@@ -1,4 +1,4 @@
-"""Tests for the opt-in control-dependence discount in core/distance.py.
+"""Tests for the opt-in control-dependence discount in core/analyzers/analyzer_distance.py.
 
 Drives ``TargetDistance._compute_bb_values`` directly against a
 hand-built FunctionCFG (no ELF, no disassembly -- the discount is a pure
@@ -38,8 +38,8 @@ discount:
 
 import pytest
 
-from fuzzer_tool.core.cfg import BasicBlock, FunctionCFG
 from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
+from fuzzer_tool.core.cfg import BasicBlock, FunctionCFG
 
 FUNC_NAME = "target_fn"
 
@@ -47,8 +47,7 @@ FUNC_NAME = "target_fn"
 def _make_cfg() -> FunctionCFG:
     edges = {0: [1], 1: [2, 3], 2: [1], 3: []}
     blocks = {
-        a: BasicBlock(start=a, end=a + 1, successors=list(succs))
-        for a, succs in edges.items()
+        a: BasicBlock(start=a, end=a + 1, successors=list(succs)) for a, succs in edges.items()
     }
     blocks[0].is_entry = True
     blocks[3].is_exit = True

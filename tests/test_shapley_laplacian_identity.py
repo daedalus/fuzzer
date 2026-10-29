@@ -25,26 +25,41 @@ def _dense_reference(K):
     return np.eye(n, dtype=np.float64) - d_inv_sqrt @ K @ d_inv_sqrt
 
 
-def _outer_form(K):
-    n = len(K)
-    s = 1.0 / np.sqrt(np.maximum(K.sum(axis=1), 1e-12))
-    return np.eye(n, dtype=np.float64) - K * s[:, None] * s[None, :]
+def _kernel(K):
+    """Dict-of-dicts kernel that ShapleyAttribution consumes, from a matrix."""
+    ops = [f"op{i}" for i in range(len(K))]
+    return ops, {a: {b: float(K[i, j]) for j, b in enumerate(ops)} for i, a in enumerate(ops)}
+
+
+def _src_vectors(K):
+    """All n eigenvectors from the real spectral embedding, as an n-by-n matrix."""
+    ops, kernel = _kernel(K)
+    emb = ShapleyAttribution()._spectral_embedding_numpy(ops, kernel, k=len(ops))
+    return np.array([emb[op] for op in ops])
+
+
+def _ref_vectors(K):
+    return np.linalg.eigh(_dense_reference(K))[1]
 
 
 @pytest.mark.parametrize("n", [2, 5, 40, 155])
 def test_outer_form_is_bit_identical(n):
+    """Identical Laplacians give identical eigh output, so any drift in src shows."""
     rng = np.random.default_rng(n)
     K = np.abs(rng.standard_normal((n, n)))
     K = (K + K.T) / 2.0
-    assert np.array_equal(_outer_form(K), _dense_reference(K))
+
+    # Control (Hard Rule 46): the reference against a second run of itself.
+    assert np.array_equal(_ref_vectors(K), _ref_vectors(K))
+    assert np.array_equal(_src_vectors(K), _ref_vectors(K))
 
 
 def test_zero_degree_row_uses_the_same_floor():
     """An isolated operator must not divide by zero, in either form."""
     K = np.zeros((4, 4))
     K[1, 2] = K[2, 1] = 1.0
-    got = _outer_form(K)
-    assert np.array_equal(got, _dense_reference(K))
+    got = _src_vectors(K)
+    assert np.array_equal(got, _ref_vectors(K))
     assert np.isfinite(got).all()
 
 
@@ -62,9 +77,14 @@ def test_spectral_embedding_still_produces_k_dimensions():
 
 
 def test_laplacian_diagonal_is_the_expected_one_minus_self_similarity():
-    """Sanity anchor on the formula itself, not just on the two paths agreeing."""
-    K = np.array([[2.0, 1.0], [1.0, 2.0]])
-    L = _outer_form(K)
-    # degrees are 3 and 3, so s = 1/sqrt(3) and L_ii = 1 - 2/3.
-    assert L[0, 0] == pytest.approx(1.0 - 2.0 / 3.0)
-    assert L[0, 1] == pytest.approx(-1.0 / 3.0)
+    """Sanity anchor on src itself, not just on two paths agreeing.
+
+    K = [[2, 1], [1, 2]]: degrees 3, so L = I - K/3 = [[1/3, -1/3], [-1/3, 1/3]].
+    Eigenvalues 0 and 2/3; eigenvectors (1, 1)/sqrt2 and (1, -1)/sqrt2.
+    """
+    vecs = _src_vectors(np.array([[2.0, 1.0], [1.0, 2.0]]))
+    inv_sqrt2 = 1.0 / np.sqrt(2.0)
+    assert np.allclose(np.abs(vecs), inv_sqrt2)
+    # Column 0 (eigenvalue 0) is constant-sign, column 1 alternates.
+    assert vecs[0, 0] * vecs[1, 0] > 0
+    assert vecs[0, 1] * vecs[1, 1] < 0

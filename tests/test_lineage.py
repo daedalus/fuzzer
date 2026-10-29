@@ -892,3 +892,28 @@ class TestLineageStrahler:
             prev = key
         assert tree.strahler("n0") == 1
         assert tree.strahler(prev) == 1
+
+
+class TestChildCount:
+    """LineageTree.child_count: how many admitted children a seed produced."""
+
+    def test_counts_direct_children_only(self):
+        from fuzzer_tool.core.lineage import LineageTree
+
+        tree = LineageTree()
+        tree.insert(None, "root", [], [], 1)
+        tree.insert("root", "a", ["flip"], [0], 1)
+        tree.insert("root", "b", ["flip"], [1], 1)
+        tree.insert("a", "c", ["flip"], [2], 1)
+        assert [tree.child_count(k) for k in ("root", "a", "b", "c")] == [2, 1, 0, 0]
+
+    def test_unknown_key_and_duplicate_insert(self):
+        """Adversarial: unknown keys read 0; a re-insert does not double count."""
+        from fuzzer_tool.core.lineage import LineageTree
+
+        tree = LineageTree()
+        tree.insert(None, "root", [], [], 1)
+        tree.insert("root", "a", [], [], 1)
+        tree.insert("root", "a", [], [], 1)
+        assert tree.child_count("root") == 1
+        assert tree.child_count("missing") == 0

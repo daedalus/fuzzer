@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from fuzzer_tool.core.byte_entropy import ENTROPY_SAMPLE_CAP, byte_histogram
+from fuzzer_tool.core.rank_stats import rank_corr
 from fuzzer_tool.core.schedulers.seed_entropy_shapley import loo_entropy, shapley_entropy
 
 
@@ -28,17 +29,6 @@ def _slab(seeds: list[bytes]) -> tuple[np.ndarray, np.ndarray]:
     rows = [byte_histogram(s, ENTROPY_SAMPLE_CAP) for s in seeds]
     counts = np.stack([np.asarray(c, dtype=np.int64) for c, _ in rows])
     return counts, np.array([t for _, t in rows], dtype=np.int64)
-
-
-def _rank(x: np.ndarray) -> np.ndarray:
-    return np.argsort(np.argsort(x, kind="stable"), kind="stable").astype(np.float64)
-
-
-def _spearman(a: np.ndarray, b: np.ndarray) -> float:
-    ra, rb = _rank(a), _rank(b)
-    if ra.std() == 0 or rb.std() == 0:
-        return float("nan")
-    return float(np.corrcoef(ra, rb)[0, 1])
 
 
 def planted(
@@ -75,7 +65,7 @@ def report(
     bottom_loo = set(np.argsort(loo, kind="stable")[:m].tolist())
     bottom_phi = set(np.argsort(phi, kind="stable")[:m].tolist())
     line = (
-        f"{name:28s} n={len(seeds):4d}  rho={_spearman(loo, phi):6.3f}  "
+        f"{name:28s} n={len(seeds):4d}  rho={rank_corr(loo, phi):6.3f}  "
         f"bottom{m}-overlap={len(bottom_loo & bottom_phi) / m:5.2f}  "
         f"noise-floor-overlap={floor:5.2f}  max-se={se.max():.4f}"
     )

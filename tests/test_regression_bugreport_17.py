@@ -11,8 +11,9 @@ from fuzzer_tool.core.analyzers.analyzer_crash_eta import CrashMITracker
 
 
 class TestCrashMITrackerNonCrashObservations:
-    """#17 core/crash_eta.py:66-135 -- CrashMITracker.record only tracked
-    positions for crashing inputs, so byte_total == joint_crash always;
+    """#17 core/analyzers/analyzer_crash_eta.py (was core/crash_eta.py:66-135)
+    -- CrashMITracker.record only tracked positions for crashing inputs,
+    so byte_total == joint_crash always;
     MI degenerated to position frequency x log2(1/p_crash)."""
 
     def test_non_crash_inputs_feed_byte_total(self):

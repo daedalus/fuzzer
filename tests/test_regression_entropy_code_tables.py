@@ -4,7 +4,9 @@
 per Python iteration (0.3-1.2 ms per 512-byte block each way). Encoding now
 joins per-byte codewords from a 256-entry table; decoding finds unary runs
 with ``bytearray.find`` and reads fields with ``int(..., 2)``. The oracles
-below are the old loops, verbatim.
+below are the old loops, verbatim, except the 1-bit codeword fix both
+sides share: gamma accepts N = 1 ("1"), and delta seeds ``val`` with 1, not
+``1 << log2`` (which scaled every N >= 2 by 2**log2).
 """
 
 import random
@@ -75,7 +77,7 @@ def _old_gamma_decode(bits, length):
         while bidx < len(bits) and bits[bidx] == 0:
             log2 += 1
             bidx += 1
-        if bidx >= len(bits) or log2 == 0:
+        if bidx >= len(bits):
             break
         total_bits = log2 + 1
         if bidx + total_bits > len(bits):
@@ -108,7 +110,7 @@ def _old_read_gamma(bits, bidx):
     while bidx < len(bits) and bits[bidx] == 0:
         g_log2 += 1
         bidx += 1
-    if bidx >= len(bits) or g_log2 == 0:
+    if bidx >= len(bits):
         return -1, bidx
     gamma_bits = g_log2 + 1
     if bidx + gamma_bits > len(bits):
@@ -133,7 +135,7 @@ def _old_delta_decode(bits, length):
         total_bits = log2
         if bidx + total_bits > len(bits):
             break
-        val = 1 << log2
+        val = 1
         for i in range(total_bits):
             val = (val << 1) | bits[bidx + i]
         restored[ridx] = (val - 1) & 0xFF

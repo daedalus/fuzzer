@@ -439,8 +439,18 @@ class TestQEACorpusInteraction:
         stale = b"qea_elo_stale_" + b"y" * 60
         f.corpus = [keep, stale]
         f.seed_meta = {
-            keep: {"fuzz_count": 10, "coverage_edges": 5, "added_at": 100.0, "input_size": len(keep)},
-            stale: {"fuzz_count": 200, "coverage_edges": 0, "added_at": 200.0, "input_size": len(stale)},
+            keep: {
+                "fuzz_count": 10,
+                "coverage_edges": 5,
+                "added_at": 100.0,
+                "input_size": len(keep),
+            },
+            stale: {
+                "fuzz_count": 200,
+                "coverage_edges": 0,
+                "added_at": 200.0,
+                "input_size": len(stale),
+            },
         }
         f.max_corpus = 1
 
@@ -468,8 +478,18 @@ class TestQEACorpusInteraction:
         stale = b"hailmary_stale_" + b"y" * 60
         f.corpus = [keep, stale]
         f.seed_meta = {
-            keep: {"fuzz_count": 10, "coverage_edges": 5, "added_at": 100.0, "input_size": len(keep)},
-            stale: {"fuzz_count": 200, "coverage_edges": 0, "added_at": 200.0, "input_size": len(stale)},
+            keep: {
+                "fuzz_count": 10,
+                "coverage_edges": 5,
+                "added_at": 100.0,
+                "input_size": len(keep),
+            },
+            stale: {
+                "fuzz_count": 200,
+                "coverage_edges": 0,
+                "added_at": 200.0,
+                "input_size": len(stale),
+            },
         }
         f.max_corpus = 1
 
@@ -493,8 +513,18 @@ class TestQEACorpusInteraction:
         stale = b"ga_stale_" + b"y" * 60
         f.corpus = [keep, stale]
         f.seed_meta = {
-            keep: {"fuzz_count": 10, "coverage_edges": 5, "added_at": 100.0, "input_size": len(keep)},
-            stale: {"fuzz_count": 200, "coverage_edges": 0, "added_at": 200.0, "input_size": len(stale)},
+            keep: {
+                "fuzz_count": 10,
+                "coverage_edges": 5,
+                "added_at": 100.0,
+                "input_size": len(keep),
+            },
+            stale: {
+                "fuzz_count": 200,
+                "coverage_edges": 0,
+                "added_at": 200.0,
+                "input_size": len(stale),
+            },
         }
         f.max_corpus = 1
 
@@ -917,7 +947,7 @@ class TestCorpusAddedCount:
 
     This is the addition-side channel CorpusFlux pairs with evictions to
     distinguish a stalled campaign from one in dynamic equilibrium -- see
-    core/corpus_flux.py (P4-T6).
+    core/analyzers/analyzer_corpus_flux.py (P4-T6).
     """
 
     def test_records_addition_on_each_successful_save(self):

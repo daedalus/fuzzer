@@ -144,27 +144,85 @@ class TestMaxLenIsNotARatchet:
 
     @staticmethod
     def _adaptive_max_len(history, floor):
-        """Mirror of the corpus_manager expression, derived independently."""
+        """Expected value, derived independently of corpus_manager."""
         sorted_sizes = sorted(history)
         p90 = sorted_sizes[-len(sorted_sizes) // 10]
         return min(max(p90 * 2, floor), 65536)
 
+    @staticmethod
+    def _admit_last(history, floor):
+        """Run the real CorpusManager._after_admit on history[-1]; return max_len."""
+        from array import array
+        from types import SimpleNamespace
+
+        from fuzzer_tool.core.operator_registry import REGISTRY
+        from fuzzer_tool.core.run_mode import Switch
+        from fuzzer_tool.services.corpus_manager import CorpusManager
+
+        f = SimpleNamespace(
+            _markov_switch=Switch.OFF,
+            _auto_minimize=Switch.OFF,
+            _corpus_size_history=array("I", history[:-1]),
+            _corpus_secretary=None,
+            max_corpus=0,
+            max_len=floor,
+            _max_len_floor=floor,
+            exec_count=0,
+        )
+        # Learned mutators are process-global; keep this test out of them.
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(REGISTRY, "notify_new_coverage", lambda *_: None)
+            CorpusManager(f)._after_admit(bytes(history[-1]))
+        return f.max_len
+
     def test_grows_with_the_corpus(self):
         history = [200] * 90 + [8000] * 10
-        assert self._adaptive_max_len(history, floor=4096) == 16000
+        expected = self._adaptive_max_len(history, floor=4096)
+        assert expected == 16000
+        assert self._admit_last(history, 4096) == expected
 
     def test_falls_back_when_the_corpus_shrinks(self):
         """The regression: this returned the earlier high-water mark."""
         history = [200] * 100
-        assert self._adaptive_max_len(history, floor=4096) == 4096
+        f_max = self._admit_last(history, 4096)
+        assert f_max == self._adaptive_max_len(history, floor=4096) == 4096
+
+    def test_regression_max_len_falls_from_high_water(self):
+        """Adversarial: a prior high max_len must not survive a shrunk corpus."""
+        from array import array
+        from types import SimpleNamespace
+
+        from fuzzer_tool.core.operator_registry import REGISTRY
+        from fuzzer_tool.core.run_mode import Switch
+        from fuzzer_tool.services.corpus_manager import CorpusManager
+
+        f = SimpleNamespace(
+            _markov_switch=Switch.OFF,
+            _auto_minimize=Switch.OFF,
+            _corpus_size_history=array("I", [200] * 99),
+            _corpus_secretary=None,
+            max_corpus=0,
+            max_len=65536,
+            _max_len_floor=4096,
+            exec_count=0,
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(REGISTRY, "notify_new_coverage", lambda *_: None)
+            CorpusManager(f)._after_admit(bytes(200))
+        assert f.max_len == 4096
 
     def test_never_drops_below_the_configured_floor(self):
         history = [8] * 100
-        assert self._adaptive_max_len(history, floor=4096) == 4096
+        assert self._admit_last(history, 4096) == 4096
 
     def test_stays_capped(self):
         history = [500_000] * 100
-        assert self._adaptive_max_len(history, floor=4096) == 65536
+        assert self._admit_last(history, 4096) == 65536
+
+    def test_below_100_seeds_is_untouched(self):
+        """Edge: the rule needs 100 sizes; 99 leave max_len as configured."""
+        history = [8000] * 99
+        assert self._admit_last(history, 4096) == 4096
 
 
 class TestLargeCorpusSetCover:

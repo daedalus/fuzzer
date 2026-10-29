@@ -1,4 +1,4 @@
-"""Tests for core/structure_function.py — Allan variance stall detection and DispersionIndex."""
+"""Tests for core/analyzers/analyzer_structure_function.py — Allan variance stall detection and DispersionIndex."""
 
 import math
 import random
@@ -6,8 +6,8 @@ import random
 import pytest
 
 from fuzzer_tool.core.analyzers.analyzer_structure_function import (
-    StructureFunctionDetector,
     DispersionIndex,
+    StructureFunctionDetector,
     chi2_cdf,
     chi2_sf,
 )

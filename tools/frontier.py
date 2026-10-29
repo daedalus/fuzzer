@@ -39,6 +39,7 @@ from fuzzer_tool.adapters.frontier_cov import (  # noqa: F401  (re-exported for 
     Side,
     frontier_of,
 )
+from fuzzer_tool.core.rank_stats import rank_corr
 
 SEED_SAMPLE = 200  # inputs exported one by one (per-seed reach)
 SAMPLE_SEED = 5
@@ -112,14 +113,6 @@ def _print_frontier(cov: Coverage, n_inputs: int, runs: list[Run], merged, front
         )
 
 
-def _ranks(x: np.ndarray) -> np.ndarray:
-    return np.argsort(np.argsort(x, kind="stable"), kind="stable").astype(float)
-
-
-def _spearman(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.corrcoef(_ranks(a), _ranks(b))[0, 1])
-
-
 def _seed_meta(corpus: Path) -> dict:
     """seed_meta from the corpus state, {} when there is none."""
     from fuzzer_tool.core.state_store import STATE_FILENAME, StateStore
@@ -166,8 +159,8 @@ def _print_seed_reach(meta: dict, runs: list[Run], front) -> None:
     rate, hit = (np.array(c, float) for c in zip(*rows, strict=True))
     shuffled = rate[np.array(RandPool(SAMPLE_SEED).sample(range(len(rate)), len(rate)))]
     print(
-        f"seed reach ({len(rows)} seeds): Spearman child-rate ~ frontier reached {_spearman(rate, hit):+.2f}"
-        f" | control (shuffled) {_spearman(shuffled, hit):+.2f}"
+        f"seed reach ({len(rows)} seeds): Spearman child-rate ~ frontier reached {rank_corr(rate, hit):+.2f}"
+        f" | control (shuffled) {rank_corr(shuffled, hit):+.2f}"
     )
 
 

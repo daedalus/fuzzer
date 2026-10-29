@@ -77,4 +77,10 @@ suppress = [
     # Renamed to test_clang_trace_pc_edge_ids_depend_on_input: clang trace-pc
     # ids are mixed since edge-id scheme 3, so the old name stated a falsehood.
     "tests/test_gcc_trace_pc.py:TestClangUnchanged.test_clang_trace_pc_edge_ids_are_unmixed",
+    # Moved to core/rank_stats.py (one home for tied ranks / Spearman / AUC);
+    # edge_matrix re-exports both names, so every import still resolves.
+    "src/fuzzer_tool/core/edge_matrix.py:average_ranks",
+    "src/fuzzer_tool/core/edge_matrix.py:rank_corr",
+    # Local AUC replaced by core/rank_stats.rank_auc, imported under the same name.
+    "tests/test_entropy_kl_miller_madow.py:auc",
 ]

@@ -101,6 +101,7 @@ from fuzzer_tool.adapters.process import disable_aslr  # noqa: E402
 from fuzzer_tool.adapters.shm import ShmCoverage  # noqa: E402
 from fuzzer_tool.core.gini import gini as _gini  # noqa: E402
 from fuzzer_tool.core.lattice import lll_reduce  # noqa: E402
+from fuzzer_tool.core.rank_stats import rank_corr  # noqa: E402
 from fuzzer_tool.services.fuzzer import Fuzzer  # noqa: E402
 
 # Inputs of the local-only modes (see the module docstring).  Strings, not
@@ -1317,31 +1318,6 @@ def aggregate(runs):
 # ── Statistics (numpy only; scipy is not a dependency) ────────────────
 
 
-def _pearson(x: np.ndarray, y: np.ndarray) -> float:
-    xc, yc = x - x.mean(), y - y.mean()
-    denom = math.sqrt(float((xc * xc).sum()) * float((yc * yc).sum()))
-    return float((xc * yc).sum() / denom) if denom else 0.0
-
-
-def _ranks(v: np.ndarray) -> np.ndarray:
-    """Average ranks, so ties (very common in hit counts) do not bias rho."""
-    order = np.argsort(v, kind="stable")
-    ranks = np.empty(len(v), dtype=float)
-    sv = v[order]
-    i = 0
-    while i < len(sv):
-        j = i
-        while j + 1 < len(sv) and sv[j + 1] == sv[i]:
-            j += 1
-        ranks[order[i : j + 1]] = 0.5 * (i + j) + 1.0
-        i = j + 1
-    return ranks
-
-
-def _spearman(x: np.ndarray, y: np.ndarray) -> float:
-    return _pearson(_ranks(x), _ranks(y))
-
-
 def _lag1(v: np.ndarray) -> float:
     vc = v - v.mean()
     denom = float((vc * vc).sum())
@@ -1400,7 +1376,7 @@ def axis_structure(ids: np.ndarray, total: np.ndarray, ctx_bits: int, perms: int
         "lag1_null_sd": float(null.std()),
         "lag1_z": float((observed - null.mean()) / null.std()) if null.std() else 0.0,
         "lag1_within_family_shuffle": _lag1(within),
-        "spearman_id_vs_count": _spearman(ids.astype(float), total),
+        "spearman_id_vs_count": rank_corr(ids.astype(float), total),
     }
 
 
@@ -1443,9 +1419,9 @@ def substituted_axes(agg):
     """Rank correlation of each meaningful x candidate against total count."""
     total = agg["total"]
     return {
-        "spearman_owners_vs_total": _spearman(agg["owners"], total),
-        "spearman_first_seen_vs_total": _spearman(agg["first_seen"], total),
-        "spearman_peak_vs_total": _spearman(agg["peak"], total),
+        "spearman_owners_vs_total": rank_corr(agg["owners"], total),
+        "spearman_first_seen_vs_total": rank_corr(agg["first_seen"], total),
+        "spearman_peak_vs_total": rank_corr(agg["peak"], total),
     }
 
 
@@ -1735,8 +1711,8 @@ def _placement_overview(arr, pos_of, ids_at_slot, map_size):
 
 def _spearman_null_block(a, b, perms, rng, prefix):
     """Observed rank correlation against a b-preserving permutation null."""
-    obs = _spearman(a, b)
-    null = np.array([_spearman(a, rng.permutation(b)) for _ in range(perms)])
+    obs = rank_corr(a, b)
+    null = np.array([rank_corr(a, rng.permutation(b)) for _ in range(perms)])
     return {
         f"{prefix}": obs,
         f"{prefix}_null_mean": float(null.mean()),
@@ -1803,8 +1779,8 @@ def positions_structure(pos_runs, map_size: int, perms: int, seed: int):
     # Confound check: displacement is decided by table occupancy at the
     # moment of insertion, so any disp-count association should trace to
     # first-seen run, not to the count itself.
-    out["spearman_disp_first_run"] = _spearman(disp.astype(float), arr_first.astype(float))
-    out["spearman_first_run_count"] = _spearman(arr_first.astype(float), arr_cnt.astype(float))
+    out["spearman_disp_first_run"] = rank_corr(disp.astype(float), arr_first.astype(float))
+    out["spearman_first_run_count"] = rank_corr(arr_first.astype(float), arr_cnt.astype(float))
     out.update(_spectral_check(pos_runs, SVD_CELL_BUDGET_POS))
     return out
 

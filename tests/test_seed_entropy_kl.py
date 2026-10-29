@@ -325,3 +325,56 @@ class TestReporting:
 
         assert _entropy_seed_str(self._f()).startswith(" | ent-kl: mean=")
         assert _entropy_seed_str(self._f(enabled=False)) == ""
+
+
+class TestScoreAuc:
+    """Report AUC: KL score vs "seed produced a lineage child"."""
+
+    @staticmethod
+    def _f(parents):
+        from fuzzer_tool.core.lineage import LineageTree
+
+        strategy = _strategy()
+        corpus = [TEXT, PAIR_A, PAIR_B]
+        strategy.select(corpus)
+        tree = LineageTree()
+        for seed in corpus:
+            tree.insert(None, seed.hex(), [], [], 1)
+        for i, parent in enumerate(parents):
+            tree.insert(parent.hex(), f"child{i}", ["flip"], [0], 1)
+        return SimpleNamespace(
+            _entropy_kl=strategy,
+            _entropy_zscore=None,
+            _lineage=tree,
+            _seed_key=bytes.hex,
+            corpus=corpus,
+        )
+
+    def test_cached_scores_is_a_read_only_copy(self):
+        strategy = _strategy()
+        corpus = [TEXT, PAIR_A, PAIR_B]
+        expected = strategy.scores(corpus)
+        cached = strategy.cached_scores()
+        assert [cached[s] for s in corpus] == expected
+        cached.clear()
+        # No sync: a corpus the strategy never saw does not fold in.
+        assert strategy.cached_scores().keys() == set(corpus)
+        assert strategy.stats()["scored"] == len(corpus)
+
+    def test_report_auc_matches_rank_auc(self):
+        from fuzzer_tool.core.rank_stats import rank_auc
+        from fuzzer_tool.services.report import _entropy_seed_lines
+
+        f = self._f(parents=[TEXT])
+        scores = f._entropy_kl.cached_scores()
+        expected = rank_auc([scores[s] for s in f.corpus], [s == TEXT for s in f.corpus])
+        lines = _entropy_seed_lines(f)
+        assert f"auc={expected:.2f} (score vs lineage child, n=3)" in lines[2]
+
+    def test_report_auc_absent_without_both_classes(self):
+        """Adversarial: no seed has a child -> AUC undefined -> no line."""
+        from fuzzer_tool.services.report import _entropy_seed_lines
+
+        lines = _entropy_seed_lines(self._f(parents=[]))
+        assert len(lines) == 2
+        assert not any("auc=" in line for line in lines)

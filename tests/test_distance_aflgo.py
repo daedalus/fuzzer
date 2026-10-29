@@ -1,4 +1,4 @@
-"""Integration tests for the AFLGo BB-level distance (core/distance.py).
+"""Integration tests for the AFLGo BB-level distance (core/analyzers/analyzer_distance.py).
 
 Real binaries are compiled with clang at test time (skipped when clang
 is unavailable). Expected values are hand-derived:

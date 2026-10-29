@@ -4,8 +4,9 @@
 per symbol), and when fewer bits remained than the shortest unmatched code,
 its inner ``break`` skipped the ``for/else`` exit and the ``while`` spun on
 the same state forever. The prefix now grows one bit per length, and a tail
-no code fits ends the decode. The oracle below is the old operator,
-verbatim, which terminates on every stream it is fed here.
+no code fits ends the decode. The oracle below is the old operator, with
+the canonical codebook (``_huffman_codebook``) in place of the rank codes,
+which left most inputs unchanged; it terminates on every stream fed here.
 """
 
 import random
@@ -57,19 +58,19 @@ def _old_huffman_tree_mutate(data, rng):
     for b in block:
         freq[b] += 1
     symbols = sorted(range(256), key=lambda x: (freq[x], x))
-    codes, lengths = s._rank_codes(freq, symbols)
+    codes, lengths = s._huffman_codebook(freq)
     non_zero = [x for x in symbols if freq[x] > 0]
     if len(non_zero) < 2:
         return data
-    a, b = rng.sample(non_zero, 2)
-    codes[a], codes[b] = codes[b], codes[a]
-    lengths[a], lengths[b] = lengths[b], lengths[a]
     bits = bytearray()
     for b in block:
         sym_code = codes[b]
         sym_len = lengths[b]
         for i in range(sym_len - 1, -1, -1):
             bits.append((sym_code >> i) & 1)
+    a, b = rng.sample(non_zero, 2)
+    codes[a], codes[b] = codes[b], codes[a]
+    lengths[a], lengths[b] = lengths[b], lengths[a]
     restored, ridx = _old_huff_decode(bits, codes, lengths, length)
     s._pad_random(restored, ridx, rng)
     return s._splice(data, offset, bytes(restored[:length]))
@@ -130,17 +131,17 @@ def test_operator_output_and_draws_unchanged():
 
 
 def test_decode_matches_on_random_streams():
-    """Arbitrary 0/1 streams against real rank codebooks."""
+    """Arbitrary 0/1 streams against real canonical codebooks."""
     rnd = random.Random(4)
     for block in _inputs():
         freq = [0] * 256
         for b in block:
             freq[b] += 1
-        symbols = sorted(range(256), key=lambda x: (freq[x], x))
-        codes, lengths = s._rank_codes(freq, symbols)
-        if 1 not in lengths:
-            continue  # without 1-bit codes a random tail can spin the oracle
+        codes, lengths = s._huffman_codebook(freq)
+        # Zero padding: all-zero is the first canonical code, so 64 symbols
+        # decode before any tail could leave the oracle spinning.
         bits = bytearray(rnd.randrange(2) for _ in range(rnd.randrange(0, 400)))
+        bits += bytearray(64 * s._HUFF_MAX_BITS)
         assert s._huff_decode(bits, codes, lengths, 64) == _old_huff_decode(
             bits, codes, lengths, 64
         )

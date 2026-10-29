@@ -62,6 +62,7 @@ expressed as pre-expanded tuples rather than calling
 values each operator pulls and move the output of every seeded run.
 """
 
+import heapq
 import math
 import struct
 from collections import Counter
@@ -2158,7 +2159,7 @@ def _gamma_decode(bits: bytearray, length: int) -> tuple[bytearray, int]:
     while ridx < length and bidx < n:
         # Leading zeros, up to the next 1.
         one = bits.find(1, bidx)
-        if one < 0 or one == bidx:
+        if one < 0:
             break
         total_bits = one - bidx + 1
         bidx = one
@@ -2231,8 +2232,6 @@ def _read_gamma(bits: bytearray, bidx: int) -> tuple[int, int]:
     one = bits.find(1, bidx)
     if one < 0:
         return -1, n
-    if one == bidx:
-        return -1, bidx
     gamma_bits = one - bidx + 1
     if one + gamma_bits > n:
         return -1, one
@@ -2255,7 +2254,7 @@ def _delta_decode(bits: bytearray, length: int) -> tuple[bytearray, int]:
         total_bits = log2
         if bidx + total_bits > len(bits):
             break
-        val = (1 << log2 << total_bits) | _bits_int(bits, bidx, bidx + total_bits)
+        val = (1 << log2) | _bits_int(bits, bidx, bidx + total_bits)
         restored[ridx] = (val - 1) & 0xFF
         ridx += 1
         bidx += total_bits
@@ -2842,22 +2841,52 @@ def lz_dict_mutate(data: bytes, rng) -> bytes:
 _HUFF_MAX_BITS = 16  # longest code _huff_decode tries
 
 
-def _rank_codes(freq: list[int], symbols: list[int]) -> tuple[list[int], list[int]]:
-    """Rank-ordered prefix codes: rank r gets a bit_length(r)-bit code."""
+def _huffman_depths(weights: list[int]) -> list[int]:
+    """Unlimited Huffman code length of every symbol with weight > 0.
+
+    Merge the two lightest subtrees until one is left; each merge pushes
+    every leaf below it one level deeper. A lone symbol still gets 1 bit.
+    """
+    depths = [0] * 256
+    heap = [(w, sym, [sym]) for sym, w in enumerate(weights) if w > 0]
+    heapq.heapify(heap)
+    if len(heap) == 1:
+        depths[heap[0][1]] = 1
+        return depths
+
+    while len(heap) > 1:
+        w1, t1, leaves1 = heapq.heappop(heap)
+        w2, t2, leaves2 = heapq.heappop(heap)
+        for sym in leaves1 + leaves2:
+            depths[sym] += 1
+        heapq.heappush(heap, (w1 + w2, min(t1, t2), leaves1 + leaves2))
+    return depths
+
+
+def _huffman_codebook(freq: list[int]) -> tuple[list[int], list[int]]:
+    """Canonical Huffman (codes, lengths) for *freq*, lengths <= _HUFF_MAX_BITS.
+
+    Fibonacci-like counts over a >4 KiB block can need 17+ bits. Halving the
+    counts (rounding up, so no symbol vanishes) flattens the tree; at all-ones
+    it is balanced at <= 8 bits, so the loop ends.
+
+    Canonical order (length, symbol) makes the code prefix-free and complete:
+    lengths 1, 2, 2 -> "0", "10", "11".
+    """
+    weights = list(freq)
+    lengths = _huffman_depths(weights)
+    while max(lengths) > _HUFF_MAX_BITS:
+        weights = [(w + 1) // 2 for w in weights]
+        lengths = _huffman_depths(weights)
+
     codes = [0] * 256
-    lengths = [0] * 256
     code = 0
     prev_len = 0
-    for rank, sym in enumerate(symbols):
-        if freq[sym] == 0:
-            continue
-        bit_len = max(1, rank.bit_length())
-        if rank > 0 and bit_len > prev_len:
-            code <<= bit_len - prev_len
+    for sym in sorted((s for s in range(256) if lengths[s]), key=lambda s: (lengths[s], s)):
+        code <<= lengths[sym] - prev_len
         codes[sym] = code
-        lengths[sym] = bit_len
         code += 1
-        prev_len = bit_len
+        prev_len = lengths[sym]
     return codes, lengths
 
 
@@ -2902,11 +2931,11 @@ def huffman_tree_mutate(data: bytes, rng) -> bytes:
     structure: swapping two sibling leaves changes which symbol gets
     the short code without violating the prefix-free property.
 
-    This operator builds an approximate Huffman tree for the region,
-    swaps two leaf assignments, and re-encodes the region with the
-    mutated tree.  The result is a valid Huffman stream that decodes
-    to different bytes — probing the decoder's tree traversal and
-    symbol reconstruction paths.
+    This operator builds the region's canonical Huffman code, encodes
+    the region with it, swaps two present leaves, and decodes the same
+    bits with the mutated tree.  The stream stays valid and decodes to
+    the region with those two symbols exchanged (e.g. "AAB" -> "BBA") --
+    probing the decoder's tree traversal and symbol reconstruction paths.
 
     Args:
         data: Input bytes.
@@ -2926,18 +2955,21 @@ def huffman_tree_mutate(data: bytes, rng) -> bytes:
     for b in block:
         freq[b] += 1
     symbols = sorted(range(256), key=lambda s: (freq[s], s))
-    codes, lengths = _rank_codes(freq, symbols)
+    codes, lengths = _huffman_codebook(freq)
     non_zero = [s for s in symbols if freq[s] > 0]
     if len(non_zero) < 2:
         return data
+
+    # Encode with the real tree: one MSB-first codeword per present symbol.
+    words = [b""] * 256
+    for sym in non_zero:
+        words[sym] = _msb_bits(codes[sym], lengths[sym])
+    bits = bytearray(b"".join(map(words.__getitem__, block)))
+
+    # Decode with two leaves swapped: same codeword set, so still prefix-free.
     a, b = rng.sample(non_zero, 2)
     codes[a], codes[b] = codes[b], codes[a]
     lengths[a], lengths[b] = lengths[b], lengths[a]
-    # Codeword per present symbol: low `len` bits of its code, MSB first.
-    words = [b""] * 256
-    for sym in non_zero:
-        words[sym] = _msb_bits(codes[sym] & ((1 << lengths[sym]) - 1), lengths[sym])
-    bits = bytearray(b"".join(map(words.__getitem__, block)))
     restored, ridx = _huff_decode(bits, codes, lengths, length)
     _pad_random(restored, ridx, rng)
     return _splice(data, offset, bytes(restored[:length]))

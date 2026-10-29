@@ -234,6 +234,10 @@ class LineageTree:
     def __contains__(self, key: str) -> bool:
         return key in self.nodes
 
+    def child_count(self, key: str) -> int:
+        """Admitted children of *key*; 0 for a leaf or an unknown key."""
+        return len(self._children.get(key, ()))
+
     # ── ancestry / LCA ────────────────────────────────────────────────
 
     def ancestors(self, key: str) -> list[LineageNode]:

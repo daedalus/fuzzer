@@ -1,4 +1,4 @@
-"""Tests for core/distance.py — directed distance computation."""
+"""Tests for core/analyzers/analyzer_distance.py — directed distance computation."""
 
 import struct
 
