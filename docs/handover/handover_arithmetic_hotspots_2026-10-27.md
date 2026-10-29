@@ -328,12 +328,31 @@ control, adversarial whitespace; a naive `parts[0] == "CMP"` variant fails 3/4).
 | 3911 | 2.701 / 2.039 | 6.589 / 5.751 |
 
 Not shipped:
-- `pairs_from_operand_records` split-once variant: 2.30 → 2.10 ms at 200k
-  lines; under 1% of a drain.
 - `_ingest_conds` with `itemgetter` + `dict.fromkeys` bulk updates: 5-13%
   slower (the per-pair loop still runs for new-pair detection).
-- `_eviction_victims` via `islice` over a generator: 0.31 → 0.24 ms at a
-  15k pool, 5000 victims; negligible. cProfile overstated it (per-call `len`).
 - Cross-drain line→tuple cache: would remove most of the parse on repeat
   lines, but needs a memory bound and eviction for ≤1 ms per drain at the
   saturated 1/20 cadence. Not built.
+
+### 7.8 Update 2026-10-29: 7.5% bar
+
+Bar set by the user: a gain > 7.5% on the function is worth shipping.
+Re-measured at 10k-line drains (interleaved min-of-N):
+
+| Change | Gain | Shipped |
+|---|---:|---|
+| `detect_hash_candidates`: zero bytes of `int(a) ^ int(b)` | 62% | yes |
+| pending-redqueen prune: `filter(set.__contains__)` | 47% | yes |
+| `_eviction_victims`: `islice` over zero-credit generator | 14-20% | yes |
+| `_evict_pairs`: `difference_update` + bound `pop` per map | 16% | yes (and `_evict_tokens`) |
+| occurrence count: bound locals | 12% | yes |
+| `pairs_from_operand_records` split once | 5-9% | no: under the bar at 3000+ distinct |
+
+Warm `_parse_lines`, master vs branch, best of 3 process pairs:
+0.449 → 0.416 ms (300 distinct), 3.494 → 2.984 (3000), 6.401 → 5.159 (9000).
+
+Tests: `tests/test_regression_cmplog_drain_loops.py` (pre-change hash oracle,
+Rule 46 control, leading-zero / 2-vs-3-match cut, eviction state under 3x
+cap churn). A variant that skips re-padding in `to_bytes` fails 2/4.
+`_eviction_victims` stays covered by `tests/test_cmplog_eviction_victims.py`
+(full-sort oracle, 3000 random pools).
