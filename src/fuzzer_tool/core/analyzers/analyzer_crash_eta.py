@@ -8,6 +8,7 @@ input bytes and crash outcomes.
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
 from dataclasses import dataclass
@@ -102,6 +103,9 @@ class CrashMITracker:
         self._pos_arr = _np.zeros(0, dtype=_np.int64)
         self._mi_arr = _np.zeros(0, dtype=_np.float64)
         self._prefix_arr = _np.zeros(0, dtype=_np.float64)
+        # List mirrors for weighted_position's bisect (rebuilt per _refresh).
+        self._pos_list: list[int] = []
+        self._prefix_list: list[float] = []
         self._mi_cache: dict[int, float] = {}
         self._mi_dict_valid: bool = False
 
@@ -328,6 +332,8 @@ class CrashMITracker:
             self._mi_rows(self._pos_arr) if len(observed) else [], dtype=_np.float64
         )
         self._prefix_arr = _np.cumsum(_np.maximum(self._mi_arr, 0.01))
+        self._pos_list = self._pos_arr.tolist()
+        self._prefix_list = self._prefix_arr.tolist()
         self._cache_valid = True
         self._mi_dict_valid = False
 
@@ -362,23 +368,25 @@ class CrashMITracker:
         normal case since positions accumulate up to max_positions.
         """
         self._refresh()
-        positions = self._pos_arr
-        if not positions.size:
+        # Lists + bisect: two scalar np.searchsorted calls cost ~8 us per
+        # draw in-run, ~4 draws per exec.
+        positions = self._pos_list
+        if not positions:
             return None
-        # Cutoff: positions below input_length (bisect_left == side="left").
-        idx = int(_np.searchsorted(positions, input_length, side="left"))
+        # Cutoff: positions below input_length.
+        idx = bisect.bisect_left(positions, input_length)
         if idx == 0:
             return None
-        prefix = self._prefix_arr
-        eligible_mass = float(prefix[idx - 1])
+        prefix = self._prefix_list
+        eligible_mass = prefix[idx - 1]
         if eligible_mass <= 0.0:
-            return int(positions[self._rng.randrange(idx)])
+            return positions[self._rng.randrange(idx)]
         r = self._rng.random() * eligible_mass
         # prefix is non-decreasing, so the first entry >= r is the pick.
-        i = int(_np.searchsorted(prefix[:idx], r, side="left"))
+        i = bisect.bisect_left(prefix, r, 0, idx)
         if i >= idx:
             i = idx - 1
-        return int(positions[i])
+        return positions[i]
 
     def top_values(self, position: int, k: int = 5) -> list[int]:
         """Return the k byte values at position with highest crash count."""
