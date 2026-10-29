@@ -321,6 +321,29 @@ class TestSiteBook:
         book.sites_for(b"\x00" * 40)
         assert len(calls) == 1
 
+    def test_regression_apply_hashes_parent_once(self, monkeypatch):
+        """apply keyed the parent, then sites_for keyed it again."""
+        calls = []
+        real = cs.hash64
+        monkeypatch.setattr(cs, "hash64", lambda d: calls.append(1) or real(d))
+        book = SiteBook()
+        seed = self._seed()
+
+        book.apply(seed, bytearray(seed), ScriptedRng(randoms=[1.0]))
+
+        assert len(calls) == 1
+
+    def test_regression_apply_key_still_per_parent(self):
+        """Falsification: one key per parent, so a second parent is located anew."""
+        book = SiteBook()
+        rng = ScriptedRng(randoms=[1.0, 1.0])
+        seed = self._seed()
+
+        book.apply(seed, bytearray(seed), rng)
+        book.apply(seed[::-1], bytearray(seed[::-1]), rng)
+
+        assert book.seeds_tracked() == 2
+
     def test_seed_count_is_bounded(self):
         book = SiteBook()
         for i in range(cs.MAX_SEEDS + 9):

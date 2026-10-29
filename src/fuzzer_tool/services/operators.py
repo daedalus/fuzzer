@@ -1494,6 +1494,9 @@ class OperatorEngine:
         # Position plan for the current mutate() round (_pos_plan); None
         # falls back to select_position.
         self._round_pos_plan: tuple | None = None
+        # hash64 of the buffer the last op returned, reused as the next op's
+        # before-digest (k+1 digests per k-op stack, not 2k). None = rehash.
+        self._digest_carry: int | None = None
         # Cache for _op_redqueen_xform: sorted cmplog pairs + version counter.
         # Rebuilt only when the pair list grows or is recreated (collect_tokens),
         # avoiding O(N log N) sort on every invocation (~2,500 sorts saved per run).
@@ -5815,6 +5818,7 @@ class OperatorEngine:
         from fuzzer_tool.core.similarity import hamming_distance
 
         buf = bytearray(mutated)
+        self._digest_carry = None
         self._apply_op_once("bit_flip", buf, mutated, self.f._track_op_effect)
         result = bytes(buf)
         self.f._last_hamming_distance = (
@@ -6941,8 +6945,14 @@ class OperatorEngine:
         old_len = len(buf)
 
         # Digest over a memoryview: no copy, ~3.4us at 64KiB. Only paid
-        # when a scheduler consumes the signal (_track_op_effect).
-        _h_before = hash64(memoryview(buf)) if track_effect else 0
+        # when a scheduler consumes the signal (_track_op_effect), and
+        # skipped when the previous op's after-digest still covers buf.
+        _h_before = 0
+        if track_effect:
+            _h_before = self._digest_carry
+            if _h_before is None:
+                _h_before = hash64(memoryview(buf))
+            self._digest_carry = None
 
         # Evaluated on the buffer actually handed to the operator, and
         # before the call, because the operator may replace it. Returns
@@ -6965,7 +6975,8 @@ class OperatorEngine:
         _dt = clock.monotonic() - _t0
 
         if track_effect:
-            self._note_op_effect(op, buf, result, _h_before)
+            _h_after = self._note_op_effect(op, buf, result, _h_before)
+            _after_len = len(buf if result is None else result)
         f._last_op_costs[op] = f._last_op_costs.get(op, 0.0) + _dt
         # EMA of per-call cost, seeded on first observation so a single
         # early sample doesn't get dragged toward zero.
@@ -6995,15 +7006,22 @@ class OperatorEngine:
             # already found bugs in.
             del buf[cap:]
 
+        # Carry only an unclamped buffer: the digest covers pre-clamp bytes.
+        if track_effect and len(buf) == _after_len:
+            self._digest_carry = _h_after
         return buf
 
-    def _note_op_effect(self, op: str, buf: bytearray, result, h_before: int) -> None:
-        """Record whether *op* changed the buffer (effective) or declined."""
+    def _note_op_effect(self, op: str, buf: bytearray, result, h_before: int) -> int:
+        """Record whether *op* changed the buffer (effective) or declined.
+
+        Returns the after-digest so the next op can reuse it.
+        """
         f = self.f
         # None means the handler mutated `buf` in place (the dominant
         # convention here); anything else replaces the buffer.
         _after = buf if result is None else result
-        if hash64(memoryview(_after)) != h_before:
+        h_after = hash64(memoryview(_after))
+        if h_after != h_before:
             f._last_ops_effective.add(op)
         elif op not in _DECLINE_EXEMPT:
             # Produced nothing. `_op_declined` covers the handlers
@@ -7021,6 +7039,7 @@ class OperatorEngine:
             # scheduler consumes feedback is the right scope rather
             # than a compromise; `Declin` reads n/a otherwise.
             f._op_declines[op] = f._op_declines.get(op, 0) + 1
+        return h_after
 
     def _cksum_hints(self) -> list[bytes]:
         return hint_operands(self.ctx.cmplog_pairs)
@@ -7199,6 +7218,8 @@ class OperatorEngine:
         # exactly as much as the operator that did the work -- see
         # fuzzer.py::_record_outcome.
         f._last_ops_effective = set()
+        # A fresh buffer: the last round's after-digest does not cover it.
+        self._digest_carry = None
         # Ops that were handed input their own format sniffer matched, i.e.
         # that ran in their mutate-this-file regime rather than their
         # synthesise-one-from-scratch fallback. Recorded here rather than
