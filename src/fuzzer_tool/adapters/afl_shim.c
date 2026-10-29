@@ -5357,6 +5357,22 @@ __AFL_NO_COV static int __afl_sym_raw(void) {
     return raw;
 }
 
+/* Unsymbolized frame as "??|??|0|<module>|0x<off>" (the symbolizer's
+ * field order): Python skips libc / runtime frames by module. Runs after
+ * the guard jump, outside the handler; text stays "-" if dladdr fails. */
+__AFL_NO_COV static void __afl_sym_module(char *text, size_t cap, uintptr_t pc) {
+    Dl_info info;
+    if (!dladdr((void *)pc, &info) || !info.dli_fname || !info.dli_fbase) return;
+
+    static const char head[] = "??|??|0|";
+    char *p = text, *end = text + cap - 20;   /* room for "|0x" + 16 hex + NUL */
+    for (const char *t = head; *t; t++) *p++ = *t;
+    for (const char *t = info.dli_fname; *t && p < end; t++) *p++ = *t;
+    *p++ = '|';
+    p = __afl_sym_put_hex(p, (uint64_t)(pc - (uintptr_t)info.dli_fbase));
+    *p = 0;
+}
+
 /* Append the pending record. Plain open/write/close each time: a crash is
  * rare, and holding no fd means a fork child or a stolen fd number cannot
  * corrupt the stream. */
@@ -5393,11 +5409,13 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
                                      text, sizeof(text));
             __afl_sym_busy = 0;
             text[sizeof(text) - 1] = 0;
-            for (char *q = text; *q; q++)
-                if (*q == '\n') *q = ';';
-                else if (*q == '@' || *q == ' ') *q = '_';
-            if (!text[0]) { text[0] = '-'; text[1] = 0; }
+        } else if (pc) {
+            __afl_sym_module(text, sizeof(text), pc);
         }
+        for (char *q = text; *q; q++)
+            if (*q == '\n') *q = ';';
+            else if (*q == '@' || *q == ' ') *q = '_';
+        if (!text[0]) { text[0] = '-'; text[1] = 0; }
         if (p + 2 * 18 + sizeof(text) + 4 > buf + sizeof(buf) - 2) break;
         if (i) *p++ = '@';
         p = __afl_sym_put_hex(p, (uint64_t)pc);

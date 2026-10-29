@@ -23,6 +23,8 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 
+from fuzzer_tool.core.sanitizer import is_runtime_module
+
 ENV_VAR = "__AFL_CRASH_SYM_OUT"
 _MAX_BYTES = 1 << 16  # a sink this large only holds repeats of the same crash
 
@@ -84,6 +86,18 @@ class CrashSymbol:
         }
 
 
+def sidecar_pcs(shim_symbol: dict) -> tuple[int, ...] | None:
+    """:func:`crash_pcs` of a record saved by ``CrashSymbol.to_dict``."""
+    frames = [
+        SymFrame(pc=_int(str(fr.get("pc", "0")), 16), module=str(fr.get("module", "")))
+        for fr in shim_symbol.get("frames", ())
+        if isinstance(fr, dict)
+    ]
+    if not frames:
+        return None
+    return crash_pcs(CrashSymbol(signal=0, pc=frames[0].pc, frames=frames))
+
+
 def _int(text: str, base: int = 10) -> int:
     try:
         return int(text, base)
@@ -134,7 +148,7 @@ def parse_line(line: str) -> CrashSymbol | None:
             continue
         resolved = [fr for chunk in text.split(";") if (fr := _parse_frame(pc, chunk))]
         sym.frames.extend(resolved or [SymFrame(pc=pc)])
-        sym.symbolized = sym.symbolized or bool(resolved)
+        sym.symbolized = sym.symbolized or any(fr.function or fr.file for fr in resolved)
     return sym
 
 
@@ -183,8 +197,11 @@ def crash_pcs(sym: CrashSymbol | None) -> tuple[int, ...] | None:
     if sym is None:
         return None
 
+    # libc / sanitizer runtime frames (glibc abort -> raise -> pthread_kill)
+    # name no target site; skipped unless nothing else is left.
+    target = [f.pc for f in sym.frames if not is_runtime_module(f.module)]
     out: list[int] = []
-    for pc in [f.pc for f in sym.frames] or [sym.pc]:
+    for pc in target or [f.pc for f in sym.frames] or [sym.pc]:
         if pc and (not out or out[-1] != pc):
             out.append(pc)
     return tuple(out) or None

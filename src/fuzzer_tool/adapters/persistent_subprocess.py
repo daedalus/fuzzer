@@ -72,7 +72,19 @@ def _close_streams(proc: subprocess.Popen) -> None:
 
 
 _PERSISTENT_LOADER = r"""#!/usr/bin/env python3
-import ctypes, ctypes.util, os, signal, sys
+import ctypes, ctypes.util, os, resource, signal, sys
+
+# --rss-limit-mb (process.RSS_LIMIT_ENV): per-call budget in the fork child.
+_RSS_BUDGET = int(os.environ.get("__FUZZ_RSS_LIMIT_MB") or 0) << 20
+_PAGE = os.sysconf("SC_PAGE_SIZE")
+
+def _limit_rss():
+    # RLIMIT_AS = what the loader already maps (Python, the .so) + budget:
+    # a bare N MB cap would not fit the interpreter itself.
+    with open("/proc/self/statm") as fh:
+        vm = int(fh.read().split()[0]) * _PAGE
+    cap = vm + _RSS_BUDGET
+    resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
 
 target = None
 func = None
@@ -173,6 +185,8 @@ while True:
             # Child: own process group, run target function, write rc
             os.close(read_pipe)
             os.setsid()
+            if _RSS_BUDGET:
+                _limit_rss()
             # fd 1 is the RC protocol channel; target output there prefixed
             # the reply header and the run read as -2 (fuzz_loader.c:
             # redirect_stdout_to_null does the same).

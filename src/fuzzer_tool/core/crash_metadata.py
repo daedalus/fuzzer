@@ -102,6 +102,7 @@ class CrashMetadata:
 
     # Cluster ID
     cluster_id: str = ""
+    stack_hash: str = ""  # --crash-blocklist entry (sanitizer.STACK_HASH_TAG)
 
     # Execution metadata
     timestamp: str = ""
@@ -261,6 +262,8 @@ class CrashMetadata:
                 lines.append(f"shadow:        {self.shadow_info}")
             lines.append(f"exploitability: {self.exploitability}")
             lines.append(f"cluster_id:    {self.cluster_id}")
+            if self.stack_hash:
+                lines.append(f"stack_hash:    {self.stack_hash}")
             lines.append("")
             return
 
@@ -414,6 +417,7 @@ class CrashMetadata:
             "shadow_info": self.shadow_info,
             "exploitability": self.exploitability,
             "cluster_id": self.cluster_id,
+            "stack_hash": self.stack_hash,
             "returncode": self.returncode,
             "parent_seed_hash": self.parent_seed_hash,
             "mutation_ops": list(self.mutation_ops),

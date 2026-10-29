@@ -23,6 +23,8 @@ from array import array
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
+
 from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.filesystem import (
     load_corpus,
@@ -30,6 +32,7 @@ from fuzzer_tool.adapters.filesystem import (
     save_irreplaceable,
     save_timeout_seed,
     save_to_corpus,
+    saved_crash_sigs,
 )
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.clock import clock_of
@@ -432,6 +435,8 @@ class CorpusManager:
 
     def __init__(self, fuzzer):
         self.f = fuzzer
+        # Edges any saved hang's trace hit (sorted); bounded by the map size.
+        self._hang_edges = np.empty(0, dtype=np.uint32)
         # Corpus seed -> content key. Corpus seeds are long-lived bytes with
         # a cached hash, so a hit skips the xxh64 pass over the seed.
         self._key_memo: dict[bytes, str] = {}
@@ -666,6 +671,16 @@ class CorpusManager:
             store.set("regime", f._regime.save())
         store.save()
 
+    def resync_crash_sigs(self) -> None:
+        """Add saved crashes' signatures as the current parser derives them,
+        so a format change does not re-save every known bug once."""
+        crashes_dir = getattr(self.f, "crashes_dir", None)
+        if crashes_dir is None:
+            return
+        f = self.f
+        for sig in saved_crash_sigs(Path(crashes_dir)):
+            f.crash_sigs.setdefault(sig, 1)
+
     def load_state(self):
         f = self.f
         saved_contract = f._state_store.get("coverage_contract")
@@ -691,6 +706,7 @@ class CorpusManager:
         f.crash_count = state.get("crash_count", 0)
         f.timeout_count = state.get("timeout_count", 0)
         f.crash_sigs = state.get("crash_sigs", {})
+        self.resync_crash_sigs()
         f.crash_frames = state.get("crash_frames", {})
         # Keyed by signature; states before that keyed it by stack hash.
         min_sizes = state.get("crash_min_sizes", {})
@@ -827,7 +843,6 @@ class CorpusManager:
         f = self.f
         from fuzzer_tool.adapters.filesystem import classify_crash
         from fuzzer_tool.core.crash_metadata import CrashMetadata
-        from fuzzer_tool.core.crash_symbols import crash_pcs
 
         fault_addr = getattr(f, "_last_fault_addr", None)
         # Drain on EVERY crash, not just novel ones: the sink is append-only,
@@ -852,7 +867,7 @@ class CorpusManager:
             crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
             crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
             crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
-            crash_pcs=crash_pcs(shim_sym),
+            crash_pcs=self._site_pcs(shim_sym),
         )
 
         # Preserve the crashing input as corpus material: stored under
@@ -911,6 +926,9 @@ class CorpusManager:
             crash_files = getattr(f, "_crash_files", None)
             if crash_files is not None:
                 crash_files[counted_sig] = str(result)
+            shrinker = getattr(f, "_crash_shrinker", None)
+            if shrinker is not None:
+                shrinker.enqueue(Path(f.crashes_dir) / f"{result}.bin", counted_sig)
         else:
             f._last_crash_signature = None
         # A smaller trigger of a known bug is no news.
@@ -939,7 +957,6 @@ class CorpusManager:
         so a second drain would come back empty and lose the crash site.
         """
         from fuzzer_tool.adapters.filesystem import classify_crash
-        from fuzzer_tool.core.crash_symbols import crash_pcs
 
         f = self.f
         f._pending_crash_sym = self._drain_sym()
@@ -953,9 +970,36 @@ class CorpusManager:
             crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
             crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
             crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
-            crash_pcs=crash_pcs(f._pending_crash_sym),
+            crash_pcs=self._site_pcs(f._pending_crash_sym),
         )
         return verdict.novel
+
+    def _site_pcs(self, sym) -> tuple[int, ...] | None:
+        """Shim backtrace PCs, else ptrace's faulting ``rip``.
+
+        The fault address is the data a wild pointer held; the instruction
+        names the site (``signal:11@0x1d6``). Hardware faults only: a raised
+        signal's ``rip`` is libc's ``kill``.
+        """
+        from fuzzer_tool.core.crash_symbols import crash_pcs
+
+        pcs = crash_pcs(sym)
+        if pcs or getattr(self.f, "_last_fault_addr", None) is None:
+            return pcs
+        rip = (getattr(self.f, "_last_regs", None) or {}).get("rip", 0)
+        return (rip,) if rip else None
+
+    def run_signature(self, returncode: int, stderr: str) -> str | None:
+        """Signature of the run just made, as save_crash derives it; None
+        when it did not crash (--crash-tmin-execs oracle)."""
+        from fuzzer_tool.adapters.filesystem import crash_signature
+
+        f = self.f
+        sym = self._drain_sym()
+        if not f._is_crash(returncode, stderr):
+            return None
+        fault = getattr(f, "_last_fault_addr", None)
+        return crash_signature(stderr, returncode, fault, self._site_pcs(sym))
 
     def triage_skippable(self, data: bytes, returncode: int, stderr: str) -> bool:
         """True when a fault-address triage cannot change this crash's fate.
@@ -1124,7 +1168,30 @@ class CorpusManager:
 
     def save_timeout(self, data: bytes) -> None:
         f = self.f
+        if not self._hang_is_novel():
+            f.hangs_deduped = getattr(f, "hangs_deduped", 0) + 1
+            return
         save_timeout_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
+
+    def _hang_is_novel(self) -> bool:
+        """The hang's (partial) trace hits an edge no saved hang hit.
+
+        One loop fed other bytes is one hang (AFL's virgin-tmout rule). No
+        SHM or an empty trace: True, input-hash dedup decides.
+        """
+        f = self.f
+        shm = f._target_shm_covs.get(f.target) if f.multi_targets else f.shm_cov
+        if shm is None:
+            return True
+        edges = shm.edge_id_array()
+        if not edges.size:
+            return True
+
+        fresh = np.setdiff1d(edges, self._hang_edges, assume_unique=True)
+        if not fresh.size:
+            return False
+        self._hang_edges = np.union1d(self._hang_edges, fresh).astype(np.uint32)
+        return True
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
         f = self.f
