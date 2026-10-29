@@ -675,7 +675,9 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
 }
 
 # Distinct inputs whose format sniff results are remembered (per plan).
-_SNIFF_CACHE_MAX = 256
+# Must cover the corpus: 256 thrashed at 470 seeds (fuzzgoat, 18% misses,
+# build_ops 71 -> 60 us at 4096). ~1.1 MB when full.
+_SNIFF_CACHE_MAX = 4096
 
 # Fraction of selections on which a not-yet-seen format is still offered.
 _FORMAT_BOOTSTRAP_RATE = 0.02
