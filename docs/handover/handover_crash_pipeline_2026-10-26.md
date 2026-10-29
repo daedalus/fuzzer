@@ -109,7 +109,7 @@ Fuzzgoat calibration (rebuilt targets, base `e9dfb89b` vs branch, 20k execs, see
 - noasan invalid frees read LOW (glibc message not captured in direct_lite): fixed in the follow-up, now HIGH.
 - Edges within spread (one 1359 outlier, seed 3).
 
-Open: (a) `--rss-limit-mb` unenforced in direct_lite (warns); (h) hang edges not persisted across `--resume`; (m) `--crash-tmin-execs` unmeasured; (10) `--novel-crash-reward` FFmpeg A/B: built (9.0.2, 9 min), arms added, but 0 crashes at 20k execs from an empty corpus with `--abort-is-crash`; blocked on a crash-reaching corpus (`docs/AB_PENDING.md`).
+Open: (a) `--rss-limit-mb` unenforced in direct_lite (warns); (h) hang edges not persisted across `--resume`; (m) `--crash-tmin-execs` unmeasured; (10) `--novel-crash-reward` FFmpeg A/B: done, null. 9.0.2 from empty corpus never crashed; seeded 8.0.3 (`eval_set.SEED_DIRS`, `--set ffmpeg_803`) crashed every cell on one SIGFPE, but no arm found a second bug in 10k execs (`docs/AB_PENDING.md`). A longer budget (≥50k) is the next test.
 
 ## Verify
 
