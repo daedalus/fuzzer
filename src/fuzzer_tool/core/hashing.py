@@ -137,13 +137,29 @@ def hash64(data: bytes) -> int:
     return crc32(data) | (adler32(data) << _HI_SHIFT)
 
 
+# Last (bytes object, key) from hash64_len. Position schedulers key the same
+# parent back to back (~2/3 of calls with --pos-* on), so a hit is ~65 ns vs
+# 0.3-40 us. One tuple: swapped atomically, holds a single object.
+_len_memo: tuple[bytes | None, int] = (None, 0)
+
+
 def hash64_len(data: bytes) -> int:
     """``hash64`` with the length above bit 64: key for length-sized state.
 
     A digest collision across lengths cannot share a table whose bins
-    were sized for another length.
+    were sized for another length. Repeat calls on the same ``bytes``
+    object reuse the key; mutable buffers are always rehashed.
     """
-    return hash64(data) | (len(data) << _LEN_SHIFT)
+    global _len_memo
+    last, key = _len_memo
+    if data is last:
+        return key
+
+    key = hash64(data) | (len(data) << _LEN_SHIFT)
+    # Identity is content only for immutable bytes (subclasses excluded).
+    if type(data) is bytes:
+        _len_memo = (data, key)
+    return key
 
 
 def hash64_seeded(data: bytes, seed: int) -> int:

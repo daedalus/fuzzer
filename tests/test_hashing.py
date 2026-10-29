@@ -198,3 +198,63 @@ def test_length_keyed_table_no_merge_on_collision(monkeypatch):
 
     assert rates.width(b"b" * 90_000) is None
     assert rates.counts(b"b" * 90_000) is None
+
+
+def _key_ref(data) -> int:
+    """hash64_len derived from zlib directly, independent of the memo."""
+    from zlib import adler32, crc32
+
+    return crc32(data) | (adler32(data) << 32) | (len(data) << 64)
+
+
+def test_regression_hash64_len_memo_reuses_same_object(monkeypatch):
+    """Schedulers key the same parent object back to back: digest it once."""
+    import fuzzer_tool.core.hashing as h
+
+    calls = []
+    real = h.hash64
+    monkeypatch.setattr(h, "hash64", lambda d: calls.append(1) or real(d))
+    parent = bytes(_blob(300))
+
+    keys = [h.hash64_len(parent) for _ in range(4)]
+
+    assert keys == [_key_ref(parent)] * 4
+    assert len(calls) == 1
+
+
+def test_regression_hash64_len_memo_misses_on_other_object():
+    """Falsification: a new object, even one equal in length, is rehashed."""
+    from fuzzer_tool.core.hashing import hash64_len
+
+    a, b = bytes(_blob(64)), bytes(reversed(_blob(64)))
+    hash64_len(a)
+
+    assert hash64_len(b) == _key_ref(b) != _key_ref(a)
+    assert hash64_len(bytes(a)) == _key_ref(a)
+
+
+@pytest.mark.parametrize("view", [bytearray, lambda b: memoryview(bytearray(b))])
+def test_regression_hash64_len_memo_skips_mutable(view):
+    """Adversarial: a buffer edited in place between calls keeps its identity,
+    so a memo keyed on identity would return the stale key."""
+    from fuzzer_tool.core.hashing import hash64_len
+
+    buf = view(_blob(32))
+    before = hash64_len(buf)
+    buf[0] ^= 0xFF
+
+    assert hash64_len(buf) == _key_ref(buf) != before
+
+
+def test_regression_hash64_len_memo_holds_one_object():
+    """Bounded: the memo releases a parent once another one is keyed."""
+    import sys
+
+    from fuzzer_tool.core.hashing import hash64_len
+
+    big = bytes(1 << 16)
+    base = sys.getrefcount(big)
+    hash64_len(big)
+    hash64_len(bytes(_blob(8)))
+
+    assert sys.getrefcount(big) == base
