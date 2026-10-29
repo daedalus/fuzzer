@@ -2229,7 +2229,10 @@ seed ─────► Viterbi spans (first 4096 bytes), FIFO cache 512 seeds
 - Spans are recomputed after a refit or resume, not persisted per seed: they are a pure function of (model, seed).
 - `hmm_segment` (adaptive band) is offered when the parent has ≥ 2 spans; declines once an earlier op resized the buffer, or on splice without a donor (64 kept per state). In `_DELOCALISED_OPS`.
 - Decode speed (n=4096, min of 5): K ≤ 4 pure Python (5.5 ms at K=4; numpy 16.7 ms), K > 4 numpy over states (15.7 ms at K=8; Python 17.9 ms). Picked once per model. Training is batched over seeds: 256 × 512 bytes, K=8, 115 ms per fit.
-- Unmeasured; not in `--hail-mary`. Kill criterion in `docs/handover/handover_viterbi_field_hmm_2026-10-29.md` §7.
+- Measured 2026-10-29; not in `--hail-mary`.
+  - fuzzgoat (clang noasan, 20 seeds x 10k, `tools/benchmark.py paired`): edges W9 L11, McNemar p=0.82, median Δ −21.5; A/A control W9 L11 p=0.82 (clean). Throughput 753 vs 845 eps median.
+  - PNG kill criterion (handover §7), truth = `core/field_map.py` exact boundaries, 104 generated PNGs, null = same cut count at random offsets (2000 draws; random-vs-null control rejects 3.5-7.5%). Micro-F1 exact: K=4 0.026 vs 0.025 (p=0.027), K=8 0.028 vs 0.026 (p=0.0005), K=16 0.028 vs 0.028 (p=0.51); at ±1 byte worse than random for every K.
+  - Cause: ~700 spans per seed vs ~17 true cuts. High-entropy IDAT flips states every few bytes, so `hmm_segment` acts like byte havoc. Criterion met: drop, or retry with sticky transitions / a minimum span length.
 
 ### Swap walk, pooled colorization, screening (2026-09-30)
 

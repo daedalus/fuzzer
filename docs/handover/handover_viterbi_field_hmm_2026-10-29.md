@@ -231,6 +231,13 @@ Auto-covered: `test_regression_cli_fuzzer_kwargs.py`,
   Weizz magic/length span edges no better than a random segmentation with
   the same span count, drop the feature and record the null result.
 
+### Results (2026-10-29)
+
+- fuzzgoat A/B: null (W9 L11, p=0.82; A/A clean). Detail: DEEP_DIVE §Viterbi field segmentation.
+- Kill criterion: failed. Truth was `core/field_map.py` exact PNG boundaries, not Weizz
+  tags (exact, no cmplog run needed). HMM ≈ random at exact match, worse at ±1.
+  ~700 spans/seed vs ~17 true cuts: the model over-segments high-entropy data.
+
 ## 8. Open questions
 
 1. K: fixed 8, or pick by BIC on first fit?
