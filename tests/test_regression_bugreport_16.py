@@ -11,7 +11,8 @@ from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
 
 
 class TestTransferEntropyBiasCorrection:
-    """#16 core/transfer_entropy.py:84-105 -- plug-in TE estimator reported
+    """#16 core/analyzers/analyzer_transfer_entropy.py (was
+    core/transfer_entropy.py:84-105) -- plug-in TE estimator reported
     ~2.6 bits for independent uniform byte streams (n=1500); no bias
     correction for context cardinality. byte_to_edge_flow/causal_chains
     produced spurious causal edges on essentially any input."""

@@ -1,4 +1,4 @@
-"""Tests for core/trace.py — CrashTracer, TraceReport format, parsing, repro."""
+"""Tests for core/analyzers/analyzer_trace.py — CrashTracer, TraceReport format, parsing, repro."""
 
 import os
 import shutil

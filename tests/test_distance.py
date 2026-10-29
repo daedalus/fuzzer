@@ -1,4 +1,4 @@
-"""Unit tests for core/distance.py — AFLGo directed distance computation."""
+"""Unit tests for core/analyzers/analyzer_distance.py — AFLGo directed distance computation."""
 
 import pytest
 

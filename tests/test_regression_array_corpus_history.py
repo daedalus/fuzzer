@@ -16,6 +16,8 @@ from __future__ import annotations
 from array import array
 from types import SimpleNamespace
 
+import pytest
+
 from fuzzer_tool.core.state_store import StateStore
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.operators import OperatorEngine
@@ -115,13 +117,28 @@ def test_init_builds_array():
 
 
 def test_trim_keeps_last_500():
-    """The >1000 -> keep-last-500 trim preserves content as an array."""
-    sizes = list(range(1200))  # independent reference
-    hist = array("I", sizes)
-    if len(hist) > 1000:
-        hist = hist[-500:]
+    """The real >1000 -> keep-last-500 trim in _after_admit keeps array content."""
+    from fuzzer_tool.core.operator_registry import REGISTRY
+    from fuzzer_tool.core.run_mode import Switch
+
+    sizes = list(range(1, 1002))  # independent reference; admitting 1001 trips the trim
+    f = SimpleNamespace(
+        _markov_switch=Switch.OFF,
+        _auto_minimize=Switch.OFF,
+        _corpus_size_history=array("I", sizes[:-1]),
+        _corpus_secretary=None,
+        max_corpus=0,
+        max_len=4096,
+        _max_len_floor=4096,
+        exec_count=0,
+    )
+    # Learned mutators are process-global; keep this test out of them.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(REGISTRY, "notify_new_coverage", lambda *_: None)
+        CorpusManager(f)._after_admit(bytes(sizes[-1]))
+    hist = f._corpus_size_history
     assert isinstance(hist, array)
-    assert len(hist) == 500
+    assert hist.typecode == "I"
     assert hist.tolist() == sizes[-500:]
 
 

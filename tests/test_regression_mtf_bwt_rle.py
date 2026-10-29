@@ -3,11 +3,14 @@
 Covers:
 - Registry registration, category placement, unconditional availability
 - Handler dispatch and length preservation
-- Round-trip invariants (encode → mutate → decode == original length)
+- Codec round-trips: encode → decode == original, no mutation (TestCodecRoundTrip)
+- Handler length preservation through encode → mutate → decode
 - Adversarial edge cases (empty, single byte, uniform input)
 """
 
 import os
+
+import pytest
 
 import fuzzer_tool.core.mutations.structured as structured
 from fuzzer_tool.core.operator_registry import REGISTRY
@@ -401,6 +404,187 @@ class TestRoundTrip:
         result = dispatch["huffman_tree_mutate"](buf, 0, data)
         assert result is not None
         assert len(result) == len(data)
+
+
+def _codec_inputs():
+    """Edge cases plus seeded noise over small and full alphabets."""
+    pool = RandPool(seed=7)
+    return [
+        b"ab",
+        b"\x00" * 64,
+        b"\xff" * 64,
+        bytes(range(256)),
+        bytes(range(256))[::-1] * 3,
+        pool.randbytes(500),
+        bytes(b % 3 for b in pool.randbytes(700)),
+    ]
+
+
+class _NoDraws:
+    """RNG that fails the test on any draw: a clean decode must not pad."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"unexpected rng.{name} on a clean decode")
+
+
+class TestCodecRoundTrip:
+    """Each codec's decoder inverts its encoder exactly when nothing is edited."""
+
+    @pytest.mark.parametrize("k", [0, 2, 4, 7])
+    @pytest.mark.parametrize("block", _codec_inputs())
+    def test_rice(self, block, k):
+        restored, n = structured._rice_decode(
+            structured._rice_encode(bytearray(block), k), k, len(block)
+        )
+        assert (bytes(restored), n) == (block, len(block))
+
+    @pytest.mark.parametrize("block", _codec_inputs())
+    def test_elias_gamma(self, block):
+        restored, n = structured._gamma_decode(structured._gamma_encode(block), len(block))
+        assert (bytes(restored), n) == (block, len(block))
+
+    @pytest.mark.parametrize("block", _codec_inputs())
+    def test_elias_delta(self, block):
+        restored, n = structured._delta_decode(structured._delta_encode(block), len(block))
+        assert (bytes(restored), n) == (block, len(block))
+
+    @pytest.mark.parametrize("block", _codec_inputs())
+    def test_lz77(self, block):
+        tokens = structured._lz_tokenize(bytearray(block), 3, 64)
+        restored, n = structured._lz_replay(tokens, len(block), _NoDraws())
+        assert (bytes(restored), n) == (block, len(block))
+
+    def test_gray(self):
+        every = bytes(range(256))
+        encoded = every.translate(structured._GRAY_ENCODE)
+        assert sorted(encoded) == list(every)
+        assert encoded.translate(structured._GRAY_DECODE) == every
+
+    @pytest.mark.parametrize("block", _codec_inputs())
+    def test_huffman(self, block):
+        codes, lengths = structured._huffman_codebook(_freq(block))
+        restored, n = structured._huff_decode(
+            _huff_bits(block, codes, lengths), codes, lengths, len(block)
+        )
+        assert (bytes(restored), n) == (block, len(block))
+
+
+def _freq(block):
+    freq = [0] * 256
+    for b in block:
+        freq[b] += 1
+    return freq
+
+
+def _huff_bits(block, codes, lengths):
+    """MSB-first codeword bits of *block*, one 0/1 byte per bit."""
+    return bytearray((codes[b] >> i) & 1 for b in block for i in range(lengths[b] - 1, -1, -1))
+
+
+def _fib_freq(n):
+    """Fibonacci frequencies: the shape that makes unlimited Huffman deepest."""
+    freq = [0] * 256
+    a, b = 1, 1
+    for sym in range(n):
+        freq[sym] = a
+        a, b = b, a + b
+    return freq
+
+
+class TestHuffmanCodebook:
+    """_huffman_codebook: a real, length-limited, canonical prefix code."""
+
+    @pytest.mark.parametrize("block", _codec_inputs())
+    def test_prefix_free_and_kraft_complete(self, block):
+        codes, lengths = structured._huffman_codebook(_freq(block))
+        words = sorted(format(codes[s], f"0{lengths[s]}b") for s in range(256) if lengths[s])
+        # Sorted, a prefix sits right before a word it prefixes.
+        assert all(not b.startswith(a) for a, b in zip(words, words[1:], strict=False))
+        kraft = sum(2.0 ** -lengths[s] for s in range(256) if lengths[s])
+        assert kraft == (1.0 if len(words) > 1 else 0.5)
+
+    def test_matches_textbook_lengths(self):
+        """Falsification: freqs 5,9,12,13,16,45 -> lengths 4,4,3,3,3,1 (CLRS 16.3)."""
+        freq = [0] * 256
+        for sym, f in zip(b"abcdef", (5, 9, 12, 13, 16, 45), strict=True):
+            freq[sym] = f
+        _, lengths = structured._huffman_codebook(freq)
+        assert [lengths[s] for s in b"abcdef"] == [4, 4, 3, 3, 3, 1]
+
+    def test_regression_rank_codes_undecodable(self):
+        """Six symbols: every one must decode (rank codes lost all but two)."""
+        block = b"aaaaaabbbbbccccdddeef"
+        codes, lengths = structured._huffman_codebook(_freq(block))
+        restored, n = structured._huff_decode(
+            _huff_bits(block, codes, lengths), codes, lengths, len(block)
+        )
+        assert (bytes(restored), n) == (block, len(block))
+
+    def test_adversarial_fibonacci_depth_is_limited(self):
+        """Fibonacci freqs push unlimited Huffman past 16 bits; the cap must hold."""
+        freq = _fib_freq(30)
+        codes, lengths = structured._huffman_codebook(freq)
+        present = [s for s in range(256) if freq[s]]
+        assert max(lengths[s] for s in present) <= structured._HUFF_MAX_BITS
+        assert sum(2.0 ** -lengths[s] for s in present) <= 1.0
+        block = bytes(present)
+        restored, n = structured._huff_decode(
+            _huff_bits(block, codes, lengths), codes, lengths, len(block)
+        )
+        assert (bytes(restored), n) == (block, len(block))
+
+    def test_single_symbol_gets_one_bit(self):
+        codes, lengths = structured._huffman_codebook(_freq(b"zzzz"))
+        assert (codes[ord("z")], lengths[ord("z")]) == (0, 1)
+        assert sum(lengths) == 1
+
+
+class TestHuffmanTreeMutate:
+    """The operator decodes the stream under a leaf-swapped tree: a, b exchange."""
+
+    @pytest.mark.parametrize("seed", range(20))
+    def test_output_is_a_two_symbol_swap(self, seed):
+        pool = RandPool(seed=seed)
+        data = bytes(b % 6 + 65 for b in RandPool(seed=100 + seed).randbytes(300))
+        out = structured.huffman_tree_mutate(data, pool)
+        assert len(out) == len(data)
+        diff = {(x, y) for x, y in zip(data, out, strict=True) if x != y}
+        # Every changed byte is one of a single pair (a->b, b->a).
+        # Both symbols are drawn from the region, so the swap must show
+        # (the rank codebook made this an identity on most inputs).
+        assert len(diff) == 2
+        assert all((y, x) in diff for x, y in diff)
+        assert set(out) == set(data)
+
+    def test_regression_huffman_not_identity_on_narrow_alphabet(self):
+        """Falsification: four symbols, whole-buffer region; output must differ."""
+        data = b"ABCD" * 8
+        out = structured.huffman_tree_mutate(data, RandPool(seed=1))
+        assert out != data
+        assert sorted(out) == sorted(data.translate(_swap_table(data, out)))
+
+
+def _swap_table(data, out):
+    """Translate table exchanging the one pair of symbols out/data differ on."""
+    (a, b) = {x for x, y in zip(data, out, strict=True) if x != y}
+    table = bytearray(range(256))
+    table[a], table[b] = b, a
+    return bytes(table)
+
+
+class TestEliasRegressions:
+    """Decoders lost the 1-bit codeword: byte 0x00 stopped gamma, delta scaled wrong."""
+
+    def test_regression_gamma_zero_byte(self):
+        block = b"\x00\x01\x00"
+        restored, n = structured._gamma_decode(structured._gamma_encode(block), len(block))
+        assert (bytes(restored), n) == (block, len(block))
+
+    def test_regression_delta_value_scaling(self):
+        # N = 98 for 'a': gamma(7) then the low 6 bits of 98; was decoded as 0x21.
+        block = b"a"
+        restored, n = structured._delta_decode(structured._delta_encode(block), len(block))
+        assert (bytes(restored), n) == (block, len(block))
 
 
 class TestAdversarial:
