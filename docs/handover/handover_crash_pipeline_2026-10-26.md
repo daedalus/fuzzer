@@ -93,6 +93,24 @@ clang builds from `tools/build_targets.sh`, base `d32da74` vs branch, 20k execs,
 - noasan: base filed every glibc abort (`free(): invalid pointer` / double free) as one `signal:6`; branch splits them by crash site, and the same site gets the same cluster id across runs (ASLR-stable): `6b429bba` in seeds 1 and 2, `7b56d567` in seeds 2 and 3.
 - Still one bucket: in-process ASAN `.so` SIGSEGVs the shim catches before ASAN reports (`signal:11`, sink off for sanitizer targets).
 
+## Third pass (2026-10-29, PR #241 + follow-up)
+
+Shipped: 3-frame signatures (runtime skipped, harness boundary, shim module per raw frame), resume re-derives saved signatures, `# stack-hash v2` blocklists + sidecar `stack_hash`, ptrace sites by `rip`, `repro`/`flaky` in sidecars and SARIF, signal exploitability tiers, hang dedup by trace edges, `--rss-limit-mb` pre-exec (file input) + persistent per-call cap, `--crash-tmin-execs`. Follow-up: direct_lite glibc heap aborts tiered HIGH from the shim record (`shim_exploitability`).
+
+Fuzzgoat calibration (rebuilt targets, base `e9dfb89b` vs branch, 20k execs, seeds 1-3; crashes / unique / edges):
+
+| target | base | branch |
+|---|---|---|
+| `fuzzgoat_read_asan.so` | 5/3/682, 3/2/705, 11/4/786 | 5/3/784, 11/3/787, 9/3/792 |
+| `fuzzgoat_read_noasan.so` | 14/3/797, 1/1/682, 8/3/942 | 12/4/795, 5/3/738, 14/3/1359 |
+
+- Branch cluster ids repeat across seeds: ASAN `dba7aadc`, `0b052e38` 3/3; noasan `be590256`, `902cc90d`, `582a3a5d` 3/3. Base ids were split by harness frames (`fuzz_shm_run`, libffi offsets).
+- Remaining ASAN splits are real callers: bad-free via `default_free` vs direct, UAF via `json_parse` vs the harness's `parse_trailer`.
+- noasan invalid frees read LOW (glibc message not captured in direct_lite): fixed in the follow-up, now HIGH.
+- Edges within spread (one 1359 outlier, seed 3).
+
+Open: (a) `--rss-limit-mb` unenforced in direct_lite (warns); (h) hang edges not persisted across `--resume`; (m) `--crash-tmin-execs` unmeasured; (10) `--novel-crash-reward` FFmpeg A/B: done, null. 9.0.2 from empty corpus never crashed; seeded 8.0.3 (`eval_set.SEED_DIRS`, `--set ffmpeg_803`) crashed every cell on one SIGFPE, but no arm found a second bug in 10k execs (`docs/AB_PENDING.md`). A longer budget (≥50k) is the next test.
+
 ## Verify
 
 ```
