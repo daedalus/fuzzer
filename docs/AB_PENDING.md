@@ -18,7 +18,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
-| Novel crash reward (`--novel-crash-reward`) | Only new-signature crashes pay operators / Elo | N | fuzzgoat noasan, 20 seeds. 10k: unique W8 L5 T7 p=0.58, edges W11 L9 p=0.82. 50k: unique W8 L8 T4 p=1, edges W9 L11 p=0.82 (median -13), crashes W9 L11. Controls (`novel-crash-reward-ctl`) clean: 50k unique W4 L6 p=0.75, edges W11 L9 p=0.82. Fuzzgoat yields a few crashes per run, so repeat-crash reward is rare there: needs a target where one shallow crash dominates (FFmpeg asserts with `--abort-is-crash`). Stays opt-in |
+| Novel crash reward (`--novel-crash-reward`) | Only new-signature crashes pay operators / Elo | N | fuzzgoat noasan, 20 seeds. 10k: unique W8 L5 T7 p=0.58, edges W11 L9 p=0.82. 50k: unique W8 L8 T4 p=1, edges W9 L11 p=0.82 (median -13), crashes W9 L11. Controls (`novel-crash-reward-ctl`) clean: 50k unique W4 L6 p=0.75, edges W11 L9 p=0.82. Fuzzgoat yields a few crashes per run, so repeat-crash reward is rare there: needs a target where one shallow crash dominates. FFmpeg 9.0.2 (`--set ffmpeg`, arms `abort-crash` / `novel-crash-reward-abort` / `abort-crash-ctl`) from the set's empty corpus: 0 crashes at 3k and 20k execs (seeds 1, 2; 33-77 eps): the A/B cannot move `unique` there. Needs a crash-reaching corpus or another target. Stays opt-in |
 
 ## Seed scheduling
 
