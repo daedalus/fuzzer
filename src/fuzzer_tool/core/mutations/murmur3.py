@@ -54,17 +54,28 @@ def _fmix(h: int, length: int) -> int:
 def murmur3_32(data: bytes, seed: int = 0) -> int:
     """MurmurHash3_x86_32 of *data*."""
     h = seed & _MASK
-    nblocks = len(data) // _BLOCK
+    n = len(data)
+    nblocks = n // _BLOCK
+
+    # _mix_k and _fmix inlined (a call per block cost 11-20%). Rotates skip
+    # their mask: bits above 2**32 drop out of the masked product.
     for (k,) in struct.iter_unpack("<I", data[: nblocks * _BLOCK]):
-        h ^= _mix_k(k)
-        h = ((h << 13) | (h >> 19)) & _MASK
-        h = (h * 5 + _ROUND_ADD) & _MASK
+        k = (k * _C1) & _MASK
+        h ^= (((k << 15) | (k >> 17)) * _C2) & _MASK
+        h = (((h << 13) | (h >> 19)) * 5 + _ROUND_ADD) & _MASK
 
     # Tail: 1-3 trailing bytes, little-endian, no rotate/add round.
     tail = int.from_bytes(data[nblocks * _BLOCK :], "little")
     if tail:
-        h ^= _mix_k(tail)
-    return _fmix(h, len(data))
+        k = (tail * _C1) & _MASK
+        h ^= (((k << 15) | (k >> 17)) * _C2) & _MASK
+
+    h ^= n
+    h ^= h >> 16
+    h = (h * _FMIX1) & _MASK
+    h ^= h >> 13
+    h = (h * _FMIX2) & _MASK
+    return h ^ (h >> 16)
 
 
 def murmur3_chain(prefix: bytes, length: int, seed: int) -> bytes:
@@ -87,10 +98,10 @@ def _chain_scalar(blocks: list[int], n_blocks: int, seed: int) -> None:
     for t in range(1, n_blocks):
         mixed.append(_mix_k(blocks[t - 1]))
         h = (seed ^ (t * _BLOCK)) & _MASK
+        # Rotate and round fused as in murmur3_32: one mask per block.
         for k in mixed:
             h ^= k
-            h = ((h << 13) | (h >> 19)) & _MASK
-            h = (h * 5 + _ROUND_ADD) & _MASK
+            h = (((h << 13) | (h >> 19)) * 5 + _ROUND_ADD) & _MASK
         blocks.append(_fmix(h, t * _BLOCK))
 
 
