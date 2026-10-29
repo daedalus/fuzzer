@@ -82,6 +82,10 @@ class Encoder:
     #: ``generate_mutations`` keeps them and drops the rest (handover F1).
     inverts_hash = False
 
+    #: ``fit`` rewrites a replacement after seeing the input it lands in. Off by
+    #: default so the common path pays one attribute test per mutation.
+    fits_input = False
+
     def is_applicable(  # noqa: ARG002
         self, cmp_size: int, cmp_type: str, lhs: bytes, rhs: bytes
     ) -> bool:
@@ -99,6 +103,12 @@ class Encoder:
     def pattern(self, val: bytes) -> list[bytes]:
         """Chunks to search for; ``encode`` unless trailing output is ambiguous."""
         return self.encode(val)
+
+    def fit(  # noqa: ARG002
+        self, repl: tuple[bytes, ...], offsets: tuple[int, ...], data: bytes
+    ) -> tuple[bytes, ...]:
+        """Adjust *repl*, to be written at *offsets* of *data*; only if ``fits_input``."""
+        return repl
 
     def size(self) -> int:
         """Return the number of discontiguous chunks produced by ``encode``."""
@@ -321,12 +331,40 @@ _HEX_MIN = 2
 _UTF16_MIN = 4  # two code units
 
 
+_B64_STD_ALPHABET = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_B64_URL_ALPHABET = _B64_STD_ALPHABET[:-2] + b"-_"
+
+# Spare low bits of the last char by its encoded length mod 4: 1 byte is 8 bits
+# = 1 char + 2 bits, 2 bytes are 16 = 2 chars + 4 bits (3 bytes fill 4 chars).
+_B64_SPARE_BITS = {2: 4, 3: 2}
+
+
 class Base64Encoder(Encoder):
     """Base64 text decoded before a string compare."""
+
+    fits_input = True
 
     def __init__(self, urlsafe: bool = False):
         self.urlsafe = urlsafe
         self._b64 = base64.urlsafe_b64encode if urlsafe else base64.b64encode
+        self._alphabet = _B64_URL_ALPHABET if urlsafe else _B64_STD_ALPHABET
+        self._sextet = {c: i for i, c in enumerate(self._alphabet)}
+
+    def fit(self, repl, offsets, data):
+        # ``encode`` zero-fills the spare bits of a partial last char, but in
+        # the input they hold the top bits of the next decoded byte. Keep what
+        # the input has there so only the operand's own bits change.
+        chunk = repl[0]
+        spare = _B64_SPARE_BITS.get(len(chunk) % 4)
+        if spare is None:
+            return repl
+        at = offsets[0] + len(chunk) - 1
+        old = self._sextet.get(data[at]) if at < len(data) else None
+        if old is None:  # end of input, "=" or junk: nothing to preserve
+            return repl
+        keep = (1 << spare) - 1
+        last = (self._sextet[chunk[-1]] & ~keep) | (old & keep)
+        return (chunk[:-1] + bytes((self._alphabet[last],)),)
 
     def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
         return cmp_type == "STR" and len(lhs) >= _B64_MIN
@@ -1103,6 +1141,8 @@ def generate_mutations(
                     break
                 for repl in repl_variants:
                     if pattern_key != repl:
+                        if enc.fits_input:
+                            repl = enc.fit(repl, offset_combo, input_data)  # noqa: PLW2901
                         k = (offset_combo, repl)
                         if k not in seen:
                             seen.add(k)

@@ -298,6 +298,36 @@ class TestDecoderEncoders:
         assert hits
         assert dec(_apply(data, hits[0])[2:])[: len(_OP_B)] == _OP_B
 
+    @pytest.mark.parametrize(
+        ("name", "enc", "dec"),
+        [
+            ("b64_std", base64.b64encode, base64.b64decode),
+            ("b64_url", base64.urlsafe_b64encode, base64.urlsafe_b64decode),
+        ],
+    )
+    @pytest.mark.parametrize("length", [9, 10, 11, 12, 13])
+    @pytest.mark.parametrize("trailer", [b"\xff", b"\xff\xff\xff", b"\xa5\x5a\xc3\x3c!"])
+    def test_b64_write_keeps_following_decoded_bytes(self, name, enc, dec, length, trailer):
+        # The last encoded char of a length % 3 != 0 operand is shared with the
+        # next decoded byte (2 or 4 spare bits). The write must keep those bits:
+        # the whole decoded input is op_b followed by the untouched trailer.
+        op_a = bytes(range(0xF0, 0xF0 + length))
+        op_b = bytes((0x41 + 7 * i) & 0x7F for i in range(length))
+        data = b"k=" + enc(op_a + trailer)
+        hits = _by_encoder(generate_mutations(op_a, op_b, 512, "STR", data), name)
+        # Terminator / quoting variants (op_b + NUL, "op_b") are deliberately longer.
+        exact = len(enc(op_b).rstrip(b"="))
+        solved = [m for m in hits if len(m[1][0]) == exact]
+        assert solved
+        for m in solved:
+            assert dec(_apply(data, m)[2:]) == op_b + trailer
+
+    def test_b64_write_leaves_a_non_alphabet_neighbour_alone(self):
+        # Nothing to merge with when the shared char is not an alphabet byte.
+        enc = rq_encodings.Base64Encoder()
+        assert enc.fit((b"QUJDREVGR0hJSks",), (0,), b"QUJDREVGR0hJSk=") == (b"QUJDREVGR0hJSks",)
+        assert enc.fit((b"QUJDREVGR0hJSks",), (0,), b"QUJDREVG") == (b"QUJDREVGR0hJSks",)
+
     @pytest.mark.parametrize(("name", "upper"), [("hex_l", False), ("hex_u", True)])
     def test_hex_solves_decoded_compare(self, name, upper):
         h = _OP_A.hex()
