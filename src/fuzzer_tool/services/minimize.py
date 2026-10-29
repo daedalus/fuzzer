@@ -33,6 +33,7 @@ from fuzzer_tool.core.edge_components import components_report
 from fuzzer_tool.core.edge_hist import hist_report
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.run_mode import Switch
+from fuzzer_tool.core.sdr import distinct_reps, reps_report
 from fuzzer_tool.core.set_cover import min_cover
 
 
@@ -270,6 +271,7 @@ def minimize_corpus(
     edge_hist: Switch = Switch.OFF,
     edge_components: Switch = Switch.OFF,
     count_items: CountItems = CountItems.OFF,
+    hall: Switch = Switch.OFF,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -302,6 +304,8 @@ def minimize_corpus(
             bare edges (see core/count_items.py); coverage mode only.
         edge_components: ON prints connected components of the seed Gram
             matrix after stripping near-universal edges; coverage mode only.
+        hall: ON adds a distinct seed per rare edge to the kept set (Hall
+            matching, core/sdr.py) and prints the report; coverage mode only.
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -360,6 +364,7 @@ def minimize_corpus(
             edge_hist=edge_hist,
             edge_components=edge_components,
             count_items=count_items,
+            hall=hall,
         )
     else:
         kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path, fuzzy_dedup)
@@ -433,6 +438,7 @@ def _minimize_with_coverage(
     edge_hist: Switch = Switch.OFF,
     edge_components: Switch = Switch.OFF,
     count_items: CountItems = CountItems.OFF,
+    hall: Switch = Switch.OFF,
 ) -> tuple[int, int]:
     """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -464,7 +470,9 @@ def _minimize_with_coverage(
     env_base["__AFL_SHM_ID"] = shm.env_id
     env_base["AFL_MAP_SIZE"] = str(shm.num_entries)
 
-    book = _EdgeBook(_TWINS.get(prune, Twins.COLLAPSE), np.uint32 if count_items is CountItems.OFF else np.uint64)
+    book = _EdgeBook(
+        _TWINS.get(prune, Twins.COLLAPSE), np.uint32 if count_items is CountItems.OFF else np.uint64
+    )
     observe = _observer(shm, count_items)
     runner = None
     peak_rss_kb = _maxrss_kb()
@@ -576,6 +584,8 @@ def _minimize_with_coverage(
     print(f"[*] Coverage twins collapsed: {len(corpus_files) - len(book.edges)}")
 
     covered_files = _prune(book, prune, target_frac, map_entries)
+    if hall is Switch.ON:
+        covered_files = _add_reps(book, covered_files)
 
     if edge_hist is Switch.ON:
         _print_edge_hist(replayed_counts, unique_edges, book, covered_files)
@@ -591,6 +601,15 @@ def _minimize_with_coverage(
         batch_mode=batch_mode,
         all_corpus_files=all_corpus_files,
     )
+
+
+def _add_reps(book: _EdgeBook, kept: list[str]) -> list[str]:
+    """*kept* plus a distinct seed for each rare edge, cover seeds tried first."""
+    reps = distinct_reps({k: _edge_ids(e) for k, e in book.edges.items()}, prefer=kept)
+    have = set(kept)
+    extra = [k for k in reps.owner.values() if k not in have]
+    print(reps_report(reps, added=len(extra)))
+    return kept + extra
 
 
 def _print_edge_hist(

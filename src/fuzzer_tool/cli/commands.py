@@ -1530,7 +1530,13 @@ def cmd_minimize(args):
     if edge_comp is Switch.ON and not args.coverage:
         print("[!] --edge-components needs -c/--coverage: no edge data without it", file=sys.stderr)
 
-    count_mode = CountItems(args.count_aware) if getattr(args, "count_aware", None) else CountItems.OFF
+    hall = Switch.ON if getattr(args, "hall", False) else Switch.OFF
+    if hall is Switch.ON and not args.coverage:
+        print("[!] --hall needs -c/--coverage: no edge data without it", file=sys.stderr)
+
+    count_mode = (
+        CountItems(args.count_aware) if getattr(args, "count_aware", None) else CountItems.OFF
+    )
     if count_mode is not CountItems.OFF and not args.coverage:
         print("[!] --count-aware needs -c/--coverage: no edge data without it", file=sys.stderr)
 
@@ -1552,6 +1558,7 @@ def cmd_minimize(args):
         edge_hist=edge_hist,
         edge_components=edge_comp,
         count_items=count_mode,
+        hall=hall,
     )
 
     if removed == 0:
@@ -6918,6 +6925,12 @@ def main() -> int:
         action="store_true",
         help="With -c: print connected components of the seed Gram matrix "
         "(seeds sharing an edge) after stripping edges held by >10%% of seeds",
+    )
+    min_parser.add_argument(
+        "--hall",
+        action="store_true",
+        help="With -c: keep a distinct seed for every rare edge (<= 3 owners) on top of "
+        "the cover (Hall matching), and report the edges no distinct seed can cover",
     )
     min_parser.add_argument(
         "--count-aware",
