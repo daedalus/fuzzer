@@ -139,7 +139,7 @@ class TestSanitizerReportEnriched:
         assert report is not None
         assert report.access_type == "READ"
         assert report.access_size == 8
-        assert report.exploitability == "CRITICAL"
+        assert report.exploitability == "HIGH"  # UAF READ leaks, WRITE corrupts
 
     def test_shadow_info(self):
         stderr = (

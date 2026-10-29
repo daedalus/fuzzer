@@ -190,6 +190,7 @@ from fuzzer_tool.core.validity import ValidityChannel
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
 from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.crash_shrink import CrashShrinker
 from fuzzer_tool.services.favored_cover import favored_cover
 from fuzzer_tool.services.fuzz_round import FuzzRound
 from fuzzer_tool.services.i2s_fixpoint import I2SFixpoint
@@ -1558,6 +1559,7 @@ class Fuzzer:
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
+        crash_tmin_execs=0,
         crash_blocklist=None,
         crash_allowlist=None,
         save_smaller=False,
@@ -2224,6 +2226,7 @@ class Fuzzer:
         # os.environ was snapshotted above, so _restore_environ() removes it.
         self.crash_symbolize = crash_symbolize
         _export_abort_mode(AbortMode.CRASH if abort_is_crash else AbortMode.RETURN)
+        self._rss_limit_mb = rss_limit_mb
         if rss_limit_mb > 0:
             _export_rss_limit(rss_limit_mb, _shadow_of(target))
         _export_sym_mode(SymMode.SYMBOLIZE if crash_symbolize else SymMode.RAW)
@@ -2268,6 +2271,12 @@ class Fuzzer:
                     interval_execs=500,
                     action=self._run_crash_replays,
                     active=lambda: self.replay_n > 0,
+                ),
+                MaintenanceJob(
+                    "crash_tmin",
+                    interval_execs=500,
+                    action=self._run_crash_tmin,
+                    active=lambda: self._crash_shrinker is not None,
                 ),
                 MaintenanceJob(
                     "sanitizer_replays",
@@ -2806,6 +2815,7 @@ class Fuzzer:
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict[str, int] = {}
         self.crash_frames: dict[str, list[str]] = {}  # sig -> frames for clustering
+        self.hangs_deduped = 0  # timeouts whose trace hit no new hang edge
         # Crash-stop state captured by the ptrace runner (fault address from
         # PTRACE_GETSIGINFO, registers from PTRACE_GETREGS); consumed by
         # corpus_manager.save_crash for the sidecar + signature.
@@ -2863,6 +2873,15 @@ class Fuzzer:
         # None when that crash was not written. Set by CorpusManager.save_crash.
         self._last_crash_signature: str | None = None
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
+        # --crash-tmin-execs: shrink novel crashes at maintenance ticks (None = off).
+        # Lambdas: the runner and corpus manager are built later in __init__.
+        self._crash_shrinker: CrashShrinker | None = None
+        if crash_tmin_execs > 0:
+            self._crash_shrinker = CrashShrinker(
+                lambda d: self._runner.run_target(d),
+                lambda rc, err: self._corpus_manager.run_signature(rc, err),
+                max_execs=crash_tmin_execs,
+            )
         self.asan_target: str | None = asan_target  # --asan-target: ASAN-instrumented variant
         self.ubsan_target: str | None = ubsan_target  # --ubsan-target: UBSAN-instrumented variant
         self._crash_sanitizer_replays: dict[str, dict] = {}  # sig -> {data, asan, ubsan}
@@ -5142,6 +5161,9 @@ class Fuzzer:
                 use_ptrace=self.use_ptrace,
                 placement=self.input_placement,
             )
+            if use_direct_lite and self._rss_limit_mb > 0:
+                # The target shares this process: no per-target cap exists.
+                print("[!] --rss-limit-mb is not enforced in direct_lite; use --persistent")
             if use_direct_lite and target_is_asan and _asan_fatal_in_process(self.target):
                 # A plain ASAN check runs Die() inside this process: the first
                 # report ends the run, silently (stderr is a capture pipe).
@@ -7576,6 +7598,9 @@ class Fuzzer:
 
     def _run_crash_replays(self, budget_ms: float = 200):
         return self._stats.run_crash_replays(budget_ms)
+
+    def _run_crash_tmin(self) -> None:
+        self._crash_shrinker.tick()
 
     def _run_sanitizer_replays(self, budget_ms: float = 200):
         """Replay crashes on ASAN/UBSAN targets for sanitizer reports.
@@ -10435,6 +10460,8 @@ class Fuzzer:
                 if not self.job_scheduler:
                     if i % 500 == 0 and self.replay_n > 0:
                         self._run_crash_replays()
+                    if i % 500 == 0 and self._crash_shrinker is not None:
+                        self._run_crash_tmin()
                     if i % 500 == 0 and (self.asan_target or self.ubsan_target):
                         self._run_sanitizer_replays()
         except (KeyboardInterrupt, SystemExit):

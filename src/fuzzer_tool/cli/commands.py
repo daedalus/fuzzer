@@ -25,6 +25,7 @@ from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD
 from fuzzer_tool.core.run_mode import InputPlacement, RunMode, Switch
+from fuzzer_tool.core.sanitizer import STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
@@ -145,15 +146,32 @@ def _run_mail_test(args) -> int:
 
 
 def _load_hash_list(path: str | None) -> set[str] | None:
-    """Load a file of hex hashes (one per line) into a set."""
+    """Load a file of hex stack hashes (one per line) into a set.
+
+    Warns when the list is not tagged ``STACK_HASH_TAG``: entries of another
+    stack-hash format match nothing.
+    """
     if not path:
         return None
     try:
-        lines = Path(path).read_text().splitlines()
-        return {line.strip() for line in lines if line.strip() and not line.startswith("#")}
+        lines = [line.strip() for line in Path(path).read_text().splitlines()]
     except FileNotFoundError:
         print(f"[!] Warning: hash list file not found: {path}")
         return None
+
+    hashes = {line for line in lines if line and not line.startswith("#")}
+    tags = [line for line in lines if line.startswith(_STACK_HASH_PREFIX)]
+    if hashes and tags != [STACK_HASH_TAG]:
+        found = ", ".join(t.removeprefix(_STACK_HASH_PREFIX) for t in tags) or "untagged"
+        print(
+            f"[!] Warning: {path}: stack-hash format {found}, current "
+            f"v{STACK_HASH_VERSION} ('{STACK_HASH_TAG}'); entries of another "
+            "format match nothing: regenerate from crash sidecars (stack_hash)"
+        )
+    return hashes
+
+
+_STACK_HASH_PREFIX = "# stack-hash "
 
 
 def _detect_asan(target: str) -> bool:
@@ -734,6 +752,7 @@ def cmd_fuzz(args):
         ctx_sensitive=getattr(args, "ctx_sensitive", None),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
+        crash_tmin_execs=getattr(args, "crash_tmin_execs", 0),
         asan_target=getattr(args, "asan_target", None),
         ubsan_target=getattr(args, "ubsan_target", None),
         crash_blocklist=_load_hash_list(getattr(args, "crash_blocklist", None)),
@@ -5955,6 +5974,14 @@ def main() -> int:
         "edges/seed ratio (tracked seeds only)",
     )
     fuzz_parser.add_argument(
+        "--crash-tmin-execs",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Shrink each novel crash at maintenance ticks, up to N runs; writes "
+        "<crash>.min beside the .bin, signature pinned (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
         "--replay-n",
         type=int,
         default=0,
@@ -5977,7 +6004,10 @@ def main() -> int:
         "--crash-blocklist",
         default=None,
         metavar="FILE",
-        help="File with stack hashes (one per line) to skip when saving crashes",
+        help=(
+            "File with stack hashes (one per line, sidecar 'stack_hash') to skip when "
+            "saving crashes; header '# stack-hash v2' (other versions warn)"
+        ),
     )
     fuzz_parser.add_argument(
         "--crash-allowlist",

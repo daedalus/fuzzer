@@ -134,6 +134,66 @@ _FRAME_LOC_RE = re.compile(
     re.MULTILINE,
 )
 
+# Signature frames: the first N target frames of the crash stack.
+_SIG_FRAMES = 3
+
+# Sanitizer / libc frames: they name the runtime, not the bug site
+# ("#0 in free" of a bad-free). Exact names; prefixes below.
+_RUNTIME_FUNCS = frozenset((
+    "free", "malloc", "calloc", "realloc", "reallocarray", "memalign", "posix_memalign",
+    "aligned_alloc", "memcpy", "memmove", "memset", "memcmp", "strlen", "strnlen", "strcpy",
+    "strncpy", "strcmp", "strncmp", "strcat", "strncat", "strchr", "strrchr", "strstr",
+    "abort", "raise", "_start", "operator",
+))  # fmt: skip
+_RUNTIME_PREFIXES = (
+    "__interceptor_", "___interceptor_", "__asan", "__msan", "__tsan", "__ubsan",
+    "__lsan", "__sanitizer", "__afl_", "__libc_", "__GI_", "__pthread_", "_dl_",
+)  # fmt: skip
+_RUNTIME_MODULES = (
+    "libc.so", "libc-", "ld-linux", "libasan", "libubsan", "libmsan", "libtsan",
+    "liblsan", "libclang_rt", "libgcc_s", "libpthread", "libstdc++", "libc++",
+)  # fmt: skip
+
+# Harness entry: frames below it are the fuzzer's (ctypes, libffi, loader).
+_HARNESS_FUNCS = frozenset(("fuzz_shm_run", "LLVMFuzzerTestOneInput"))
+
+
+def is_runtime_module(module: str) -> bool:
+    """True for libc / sanitizer runtime objects, e.g. "/lib/libc.so.6"."""
+    return module.rsplit("/", 1)[-1].startswith(_RUNTIME_MODULES)
+
+
+def _is_runtime(frame: str) -> bool:
+    if frame in _RUNTIME_FUNCS or frame.startswith(_RUNTIME_PREFIXES):
+        return True
+    return "+0x" in frame and is_runtime_module(frame)
+
+
+def signature_frames(frames: list[str]) -> list[str]:
+    """First ``_SIG_FRAMES`` target frames: runtime skipped, harness ends it.
+
+    ``[free, json_value_free_ex, fuzz_shm_run, __afl_guard_run, libffi...]``
+    -> ``[json_value_free_ex]``. A crash in the harness itself keeps it; an
+    all-runtime stack keeps its innermost frame.
+    """
+    out: list[str] = []
+    for f in frames:
+        if f in _HARNESS_FUNCS and out:
+            break
+        if _is_runtime(f):
+            continue
+        out.append(f)
+        if len(out) == _SIG_FRAMES:
+            break
+    return out or frames[:1]
+
+
+# Stack hash format; bump on any change to stack_hash(). Blocklists carry it
+# as their header so a list from another format warns instead of matching
+# nothing.
+STACK_HASH_VERSION = 2
+STACK_HASH_TAG = f"# stack-hash v{STACK_HASH_VERSION}"
+
 # Stack hash: first N crash-stack PCs, page offset only (survives ASLR).
 _NUM_FRAMES_SANITIZER = 14
 _PAGE_OFFSET_MASK = 0xFFF
@@ -194,12 +254,53 @@ UBSAN_EXPLOITABILITY = {
     "integer-divide-by-zero": "LOW",
 }
 
-# READ access downgrades CRITICAL to HIGH for heap overflow types
+# READ access downgrades CRITICAL to HIGH: an out-of-bounds or stale read
+# leaks; the write corrupts.
 _ASAN_READ_DOWNGRADE = {
     "heap-buffer-overflow",
     "heap-buffer-overflow-",
     "global-buffer-overflow",
+    "stack-buffer-overflow",
+    "dynamic-stack-buffer-overflow",
+    "heap-use-after-free",
 }
+
+# ── Signal crashes (no report) ───────────────────────────────────
+
+_NULL_PAGE = 0x10000  # Linux vm.mmap_min_addr default: never mapped
+_STACK_REACH = 0x10000  # a fault this close to rsp: stack exhaustion
+
+# glibc malloc's abort messages (__libc_message), at line start:
+# "free(): invalid pointer", "double free or corruption (out)", ...
+_GLIBC_HEAP_RE = re.compile(
+    r"^(?:free\(\)|malloc\(\)|realloc\(\)|munmap_chunk\(\)|malloc_consolidate\(\)"
+    r"|double free or corruption|corrupted size vs\. prev_size|corrupted double-linked list)",
+    re.MULTILINE,
+)
+_SIGSEGV, _SIGBUS, _SIGABRT, _SIGFPE = 11, 7, 6, 8
+
+
+def signal_exploitability(signo: int, fault: int | None, rip: int, rsp: int, stderr: str) -> str:
+    """Tier of a crash without a sanitizer report, from what the fault shows.
+
+    Heap-corruption abort HIGH; other aborts and SIGFPE LOW; then by fault
+    address: null page LOW, ``rip == fault`` (jumped there) CRITICAL, near
+    ``rsp`` (stack exhaustion) LOW, else MEDIUM: read vs write is unknown.
+    """
+    if _GLIBC_HEAP_RE.search(stderr):
+        return "HIGH"
+    if signo in (_SIGABRT, _SIGFPE):
+        return "LOW"
+    if fault is None:
+        return "UNKNOWN"
+
+    if fault < _NULL_PAGE:
+        return "LOW"
+    if signo in (_SIGSEGV, _SIGBUS) and fault == rip:
+        return "CRITICAL"
+    if rsp and abs(fault - rsp) < _STACK_REACH:
+        return "LOW"
+    return "MEDIUM"
 
 
 def _crash_stack(text: str, start: int = 0) -> list[tuple[int, str]]:
@@ -393,7 +494,7 @@ class SanitizerReport:
 
     def _build_signature(self) -> str:
         key = f"{self.sanitizer}:{self.error_type}"
-        for f in self.frames[:6]:
+        for f in signature_frames(self.frames):
             key += f"@{f}"
 
         # No stack (UBSAN's default): the source location tells sites apart.

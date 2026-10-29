@@ -60,6 +60,11 @@ _ENV_OWNED = (
     "AFL_MAP_SIZE",
     # Every Fuzzer() writes it; a leaked "0" silences later stack-depth tests.
     "__AFL_STACK_DEPTH",
+    # Every Fuzzer() exports them; a leaked raw "1" unsymbolizes later shim tests.
+    "__AFL_CRASH_SYM_RAW",
+    "__AFL_CRASH_SYM_OUT",
+    "__AFL_ABORT_CRASH",
+    "__FUZZ_RSS_LIMIT_MB",
 )
 
 

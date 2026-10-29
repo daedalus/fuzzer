@@ -387,3 +387,28 @@ than the expected few-percent gain; not claimed.
 Open: `_trickle` geometric skip (needs ~2 draws instead of ~48 per call)
 changes the seeded stream that `tests/test_regression_registry_plan.py`
 pins; needs a decision.
+
+### 7.10 Update 2026-10-29: in-run validation, coverage scan
+
+Method change: every candidate is now also timed **inside a real run**
+(fuzzgoat, 20k execs, wrapper timers, master vs branch alternated). Warm
+microbenchmarks overstate memory-bound code: the target has just written
+the map, so the table walk runs cache-cold.
+
+PR #239 confirmed in-run: `available` 73 -> 60 us, crash-MI `record`
+38 -> 27 us, `randint_list` 12.5 -> 9.8 us.
+
+Fuzzgoat map: 32,768 entries, slow path on 92% of execs, 25 live entries;
+`_scan_new` 103 us in-run (`_active_columns` 50 us).
+
+| Change | Micro | In-run | Shipped |
+|---|---:|---:|---|
+| `weighted_position`: bisect over list mirrors built per `_refresh` | 80% | 7.9-10.3 -> 3.7-4.1 us | yes |
+| `_live_entries`: contiguous copy of the generation column, then compare | 17-20% (32k-64k) | 0-1% | no |
+| `--touched-scan` at 32,768 entries | - | 50 -> 59 us, reset +1.5 us | no (threshold 65,536 stays) |
+| fold trims (one `max()` replaces range check, direct table index in bucket bits) | 16-20% at 25 live, 10-11% at 2k, 6% at 15k | - | no (under the bar at ffmpeg's 15k) |
+| Katz `observe`: cached buffer address | ~1-2 us of 10 warm | 36 us in-run (cold) | not attempted |
+
+`weighted_position` runs ~4x per exec (crash-MI position source), so it was
+~32 us/exec. Lists cost one `tolist()` per refresh (406 refreshes / 20k
+execs).
