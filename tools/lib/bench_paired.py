@@ -153,6 +153,11 @@ ARMS: dict[str, list[str]] = {
     "novel-crash-reward": ["--novel-crash-reward"],
     # The control that must not reject (Rule 46): baseline again.
     "novel-crash-reward-ctl": [],
+    # Same on a target with a dominant shallow crash: FFmpeg asserts count as
+    # crashes only with --abort-is-crash, so every arm of this pair carries it.
+    "abort-crash": ["--abort-is-crash"],
+    "novel-crash-reward-abort": ["--abort-is-crash", "--novel-crash-reward"],
+    "abort-crash-ctl": ["--abort-is-crash"],
     # Generation group (docs/handover/handover_generators_2026-09-20.md G0).
     # Each pairs against the baseline named in ARM_BASELINES.
     #
@@ -331,6 +336,8 @@ ARM_BASELINES: dict[str, str] = {
     "pos-fibonacci": "baseline",
     **{arm: "baseline" for arm in GROWING_TREE_ARMS},
     "seed-dpp": "baseline",
+    "novel-crash-reward-abort": "abort-crash",
+    "abort-crash-ctl": "abort-crash",
     "elo-good-turing-seed": "elo",
     "elo-op-good-turing": "elo",
     **{arm: "elo" for arm in REACTIVE_ARMS},
