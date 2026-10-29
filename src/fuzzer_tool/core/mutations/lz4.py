@@ -47,17 +47,17 @@ def _xxh32_py(data: bytes, seed: int = 0) -> int:
         v2 = (seed + _P2) & _U32
         v3 = seed & _U32
         v4 = (seed - _P1) & _U32
-        nw = (n // _STRIPE) * 4
-        words = struct.unpack_from(f"<{nw}I", data)
+        used = n - n % _STRIPE
         # Lanes inlined: a helper call per word costs ~2x on 4 KiB input.
-        for i in range(0, nw, 4):
-            v1 = (v1 + words[i] * _P2) & _U32
+        # iter_unpack hands each stripe over as one tuple (vs four indexings).
+        for a, b, c, d in struct.iter_unpack("<4I", data[:used]):
+            v1 = (v1 + a * _P2) & _U32
             v1 = (((v1 << 13) | (v1 >> 19)) * _P1) & _U32
-            v2 = (v2 + words[i + 1] * _P2) & _U32
+            v2 = (v2 + b * _P2) & _U32
             v2 = (((v2 << 13) | (v2 >> 19)) * _P1) & _U32
-            v3 = (v3 + words[i + 2] * _P2) & _U32
+            v3 = (v3 + c * _P2) & _U32
             v3 = (((v3 << 13) | (v3 >> 19)) * _P1) & _U32
-            v4 = (v4 + words[i + 3] * _P2) & _U32
+            v4 = (v4 + d * _P2) & _U32
             v4 = (((v4 << 13) | (v4 >> 19)) * _P1) & _U32
         h = (
             ((v1 << 1) | (v1 >> 31))
@@ -65,7 +65,7 @@ def _xxh32_py(data: bytes, seed: int = 0) -> int:
             + ((v3 << 12) | (v3 >> 20))
             + ((v4 << 18) | (v4 >> 14))
         )
-        pos = nw * _WORD
+        pos = used
     else:
         h = seed + _P5
     h = (h + n) & _U32

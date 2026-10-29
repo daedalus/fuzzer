@@ -1207,14 +1207,16 @@ class ShmCoverage:
         bits = bits[occupied]
 
         found = False
-        in_range = eids < VIRGIN_DENSE_MAX
-        if not in_range.all():
+        # One max() answers both the range check and the growth size.
+        hi = int(eids.max()) + 1
+        if hi > VIRGIN_DENSE_MAX:
+            in_range = eids < VIRGIN_DENSE_MAX
             found = self._update_virgin_overflow(eids[~in_range], bits[~in_range])
             eids, bits = eids[in_range], bits[in_range]
             if eids.size == 0:
                 return found
+            hi = int(eids.max()) + 1
 
-        hi = int(eids.max()) + 1
         if hi > self._virgin.size:
             grown = np.zeros(1 << max(10, (hi - 1).bit_length()), dtype=np.uint8)
             grown[: self._virgin.size] = self._virgin
@@ -1271,14 +1273,16 @@ class ShmCoverage:
             return 0
 
         gained = 0
-        in_range = eids < VIRGIN_DENSE_MAX
-        if not in_range.all():
+        # One max() answers both the range check and the growth size.
+        hi = int(eids.max()) + 1
+        if hi > VIRGIN_DENSE_MAX:
+            in_range = eids < VIRGIN_DENSE_MAX
             gained = self._update_max_overflow(eids[~in_range], cnts[~in_range])
             eids, cnts = eids[in_range], cnts[in_range]
             if eids.size == 0:
                 return gained
+            hi = int(eids.max()) + 1
 
-        hi = int(eids.max()) + 1
         if hi > self._max_counts.size:
             grown = np.zeros(1 << max(10, (hi - 1).bit_length()), dtype=np.uint32)
             grown[: self._max_counts.size] = self._max_counts

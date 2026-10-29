@@ -4,7 +4,7 @@ Two families, split by whether the digest outlives the process:
 
 * ``xxh64`` / ``key16`` -- XXH64, bit-exact with the reference. Corpus
   filenames and ``seed_meta`` keys are persisted, so the scheme must not
-  change under an existing corpus. Pure Python: ~150 us per 4 KiB.
+  change under an existing corpus. Pure Python: ~100 us per 4 KiB.
   Fixed seed, invertible lane rounds: second preimages are forgeable, so
   a name match is not byte equality (``filesystem.free_slot``).
 * ``hash64`` / ``hash64_len`` / ``hash64_seeded`` -- CRC32 | Adler32 << 32. Keys for
@@ -37,23 +37,10 @@ _STRIPE = 32
 _LANE_FMT = "<4Q"
 _WORD64 = 8
 _WORD32 = 4
-_ROT_LANES = (1, 7, 12, 18)
 _U32 = 0xFFFFFFFF
 _HI_SHIFT = 32
 _LEN_SHIFT = 64
 _KEY_HEX_CHARS = 16
-
-
-def _rotl(x: int, r: int) -> int:
-    return ((x << r) | (x >> (64 - r))) & _U64
-
-
-def _round(acc: int, lane: int) -> int:
-    return (_rotl((acc + lane * _P2) & _U64, 31) * _P1) & _U64
-
-
-def _merge(h: int, acc: int) -> int:
-    return (((h ^ _round(0, acc)) * _P1) + _P4) & _U64
 
 
 def _bulk(data: bytes, seed: int) -> tuple[int, int]:
@@ -67,40 +54,53 @@ def _bulk(data: bytes, seed: int) -> tuple[int, int]:
     v4 = (seed - _P1) & _U64
     used = len(data) - len(data) % _STRIPE
 
-    # Lanes inlined: a helper call per lane costs ~2x.
+    # Lanes and rotl inlined: a helper call per lane costs ~2x, the rotl
+    # call another 15%. The rotate skips its mask: bits above 2**64 drop
+    # out of the masked product anyway.
     for a, b, c, d in struct.iter_unpack(_LANE_FMT, data[:used]):
-        v1 = (_rotl((v1 + a * _P2) & _U64, 31) * _P1) & _U64
-        v2 = (_rotl((v2 + b * _P2) & _U64, 31) * _P1) & _U64
-        v3 = (_rotl((v3 + c * _P2) & _U64, 31) * _P1) & _U64
-        v4 = (_rotl((v4 + d * _P2) & _U64, 31) * _P1) & _U64
+        x = (v1 + a * _P2) & _U64
+        v1 = (((x << 31) | (x >> 33)) * _P1) & _U64
+        x = (v2 + b * _P2) & _U64
+        v2 = (((x << 31) | (x >> 33)) * _P1) & _U64
+        x = (v3 + c * _P2) & _U64
+        v3 = (((x << 31) | (x >> 33)) * _P1) & _U64
+        x = (v4 + d * _P2) & _U64
+        v4 = (((x << 31) | (x >> 33)) * _P1) & _U64
 
-    h = 0
-    for lane, rot in zip((v1, v2, v3, v4), _ROT_LANES, strict=True):
-        h += _rotl(lane, rot)
-    h &= _U64
+    h = (
+        ((v1 << 1) | (v1 >> 63))
+        + ((v2 << 7) | (v2 >> 57))
+        + ((v3 << 12) | (v3 >> 52))
+        + ((v4 << 18) | (v4 >> 46))
+    ) & _U64
+
+    # _merge inlined: three helper calls per lane.
     for lane in (v1, v2, v3, v4):
-        h = _merge(h, lane)
+        x = (lane * _P2) & _U64
+        h = (((h ^ ((((x << 31) | (x >> 33)) * _P1) & _U64)) * _P1) + _P4) & _U64
     return h, used
 
 
 def _tail(h: int, data: bytes, pos: int) -> int:
     """Fold the <32 trailing bytes: 8-byte words, one 4-byte word, bytes."""
+    # Rounds inlined as in _bulk; each rotate's mask is dropped where a
+    # masked product follows.
     n = len(data)
     while pos + _WORD64 <= n:
-        word = int.from_bytes(data[pos : pos + _WORD64], "little")
-        h ^= _round(0, word)
-        h = (_rotl(h, 27) * _P1 + _P4) & _U64
+        x = (int.from_bytes(data[pos : pos + _WORD64], "little") * _P2) & _U64
+        h ^= (((x << 31) | (x >> 33)) * _P1) & _U64
+        h = ((((h << 27) | (h >> 37)) * _P1) + _P4) & _U64
         pos += _WORD64
 
     if pos + _WORD32 <= n:
         word = int.from_bytes(data[pos : pos + _WORD32], "little")
         h ^= (word * _P1) & _U64
-        h = (_rotl(h, 23) * _P2 + _P3) & _U64
+        h = ((((h << 23) | (h >> 41)) * _P2) + _P3) & _U64
         pos += _WORD32
 
     while pos < n:
         h ^= (data[pos] * _P5) & _U64
-        h = (_rotl(h, 11) * _P1) & _U64
+        h = (((h << 11) | (h >> 53)) * _P1) & _U64
         pos += 1
     return h
 
