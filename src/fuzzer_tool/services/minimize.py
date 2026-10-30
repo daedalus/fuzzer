@@ -60,7 +60,10 @@ def _trim_heap() -> None:
 def _print_progress(
     files_done: int, total_files: int, start_time: float, n_edges: int, peak_rss_kb: int
 ) -> None:
-    """One-line replay status: rate, ETA, elapsed, unique edges, rss."""
+    """One-line replay status: rate, ETA, elapsed, unique edges, rss.
+
+    *total_files* 0 = unknown (a streamed archive): no percentage or ETA.
+    """
     elapsed = time.time() - start_time
     live_kb = None
     with contextlib.suppress(Exception):
@@ -68,6 +71,16 @@ def _print_progress(
     rss_str = f" | rss: {_fmt_kb(peak_rss_kb)}"
     if live_kb is not None:
         rss_str += f" | live: {_fmt_kb(live_kb)}"
+
+    if total_files <= 0:
+        rate = files_done / elapsed if elapsed > 0 else 0.0
+        print(
+            f"\r[*] Replayed {files_done} {rate:.1f} seeds/s | elapsed: {elapsed:.1f}s "
+            f"| edges: {n_edges}{rss_str}",
+            end="",
+            flush=True,
+        )
+        return
 
     if elapsed > 0 and files_done > 0:
         rate = files_done / elapsed

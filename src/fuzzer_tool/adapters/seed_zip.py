@@ -394,13 +394,13 @@ class SeedZip:
             return zf.read(name)
 
     def live(self) -> Iterator[tuple[bytes, bool]]:
-        """``(data, protected)`` for every live seed; flushes first."""
+        """``(data, protected)`` for every live seed, one member inflated at a time; flushes first."""
         self.flush()
         self._index()
-        foreign = self._read_foreign()
-        if foreign and not self._readonly:
-            self._adopt(foreign)
-            foreign = {}
+        if self._foreign and not self._readonly:
+            foreign = self._read_foreign()
+            if foreign:
+                self._adopt(foreign)
         protected = {h for _, h in self._protected}
         wanted = self._main_live | protected
         if wanted:
@@ -408,23 +408,38 @@ class SeedZip:
                 for h in sorted(wanted):
                     yield zf.read(self._where[h]), h in protected
         # Read-only: foreign members are served by content, never rewritten.
-        for data in foreign.values():
-            yield data, False
+        if self._readonly:
+            yield from ((data, False) for _, data in self._iter_foreign())
+
+    def unprotected_count(self) -> int:
+        """Live unprotected seeds, from the index alone (nothing inflated).
+
+        Foreign members count by name: an upper bound, as duplicates by
+        content are only dropped once read.
+        """
+        self._index()
+        protected = {h for _, h in self._protected}
+        return len(self._main_live - protected) + len(self._foreign)
 
     def _read_foreign(self) -> dict[str, bytes]:
         """``{content hash: data}`` of foreign members not already canonical."""
+        return dict(self._iter_foreign())
+
+    def _iter_foreign(self) -> Iterator[tuple[str, bytes]]:
+        """``(hash, data)`` per foreign member, one at a time; content seen before is skipped."""
         if not self._foreign:
-            return {}
+            return
         from fuzzer_tool.adapters.filesystem import hash_data  # noqa: PLC0415
 
-        out: dict[str, bytes] = {}
+        seen = set(self._main_seen)  # pruned or already adopted: skip
         with zipfile.ZipFile(self._path) as zf:
             for name in self._foreign:
                 data = zf.read(name)
                 h = hash_data(data)
-                if h not in self._main_seen:  # pruned or already adopted: skip
-                    out.setdefault(h, data)
-        return out
+                if h in seen:
+                    continue
+                seen.add(h)
+                yield h, data
 
     def _adopt(self, foreign: dict[str, bytes]) -> None:
         """Re-add foreign seeds as canonical members so prune can tombstone them."""

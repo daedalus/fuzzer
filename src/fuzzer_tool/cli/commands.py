@@ -1605,7 +1605,7 @@ def cmd_edge_dump(args):
     n = export_edges(
         target=args.target,
         corpus_dir=args.corpus,
-        out_path=args.out,
+        out_paths=args.out,
         timeout=args.timeout,
         file_mode=args.file_mode,
         target_args=args.target_args,
@@ -7082,7 +7082,14 @@ def main() -> int:
     )
     ed_parser.add_argument("target", help="Path to target binary")
     ed_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
-    ed_parser.add_argument("-o", "--out", required=True, help="Output pickle path")
+    ed_parser.add_argument(
+        "-o",
+        "--out",
+        action="append",
+        required=True,
+        help="Output file, format by extension: .pkl (pickle) or .sqlite "
+        "(edges(edge_id PK, n_seeds) + edge_seeds). Repeat for both",
+    )
     ed_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     ed_parser.add_argument(
         "-c",

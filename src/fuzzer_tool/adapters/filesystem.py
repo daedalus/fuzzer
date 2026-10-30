@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from fuzzer_tool.adapters import seed_zip
+from fuzzer_tool.adapters import seed_tar, seed_zip
 from fuzzer_tool.adapters.libc_symbols import libc_symbol
 from fuzzer_tool.adapters.process import signal_number
 from fuzzer_tool.adapters.seed_zip import SeedTree
@@ -233,6 +233,9 @@ _SEED_SUBTREES = ("pruned", "crashing", "irreplaceable", "timeouts")
 # independent rediscoveries is the evidence this walk needs one owner.
 _SEED_SKIP_SUFFIXES = (".txt", ".log", ".json", ".gz", ".tmp")
 
+# Seed archives beside seeds/: never seeds themselves in a flat corpus.
+_SEED_ARCHIVES = frozenset((seed_zip.ZIP_NAME, seed_tar.TAR_NAME))
+
 
 def discover_seed_files(
     corpus_dir: str | Path,
@@ -279,11 +282,15 @@ def discover_seed_files(
     seeds = corpus_path / "seeds"
     root = seeds if seeds.is_dir() else corpus_path
 
+    # Archives sit beside seeds/: only a flat walk can reach them.
+    flat = root == corpus_path
+
     def _usable(f: Path) -> bool:
         return (
             f.is_file()
             and not f.is_symlink()
             and f.suffix not in _SEED_SKIP_SUFFIXES
+            and not (flat and f.name in _SEED_ARCHIVES and f.parent == corpus_path)
             and not (excluded & set(f.parts))
         )
 
@@ -606,6 +613,7 @@ def load_corpus(
             _load_full_from_dir(base, mark_irreplaceable=False)
 
     _load_full_from_zip(corpus_dir, full_files, irreplaceable_hashes, load_irreplaceable)
+    _load_full_from_tar(corpus_dir, full_files, irreplaceable_hashes, load_irreplaceable)
 
     # Deltas live in corpus/deltas/, a *sibling* of seeds/ (see save_to_corpus),
     # so scanning seeds/ alone silently drops every delta-encoded entry.
@@ -641,6 +649,24 @@ def _load_full_from_zip(
         return
 
     for data, protected in store.live():
+        h = hash_data(data)
+        full_files.setdefault(h, data)
+        if protected and load_irreplaceable:
+            irreplaceable_hashes.add(h)
+
+
+def _load_full_from_tar(
+    corpus_dir: Path,
+    full_files: dict[str, bytes],
+    irreplaceable_hashes: set[str],
+    load_irreplaceable: bool,
+) -> None:
+    """Union seeds.tar.gz into *full_files*; read-only, as a zip in mode off.
+
+    Not a rehydrate_by_hash root: a gzip stream has no index, so a per-hash
+    lookup would decompress the whole archive.
+    """
+    for data, protected in seed_tar.live(corpus_dir):
         h = hash_data(data)
         full_files.setdefault(h, data)
         if protected and load_irreplaceable:
@@ -689,18 +715,44 @@ def iter_seed_batches(corpus_dir: Path, batch_size: int) -> Iterator[list[bytes]
 
 
 def _iter_seeds(corpus_dir: Path) -> Iterator[bytes]:
-    """Every live seed: loose full files, then seeds.zip, then deltas."""
+    """Every live seed: loose full files, then seeds.zip, seeds.tar.gz, then deltas."""
     for rel in _CORPUS_FULL_ROOTS:
         yield from _iter_full_dir(corpus_dir / rel)
 
     store = _seed_store(corpus_dir)
     if store is not None:
         yield from (data for data, _ in store.live())
+    yield from (data for data, _ in seed_tar.live(corpus_dir))
 
     for h in _delta_hashes(corpus_dir):
         data = rehydrate_by_hash(h, corpus_dir)
         if data is not None:
             yield data
+
+
+def iter_archive_seeds(corpus_dir: Path) -> Iterator[bytes]:
+    """Live, unprotected seeds in seeds.zip then seeds.tar.gz; read-only.
+
+    The archive counterpart of :func:`discover_seed_files` with its default
+    exclusions (pruned, crashing, irreplaceable, timeouts).
+    """
+    store = _seed_store(Path(corpus_dir))
+    if store is not None:
+        yield from (data for data, protected in store.live() if not protected)
+    yield from (data for data, protected in seed_tar.live(corpus_dir) if not protected)
+
+
+def count_archive_seeds(corpus_dir: Path) -> int | None:
+    """Seeds :func:`iter_archive_seeds` yields, read from the zip index (nothing inflated).
+
+    None when seeds.tar.gz exists: a gzip stream cannot be counted without
+    decompressing it, so its total is unknown until it has been read.
+    """
+    if (Path(corpus_dir) / seed_tar.TAR_NAME).is_file():
+        return None
+
+    store = _seed_store(Path(corpus_dir))
+    return store.unprotected_count() if store is not None else 0
 
 
 def _iter_full_dir(base: Path) -> Iterator[bytes]:
