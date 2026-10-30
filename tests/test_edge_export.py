@@ -51,8 +51,14 @@ def _setup(tmp_path, monkeypatch, seeds: dict[str, bytes], blind: bool = False):
 
 
 def _load(out):
+    """Every pickled batch in *out*, merged."""
+    merged: dict = {}
     with open(out, "rb") as f:
-        return pickle.load(f)
+        while True:
+            try:
+                merged.update(pickle.load(f))
+            except EOFError:
+                return merged
 
 
 def test_exports_edges_per_seed(tmp_path, monkeypatch):

@@ -42,11 +42,21 @@ class _Corpus:
         return edge_export.export_edges("t", str(self.root), [str(o) for o in outs])
 
 
+def _pkl_chunks(path) -> dict:
+    """Merge every pickled batch in *path* (one dict per batch, appended)."""
+    merged: dict = {}
+    with open(path, "rb") as f:
+        while True:
+            try:
+                merged.update(pickle.load(f))
+            except EOFError:
+                return merged
+
+
 def _load(path) -> dict[str, list[int]]:
     """Seed -> edge list from either format, read without the code under test."""
     if path.suffix == ".pkl":
-        with open(path, "rb") as f:
-            return {k: v.tolist() for k, v in pickle.load(f).items()}
+        return {k: v.tolist() for k, v in _pkl_chunks(path).items()}
 
     con = sqlite3.connect(path)
     try:

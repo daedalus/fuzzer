@@ -931,7 +931,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `fuzz` | Run coverage-guided fuzzing (default) |
 | `rank` | Rank corpus seeds by interestingness (edge coverage, rarity, subsumption) |
 | `minimize` | Minimize corpus by removing redundant inputs |
-| `edge-dump` | Replay corpus, export `{seed_id: edge ids}` per seed to `.pkl` / `.sqlite` (no pruning, incremental) |
+| `edge-dump` | Replay corpus, stream `{seed_id: edge ids}` per seed to `.pkl` / `.sqlite` in adaptive batches (no pruning, incremental, `--push-on-finish`) |
 | `sweep` | Linear corpus scan — replay every seed without mutations or scheduling (find missed crashes) |
 | `tmin` | Minimize a crash to smallest reproducer |
 | `replay` | Replay a crash input against the target |
@@ -1405,15 +1405,20 @@ fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 fuzzer-tool edge-dump ./target -d corpus -o ~/edges.pkl
 fuzzer-tool edge-dump ./target -d corpus -o ~/edges.pkl -o ~/edges.sqlite   # both
 fuzzer-tool edge-dump ./t.so -d corpus -o ~/edges.sqlite --inprocess-direct --inprocess-func fuzz_test
+fuzzer-tool edge-dump ./target -d corpus -o ~/edges.sqlite --push-on-finish https://ntfy.sh/TOPIC
 ```
 
-Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(seed)` (the `id_<hash>` key) -> sorted `uint32` edge ids. Read-only: nothing pruned, no twin collapse. Same backends and flags as `minimize -c` (`--inprocess`, `--inprocess-direct`, `--inprocess-func`); `-c` accepted, coverage always on. `pruned/`, `crashing/`, `irreplaceable/` excluded; `--max-seed-bytes` skips large seeds; timed-out seeds keep partial edges. Progress line and heap trim are minimize's (`_print_progress`, `_trim_heap`): rate, ETA, elapsed, unique edges, rss/live. New seeds with no edges at all = failed measurement: nothing written, exit 1 (not cached as negatives). Atomic write (tmp + rename).
+Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(seed)` (the `id_<hash>` key) -> sorted `uint32` edge ids. Read-only: nothing pruned, no twin collapse. Same backends and flags as `minimize -c` (`--inprocess`, `--inprocess-direct`, `--inprocess-func`); `-c` accepted, coverage always on. `pruned/`, `crashing/`, `irreplaceable/` excluded; `--max-seed-bytes` skips large seeds; timed-out seeds keep partial edges. Progress line and heap trim are minimize's (`_print_progress`, `_trim_heap`): rate, ETA, elapsed, unique edges, rss/live. New seeds with no edges at all = failed measurement: nothing written, exit 1 (not cached as negatives): edgeless seeds are held (ids only) until the first seed with edges.
 
-**Format by `-o` extension** (case-insensitive, repeatable; other extensions rejected before replay): `.pkl` = the dict above; `.sqlite` = edge-keyed inverse (`adapters/edge_sqlite.py`): `edges(edge_id PK, n_seeds)`, `edge_seeds(edge_id, seed_id)` PK both, `seeds(seed_id PK, n_edges)`. `seeds` keeps edgeless seeds so the dict round-trips. Writer is numpy-vectorized (one argsort + `np.unique`); measured even with a plain dict loop at 5k seeds x 300 edges (~1.9 s both: SQLite inserts dominate), 16% faster at 200 seeds.
+**Format by `-o` extension** (case-insensitive, repeatable; other extensions rejected before replay): `.pkl` = the dict above, one pickled dict per batch, appended (`adapters/edge_pickle.py`; one `pickle.load` gives the first batch, `read_edges_pickle` merges all; a pre-batch single-dict file is one batch); `.sqlite` = edge-keyed inverse (`adapters/edge_sqlite.py`): `edges(edge_id PK, n_seeds)`, `edge_seeds(edge_id, seed_id)` PK both, `seeds(seed_id PK, n_edges)`. `seeds` keeps edgeless seeds so the dict round-trips. `EdgeSqliteWriter`: one transaction per batch, `n_seeds` upserted (`ON CONFLICT ... n_seeds + excluded.n_seeds`). Batch write is numpy-vectorized (one argsort + `np.unique`); measured even with a plain dict loop at 5k seeds x 300 edges (~1.9 s both: SQLite inserts dominate), 16% faster at 200 seeds.
 
-**Incremental.** An existing `-o` file is read first; its seed_ids are known negatives and are not replayed. With several outputs a seed is skipped only if every one holds it. New results merge into each file (new wins). Nothing new = no rewrite, exit 0. Unreadable output (corrupt, wrong shape) = abort before replay, file untouched.
+**Incremental.** An existing `-o` file is read first; its seed_ids are known negatives and are not replayed. With several outputs a seed is skipped only if every one holds it. New results are appended to each file; only seed_ids are read up front. Nothing new = no write, exit 0. Unreadable output (corrupt, wrong shape) = abort before replay, file untouched.
 
-Tests: `tests/test_edge_export.py`, `test_edge_sqlite.py`, `test_edge_export_incremental.py`, `test_edge_export_inprocess.py`.
+**Batched streaming writes.** Results go to every output in batches as they arrive (`_Collector`): memory holds one batch (also capped at `_MAX_ROWS` = 2^20 edge ids). Files are created on the first batch. A crash or Ctrl-C keeps every written batch plus the buffered tail (flushed in `finally`), so the next run skips them; a torn last pickle batch is cut off (logged) on the next open. Batch size is adaptive (`core/adaptive_batch.py`): after each write, end-to-end seeds/s over the window (replay + write) is compared with the previous window; a drop over `tol` reverses direction, then size x2 or /2 within [8, 4096]. Measured (19,869 seeds, shim `.so`, `--inprocess-direct`, ~10k seeds/s, `.pkl` + `.sqlite`, min of 3-5 interleaved): fixed 8 = 6.52 s, fixed 4096 = 1.89-1.99 s, adaptive start 64 / tol 0 = 1.94-1.97 s with noise-driven collapses (4096 -> 64), start 256 / tol 0.2 = 1.94 s (shipped). Write time (cProfile) 0.14-0.18 s vs master's single dump 0.12-0.14 s: ~+30 ms per 20k seeds; replay (2.3-2.75 s) dominates and its noise exceeds the difference.
+
+**`--push-on-finish [URL]`** (repeatable): one push when the run ends, done or failed (`push.edge_dump_message`: target, corpus, seeds, outputs, elapsed, host). Bare flag reads `$FUZZER_PUSH_URL`; without the flag nothing is pushed even if the variable is set. URLs are parsed before replay (bad URL: exit 2). A failed push is printed and never changes the exit code.
+
+Tests: `tests/test_edge_export.py`, `test_edge_sqlite.py`, `test_edge_export_incremental.py`, `test_edge_export_inprocess.py`, `test_edge_export_streaming.py`, `test_adaptive_batch.py`, `test_edge_dump_push.py`.
 
 ### Set cover (`core/set_cover.py`)
 

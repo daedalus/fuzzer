@@ -222,6 +222,32 @@ def crash_message(
     )
 
 
+def edge_dump_message(
+    *,
+    target: str,
+    corpus: str,
+    outputs: Sequence[str],
+    seeds: int,
+    rc: int,
+    elapsed: float,
+) -> PushMessage:
+    """``edge-dump`` finished: status, seeds exported, where, how long."""
+    target_base = os.path.basename(target) if target else "target"
+    status = "done" if rc == 0 else f"failed (exit {rc})"
+    lines = [
+        f"target: {target_base}",
+        f"corpus: {corpus}",
+        f"seeds: {seeds}",
+        f"outputs: {', '.join(outputs)}",
+        f"elapsed: {elapsed:.1f}s",
+        f"host: {socket.gethostname()}",
+    ]
+    return PushMessage(
+        title=_clean(f"[fuzzer-tool] edge-dump {status} ({target_base})", TITLE_MAX, oneline=True),
+        body=_clean("\n".join(lines), BODY_MAX, oneline=False),
+    )
+
+
 def _basic(userinfo: str) -> str:
     return "Basic " + base64.b64encode(userinfo.encode()).decode("ascii")
 

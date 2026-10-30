@@ -1597,11 +1597,21 @@ def cmd_minimize(args):
 
 
 def cmd_edge_dump(args):
-    """Replay a corpus and pickle each seed's edge ids; no pruning."""
+    """Replay a corpus and write each seed's edge ids; no pruning."""
     if not (args.inprocess and ":" in args.target):
         _validate_target(args.target)
+    import time
+
     from fuzzer_tool.services.edge_export import export_edges
 
+    # Push targets parsed before replay: a bad URL costs no replay.
+    try:
+        targets = _finish_push_targets(args.push_on_finish)
+    except ValueError as exc:
+        print(f"[!] --push-on-finish: {exc}")
+        return 2
+
+    start = time.monotonic()
     n = export_edges(
         target=args.target,
         corpus_dir=args.corpus,
@@ -1613,7 +1623,42 @@ def cmd_edge_dump(args):
         inprocess_func=args.inprocess_func,
         max_seed_bytes=args.max_seed_bytes,
     )
-    return 0 if n else 1
+    rc = 0 if n else 1
+
+    if targets:
+        _push_finish(targets, args, n, rc, time.monotonic() - start)
+    return rc
+
+
+def _finish_push_targets(urls: list[str] | None):
+    """``--push-on-finish`` targets: None when absent; a bare flag reads $FUZZER_PUSH_URL."""
+    if urls is None:
+        return None
+    from fuzzer_tool.services.push import PUSH_ENV, push_targets
+
+    targets = push_targets([u for u in urls if u])
+    if not targets:
+        raise ValueError(f"no URL given and ${PUSH_ENV} is empty")
+    return targets
+
+
+def _push_finish(targets, args, seeds: int, rc: int, elapsed: float) -> None:
+    """One push per target; a failed push is reported, never changes *rc*."""
+    from fuzzer_tool.services import push
+
+    msg = push.edge_dump_message(
+        target=args.target,
+        corpus=args.corpus,
+        outputs=args.out,
+        seeds=seeds,
+        rc=rc,
+        elapsed=elapsed,
+    )
+    for target in targets:
+        try:
+            push.send_push(target, msg)
+        except push.PushError as exc:
+            print(f"[!] push failed: {exc}")
 
 
 # ── negative-bloom subcommand ─────────────────────────────────────────────────
@@ -7121,6 +7166,16 @@ def main() -> int:
         "--target-args",
         nargs=argparse.REMAINDER,
         help="Target arguments ({file} placeholder)",
+    )
+    ed_parser.add_argument(
+        "--push-on-finish",
+        action="append",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="URL",
+        help="Push a summary when the run ends (repeatable; same URL forms as "
+        "--push-on-crash). Bare flag: URLs from $FUZZER_PUSH_URL",
     )
     ed_parser.set_defaults(func=cmd_edge_dump)
 

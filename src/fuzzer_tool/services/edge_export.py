@@ -1,9 +1,12 @@
-"""Edge export: replay every corpus seed and pickle its edge ids. No pruning.
+"""Edge export: replay every corpus seed and write its edge ids. No pruning.
 
-    corpus/seeds/** --replay--> ShmCoverage --> {hash_data(seed): uint32[edge ids]} --> out.pkl
-                                                                                   +-> out.sqlite (edge-keyed)
+    corpus --replay--> (seed_id, ids) --> _Collector --batch--> out.pkl    (appended batches)
+                                             ^   |         +--> out.sqlite (one txn per batch)
+                                             |   v
+                                          AdaptiveBatch (size climbs on seeds/s)
 
-Replay backends (spawn, loader, direct_lite, direct) are minimize's.
+Results are written in batches as they arrive: memory holds one batch, and
+a killed run keeps every written batch. Replay backends are minimize's.
 """
 
 import os
@@ -18,10 +21,12 @@ from pathlib import Path
 
 import numpy as np
 
-from fuzzer_tool.adapters.edge_sqlite import read_edges_sqlite, write_edges_sqlite
+from fuzzer_tool.adapters.edge_pickle import EdgePickleWriter
+from fuzzer_tool.adapters.edge_sqlite import EdgeSqliteWriter
 from fuzzer_tool.adapters.filesystem import count_archive_seeds, hash_data, iter_archive_seeds
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.adaptive_batch import AdaptiveBatch
 from fuzzer_tool.services.minimize import (
     _TIMEOUT_RC,
     _TRIM_EVERY,
@@ -43,6 +48,20 @@ _PROGRESS_EVERY = 10
 # Output format by file extension (case-insensitive); see _FORMATS.
 _PKL = ".pkl"
 _SQLITE = ".sqlite"
+
+# Write batch, in seeds: starts here, climbs on seeds/s within the bounds.
+# Measured (20k seeds, direct_lite, ~10k seeds/s): fixed 8 = 6.5 s, fixed
+# 4096 = 1.9 s; start 64 / tol 0 collapsed on window noise (2.0-2.3 s),
+# start 256 / tol 0.2 held near the top (1.94 s). See DEEP_DIVE §Edge dump.
+_BATCH_START = 256
+_BATCH_MIN = 8
+_BATCH_MAX = 4096
+# Rate must drop by more than this to reverse the climb (window noise).
+_BATCH_TOL = 0.2
+# Memory cap: a batch is also written once it buffers this many edge ids.
+_MAX_ROWS = 1 << 20
+
+_EMPTY = np.empty(0, dtype=np.uint32)
 
 
 class _CorpusSeeds:
@@ -79,32 +98,79 @@ class _CorpusSeeds:
 
 
 class _Sink:
-    """One -o file: its format's reader/writer and the seeds it already holds."""
+    """One -o file: its format's batch writer and the seeds it already holds."""
 
-    def __init__(self, path: Path, read, write) -> None:
+    def __init__(self, path: Path, writer_cls) -> None:
         self.path = path
-        self._read = read
-        self._write = write
-        self.prior: dict[str, np.ndarray] = {}
+        self._writer = writer_cls(path)
+        self.prior: set[str] = set()
 
     def load(self) -> bool:
-        """Read the existing file into ``prior``; False (reported) if unreadable."""
-        if not self.path.exists():
-            return True
-
+        """Read the seed ids already in the file; False (reported) if unreadable."""
         try:
-            self.prior = self._read(self.path)
+            self.prior = self._writer.open()
         except (OSError, pickle.UnpicklingError, sqlite3.DatabaseError, ValueError, EOFError) as e:
             print(f"[-] Cannot read existing output {self.path}: {e}", file=sys.stderr)
             return False
         return True
 
-    def save(self, new: dict[str, np.ndarray]) -> int:
-        """Write prior + *new* (new wins); returns seeds written."""
-        merged = {**self.prior, **new}
-        self._write(self.path, merged)
-        print(f"[+] Exported {len(merged)} seeds (+{len(new)}) -> {self.path}")
-        return len(merged)
+    def write(self, items: list[tuple[str, np.ndarray]]) -> None:
+        self._writer.write(items)
+
+    def close(self) -> int:
+        """Close; report and return the seeds now in the file."""
+        self._writer.close()
+        total = len(self._writer.known)
+        added = total - len(self.prior)
+        if added:
+            print(f"[+] Exported {total} seeds (+{added}) -> {self.path}")
+        return total
+
+
+class _Collector:
+    """Buffers replay results and writes them to every sink in adaptive batches.
+
+    Edgeless seeds are held (ids only) until the first seed with edges: if
+    none ever comes, the target was not measured and nothing is written.
+    """
+
+    def __init__(self, sinks: list[_Sink]) -> None:
+        self._sinks = sinks
+        self._batch = AdaptiveBatch(_BATCH_START, _BATCH_MIN, _BATCH_MAX, tol=_BATCH_TOL)
+        self._buf: list[tuple[str, np.ndarray]] = []
+        self._rows = 0
+        self._held: list[str] = []
+        self.live = False
+        self.count = 0
+
+    def add(self, key: str, ids: np.ndarray) -> None:
+        self.count += 1
+        if not self.live:
+            if not ids.size:
+                self._held.append(key)
+                return
+            self.live = True
+            self._buf.extend((k, _EMPTY) for k in self._held)
+            self._held.clear()
+
+        self._buf.append((key, ids))
+        self._rows += ids.size
+        if len(self._buf) >= self._batch.size or self._rows >= _MAX_ROWS:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._buf:
+            return
+        for sink in self._sinks:
+            sink.write(self._buf)
+        self._batch.observe(len(self._buf))
+        self._buf = []
+        self._rows = 0
+
+    def close(self) -> int:
+        """Write the tail; close sinks; seeds in the fullest output."""
+        self.flush()
+        return max(sink.close() for sink in self._sinks)
 
 
 def export_edges(
@@ -120,12 +186,14 @@ def export_edges(
 ) -> int:
     """Export ``{seed_id: sorted uint32 edge ids}`` for every live seed.
 
-    Each of *out_paths* picks its format by extension: ``.pkl`` pickles the
-    dict, ``.sqlite`` writes the edge-keyed inverse (``adapters/edge_sqlite.py``).
-    Any other extension fails before replay.
+    Each of *out_paths* picks its format by extension: ``.pkl`` appends one
+    pickled dict per batch (``adapters/edge_pickle.py``), ``.sqlite`` writes
+    the edge-keyed inverse (``adapters/edge_sqlite.py``). Any other
+    extension fails before replay. Batches are written as results arrive;
+    their size adapts to seeds/s (``core/adaptive_batch.py``).
 
     Incremental: seed_ids already in every existing output are not replayed;
-    new results merge into each file. An unreadable output aborts untouched.
+    new results are appended to each file. An unreadable output aborts untouched.
 
     seed_id is ``hash_data(seed)``, the corpus filename key. The corpus is
     read only. New seeds with no edges at all are a failed measurement:
@@ -140,19 +208,33 @@ def export_edges(
         return 0
 
     # Known only if every output holds it, e.g. pkl {a,b} + sqlite {a} -> skip {a}.
-    known = set.intersection(*(set(s.prior) for s in sinks))
+    known = set.intersection(*(s.prior for s in sinks))
 
     seeds = _CorpusSeeds(Path(corpus_dir), max_seed_bytes)
     if seeds.total == 0 and not seeds.oversized:
         print(f"[-] Corpus is empty: {corpus_dir}", file=sys.stderr)
         return 0
 
-    edges = _replay_all(
-        seeds, target, timeout, file_mode, target_args, exec_mode, inprocess_func, known
-    )
+    collector = _Collector(sinks)
+    try:
+        ok = _replay_all(
+            seeds,
+            target,
+            timeout,
+            file_mode,
+            target_args,
+            exec_mode,
+            inprocess_func,
+            known,
+            collector,
+        )
+    finally:
+        # Written batches and the buffered tail survive a crash or Ctrl-C.
+        exported = collector.close()
+
     if seeds.oversized:
         print(f"[*] Skipped: {seeds.oversized} seeds over {max_seed_bytes} bytes")
-    if edges is None:
+    if not ok:
         return 0
 
     # A streamed tar has no up-front count: emptiness shows only now.
@@ -160,16 +242,16 @@ def export_edges(
         print(f"[-] No seeds to replay in {corpus_dir}", file=sys.stderr)
         return 0
 
-    if not edges:
+    if not collector.count:
         print(f"[*] Up to date: {len(known)} seeds already exported")
         return len(known)
 
     # Blackout guard, same reading as cmin: no edges means no measurement.
-    if not any(a.size for a in edges.values()):
+    if not collector.live:
         print("[-] No edges recorded for any new seed -- nothing written.", file=sys.stderr)
         return 0
 
-    return max(s.save(edges) for s in sinks)
+    return exported
 
 
 def _resolve_sinks(out_paths: list[str]) -> list[_Sink] | None:
@@ -183,16 +265,16 @@ def _resolve_sinks(out_paths: list[str]) -> list[_Sink] | None:
 
     sinks = []
     for p in map(Path, out_paths):
-        io = _FORMATS.get(p.suffix.lower())
-        if io is None:
+        writer_cls = _FORMATS.get(p.suffix.lower())
+        if writer_cls is None:
             print(f"[-] Unknown output extension: {p} (use {_PKL} or {_SQLITE})", file=sys.stderr)
             return None
-        sinks.append(_Sink(p, *io))
+        sinks.append(_Sink(p, writer_cls))
     return sinks
 
 
-def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func, known):
-    """``{seed_id: edge ids}`` over *seeds* not in *known*, or None when the runner cannot start.
+def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func, known, out):
+    """Replay *seeds* not in *known* into collector *out*; False if the runner cannot start.
 
     A seed seen twice (loose and archived) replays once.
     """
@@ -206,7 +288,7 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
     env["__AFL_SHM_ID"] = shm.env_id
     env["AFL_MAP_SIZE"] = str(shm.num_entries)
 
-    edges: dict[str, np.ndarray] = {}
+    done: set[str] = set()
     timeouts = 0
     skipped = 0
     runner = None
@@ -217,7 +299,7 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
         else:
             runner = _open_runner(target, exec_mode, func, timeout, shm)
             if runner is None:
-                return None
+                return False
             replay = _runner_replay(runner)
 
         n = seeds.total or 0  # 0 = unknown: progress shows no ETA
@@ -230,13 +312,14 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
             if key in known:
                 skipped += 1
                 continue
-            if key in edges:
+            if key in done:
                 continue
+            done.add(key)
 
             shm.reset_edge_map()
             timeouts += replay(data)[0] == _TIMEOUT_RC
             ids = shm.edge_id_array()
-            edges[key] = ids
+            out.add(key, ids)
             unique.update(ids.tolist())
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
 
@@ -258,29 +341,9 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
     if skipped:
         print(f"[*] Already exported: {skipped} seeds skipped")
     if timeouts:
-        print(f"[*] Timed out: {timeouts}/{len(edges)} seeds (partial edges kept)")
-    return edges
+        print(f"[*] Timed out: {timeouts}/{len(done)} seeds (partial edges kept)")
+    return True
 
 
-def _write_atomic(out: Path, edges: dict[str, np.ndarray]) -> None:
-    """Pickle *edges* to *out* via tmp + rename: no half-written file on crash."""
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    with open(tmp, "wb") as f:
-        pickle.dump(edges, f, protocol=pickle.HIGHEST_PROTOCOL)
-    os.replace(tmp, out)
-
-
-def _read_pkl(path: Path) -> dict[str, np.ndarray]:
-    """A pickle this module wrote; ValueError on any other shape."""
-    with open(path, "rb") as f:
-        edges = pickle.load(f)
-    if not isinstance(edges, dict) or not all(
-        isinstance(k, str) and isinstance(v, np.ndarray) for k, v in edges.items()
-    ):
-        raise ValueError("not a {seed_id: ndarray} edge export")
-    return edges
-
-
-# Extension -> (reader, writer).
-_FORMATS = {_PKL: (_read_pkl, _write_atomic), _SQLITE: (read_edges_sqlite, write_edges_sqlite)}
+# Extension -> batch writer.
+_FORMATS = {_PKL: EdgePickleWriter, _SQLITE: EdgeSqliteWriter}
