@@ -942,6 +942,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("harmonic")
     if getattr(f, "_pos_kadane", None) is not None:
         names.append("kadane")
+    if getattr(f, "_pos_learn", None) is not None:
+        names.append("learn")
     if getattr(f, "_pos_consolidated", None) is not None:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
@@ -2066,6 +2068,9 @@ class Fuzzer:
         # Viterbi field segmentation (core/field_hmm.py, --field-hmm). Appended.
         field_hmm=False,
         field_hmm_states=8,
+        # Position-arena LearnAFL arm (core/schedulers/pos_learn.py): opt-in,
+        # not implied by position_arena or --hail-mary. Appended.
+        pos_learn=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3725,6 +3730,17 @@ class Fuzzer:
 
             self._pos_kadane = PositionKadaneScheduler(self._rng)
             log.info("Position kadane scheduling enabled")
+        # Position-arena LearnAFL arm (core/schedulers/pos_learn.py): path mask
+        # from kept-path rounds. Opt-in only (unmeasured). Off-policy extra,
+        # not persisted; frozen runs feed the auto-dictionary.
+        self._pos_learn = None
+        if pos_learn:
+            from fuzzer_tool.core.schedulers.pos_learn import PositionLearnScheduler
+
+            self._pos_learn = PositionLearnScheduler(
+                self._rng, moved=self._path_moved, emit_tokens=self._operators._add_auto_tokens
+            )
+            log.info("Position learn scheduling enabled")
         # Position-arena consolidated: the learning arms' features in one
         # proposer (see core/schedulers/pos_consolidated.py). Off-policy
         # extra, persisted.
@@ -3787,6 +3803,7 @@ class Fuzzer:
                 saliency=self._pos_saliency,
                 harmonic=self._pos_harmonic,
                 kadane=self._pos_kadane,
+                learn=self._pos_learn,
                 finch=self._pos_finch,
                 pca=self._pos_pca,
                 cmplog=self._pos_cmplog,

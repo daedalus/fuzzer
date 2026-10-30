@@ -806,6 +806,7 @@ def cmd_fuzz(args):
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
         pos_pca=getattr(args, "pos_pca", False),
+        pos_learn=getattr(args, "pos_learn", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
@@ -2449,6 +2450,10 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the PCA group arm
 # has only a synthetic planted-group check, no paired run on a real target.
 #
+# pos_learn (--pos-learn) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): LearnAFL's path
+# mask has unit tests only. Bench arm: pos-arena-learn.
+#
 # joint_liveness (--joint-liveness) is excluded: it only has an effect together
 # with --region-profile (the dead-region down-weight is the thing it revokes)
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
@@ -3877,6 +3882,15 @@ def main() -> int:
         "contiguous run of bins holding the most gains above the seed's pooled gain "
         "rate (core/schedulers/pos_kadane.py). Opt-in: NOT implied by --position-arena "
         "or --hail-mary (unmeasured). Joins the arena pool when --position-arena is on.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-learn",
+        action="store_true",
+        help="Enable the position-arena LearnAFL scheduler: a per-seed mask of bytes "
+        "havoc changed without moving the path. Proposes frozen bytes while the mask "
+        "changes, mutable ones (frozen restored) once stable; frozen runs feed the "
+        "auto-dictionary (core/schedulers/pos_learn.py). Opt-in: NOT implied by "
+        "--position-arena or --hail-mary (unmeasured).",
     )
     fuzz_parser.add_argument(
         "--saliency-targets",

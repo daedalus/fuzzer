@@ -47,6 +47,7 @@ from fuzzer_tool.core.schedulers.pos_good_turing import PositionGoodTuringSchedu
 from fuzzer_tool.core.schedulers.pos_harmonic import PositionHarmonicScheduler
 from fuzzer_tool.core.schedulers.pos_kadane import PositionKadaneScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
+from fuzzer_tool.core.schedulers.pos_learn import STABLE_ROUNDS, Mode, PositionLearnScheduler
 from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
 from fuzzer_tool.core.schedulers.pos_pca import PositionPCAScheduler
@@ -605,6 +606,7 @@ def _arena(
     saliency=None,
     harmonic=None,
     kadane=None,
+    learn=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -634,6 +636,7 @@ def _arena(
         saliency=saliency,
         harmonic=harmonic,
         kadane=kadane,
+        learn=learn,
     )
 
 
@@ -1026,6 +1029,7 @@ class TestPool:
             saliency=PositionSaliencyScheduler(RandPool(seed=1), lambda: []),
             harmonic=PositionHarmonicScheduler(RandPool(seed=1)),
             kadane=PositionKadaneScheduler(RandPool(seed=1)),
+            learn=PositionLearnScheduler(RandPool(seed=1), moved=lambda d: None, emit_tokens=list),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1247,6 +1251,20 @@ class TestSettle:
         arena2 = PositionArena(f, region_fn=lambda d, n: 55, kadane=arm, arms=["uniform"])
         arena2.settle(SEED, [700], Outcome.GAIN, weight=1.0, score=1.0)
         assert arm.scores(SEED, len(SEED)) is None
+
+    def test_learn_is_credited_off_policy(self):
+        # The picker was sensitivity, not learn; a kept path still unfreezes.
+        arm = PositionLearnScheduler(RandPool(seed=1), moved=lambda d: False, emit_tokens=list)
+        f, arena = self._played(learn=arm)
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert arm.mutable(SEED)[100]
+
+    def test_learn_left_out_of_subset_is_not_credited(self):
+        arm = PositionLearnScheduler(RandPool(seed=1), moved=lambda d: False, emit_tokens=list)
+        f, _ = _arena(learn=arm)
+        arena2 = PositionArena(f, region_fn=lambda d, n: 55, learn=arm, arms=["uniform"])
+        arena2.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert arm.mutable(SEED) is None
 
     def test_good_turing_left_out_of_subset_is_not_credited(self):
         arm = PositionGoodTuringScheduler(RandPool(seed=1), min_observations=1)
@@ -1719,6 +1737,41 @@ class TestRealConstruction:
         f = self._build(tmp_path, elo="all", position_arena=True, pos_kadane=True)
         assert isinstance(f._pos_kadane, PositionKadaneScheduler)
         assert "kadane" in f._position_arena.pool()
+
+    def test_position_arena_does_not_imply_learn(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert f._pos_learn is None
+        assert "learn" not in f._position_arena.pool()
+
+    def test_pos_learn_builds_and_joins_the_arena(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_learn=True)
+        assert isinstance(f._pos_learn, PositionLearnScheduler)
+        assert "learn" in f._position_arena.pool()
+
+    def test_learn_restores_frozen_bytes_only_when_it_served(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_learn=True)
+        f._path_moved = lambda d: False
+        f._pos_learn._moved = f._path_moved
+        for _ in range(STABLE_ROUNDS + 1):
+            f._pos_learn.record(SEED, [5], Outcome.MISS)
+        assert f._pos_learn.mode(SEED) is Mode.EXPLOIT
+
+        # Another arm served: the mutant is left alone.
+        buf = bytearray(b"\xff" * len(SEED))
+        f._operators._learn_restore(SEED, buf)
+        assert buf == bytearray(b"\xff" * len(SEED))
+
+        f._position_arena._used = ["uniform", "learn"]
+        f._operators._learn_restore(SEED, buf)
+        expect = bytearray(SEED)
+        expect[5] = 0xFF
+        assert buf == expect
+
+    def test_learn_tokens_reach_the_dictionary(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_learn=True)
+        f.dictionary = [b"HDRX"]
+        f._pos_learn._emit([b"MAGIC", b"HDRX"])
+        assert f.dictionary == [b"HDRX", b"MAGIC"]
 
     def test_position_arena_does_not_imply_pca(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True)
