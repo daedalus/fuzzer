@@ -45,6 +45,49 @@ def _fmt_kb(kb: int) -> str:
     return f"{kb // 1024}MB" if kb >= 1024 else f"{kb}KB"
 
 
+def _trim_heap() -> None:
+    """Return freed heap to the OS; report MB or KB reclaimed."""
+    with contextlib.suppress(Exception):
+        freed = libc_mem.trim_heap() >> 10
+        if freed > 0:
+            freed_mb = freed // 1024
+            if freed_mb >= 1:
+                print(f"\r[*] Trimmed {freed_mb}MB heap", end=" ", flush=True)
+            else:
+                print(f"\r[*] Trimmed {freed}KB heap", end=" ", flush=True)
+
+
+def _print_progress(
+    files_done: int, total_files: int, start_time: float, n_edges: int, peak_rss_kb: int
+) -> None:
+    """One-line replay status: rate, ETA, elapsed, unique edges, rss."""
+    elapsed = time.time() - start_time
+    live_kb = None
+    with contextlib.suppress(Exception):
+        live_kb = libc_mem.current_rss() >> 10
+    rss_str = f" | rss: {_fmt_kb(peak_rss_kb)}"
+    if live_kb is not None:
+        rss_str += f" | live: {_fmt_kb(live_kb)}"
+
+    if elapsed > 0 and files_done > 0:
+        rate = files_done / elapsed
+        remaining = total_files - files_done
+        eta = remaining / rate if rate > 0 else 0
+        print(
+            f"\r[*] Replayed {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
+            f"{rate:.1f} seeds/s ETA: {eta:.1f}s | elapsed: {elapsed:.1f}s | edges: {n_edges}{rss_str}",
+            end="",
+            flush=True,
+        )
+        return
+
+    print(
+        f"\r[*] Replayed {files_done}/{total_files} | elapsed: {elapsed:.1f}s | edges: {n_edges}{rss_str}...",
+        end="",
+        flush=True,
+    )
+
+
 class ExecMode(Enum):
     """How coverage-mode replay runs the target (same backends as ``fuzz``)."""
 
@@ -539,44 +582,10 @@ def _minimize_with_coverage(
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
             # Reclaim heap memory periodically like in fuzz mode
             if (i + 1) % _TRIM_EVERY == 0:
-                with contextlib.suppress(Exception):
-                    freed = libc_mem.trim_heap() >> 10
-                    if freed > 0:
-                        freed_mb = freed // 1024
-                        if freed_mb >= 1:
-                            print(f"\r[*] Trimmed {freed_mb}MB heap", end=" ", flush=True)
-                        else:
-                            print(f"\r[*] Trimmed {freed}KB heap", end=" ", flush=True)
+                _trim_heap()
 
             if (i + 1) % 10 == 0 or (i + 1) == len(to_replay):
-                elapsed = time.time() - start_time
-                files_done = i + 1
-                total_files = len(to_replay)
-                live_kb = None
-                with contextlib.suppress(Exception):
-                    live_kb = libc_mem.current_rss() >> 10
-                if elapsed > 0 and files_done > 0:
-                    rate = files_done / elapsed
-                    remaining = total_files - files_done
-                    eta = remaining / rate if rate > 0 else 0
-                    rss_str = f" | rss: {_fmt_kb(peak_rss_kb)}"
-                    if live_kb is not None:
-                        rss_str += f" | live: {_fmt_kb(live_kb)}"
-                    print(
-                        f"\r[*] Replayed {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
-                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s | elapsed: {elapsed:.1f}s | edges: {len(unique_edges)}{rss_str}",
-                        end="",
-                        flush=True,
-                    )
-                else:
-                    rss_str = f" | rss: {_fmt_kb(peak_rss_kb)}"
-                    if live_kb is not None:
-                        rss_str += f" | live: {_fmt_kb(live_kb)}"
-                    print(
-                        f"\r[*] Replayed {files_done}/{total_files} | elapsed: {elapsed:.1f}s | edges: {len(unique_edges)}{rss_str}...",
-                        end="",
-                        flush=True,
-                    )
+                _print_progress(i + 1, len(to_replay), start_time, len(unique_edges), peak_rss_kb)
     finally:
         map_entries = shm.num_entries
         if runner is not None:
