@@ -4,6 +4,7 @@ Hard Rule 51: no sympy/gmpy.  Everything is integer-only and deterministic
 (no RNG: Pollard-rho restarts walk ``c = 1, 2, 3, ...``).
 
     egcd / modinv / crt           Bezout, inverses, Chinese remainder
+    euclid_steps                  gcd division count (Lame: Fibonacci pairs worst)
     is_prime / next_prime / ...   Miller-Rabin, fixed bases (+ strong Lucas, BPSW, above 3.3e24)
     jacobi / legendre / kronecker symbols; quadratic_residues
     factorint / divisors / ...    trial division + Brent rho + perfect powers
@@ -54,6 +55,20 @@ def egcd(a: int, b: int) -> tuple[int, int, int]:
     if a < 0:
         return -a, -x0, -y0
     return a, x0, y0
+
+
+def euclid_steps(a: int, b: int) -> int:
+    """Division steps of Euclid's gcd on ``(|a|, |b|)``.
+
+    Lame: below a bound, consecutive Fibonacci pairs need the most, e.g.
+    ``euclid_steps(89, 55) == 9`` against ``euclid_steps(100, 55) == 4``.
+    """
+    a, b = abs(a), abs(b)
+    steps = 0
+    while b:
+        a, b = b, a % b
+        steps += 1
+    return steps
 
 
 def modinv(a: int, m: int) -> int:

@@ -42,6 +42,9 @@ class ScriptedRng:
             (shapes and rates ignored).
         randrange_lists: Lists returned one per ``randrange_list()`` call
             (n and count ignored).
+        poisson_arrays: Arrays returned one per ``poisson_array()`` call
+            (rates ignored).
+        geometrics: Ints returned one per ``geometric()`` call (p ignored).
     """
 
     def __init__(
@@ -57,6 +60,8 @@ class ScriptedRng:
         binomial_arrays=(),
         gamma_arrays=(),
         randrange_lists=(),
+        poisson_arrays=(),
+        geometrics=(),
     ):
         self._randints = iter(randints)
         self._randoms = iter(randoms)
@@ -69,6 +74,8 @@ class ScriptedRng:
         self._binomial_arrays = iter(binomial_arrays)
         self._gamma_arrays = iter(gamma_arrays)
         self._randrange_lists = iter(randrange_lists)
+        self._poisson_arrays = iter(poisson_arrays)
+        self._geometrics = iter(geometrics)
 
     def randint(self, _a, _b):
         return next(self._randints)
@@ -104,6 +111,12 @@ class ScriptedRng:
 
     def randrange_list(self, _n, _count):
         return next(self._randrange_lists)
+
+    def poisson_array(self, _lams):
+        return next(self._poisson_arrays)
+
+    def geometric(self, _p):
+        return next(self._geometrics)
 
     def shuffle(self, seq):
         seq.reverse()

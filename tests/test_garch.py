@@ -3,7 +3,6 @@
 Falsification and adversarial cases (Hard Rule 23) live at the bottom.
 """
 
-import math
 import random
 
 import pytest
@@ -13,6 +12,8 @@ from fuzzer_tool.core.analyzers.analyzer_garch import (
     OnlineGarch11,
     squared_acf,
 )
+from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.synthetic_series import garch
 
 
 def _feed(g, values):
@@ -23,15 +24,7 @@ def _feed(g, values):
 
 def _garch_series(n, omega, alpha, beta, seed=0):
     """Generate a series that genuinely follows GARCH(1,1)."""
-    rng = random.Random(seed)
-    s2 = omega / max(1.0 - alpha - beta, 1e-6)
-    eps = 0.0
-    out = []
-    for _ in range(n):
-        s2 = omega + alpha * eps * eps + beta * s2
-        eps = rng.gauss(0.0, math.sqrt(s2))
-        out.append(eps)
-    return out
+    return garch(RandPool(seed=seed), n, omega, alpha, beta).tolist()
 
 
 class TestRecursion:

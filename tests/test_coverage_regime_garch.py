@@ -14,17 +14,13 @@ from fuzzer_tool.core.analyzers.analyzer_critical_slowing import (
 )
 from fuzzer_tool.core.analyzers.analyzer_garch import OnlineGarch11
 from fuzzer_tool.core.percolation import CoverageRegime
+from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.synthetic_series import garch
 
 
 def _clustered(n=800, seed=3):
     """A series with genuine, persistent volatility clustering."""
-    rng = random.Random(seed)
-    s2, eps, out = 1.0, 0.0, []
-    for _ in range(n):
-        s2 = 0.05 + 0.25 * eps * eps + 0.70 * s2
-        eps = rng.gauss(0.0, s2**0.5)
-        out.append(20.0 + eps)
-    return out
+    return garch(RandPool(seed=seed), n, 0.05, 0.25, 0.70, mean=20.0).tolist()
 
 
 def _spiking_model():

@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 
 from fuzzer_tool.core import int_checksum_solver as solver
-from fuzzer_tool.core.null_lattice import null_relations
+from fuzzer_tool.core.null_lattice import MERSENNE_31, null_relations, rank_mod_p
+from fuzzer_tool.core.rand_pool import RandPool
 
 HUGE = 1 << 200
 
@@ -265,3 +266,66 @@ def test_linear_weights_rejects_noise():
 def test_linear_weights_constant_words_have_no_relation():
     rows = [([5, 6], c) for c in (1, 2, 3, 4)]
     assert solver._linear_weights(rows, 1 << 16) is None
+
+
+# ── rank over GF(p) ────────────────────────────────────────────────────
+
+
+def _int_matrix(pool: RandPool, rows: int, cols: int, span: int) -> list[list[int]]:
+    """Small-span integers plus a planted dependent last row."""
+    m = [pool.randint_list(-span, span, cols) for _ in range(rows)]
+    if rows >= 3:
+        m[-1] = [a - 2 * b for a, b in zip(m[0], m[1], strict=True)]
+    return m
+
+
+def test_rank_mod_p_control_oracle_is_transpose_invariant():
+    pool = RandPool(41)
+    for rows, cols in [(1, 1), (3, 5), (5, 3), (4, 4)]:
+        m = _int_matrix(pool, rows, cols, 4)
+        assert _rank(m) == _rank([list(c) for c in zip(*m, strict=True)])
+
+
+def test_rank_mod_p_matches_fraction_rank():
+    pool = RandPool(43)
+    for rows, cols in [(1, 1), (2, 7), (7, 2), (5, 5), (8, 12), (12, 8)]:
+        for span in (1, 3, 50):
+            m = _int_matrix(pool, rows, cols, span)
+            assert rank_mod_p(m) == _rank(m), (rows, cols, span)
+            assert rank_mod_p(np.array(m, dtype=np.int64)) == _rank(m)
+
+
+def test_rank_mod_p_float_rank_is_wrong_mod_p_rank_is_not():
+    # Rank 2 over Q; entries span 1e17, so float64 rounds the dependence away.
+    big = 10**17
+    m = [[big, 1], [2 * big, 2], [1, 0]]
+    assert rank_mod_p(m) == _rank(m) == 2
+    assert rank_mod_p(m[:2]) == _rank(m[:2]) == 1
+
+
+def test_rank_mod_p_zero_empty_wide_tall():
+    assert rank_mod_p(np.zeros((3, 5), dtype=np.int64)) == 0
+    assert rank_mod_p(np.zeros((0, 4), dtype=np.int64)) == 0
+    assert rank_mod_p(np.zeros((4, 0), dtype=np.int64)) == 0
+    assert rank_mod_p(np.eye(6, 40, dtype=np.int64)) == 6
+    assert rank_mod_p(np.eye(40, 6, dtype=np.int64)) == 6
+
+
+def test_rank_mod_p_adversarial_multiples_of_p_vanish():
+    # Rank 2 over Q, but row 2 is all multiples of p: rank 1 mod p.
+    m = [[1, 2, 3], [MERSENNE_31, 0, 2 * MERSENNE_31]]
+    assert _rank(m) == 2
+    assert rank_mod_p(m) == 1
+    assert rank_mod_p(m, p=101) == 2
+
+
+def test_rank_mod_p_adversarial_negative_and_unsigned_entries():
+    assert rank_mod_p(np.array([[-1, 2], [1, -2]], dtype=np.int64)) == 1
+    u = np.array([[2**64 - 1, 1], [1, 0]], dtype=np.uint64)
+    assert rank_mod_p(u) == _rank(u.tolist()) == 2
+
+
+@pytest.mark.parametrize("p", [1, 4, 2**31 + 11, 2**61 - 1])
+def test_rank_mod_p_adversarial_bad_modulus_rejected(p):
+    with pytest.raises(ValueError):
+        rank_mod_p([[1, 2]], p=p)

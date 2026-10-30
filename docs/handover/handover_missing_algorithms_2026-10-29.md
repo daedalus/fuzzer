@@ -1,6 +1,6 @@
 # Handover: algorithms present in tests, missing from src
 
-Status: **P1 shipped (2026-10-29); P2-P4 plan only.** Source: 2026-10-29 audit of all
+Status: **All shipped (P1 2026-10-29, rest 2026-10-30).** See DEEP_DIVE §Test/tool-only algorithms moved into core. Source: 2026-10-29 audit of all
 1,149 test files (six parallel passes, claims re-checked against src).
 
 ## Verdicts
@@ -8,16 +8,16 @@ Status: **P1 shipped (2026-10-29); P2-P4 plan only.** Source: 2026-10-29 audit o
 | # | Algorithm | Test location | Verdict |
 |---|---|---|---|
 | 1 | ROC AUC (Mann-Whitney U) + shared tied ranks / Spearman | `test_entropy_kl_miller_madow.py:23` | **Shipped** (P1) |
-| 2 | Poisson / geometric samplers | `test_gravity.py:29`, `test_discovery_uniformity.py:27,161` | **Implement** (P2) |
-| 3 | Hadamard by Sylvester / Paley | `tools/lib/factorial_design.py` | **Implement** (P3) |
-| 4 | Permutation sign / cycle type | `test_swap_tuple.py:31`, `test_structured_mutations.py:326` | Implement only with P4's consumer |
-| 5 | XXH64 second preimage | `tests/support/xxh64_collide.py` | Keep test-only: no target-side consumer (zstd checksums are recomputed, not collided) |
-| 6 | McNemar / Fisher exact / Wilcoxon | `tools/lib/bench_paired.py` | Keep in tools: no src consumer |
-| 7 | Dilworth width, rank mod p | `tools/edge_matrix_modes.py`, `tools/edge_diagnostic.py` | Keep in tools |
-| 8 | Steinhaus-Johnson-Trotter | `tests/support/sjt.py` | Keep test-only (n! oracle) |
-| 9 | Panzeri-Treves TE correction | `test_transfer_entropy_bias_correction.py:25` | Rejected by design (`analyzer_transfer_entropy.py:118-130`) |
-| 10 | Euclid step count, signal generators (Cox, AR(1), 1/f, GARCH) | `test_structured_mutations.py:427`, `test_regression_periodicity_null.py` | Test data / metrics; skip |
-| 11 | Rényi divergence | `test_regressions.py:243` | Never written, no consumer; skip |
+| 2 | Poisson / geometric samplers | `test_gravity.py:29`, `test_discovery_uniformity.py:27,161` | Shipped: `RandPool.poisson_array` / `geometric` |
+| 3 | Hadamard by Sylvester / Paley | `tools/lib/factorial_design.py` | Shipped: `core/hadamard.py`, `hadamard_oa` widths 1/2/4 |
+| 4 | Permutation sign / cycle type | `test_swap_tuple.py:31`, `test_structured_mutations.py:326` | Shipped: `core/permutation.py` (test callers only) |
+| 5 | XXH64 second preimage | `tests/support/xxh64_collide.py` | Shipped: `hash_inverse.xxh64_collide` (test callers only) |
+| 6 | McNemar / Fisher exact / Wilcoxon | `tools/lib/bench_paired.py` | Shipped: `core/exact_tests.py` (tools import it) |
+| 7 | Dilworth width, rank mod p | `tools/edge_matrix_modes.py`, `tools/edge_diagnostic.py` | Shipped: `core/poset.py`, `null_lattice.rank_mod_p` |
+| 8 | Steinhaus-Johnson-Trotter | `tests/support/sjt.py` | Shipped: `permutation.sjt_swaps` |
+| 9 | Panzeri-Treves TE correction | `test_transfer_entropy_bias_correction.py:25` | Shipped for comparison: `panzeri_treves_bias`; scoring keeps the shuffle correction |
+| 10 | Euclid step count, signal generators (Cox, AR(1), 1/f, GARCH) | `test_structured_mutations.py:427`, `test_regression_periodicity_null.py` | Shipped: `numtheory.euclid_steps`, `core/synthetic_series.py` |
+| 11 | Rényi divergence | `test_regressions.py:243` | Shipped: `renyi.renyi_divergence` (no production caller) |
 
 ---
 

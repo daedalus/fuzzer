@@ -377,3 +377,27 @@ class TestNthrootMod:
             nt.nthroot_mod(2, 0, 7)
         with pytest.raises(ValueError):
             nt.nthroot_mod(2, 2, 15)
+
+
+class TestEuclidSteps:
+    def test_known_counts(self):
+        assert nt.euclid_steps(240, 46) == 5  # 240,46 -> 46,10 -> 10,6 -> 6,4 -> 4,2 -> 2,0
+        assert nt.euclid_steps(7, 0) == 0
+        assert nt.euclid_steps(0, 7) == 1
+
+    def test_lame_fibonacci_is_worst_below_bound(self):
+        # Lame: below F(k+2), only consecutive Fibonacci pairs need k steps.
+        fib = [1, 2]
+        while len(fib) < 12:
+            fib.append(fib[-1] + fib[-2])
+        bound = fib[-1]
+        worst = max(nt.euclid_steps(a, b) for a in range(1, bound) for b in range(1, a + 1))
+        assert nt.euclid_steps(fib[-2], fib[-3]) == worst
+
+    def test_step_oracle_tells_noise_from_fibonacci(self):
+        # Control: a non-Fibonacci pair of the same size takes fewer steps.
+        assert nt.euclid_steps(144, 100) < nt.euclid_steps(144, 89)
+
+    def test_adversarial_negative_operands(self):
+        assert nt.euclid_steps(-240, 46) == nt.euclid_steps(240, 46)
+        assert nt.euclid_steps(240, -46) == nt.euclid_steps(240, 46)

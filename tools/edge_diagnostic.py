@@ -1145,6 +1145,7 @@ from pathlib import Path  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from fuzzer_tool.core.count_class import classify_single  # noqa: E402
+from fuzzer_tool.core.null_lattice import MERSENNE_31, rank_mod_p  # noqa: E402
 
 COUNT_MASK = 0xFFFFFF  # the top byte of the SHM count field is the generation tag
 MIN_FLAKY_REPEATS = 2  # one repeat has no variance to measure
@@ -1860,33 +1861,14 @@ class FlowGraph(enum.Enum):
     CALL_SITE = "call-site"  # node = (location, call site), column = (prev, cur, site)
 
 
-RANK_PRIME = 2**31 - 1
+RANK_PRIME = MERSENNE_31
 NON_FLOW_SHOWN = 8  # non-structural relations kept per class, for reading
 _ENTRY, _EXIT = ("entry",), ("exit",)
 
 
 def _rank_p(mat) -> int:
-    """Rank of an integer matrix over GF(RANK_PRIME), by vectorised elimination."""
-    a = np.array([[int(v) % RANK_PRIME for v in row] for row in np.asarray(mat)], dtype=np.int64)
-    if a.size == 0:
-        return 0
-    rank = 0
-    for c in range(a.shape[1]):
-        nz = np.flatnonzero(a[rank:, c])
-        if not len(nz):
-            continue
-        p = rank + nz[0]
-        a[[rank, p]] = a[[p, rank]]
-        a[rank] = a[rank] * pow(int(a[rank, c]), RANK_PRIME - 2, RANK_PRIME) % RANK_PRIME
-
-        # Clear column c everywhere else; entries < 2^31, so products fit int64.
-        col = a[:, c].copy()
-        col[rank] = 0
-        a = (a - np.outer(col, a[rank]) % RANK_PRIME) % RANK_PRIME
-        rank += 1
-        if rank == a.shape[0]:
-            break
-    return rank
+    """Rank of an integer matrix over GF(RANK_PRIME)."""
+    return rank_mod_p(mat, RANK_PRIME)
 
 
 def _cycle_basis(src: np.ndarray, dst: np.ndarray, n: int) -> np.ndarray:

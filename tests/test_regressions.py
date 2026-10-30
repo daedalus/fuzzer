@@ -256,10 +256,10 @@ class TestDeadParameters:
         )
 
     def test_renyi_module_advertises_no_missing_divergence(self):
-        """The module docstring promised a Renyi divergence -- "generalization of
-        KL divergence for comparing distributions" -- and the file contains no
-        divergence function at all, only single-distribution entropies. Same
-        class of false advertisement as the smoothing claim above."""
+        """The module docstring once promised a Renyi divergence the file did
+        not implement. renyi_divergence now exists; this still fails if the
+        "Also provides" list advertises a divergence with no callable behind
+        it. Same class of false advertisement as the smoothing claim above."""
         import inspect
 
         from fuzzer_tool.core import renyi

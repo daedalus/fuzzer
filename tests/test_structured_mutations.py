@@ -28,6 +28,8 @@ import pytest
 
 from fuzzer_tool.core import randomness as R
 from fuzzer_tool.core.mutations import structured as S
+from fuzzer_tool.core.numtheory import euclid_steps
+from fuzzer_tool.core.permutation import cycle_type
 from fuzzer_tool.core.rand_pool import RandPool
 
 # Fixed seed for every statistical assertion in this file.
@@ -323,22 +325,6 @@ class TestCycleLock:
             for i in range(n)
         ]
 
-    def _cycle_lengths(self, perm: list[int]) -> list[int]:
-        n = len(perm)
-        seen = [False] * n
-        lengths = []
-        for start in range(n):
-            if seen[start]:
-                continue
-            length = 0
-            i = start
-            while not seen[i]:
-                seen[i] = True
-                length += 1
-                i = perm[i]
-            lengths.append(length)
-        return lengths
-
     def test_single_cycle_visits_every_slot(self, monkeypatch, rp):
         """Forced single_cycle mode, fixed region: exactly one cycle over n."""
         monkeypatch.setattr(S, "_CYCLE_MODES", ("single_cycle",))
@@ -351,7 +337,7 @@ class TestCycleLock:
         n = 64 // 4
         perm = self._words(out, 8, 4, False, n)
         assert sorted(perm) == list(range(n))
-        assert self._cycle_lengths(perm) == [n]
+        assert cycle_type(perm) == [n]
 
     def test_fixed_points_is_identity(self, monkeypatch, rp):
         """Forced fixed_points mode, fixed region: every index maps to itself."""
@@ -423,14 +409,6 @@ class TestGcdWorstCase:
     and a u64 reader sees noise in the other cases.
     """
 
-    @staticmethod
-    def _euclid_steps(a: int, b: int) -> int:
-        steps = 0
-        while b:
-            a, b = b, a % b
-            steps += 1
-        return steps
-
     @classmethod
     def _worst_pair(cls, buf: bytes) -> int:
         """Most Euclid steps over any adjacent u64 pair, either endianness."""
@@ -440,7 +418,7 @@ class TestGcdWorstCase:
             vals = [st.unpack_from(buf, i)[0] for i in range(0, len(buf) - 7, 8)]
             for a, b in zip(vals[::2], vals[1::2], strict=False):
                 if a and b:
-                    worst = max(worst, cls._euclid_steps(a, b))
+                    worst = max(worst, euclid_steps(a, b))
         return worst
 
     def test_produces_near_maximal_euclid_step_counts(self, seeded, monkeypatch):
@@ -659,7 +637,6 @@ class TestBitcastFloatPatterns:
 
     def test_writes_every_pattern_class_as_raw_bits(self):
         import random
-        import struct
 
         from fuzzer_tool.core.mutations.structured import _FLOAT_PATTERNS, bitcast_float
 

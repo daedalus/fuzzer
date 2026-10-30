@@ -34,6 +34,37 @@ except ImportError:
     _HAS_NUMPY = False
 
 
+_LN2 = math.log(2)
+
+
+def panzeri_treves_bias(joint_target: dict, joint_both: dict, n: int) -> float:
+    """First-order Panzeri-Treves (1996) bias of the plug-in TE, in bits.
+
+    bias[H(Y|C)] ~= -sum_c (m_c - 1) / (2 N ln 2), m_c = distinct futures
+    seen in context c. TE = H(Y|Y_hist) - H(Y|Y_hist, X), so
+    bias[TE] = (excess(Y_hist, X) - excess(Y_hist)) / (2 N ln 2).
+    Can be negative: observed m_c undercount sparse contexts' true bins.
+    Diagnostic only; transfer_entropy() uses the shuffle correction.
+
+    Args:
+        joint_target: (y_future, y_hist) -> count.
+        joint_both: (y_future, y_hist, x) -> count.
+        n: Number of samples N.
+
+    Returns:
+        Bias estimate in bits; 0.0 when n <= 0.
+    """
+    if n <= 0:
+        return 0.0
+
+    # Observed bins only: zero-count keys are not seen futures.
+    seen_t = [key for key, c in joint_target.items() if c > 0]
+    seen_b = [key for key, c in joint_both.items() if c > 0]
+    excess_t = len(seen_t) - len({h for _, h in seen_t})
+    excess_b = len(seen_b) - len({(h, x) for _, h, x in seen_b})
+    return (excess_b - excess_t) / (2 * n * _LN2)
+
+
 def _edge_hit_totals(edge_bitmaps: list[bytes], map_size: int) -> dict[int, int]:
     """Sum of hit counts per edge index across all bitmaps (nonzero only)."""
     total_hits: dict[int, int] = defaultdict(int)
@@ -118,6 +149,8 @@ class TransferEntropy:
 
         Checked whether the shuffle loop could be replaced with the
         analytic Panzeri & Treves (1996) / Miller-Madow bias formula
+        (kept as ``panzeri_treves_bias`` / ``pt_corrected_te`` for
+        comparison, not used for scoring for the reason below)
         (bias of a plug-in conditional entropy ~ (sum of per-context
         alphabet sizes - 1) / (2N ln 2)) -- it would turn an O(n_surrogates)
         resampling loop into an O(1) closed-form correction. Verified
@@ -174,6 +207,24 @@ class TransferEntropy:
         h_both_s = self._surrogate_h_both(y_future, y_hist, rows)
         bias = float(np.mean(h_target - h_both_s))
         return max(0.0, te_raw - bias)
+
+    def pt_corrected_te(self, source: list[int], target: list[int]) -> float:
+        """T_{source -> target} with the analytic Panzeri-Treves correction.
+
+        Comparison diagnostic, not used for scoring: undercorrects in the
+        sparse-context regime fuzzing data lives in (see transfer_entropy).
+
+        Returns:
+            max(0, raw plug-in TE - panzeri_treves_bias) in bits.
+        """
+        if min(len(source), len(target)) < self.k + 2:
+            return 0.0
+
+        joint_target, joint_both, n, _ = self._build_joints(source, target)
+        h_target = self._conditional_entropy_target(joint_target, n)
+        h_both = self._conditional_entropy_both(joint_both, n)
+        bias = panzeri_treves_bias(joint_target, joint_both, n)
+        return max(0.0, h_target - h_both - bias)
 
     def _surrogate_h_both(self, y_future: list[int], y_hist: list[tuple], rows) -> np.ndarray:
         """H(Y_{t+1} | Y_t^{(k)}, X_t) per source row, in bits.

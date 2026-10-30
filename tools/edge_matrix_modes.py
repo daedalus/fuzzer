@@ -33,6 +33,7 @@ from fuzzer_tool.core.edge_matrix import (
     rank_corr,
     residualize_ranks,
 )
+from fuzzer_tool.core.poset import chain_height, poset_width
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
 
@@ -165,40 +166,9 @@ def _above(vals: list[int]) -> list[list[int]]:
     ]
 
 
-def _chain_depth(vals: list[int], above: list[list[int]]) -> int:
-    depth = [1] * len(vals)
-    for i in sorted(range(len(vals)), key=lambda k: vals[k].bit_count()):
-        for j in above[i]:
-            depth[j] = max(depth[j], depth[i] + 1)
-    return max(depth, default=0)
-
-
-def _matching(adj: list[list[int]]) -> int:
-    """Maximum bipartite matching (Kuhn, iterative augmenting paths)."""
-    match_r = [-1] * len(adj)
-    size = 0
-    for start in range(len(adj)):
-        seen = [False] * len(adj)
-        stack, iters, chosen = [start], {start: iter(adj[start])}, []
-        while stack:
-            u = stack[-1]
-            step = next((v for v in iters[u] if not seen[v]), None)
-            if step is None:
-                stack.pop()
-                if chosen:
-                    chosen.pop()
-                continue
-            seen[step] = True
-            chosen.append(step)
-            nxt = match_r[step]
-            if nxt == -1:
-                for lu, rv in zip(stack, chosen, strict=True):
-                    match_r[rv] = lu
-                size += 1
-                break
-            stack.append(nxt)
-            iters[nxt] = iter(adj[nxt])
-    return size
+def _by_size(vals: list[int]) -> list[int]:
+    """Indices by popcount: a linear extension of strict-superset order."""
+    return sorted(range(len(vals)), key=lambda k: vals[k].bit_count())
 
 
 def _seed_poset(vals: list[int], rows: int) -> dict:
@@ -208,13 +178,13 @@ def _seed_poset(vals: list[int], rows: int) -> dict:
         return {**base, "skipped": f"{n} distinct rows over budget {SUBSUME_BUDGET}"}
     above = _above(vals)
     maximal = sum(1 for a in above if not a)
-    width = n - _matching(above) if n <= WIDTH_BUDGET else None
+    width = poset_width(above) if n <= WIDTH_BUDGET else None
     return {
         **base,
         "subsumed_distinct": n - maximal,
         "maximal_rows": maximal,
         "width": width,
-        "height": _chain_depth(vals, above),
+        "height": chain_height(above, _by_size(vals)),
     }
 
 
@@ -247,7 +217,7 @@ def _edge_poset(binary: np.ndarray, ids: np.ndarray) -> dict:
         **base,
         "universal_edges": len(groups.get(universal, [])),
         "implication_pairs": sum(len(a) for a in above),
-        "depth": _chain_depth(vals, above),
+        "depth": chain_height(above, _by_size(vals)),
         "deepest_classes": len(vals) - len(has_below),
         "gateways": gateways,
     }

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 
@@ -19,34 +17,26 @@ from fuzzer_tool.core.gravity import (
 from fuzzer_tool.core.rand_pool import RandPool
 from tests.support.scripted_rng import ScriptedRng
 
-# Ground truth for the synthetic PPML recovery tests: small enough that the
-# largest Poisson mean stays ~15 and Knuth sampling stays exact and fast.
+# Ground truth for the synthetic PPML recovery tests: the largest Poisson
+# mean stays ~15.
 _TRUE = (-4.0, 0.2, 0.5, 1.0)
 _FIT_TOL = 0.15
+# The intercept is collinear with α, β (log1p masses are all positive): its
+# sampling SE over seeds is ~0.14 vs ~0.02 for the exponents, so _FIT_TOL
+# was ~1 SE for it and passed by stream luck. ~4 SE here.
+_INTERCEPT_TOL = 0.6
+_TOLS = np.array([_INTERCEPT_TOL, _FIT_TOL, _FIT_TOL, _FIT_TOL])
 _N_OBS = 3000
-
-
-def _poisson(rng: RandPool, mu: float) -> int:
-    """Knuth sampler: exact for the small means these tests use."""
-    limit = math.exp(-mu)
-    k, p = 0, rng.random()
-    while p > limit:
-        k += 1
-        p *= rng.random()
-    return k
 
 
 def _synthetic(theta, seed: int) -> tuple[np.ndarray, np.ndarray]:
     """Rows (1, log1p m_i, log1p m_j, -½log(d²+ε²)) with Poisson(exp(x·θ)) yields."""
     rng = RandPool(seed=seed)
     rows = np.empty((_N_OBS, 4))
-    ys = np.empty(_N_OBS)
     for n in range(_N_OBS):
         m_i, m_j, d = rng.randint(0, 200), rng.randint(0, 200), rng.random()
-        x = GravityModel.features(m_i, m_j, d)
-        rows[n] = x
-        ys[n] = _poisson(rng, math.exp(float(np.dot(x, theta))))
-    return rows, ys
+        rows[n] = GravityModel.features(m_i, m_j, d)
+    return rows, rng.poisson_array(np.exp(rows @ np.asarray(theta))).astype(float)
 
 
 class TestPairTerms:
@@ -107,14 +97,14 @@ class TestFitPpml:
         rows, ys = _synthetic(_TRUE, seed=1)
         theta = fit_ppml(rows, ys, np.zeros(4))
         assert theta is not None
-        assert theta == pytest.approx(np.array(_TRUE), abs=_FIT_TOL)
+        assert np.all(np.abs(theta - np.array(_TRUE)) < _TOLS)
 
     def test_control_two_samples_of_same_process_agree(self):
         # Hard Rule 46: the oracle must pass against itself first.
         a = fit_ppml(*_synthetic(_TRUE, seed=2), np.zeros(4))
         b = fit_ppml(*_synthetic(_TRUE, seed=3), np.zeros(4))
         assert a is not None and b is not None
-        assert a == pytest.approx(b, abs=2 * _FIT_TOL)
+        assert np.all(np.abs(a - b) < 2 * _TOLS)
 
     def test_falsification_no_distance_effect_fits_gamma_zero(self):
         truth = (_TRUE[0], _TRUE[1], _TRUE[2], 0.0)
