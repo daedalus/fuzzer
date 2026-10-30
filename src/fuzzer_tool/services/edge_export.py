@@ -183,8 +183,13 @@ def export_edges(
     exec_mode: ExecMode = ExecMode.SPAWN,
     inprocess_func: str = DEFAULT_INPROCESS_FUNC,
     max_seed_bytes: int = 0,
+    max_seeds: int = 0,
 ) -> int:
     """Export ``{seed_id: sorted uint32 edge ids}`` for every live seed.
+
+    *max_seeds* > 0 stops after that many new seeds, in corpus order (known
+    seeds do not count, so repeated runs walk the corpus in chunks). It is
+    also the progress total, which gives a streamed seeds.tar.gz an ETA.
 
     Each of *out_paths* picks its format by extension: ``.pkl`` appends one
     pickled dict per batch (``adapters/edge_pickle.py``), ``.sqlite`` writes
@@ -227,6 +232,7 @@ def export_edges(
             inprocess_func,
             known,
             collector,
+            max(max_seeds, 0),
         )
     finally:
         # Written batches and the buffered tail survive a crash or Ctrl-C.
@@ -273,10 +279,11 @@ def _resolve_sinks(out_paths: list[str]) -> list[_Sink] | None:
     return sinks
 
 
-def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func, known, out):
+def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func, known, out, limit):
     """Replay *seeds* not in *known* into collector *out*; False if the runner cannot start.
 
-    A seed seen twice (loose and archived) replays once.
+    A seed seen twice (loose and archived) replays once. *limit* > 0 stops
+    after that many replays.
     """
     tmp_dir = Path(tempfile.mkdtemp(prefix="edump_"))
 
@@ -302,7 +309,7 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
                 return False
             replay = _runner_replay(runner)
 
-        n = seeds.total or 0  # 0 = unknown: progress shows no ETA
+        n, done_of = _progress_basis(limit, seeds.total, done)
         start_time = time.time()
         unique: set[int] = set()
         peak_rss_kb = _maxrss_kb()
@@ -327,10 +334,14 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
                 _trim_heap()
 
             if (i + 1) % _PROGRESS_EVERY == 0:
-                _print_progress(i + 1, n, start_time, len(unique), peak_rss_kb)
+                _print_progress(done_of(i), n, start_time, len(unique), peak_rss_kb)
 
-        # Final line: archive members over the cap never reach i + 1 == n.
-        _print_progress(i + 1, n, start_time, len(unique), peak_rss_kb)
+            # Leaving a streamed archive here closes it (GeneratorExit), no read error.
+            if limit and len(done) >= limit:
+                break
+
+        # Final line: archive members over the size cap never reach i + 1 == n.
+        _print_progress(done_of(i), n, start_time, len(unique), peak_rss_kb)
     finally:
         if runner is not None:
             runner.stop()
@@ -343,6 +354,17 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
     if timeouts:
         print(f"[*] Timed out: {timeouts}/{len(done)} seeds (partial edges kept)")
     return True
+
+
+def _progress_basis(limit: int, total: int | None, done: set[str]):
+    """``(total, done_of(i))`` for the progress line, chosen once per run.
+
+    With a cap: replays out of the cap (a streamed tar then has a total).
+    Else: seeds read out of the corpus; total 0 = unknown, no ETA.
+    """
+    if limit:
+        return limit, lambda i: len(done)
+    return total or 0, lambda i: i + 1
 
 
 # Extension -> batch writer.
