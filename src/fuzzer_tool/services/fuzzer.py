@@ -52,6 +52,7 @@ from fuzzer_tool.adapters.shm import (
 )
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due, phase_of
@@ -2066,6 +2067,8 @@ class Fuzzer:
         # Viterbi field segmentation (core/field_hmm.py, --field-hmm). Appended.
         field_hmm=False,
         field_hmm_states=8,
+        # TE bias correction (--te-correction); read by the transfer_entropy spec. Appended.
+        te_correction=TECorrection.SHUFFLE,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -4503,7 +4506,9 @@ class Fuzzer:
                 )
 
         self._use_renyi_weight = renyi_weight
+        self._renyi_prev_hits: dict[int, int] | None = None  # last dump's hits; drift_half
         self._use_transfer_entropy = transfer_entropy
+        self._te_correction = te_correction
         self._te_byte_edges: dict[int, dict[int, int]] = {}  # pos → {edge: count}
         self._te_causal_version = 0  # bumped per causal-map update; keys the phase-lock memo
         self._use_occupation = occupation
