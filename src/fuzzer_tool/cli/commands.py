@@ -1622,6 +1622,7 @@ def cmd_edge_dump(args):
         exec_mode=_minimize_exec_mode(args, args.target),
         inprocess_func=args.inprocess_func,
         max_seed_bytes=args.max_seed_bytes,
+        max_seeds=args.max_seeds,
     )
     rc = 0 if n else 1
 
@@ -7166,6 +7167,15 @@ def main() -> int:
         "--target-args",
         nargs=argparse.REMAINDER,
         help="Target arguments ({file} placeholder)",
+    )
+    ed_parser.add_argument(
+        "-n",
+        "--max-seeds",
+        type=int,
+        default=0,
+        help="Max new seeds to replay, in corpus order (0=all); seeds already in the "
+        "outputs do not count, so reruns continue. Sets the progress total: a "
+        "seeds.tar.gz corpus then shows an ETA",
     )
     ed_parser.add_argument(
         "--push-on-finish",
