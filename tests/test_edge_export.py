@@ -116,3 +116,18 @@ def test_cli_wired(tmp_path, monkeypatch):
 
     assert commands.main() == 0
     assert _load(out)[hash_data(b"ab")].tolist() == _expected(b"ab")
+
+
+def test_running_stats(tmp_path, monkeypatch, capsys):
+    """Progress line matches minimize's: rate, ETA, elapsed, unique edges, rss."""
+    seeds = {"a": b"ab", "b": b"bc"}
+    corpus, out = _setup(tmp_path, monkeypatch, seeds)
+
+    edge_export.export_edges("t", str(corpus), str(out))
+
+    line = capsys.readouterr().out.split("\r")[-1]
+    union = set(_expected(b"ab")) | set(_expected(b"bc"))
+    assert f"Replayed {len(seeds)}/{len(seeds)}" in line
+    assert f"edges: {len(union)}" in line
+    for field in ("seeds/s", "ETA:", "elapsed:", "rss:"):
+        assert field in line

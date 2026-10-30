@@ -10,6 +10,7 @@ import pickle
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -19,17 +20,21 @@ from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.services.minimize import (
     _TIMEOUT_RC,
+    _TRIM_EVERY,
     DEFAULT_INPROCESS_FUNC,
     ExecMode,
     _discover_corpus_files,
+    _maxrss_kb,
     _open_runner,
+    _print_progress,
     _runner_replay,
     _spawn_replay,
     _split_oversized,
+    _trim_heap,
 )
 
-# Seeds between progress lines.
-_PROGRESS_EVERY = 100
+# Seeds between progress lines, as in minimize.
+_PROGRESS_EVERY = 10
 
 
 def export_edges(
@@ -103,6 +108,9 @@ def _replay_all(files, target, timeout, file_mode, target_args, exec_mode, func)
             replay = _runner_replay(runner)
 
         n = len(files)
+        start_time = time.time()
+        unique: set[int] = set()
+        peak_rss_kb = _maxrss_kb()
         for i, fpath in enumerate(files):
             if not fpath.exists():
                 print(f"[!] Skipping missing seed: {fpath}")
@@ -111,10 +119,16 @@ def _replay_all(files, target, timeout, file_mode, target_args, exec_mode, func)
             data = fpath.read_bytes()
             shm.reset_edge_map()
             timeouts += replay(data)[0] == _TIMEOUT_RC
-            edges[hash_data(data)] = shm.edge_id_array()
+            ids = shm.edge_id_array()
+            edges[hash_data(data)] = ids
+            unique.update(ids.tolist())
+            peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
+
+            if (i + 1) % _TRIM_EVERY == 0:
+                _trim_heap()
 
             if (i + 1) % _PROGRESS_EVERY == 0 or i + 1 == n:
-                print(f"\r[*] Replayed {i + 1}/{n}", end="", flush=True)
+                _print_progress(i + 1, n, start_time, len(unique), peak_rss_kb)
     finally:
         if runner is not None:
             runner.stop()
