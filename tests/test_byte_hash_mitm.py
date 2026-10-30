@@ -113,7 +113,9 @@ class TestEncoder:
     def test_adversarial_filters(self):
         enc = ByteHashEncoder(SPECS["djb2"])
         big = (1 << 28).to_bytes(4, "little")
-        assert not enc.is_applicable(32, "CMP", (12).to_bytes(4, "little"), (13).to_bytes(4, "little"))
+        assert not enc.is_applicable(
+            32, "CMP", (12).to_bytes(4, "little"), (13).to_bytes(4, "little")
+        )
         assert not enc.is_applicable(32, "CMP", (12).to_bytes(4, "little"), big)
         assert not enc.is_applicable(64, "CMP", b"\x01" * 8, b"\x02" * 8)
         assert not enc.is_applicable(32, "STR", big, big)

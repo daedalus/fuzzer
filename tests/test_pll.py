@@ -172,12 +172,8 @@ class TestLockAcquisition:
         signal = _sine(3000, freq=0.05, amp=1.0, dc=0.0)
         fast = PhaseLockedLoop(center_freq=0.05, min_lock_ticks=1)
         slow = PhaseLockedLoop(center_freq=0.05, min_lock_ticks=200)
-        fast_first = next(
-            (i for i, s in enumerate(_run(fast, signal)) if s.locked), None
-        )
-        slow_first = next(
-            (i for i, s in enumerate(_run(slow, signal)) if s.locked), None
-        )
+        fast_first = next((i for i, s in enumerate(_run(fast, signal)) if s.locked), None)
+        slow_first = next((i for i, s in enumerate(_run(slow, signal)) if s.locked), None)
         assert fast_first is not None and slow_first is not None
         assert slow_first > fast_first
 

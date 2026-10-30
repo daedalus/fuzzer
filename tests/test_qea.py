@@ -295,9 +295,7 @@ class TestRotationGateFaithfulMode:
         original = amps.copy()
         x = 0b10101010
         best = 0b10100000
-        result = rotation_gate(
-            amps, bytes([x]), improved=False, best=bytes([best]), delta=0.2
-        )
+        result = rotation_gate(amps, bytes([x]), improved=False, best=bytes([best]), delta=0.2)
         x_bits = _bytes_to_bits(bytes([x]))
         best_bits = _bytes_to_bits(bytes([best]))
         for i in range(8):

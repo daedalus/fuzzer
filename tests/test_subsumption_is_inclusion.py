@@ -78,7 +78,9 @@ class TestInclusionNotSize:
                 shared_b=set(range(10 * scale)),
                 private=set(range(10_000, 10_000 + 10 * scale)),
             )
-            return {k: et.compute_subsumption_weight(k) for k in ("shared_a", "shared_b", "private")}
+            return {
+                k: et.compute_subsumption_weight(k) for k in ("shared_a", "shared_b", "private")
+            }
 
         assert weights(1) == weights(10) == weights(50)
 

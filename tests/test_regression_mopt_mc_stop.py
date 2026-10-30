@@ -22,9 +22,7 @@ def _make_scheduler(**kwargs):
     # record() triggers a PSO update on self._total_execs % window_size,
     # which counts total records across all particles/operators, not per
     # particle, so the window must close only after both have been fed.
-    sched = MOptScheduler(
-        n_particles=2, window_size=8, rng=RandPool(seed=1), **kwargs
-    )
+    sched = MOptScheduler(n_particles=2, window_size=8, rng=RandPool(seed=1), **kwargs)
     sched.init_arm("mut_a")
     sched.init_arm("mut_b")
     return sched

@@ -307,8 +307,20 @@ def test_second_thread_drops_are_counted_as_contended(tmp_path):
     src.write_text(THREADED_SRC)
     exe = tmp_path / "t"
     subprocess.run(
-        [cc, "-O2", "-w", "-D__AFL_CMPLOG=1", "-fsanitize-coverage=trace-cmp",
-         "-include", str(shim), str(src), "-o", str(exe), "-ldl", "-lpthread"],
+        [
+            cc,
+            "-O2",
+            "-w",
+            "-D__AFL_CMPLOG=1",
+            "-fsanitize-coverage=trace-cmp",
+            "-include",
+            str(shim),
+            str(src),
+            "-o",
+            str(exe),
+            "-ldl",
+            "-lpthread",
+        ],
         check=True,
     )
     env = {**_clean_env(), "_CMPLOG_OUT": "/dev/null"}
@@ -370,8 +382,20 @@ def test_lost_sink_batch_is_counted_as_no_sink(tmp_path):
     src.write_text(STOLEN_FD_SRC)
     exe = tmp_path / "s"
     subprocess.run(
-        [cc, "-O2", "-w", "-D__AFL_CMPLOG=1", "-fsanitize-coverage=trace-cmp",
-         "-include", str(shim), str(src), "-o", str(exe), "-ldl", "-lpthread"],
+        [
+            cc,
+            "-O2",
+            "-w",
+            "-D__AFL_CMPLOG=1",
+            "-fsanitize-coverage=trace-cmp",
+            "-include",
+            str(shim),
+            str(src),
+            "-o",
+            str(exe),
+            "-ldl",
+            "-lpthread",
+        ],
         check=True,
     )
     env = {**_clean_env(), "_CMPLOG_OUT": str(tmp_path / "cmplog.bin")}

@@ -658,7 +658,7 @@ def perm_lock(data: bytes, rng) -> bytes:
 
 # ── 5b. single n-cycle / all-fixed-points permutation ──────────────────
 
-_CYCLE_MODES = ("single_cycle", "fixed_points")
+_CYCLE_MODES = ("single_cycle", "fixed_points", "transposition")
 
 
 def cycle_lock(data: bytes, rng) -> bytes:
@@ -675,8 +675,13 @@ def cycle_lock(data: bytes, rng) -> bytes:
       before repeating.
     - ``fixed_points``: the identity (``i -> i``) — the other extreme,
       every chase terminates in one step.
+    - ``transposition``: the identity with one adjacent pair swapped
+      (``i <-> i+1``) — the odd permutation nearest the identity. For odd
+      n the other two shapes are both even (an odd-length cycle is even),
+      so without it this operator never emits an odd table or a 2-cycle;
+      it also passes a "mostly identity" sanity check.
 
-    Both are degenerate under the same permutation-cycle statistic and both
+    All are degenerate under the same permutation-cycle statistic and all
     are adversarial for code that walks an index chain expecting short
     cycles: hash open-addressing probe sequences, a linked list stored as
     array indices, jump tables, and union-find parent arrays.
@@ -695,10 +700,17 @@ def cycle_lock(data: bytes, rng) -> bytes:
         return data
     big_endian = rng.randint(0, 1) == 0
     n = length // width
-    if rng.choice(_CYCLE_MODES) == "single_cycle":
-        values = [(i + 1) % n for i in range(n)]
-    else:
+    mode = rng.choice(_CYCLE_MODES)
+    if mode == "fixed_points":
         values = list(range(n))
+    elif mode == "single_cycle":
+        values = [*range(1, n), 0]
+    else:
+        # e.g. n=5, i=2: 0 1 3 2 4.
+        values = list(range(n))
+        i = rng.randint(0, n - 2)
+        values[i], values[i + 1] = i + 1, i
+
     return _splice(data, offset, _pack_words(values, width, big_endian))
 
 

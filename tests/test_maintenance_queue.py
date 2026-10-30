@@ -248,9 +248,7 @@ def test_absorbs_the_three_ad_hoc_gate_shapes():
     q = MaintenanceQueue(
         [
             MaintenanceJob("gc", 500, action=gc_action),
-            MaintenanceJob(
-                "crash_replays", 500, action=crash_action, active=lambda: replay_n > 0
-            ),
+            MaintenanceJob("crash_replays", 500, action=crash_action, active=lambda: replay_n > 0),
             MaintenanceJob(
                 "sanitizer_replays", 500, action=san_action, active=lambda: asan_target is not None
             ),

@@ -17,10 +17,11 @@ from __future__ import annotations
 import dataclasses
 import io
 import struct
-import pytest
 import time
 import zipfile
 from typing import Any
+
+import pytest
 
 from fuzzer_tool.core.mutations.asf import (
     DATA_OBJECT_GUID,
@@ -30,20 +31,16 @@ from fuzzer_tool.core.mutations.asf import (
     serialize_asf_objects,
 )
 from fuzzer_tool.core.mutations.flv import FlvTag, parse_flv, serialize_flv
-from fuzzer_tool.core.mutations.gif import parse_gif, serialize_gif
-from fuzzer_tool.core.mutations.isobmff import parse_boxes, serialize_boxes
 from fuzzer_tool.core.mutations.mpegts import TsPacket, parse_ts_packets, serialize_ts_packets
-from fuzzer_tool.core.mutations.nal import parse_nal_units
 from fuzzer_tool.core.mutations.ogg import parse_ogg_pages
-from fuzzer_tool.core.mutations.riff import parse_riff_chunks
 from fuzzer_tool.core.mutations.webm import Element, _encode_size_vint, parse_webm, serialize_webm
-from fuzzer_tool.core.mutations.webp import parse_webp
 from fuzzer_tool.core.mutations.zip import parse_zip
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.wfc import AdjacencyTable
 from fuzzer_tool.core.wfc_chunks import (
+    _FORMATS,
     ASF_FORMAT,
     FLV_FORMAT,
     GIF_FORMAT,
@@ -52,14 +49,13 @@ from fuzzer_tool.core.wfc_chunks import (
     NAL_FORMAT,
     OGG_FORMAT,
     RIFF_FORMAT,
+    VIOLATE_RATE,
     WEBM_FORMAT,
     WEBP_FORMAT,
     ZIP_FORMAT,
-    VIOLATE_RATE,
     ChunkFormat,
     WfcChunkMutator,
     WfcChunkTableStore,
-    _FORMATS,
     _table_pairs,
     _try_asf,
     _try_flv,
@@ -125,7 +121,6 @@ def riff_sample() -> bytes:
     return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + body
 
 
-
 _OGG_S1, _OGG_S2 = 0x1111, 0x2222
 
 
@@ -178,12 +173,18 @@ def flv_sample() -> bytes:
 def nal_sample() -> bytes:
     sc4, sc3 = b"\x00\x00\x00\x01", b"\x00\x00\x01"
     return (
-        sc4 + b"\x67\x11\x22"  # SPS
-        + sc4 + b"\x68\x33\x44"  # PPS
-        + sc4 + b"\x65\x55\x66"  # IDR
-        + sc3 + b"\x41\x77\x88"  # non-IDR slice
-        + sc3 + b"\x41\x99\xaa"  # non-IDR slice
-        + sc4 + b"\x06\xbb\xcc"  # SEI
+        sc4
+        + b"\x67\x11\x22"  # SPS
+        + sc4
+        + b"\x68\x33\x44"  # PPS
+        + sc4
+        + b"\x65\x55\x66"  # IDR
+        + sc3
+        + b"\x41\x77\x88"  # non-IDR slice
+        + sc3
+        + b"\x41\x99\xaa"  # non-IDR slice
+        + sc4
+        + b"\x06\xbb\xcc"  # SEI
     )
 
 
@@ -405,12 +406,11 @@ class TestWfcReorderChunksPerFormat:
                 out_chunks = fmt.parse(out)
                 assert out_chunks is not None
                 out_kinds = [fmt.kind(c) for c in out_chunks]
-                for a, b in zip(out_kinds, out_kinds[1:]):
+                for a, b in zip(out_kinds, out_kinds[1:], strict=False):
                     if a not in kinds or b not in kinds:
                         continue  # shuffle-fallback path, not a table claim
                     assert table.compatible(a, b, "right") or not table.has_tile(a), (
-                        f"{name}: strict mode emitted an unobserved adjacency "
-                        f"{a!r} -> {b!r}"
+                        f"{name}: strict mode emitted an unobserved adjacency {a!r} -> {b!r}"
                     )
 
     def test_violate_mode_emits_exactly_one_unobserved_pair(self):
@@ -823,7 +823,9 @@ class TestReorderPinsAndBounds:
             for mode in ("strict", "violate"):
                 for seed in range(60):
                     seen.clear()
-                    wfc_reorder_chunks(spy, chunks, store.table_for(name), RandPool(seed=seed), mode=mode)
+                    wfc_reorder_chunks(
+                        spy, chunks, store.table_for(name), RandPool(seed=seed), mode=mode
+                    )
                     assert sorted(map(id, seen[-1])) == sorted(map(id, chunks)), (name, mode, seed)
 
 
@@ -838,19 +840,19 @@ class TestLeftoverPlacement:
     @staticmethod
     def _emitted_kinds(fmt, chunks, table, seed, mode):
         seen: list[list[Any]] = []
-        spy = dataclasses.replace(fmt, serialize=lambda cs: (seen.append(list(cs)), fmt.serialize(cs))[1])
+        spy = dataclasses.replace(
+            fmt, serialize=lambda cs: (seen.append(list(cs)), fmt.serialize(cs))[1]
+        )
         wfc_reorder_chunks(spy, chunks, table, RandPool(seed=seed), mode=mode)
         return [fmt.kind(c) for c in seen[-1]]
 
     def test_skipped_kind_is_placed_at_an_observed_slot(self):
         fmt = _toy_format(pin_first=True, pin_last=True)
         chunks = [b"S1", b"X1", b"X2", b"Z1", b"E1"]
-        table = _toy_table(
-            (b"S", b"X"), (b"X", b"X"), (b"X", b"E"), (b"S", b"Z"), (b"Z", b"X")
-        )
+        table = _toy_table((b"S", b"X"), (b"X", b"X"), (b"X", b"E"), (b"S", b"Z"), (b"Z", b"X"))
         for seed in range(400):
             ks = self._emitted_kinds(fmt, chunks, table, seed, "strict")
-            for a, b in zip(ks, ks[1:]):
+            for a, b in zip(ks, ks[1:], strict=False):
                 assert table.compatible(a, b, "right"), (seed, ks)
 
     def test_strict_mode_is_table_legal_at_chunk_level_on_every_format(self):
@@ -861,7 +863,7 @@ class TestLeftoverPlacement:
             chunks = fmt.parse(data)
             for seed in range(60):
                 ks = self._emitted_kinds(fmt, chunks, table, seed, "strict")
-                for a, b in zip(ks, ks[1:]):
+                for a, b in zip(ks, ks[1:], strict=False):
                     assert table.compatible(a, b, "right"), (name, seed, a, b)
 
     def test_unplaceable_leftover_is_kept_not_dropped(self):
@@ -913,8 +915,15 @@ class TestMoserTardosRepair:
         fmt = _toy_format(pin_first=True, pin_last=True)
         chunks = [b"H1", b"A1", b"B1", b"C1", b"D1", b"T1"]
         table = _toy_table(
-            (b"H", b"A"), (b"A", b"B"), (b"B", b"C"), (b"C", b"D"), (b"D", b"T"),
-            (b"H", b"C"), (b"C", b"A"), (b"B", b"D"), (b"A", b"T"),
+            (b"H", b"A"),
+            (b"A", b"B"),
+            (b"B", b"C"),
+            (b"C", b"D"),
+            (b"D", b"T"),
+            (b"H", b"C"),
+            (b"C", b"A"),
+            (b"B", b"D"),
+            (b"A", b"T"),
         )
         for seed in range(200):
             out = wfc_reorder_chunks(fmt, chunks, table, RandPool(seed=seed), resample="mt")
@@ -960,7 +969,9 @@ class TestMoserTardosRepair:
                     fmt, chunks, table, RandPool(seed=seed), mode="violate", resample=resample
                 )
                 ks = [out[i : i + 1] for i in range(0, len(out), 2)]
-                n += any(not table.compatible(a, b, "right") for a, b in zip(ks, ks[1:]))
+                n += any(
+                    not table.compatible(a, b, "right") for a, b in zip(ks, ks[1:], strict=False)
+                )
             return n
 
         assert held("mt") >= held("restart") - 10

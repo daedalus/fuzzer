@@ -18,8 +18,6 @@ routes ``seed=None`` through OS entropy is caught.
 
 from __future__ import annotations
 
-import pytest
-
 from fuzzer_tool.core.rand_pool import (
     _NO_SEED_FALLBACK,
     RandPool,
@@ -29,9 +27,7 @@ from fuzzer_tool.core.rand_pool import (
 
 
 def _draw_seq(pool: RandPool, n: int = 64) -> list[int]:
-    return [pool.randint(0, 255) for _ in range(n)] + [
-        pool.randrange(1000) for _ in range(n // 2)
-    ]
+    return [pool.randint(0, 255) for _ in range(n)] + [pool.randrange(1000) for _ in range(n // 2)]
 
 
 class TestUnseededRandPoolIsDeterministic:

@@ -64,8 +64,8 @@ behind a flag instead of replacing the default.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from fuzzer_tool.core.job_scheduling import Job, lawler_order
 
@@ -172,9 +172,7 @@ class MaintenanceQueue:
         Read-only: does not affect ``last_run_exec``. Intended for tests and
         diagnostics; :meth:`tick` computes this internally before running.
         """
-        return [
-            j.id for j in self._jobs.values() if j.active() and self._is_due(j, exec_count)
-        ]
+        return [j.id for j in self._jobs.values() if j.active() and self._is_due(j, exec_count)]
 
     def tick(self, exec_count: int) -> list[str]:
         """Run every due, active job once, in Lawler-optimal lateness order.

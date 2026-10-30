@@ -242,7 +242,9 @@ class TestDistinctInputsYieldDistinctEdgeSets:
                 seen[ch] = shm.get_edge_ids()
         finally:
             shm.cleanup()
-        assert all(seen.values()), f"an input recorded nothing: { {k: len(v) for k, v in seen.items()} }"
+        assert all(seen.values()), (
+            f"an input recorded nothing: { {k: len(v) for k, v in seen.items()} }"
+        )
         assert seen[b"a"] != seen[b"b"], "different branches produced identical edge sets"
 
     @needs_cc

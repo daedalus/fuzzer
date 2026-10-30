@@ -172,6 +172,7 @@ class ZlibMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         """Apply one structure-aware zlib mutation."""
         self._rng = rng or self._rng
@@ -257,10 +258,7 @@ class ZlibMutator:
 
     def _inject_junk_before_deflate(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Inject random bytes between header and deflate stream."""
-        junk = bytes(
-            self._rng.randint(0, 255)
-            for _ in range(self._rng.randint(1, 32))
-        )
+        junk = bytes(self._rng.randint(0, 255) for _ in range(self._rng.randint(1, 32)))
         info.compressed_data = junk + info.compressed_data
         return info
 

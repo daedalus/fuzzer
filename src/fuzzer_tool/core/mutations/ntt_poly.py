@@ -38,9 +38,7 @@ def sniff_ntt_modulus(data: bytes) -> bool:
 
 def _inject_constants(data: bytes, rng) -> bytes:
     """Splice the NTT modulus (and optionally the root) into an aligned slot."""
-    offset, length = _region(
-        len(data), rng, min_len=4, align=4, max_len=8
-    )
+    offset, length = _region(len(data), rng, min_len=4, align=4, max_len=8)
     if length < 4:
         # Buffer too short for an in-place splice: append the modulus.
         return data + _MOD_BE

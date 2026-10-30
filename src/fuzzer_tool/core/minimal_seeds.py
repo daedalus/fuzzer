@@ -76,7 +76,9 @@ def minimal_gif() -> bytes:
         + struct.pack("<HH", 1, 1)
         + b"\x80\x00\x00"  # GCT present, 2 entries; background 0; aspect 0
         + b"\x00\x00\x00\xff\xff\xff"  # colour table
-        + b"\x2c" + struct.pack("<HHHH", 0, 0, 1, 1) + b"\x00"  # image descriptor
+        + b"\x2c"
+        + struct.pack("<HHHH", 0, 0, 1, 1)
+        + b"\x00"  # image descriptor
         + b"\x02\x02\x44\x01\x00"  # LZW min code size 2, one 2-byte sub-block
         + b"\x3b"  # trailer
     )
@@ -100,7 +102,9 @@ def minimal_gzip() -> bytes:
     comp = zlib.compressobj(wbits=-15)
     raw = comp.compress(payload) + comp.flush()
     return (
-        b"\x1f\x8b\x08\x00" + b"\x00\x00\x00\x00" + b"\x00\xff"
+        b"\x1f\x8b\x08\x00"
+        + b"\x00\x00\x00\x00"
+        + b"\x00\xff"
         + raw
         + struct.pack("<II", zlib.crc32(payload), len(payload))
     )

@@ -166,7 +166,7 @@ class MT19937:
         if len(state) != _N + 1:
             raise ValueError(f"expected {_N + 1} ints, got {len(state)}")
         obj = cls()
-        obj.mt = [ _u32(x) for x in state[:_N] ]
+        obj.mt = [_u32(x) for x in state[:_N]]
         obj.index = int(state[_N]) % (_N + 1)
         return obj
 
@@ -211,9 +211,7 @@ def output_word(state: Sequence[int], spec: MT19937Spec = MT19937_SPEC) -> int:
     return gen.random_uint32()
 
 
-def predict_words(
-    state: Sequence[int], n: int = 1, spec: MT19937Spec = MT19937_SPEC
-) -> list[int]:
+def predict_words(state: Sequence[int], n: int = 1, spec: MT19937Spec = MT19937_SPEC) -> list[int]:
     """The next *n* outputs after *state*'s own output position.
 
     Excludes *state*'s own output, the convention ``prng_state_recovery``
@@ -257,9 +255,7 @@ def recover_state(
     """
     needed = min_samples(spec)
     if len(observed_words) < needed:
-        raise ValueError(
-            f"need >= {needed} consecutive outputs to pin MT19937's {_N}-word state"
-        )
+        raise ValueError(f"need >= {needed} consecutive outputs to pin MT19937's {_N}-word state")
 
     if not _twist_prefix_consistent(observed_words):
         return None
@@ -318,10 +314,7 @@ def verify_state(
 ) -> bool:
     """Replay from *state* and check every word matches."""
     gen = MT19937.from_state_tuple(state)
-    for word in observed_words:
-        if gen.random_uint32() != _u32(word):
-            return False
-    return True
+    return all(gen.random_uint32() == _u32(word) for word in observed_words)
 
 
 def recover_from_partial(

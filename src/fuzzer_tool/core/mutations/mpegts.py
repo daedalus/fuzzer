@@ -161,6 +161,7 @@ class MpegtsMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
         self._rng = rng or self._rng
         packets = parse_ts_packets(data)

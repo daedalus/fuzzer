@@ -179,9 +179,7 @@ class TestBatchLcaDistancesEdgeCases:
         tree._children.setdefault("b", set()).add("a")
         tree._children["root"].discard("a")
 
-        result = tree.batch_lca_distances(
-            [("a", "b"), ("root", "c"), ("c", "a"), ("root", "root")]
-        )
+        result = tree.batch_lca_distances([("a", "b"), ("root", "c"), ("c", "a"), ("root", "root")])
         assert result[("root", "c")] == tree.lca_distance("root", "c")
         assert result[("c", "a")] == -1
         assert result[("root", "root")] == 0
@@ -194,14 +192,18 @@ class TestBatchLcaDistancesEdgeCases:
         tree.insert(None, "root", [], [], 1)
         tree.nodes["root"].parent_key = None  # sanity: real root stays clean
         tree.insert("root", "child", [], [], 1)
-        ghost = tree.nodes["child"]
         # Simulate a corrupted node with parent_key == its own key,
         # disconnected from the real tree.
         from fuzzer_tool.core.lineage import LineageNode
 
         tree.nodes["ghost"] = LineageNode(
-            key="ghost", parent_key="ghost", depth=0, node_weight=0,
-            child_ops=[], child_sites=[], seq=999,
+            key="ghost",
+            parent_key="ghost",
+            depth=0,
+            node_weight=0,
+            child_ops=[],
+            child_sites=[],
+            seq=999,
         )
         tree._children.setdefault("ghost", set()).add("ghost")
 

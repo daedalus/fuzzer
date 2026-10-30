@@ -60,8 +60,8 @@ from fuzzer_tool.core.running_stats import RunningMoments
 #   random-walk    slope ≈ +0.45
 #   strong down    slope ≈ +0.81
 # Fatigue at 0.15 separates stationary/white from RW and trends.
-_ADEV_ACTIVE_THRESHOLD = 0.1   # adev(2) above this → signal has meaningful variance
-_ADEV_STALL_THRESHOLD = 0.01   # adev(2) below this → signal is effectively constant
+_ADEV_ACTIVE_THRESHOLD = 0.1  # adev(2) above this → signal has meaningful variance
+_ADEV_STALL_THRESHOLD = 0.01  # adev(2) below this → signal is effectively constant
 _FATIGUE_SLOPE_THRESHOLD = 0.15  # Allan log-log slope above this → fatiguing
 
 # Default significance level for the chi-squared dispersion test.

@@ -67,9 +67,7 @@ def test_entropy_deviation_absent_by_default(capsys):
 
 
 def test_entropy_deviation_appears_when_active(capsys):
-    fake = _make_fake_fuzzer(
-        _entropy_deviation=EntropyDeviationSeedStrategy(rng=None)
-    )
+    fake = _make_fake_fuzzer(_entropy_deviation=EntropyDeviationSeedStrategy(rng=None))
     Fuzzer._print_enabled_features(fake)
     out = capsys.readouterr().out
     assert "Seed selection:" in out

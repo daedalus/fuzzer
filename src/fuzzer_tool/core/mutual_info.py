@@ -33,7 +33,7 @@ def mutual_information(xs: Sequence[Hashable], ys: Sequence[Hashable]) -> float:
         raise ValueError("xs and ys must have equal length")
     if n == 0:
         return 0.0
-    cx, cy, cxy = Counter(xs), Counter(ys), Counter(zip(xs, ys))
+    cx, cy, cxy = Counter(xs), Counter(ys), Counter(zip(xs, ys, strict=False))
     mi = 0.0
     for (x, y), c in cxy.items():
         mi += (c / n) * math.log2(c * n / (cx[x] * cy[y]))
@@ -109,13 +109,7 @@ def channel_capacity(
         py = [sum(q[x] * p_y_given_x[x][y] for x in range(m)) for y in range(k)]
         d = []
         for x in range(m):
-            d.append(
-                sum(
-                    p * math.log2(p / py[y])
-                    for y, p in enumerate(p_y_given_x[x])
-                    if p > 0
-                )
-            )
+            d.append(sum(p * math.log2(p / py[y]) for y, p in enumerate(p_y_given_x[x]) if p > 0))
         lo = sum(q[x] * d[x] for x in range(m))
         hi = max(d)
         cap = lo
@@ -155,4 +149,4 @@ def operator_new_edge_capacity(
         p = (hits[op] + alpha) / (tot[op] + 2 * alpha)
         rows.append([1.0 - p, p])
     cap, q = channel_capacity(rows)
-    return cap, dict(zip(ops, q))
+    return cap, dict(zip(ops, q, strict=False))

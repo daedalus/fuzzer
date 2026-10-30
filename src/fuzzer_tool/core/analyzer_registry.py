@@ -192,9 +192,10 @@ REGISTRY.register(
 
 
 def _activate_transfer_entropy(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
+    from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection, TransferEntropy
 
-    f._te = TransferEntropy(history_length=1)
+    mode = getattr(f, "_te_correction", TECorrection.SHUFFLE)
+    f._te = TransferEntropy(history_length=1, correction=mode)
     f._te_input_history = []
     f._te_edge_history = []
     f._te_history_max = 500

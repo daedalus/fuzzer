@@ -76,9 +76,7 @@ def test_hint_is_not_derived_from_input_bytes(target_src: str) -> None:
         "formats (g722, s16le, rawvideo) are reached -- they have no magic "
         "bytes, so no sniff can select them"
     )
-    build_url = re.search(
-        r"fuzz_build_url\(char \*out.*?\n\}", target_src, re.S
-    )
+    build_url = re.search(r"fuzz_build_url\(char \*out.*?\n\}", target_src, re.S)
     assert build_url, "fuzz_build_url() not found"
     body = build_url.group(0)
     assert "fuzz_ext_override()" in body and "fuzz_sniff_ext(" in body, (
@@ -101,9 +99,7 @@ def test_sniff_table_stays_small(target_src: str) -> None:
 
 def test_sub_resource_io_is_blocked(target_src: str) -> None:
     """A parsed playlist must not be able to open local files."""
-    assert re.search(
-        r'av_dict_set\(&opts,\s*"protocol_whitelist",\s*""', target_src
-    ), (
+    assert re.search(r'av_dict_set\(&opts,\s*"protocol_whitelist",\s*""', target_src), (
         "protocol_whitelist must be empty: once the filename hint is live a "
         "playlist demuxer opens the segments it parsed, relative to our url "
         "and through the file protocol"
@@ -119,14 +115,12 @@ def test_playlist_reload_loops_are_bounded(target_src: str) -> None:
     demuxer never polls through.
     """
     assert re.search(r'av_dict_set\(&opts,\s*"max_reload",\s*"0"', target_src)
-    assert re.search(
-        r'av_dict_set\(&opts,\s*"m3u8_hold_counters",\s*"0"', target_src
-    )
+    assert re.search(r'av_dict_set\(&opts,\s*"m3u8_hold_counters",\s*"0"', target_src)
 
 
 def test_interrupt_callback_is_armed_per_execution(target_src: str) -> None:
     """A stale budget would leave later executions with no escape hatch."""
     assert "fuzz_interrupt_cb" in target_src
-    assert re.search(
-        r"fuzz_interrupt_budget\s*=\s*FUZZ_INTERRUPT_BUDGET", target_src
-    ), "the budget must be reset on every open, not just initialised once"
+    assert re.search(r"fuzz_interrupt_budget\s*=\s*FUZZ_INTERRUPT_BUDGET", target_src), (
+        "the budget must be reset on every open, not just initialised once"
+    )

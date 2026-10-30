@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import math
 
-from fuzzer_tool.core.operator_categories import UNCATEGORIZED, category_of
+from fuzzer_tool.core.operator_categories import category_of
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 _UNIFORM_EXPERT = "uniform"
@@ -326,8 +326,6 @@ class Exp4Scheduler:
         return {
             "exp4_pulls": self._total_pulls,
             "exp4_experts": len(self.weights),
-            "exp4_top_expert": (
-                max(self.weights, key=self.weights.get) if self.weights else None
-            ),
+            "exp4_top_expert": (max(self.weights, key=self.weights.get) if self.weights else None),
             "exp4_weights": {k: round(v, 6) for k, v in sorted(self.weights.items())},
         }
