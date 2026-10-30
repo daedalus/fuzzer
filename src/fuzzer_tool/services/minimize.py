@@ -60,6 +60,9 @@ _SO_SUFFIXES = (".so", ".dylib", ".dll")
 # Seeds between heap trims; malloc_trim walks every arena.
 _TRIM_EVERY = 100
 
+# Replay return code of a timed-out run (spawn and in-process alike).
+_TIMEOUT_RC = -1
+
 
 class PruneMode(Enum):
     """Coverage-mode pruning criterion."""
@@ -254,6 +257,25 @@ def _pick_seeds(files: list[Path], max_seeds: int, rng: RandPool) -> list[Path]:
     return [files[i] for i in sorted(rng.sample(n, max_seeds))]
 
 
+def _split_oversized(files: list[Path], max_bytes: int) -> tuple[list[Path], list[Path]]:
+    """(*files* to replay, *files* over *max_bytes*); cap 0 is off.
+
+    Oversized seeds are never measured, so they are kept, not pruned.
+    A missing file stays in the replay list, which reports it.
+    """
+    if max_bytes <= 0:
+        return files, []
+
+    replay, oversized = [], []
+    for f in files:
+        try:
+            big = f.stat().st_size > max_bytes
+        except OSError:
+            big = False
+        (oversized if big else replay).append(f)
+    return replay, oversized
+
+
 def minimize_corpus(
     target: str,
     corpus_dir: str,
@@ -275,6 +297,7 @@ def minimize_corpus(
     edge_components: Switch = Switch.OFF,
     count_items: CountItems = CountItems.OFF,
     hall: Switch = Switch.OFF,
+    max_seed_bytes: int = 0,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -309,6 +332,8 @@ def minimize_corpus(
             matrix after stripping near-universal edges; coverage mode only.
         hall: ON adds a distinct seed per rare edge to the kept set (Hall
             matching, core/sdr.py) and prints the report; coverage mode only.
+        max_seed_bytes: Seeds larger than this are kept unreplayed (0=off);
+            coverage mode only.
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -368,6 +393,7 @@ def minimize_corpus(
             edge_components=edge_components,
             count_items=count_items,
             hall=hall,
+            max_seed_bytes=max_seed_bytes,
         )
     else:
         kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path, fuzzy_dedup)
@@ -442,6 +468,7 @@ def _minimize_with_coverage(
     edge_components: Switch = Switch.OFF,
     count_items: CountItems = CountItems.OFF,
     hall: Switch = Switch.OFF,
+    max_seed_bytes: int = 0,
 ) -> tuple[int, int]:
     """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -490,16 +517,21 @@ def _minimize_with_coverage(
                 return len(corpus_files), 0
             replay = _runner_replay(runner)
 
+        to_replay, oversized = _split_oversized(corpus_files, max_seed_bytes)
+        if oversized:
+            print(f"[*] Kept unreplayed: {len(oversized)} seeds over {max_seed_bytes} bytes")
+
         start_time = time.time()
         unique_edges = set()
         replayed_counts: list[int] = []
-        for i, fpath in enumerate(corpus_files):
+        timeouts = 0
+        for i, fpath in enumerate(to_replay):
             if not fpath.exists():
                 print(f"[!] Skipping missing corpus file: {fpath}")
                 continue
             data = fpath.read_bytes()
             shm.reset_edge_map()
-            replay(data)
+            timeouts += replay(data)[0] == _TIMEOUT_RC
             ids, items = observe()
             book.add(str(fpath), items, len(data))
             unique_edges.update(ids.tolist())
@@ -516,10 +548,10 @@ def _minimize_with_coverage(
                         else:
                             print(f"\r[*] Trimmed {freed}KB heap", end=" ", flush=True)
 
-            if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
+            if (i + 1) % 10 == 0 or (i + 1) == len(to_replay):
                 elapsed = time.time() - start_time
                 files_done = i + 1
-                total_files = len(corpus_files)
+                total_files = len(to_replay)
                 live_kb = None
                 with contextlib.suppress(Exception):
                     live_kb = libc_mem.current_rss() >> 10
@@ -553,6 +585,10 @@ def _minimize_with_coverage(
 
     print()
 
+    # Timed-out seeds keep only the coverage reached before the deadline.
+    if timeouts:
+        print(f"[*] Timed out: {timeouts}/{len(to_replay)} seeds (-t {timeout:g}s)")
+
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # Refuse to prune on a total coverage blackout. Both set-cover and
@@ -577,7 +613,7 @@ def _minimize_with_coverage(
         return len(corpus_files), 0
 
     print(f"[*] Total unique edges: {len(unique_edges)}")
-    print(f"[*] Coverage twins collapsed: {len(corpus_files) - len(book.edges)}")
+    print(f"[*] Coverage twins collapsed: {len(to_replay) - len(book.edges)}")
 
     covered_files = _prune(book, prune, target_frac, map_entries)
     if hall is Switch.ON:
@@ -589,9 +625,10 @@ def _minimize_with_coverage(
     if edge_components is Switch.ON:
         print(components_report({k: _edge_ids(e) for k, e in book.edges.items()}))
 
+    # Unmeasured, so kept as-is.
     return _commit_results(
         corpus_files,
-        covered_files,
+        covered_files + [str(f) for f in oversized],
         output_dir,
         corpus_path,
         batch_mode=batch_mode,

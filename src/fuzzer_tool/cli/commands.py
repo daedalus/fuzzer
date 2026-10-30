@@ -1588,6 +1588,7 @@ def cmd_minimize(args):
         edge_components=edge_comp,
         count_items=count_mode,
         hall=hall,
+        max_seed_bytes=args.max_seed_bytes,
     )
 
     if removed == 0:
@@ -7045,6 +7046,13 @@ def main() -> int:
         "differ only in how often an edge ran are kept. 'bucket' = AFL count buckets (what "
         "the virgin map treats as new coverage), 'thermo' = nested count >= 2^k levels "
         "(fewer seeds kept)",
+    )
+    min_parser.add_argument(
+        "--max-seed-bytes",
+        type=int,
+        default=0,
+        help="With -c: keep seeds larger than N bytes without replaying them (0=off). "
+        "Bounds replay time on corpora with a few huge inputs",
     )
     min_parser.set_defaults(func=cmd_minimize)
 

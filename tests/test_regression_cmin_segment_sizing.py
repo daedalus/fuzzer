@@ -179,7 +179,7 @@ class TestSegmentIsSizedInBytesForTheEntriesAdvertised:
             # segment it would have attached to are both only live now.
             captured.update(env or {})
             captured["_seg_bytes"] = _segment_bytes(int((env or {})["__AFL_SHM_ID"]))
-            return None
+            return 0, "", 0  # run_target_stdin's (rc, stderr, pid)
 
         monkeypatch.setattr(minimize, "run_target_stdin", fake_run_stdin, raising=False)
         monkeypatch.setattr(
