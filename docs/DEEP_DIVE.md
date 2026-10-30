@@ -930,6 +930,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `fuzz` | Run coverage-guided fuzzing (default) |
 | `rank` | Rank corpus seeds by interestingness (edge coverage, rarity, subsumption) |
 | `minimize` | Minimize corpus by removing redundant inputs |
+| `edge-dump` | Replay corpus, pickle `{seed_id: edge ids}` per seed (no pruning) |
 | `sweep` | Linear corpus scan — replay every seed without mutations or scheduling (find missed crashes) |
 | `tmin` | Minimize a crash to smallest reproducer |
 | `replay` | Replay a crash input against the target |
@@ -1396,6 +1397,15 @@ fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 `minimize -c` calls `disable_aslr()` like `fuzz`: caller-context edge ids hash a raw return address, so under PIE+ASLR each replay got fresh ids and set-cover ran on noise (fuzzgoat: 3070 phantom edges, 430 -> 376 seeds, kept set re-replayed at 2912; fixed: 501, 430 -> 131, re-replay 501). `FUZZER_KEEP_ASLR=1` is honoured (shim uses base-relative ids). Tests: `tests/test_regression_minimize_aslr.py`.
 
 `--max-seeds N` processes a uniform N-of-n subset (`_pick_seeds`, `RandPool.sample`), kept in disk order. It was the first N on disk: `seeds/<hh>/` sorts by hash prefix, so batches only saw low-prefix seeds. Tests: `tests/test_regression_minimize_uniform_pick.py`.
+
+### Edge dump (`services/edge_export.py`)
+
+```bash
+fuzzer-tool edge-dump ./target -d corpus -o ~/edges.pkl
+fuzzer-tool edge-dump ./t.so -d corpus -o ~/edges.pkl --inprocess-direct --inprocess-func fuzz_test
+```
+
+Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(seed)` (the `id_<hash>` key) -> sorted `uint32` edge ids. Read-only: nothing pruned, no twin collapse. Same backends and flags as `minimize -c`. `pruned/`, `crashing/`, `irreplaceable/` excluded; `--max-seed-bytes` skips large seeds; timed-out seeds keep partial edges. No edges anywhere = failed measurement: nothing written, exit 1. Atomic write (tmp + rename). Tests: `tests/test_edge_export.py`.
 
 ### Set cover (`core/set_cover.py`)
 

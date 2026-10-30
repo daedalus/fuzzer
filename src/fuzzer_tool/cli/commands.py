@@ -1596,6 +1596,26 @@ def cmd_minimize(args):
     return 0
 
 
+def cmd_edge_dump(args):
+    """Replay a corpus and pickle each seed's edge ids; no pruning."""
+    if not (args.inprocess and ":" in args.target):
+        _validate_target(args.target)
+    from fuzzer_tool.services.edge_export import export_edges
+
+    n = export_edges(
+        target=args.target,
+        corpus_dir=args.corpus,
+        out_path=args.out,
+        timeout=args.timeout,
+        file_mode=args.file_mode,
+        target_args=args.target_args,
+        exec_mode=_minimize_exec_mode(args, args.target),
+        inprocess_func=args.inprocess_func,
+        max_seed_bytes=args.max_seed_bytes,
+    )
+    return 0 if n else 1
+
+
 # ── negative-bloom subcommand ─────────────────────────────────────────────────
 
 
@@ -7055,6 +7075,41 @@ def main() -> int:
         "Bounds replay time on corpora with a few huge inputs",
     )
     min_parser.set_defaults(func=cmd_minimize)
+
+    # --- edge-dump ---
+    ed_parser = subparsers.add_parser(
+        "edge-dump", help="Replay corpus, pickle {seed_id: edge ids} per seed (no pruning)"
+    )
+    ed_parser.add_argument("target", help="Path to target binary")
+    ed_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
+    ed_parser.add_argument("-o", "--out", required=True, help="Output pickle path")
+    ed_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
+    ed_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    ed_parser.add_argument(
+        "--inprocess", action="store_true", help="Replay through the in-process loader"
+    )
+    ed_parser.add_argument(
+        "--inprocess-direct",
+        action="store_true",
+        help="Direct ctypes call (alone: direct_lite; with --inprocess: direct)",
+    )
+    ed_parser.add_argument(
+        "--inprocess-func",
+        default="LLVMFuzzerTestOneInput",
+        help="Function name for in-process replay (default: LLVMFuzzerTestOneInput)",
+    )
+    ed_parser.add_argument(
+        "--max-seed-bytes", type=int, default=0, help="Skip seeds larger than N bytes (0=off)"
+    )
+    ed_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    ed_parser.set_defaults(func=cmd_edge_dump)
 
     # --- genseed ---
     genseed_parser = subparsers.add_parser(
