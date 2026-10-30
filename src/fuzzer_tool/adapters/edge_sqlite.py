@@ -8,7 +8,8 @@
     |               |          |  | 3       | s2      |  | s2          | 1       |
                                                          | s3 (empty)  | 0       |
 
-Built from ``{seed_id: uint32 edge ids}`` in one vectorized pass. ``seeds``
+Written in batches (``EdgeSqliteWriter``), each one vectorized pass and one
+transaction; ``edges.n_seeds`` is upserted, so batches add up. ``seeds``
 lists every seed, edgeless ones too, so a reader recovers the full dict.
 """
 
@@ -28,39 +29,106 @@ _SCHEMA = (
 )
 
 
+# Upsert: a batch adds its per-edge seed counts to rows earlier batches wrote.
+_UPSERT_EDGE = (
+    "INSERT INTO edges VALUES (?, ?) "
+    "ON CONFLICT(edge_id) DO UPDATE SET n_seeds = n_seeds + excluded.n_seeds"
+)
+
+
+class EdgeSqliteWriter:
+    """Batch writer: one transaction per ``write``; file created on the first one.
+
+    A killed run keeps every committed batch, so its seeds are known next run.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.known: set[str] = set()
+        self._con: sqlite3.Connection | None = None
+
+    def open(self) -> set[str]:
+        """Seed ids already in the file (empty if absent).
+
+        Raises:
+            sqlite3.DatabaseError: the file is not a DB this module wrote.
+        """
+        if not self.path.exists():
+            return set()
+
+        con = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        try:
+            self.known = {s for (s,) in con.execute("SELECT seed_id FROM seeds")}
+        finally:
+            con.close()
+        return set(self.known)
+
+    def write(self, items: list[tuple[str, np.ndarray]]) -> None:
+        """Commit *items* (seed_id, edge ids); seeds already written are dropped."""
+        fresh: dict[str, np.ndarray] = {}
+        for seed, ids in items:
+            if seed not in self.known and seed not in fresh:
+                fresh[seed] = ids
+        if not fresh:
+            return
+
+        ids, owner = _flatten(fresh)
+        seeds = list(fresh)
+
+        # Edge-sorted rows: sequential inserts into both B-trees.
+        order = np.argsort(ids, kind="stable")
+        ids, owner = ids[order], owner[order]
+        uniq, counts = np.unique(ids, return_counts=True)
+
+        con = self._connect()
+        with con:
+            con.executemany(_UPSERT_EDGE, zip(uniq.tolist(), counts.tolist(), strict=True))
+            con.executemany(
+                "INSERT INTO edge_seeds VALUES (?, ?)",
+                zip(ids.tolist(), (seeds[i] for i in owner.tolist()), strict=True),
+            )
+            con.executemany("INSERT INTO seeds VALUES (?, ?)", ((s, fresh[s].size) for s in seeds))
+        self.known.update(fresh)
+
+    def close(self) -> None:
+        if self._con is not None:
+            self._con.close()
+            self._con = None
+
+    def _connect(self) -> sqlite3.Connection:
+        """Read-write connection; schema created when the file is new."""
+        if self._con is not None:
+            return self._con
+
+        new = not self.path.exists()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._con = sqlite3.connect(self.path)
+        if new:
+            with self._con:
+                for stmt in _SCHEMA:
+                    self._con.execute(stmt)
+        return self._con
+
+
 def write_edges_sqlite(path: str | Path, edges: dict[str, np.ndarray]) -> None:
     """Write the edge-keyed inverse of *edges* to *path*, replacing any file there.
 
-    Built in ``<path>.tmp`` and renamed: no half-written DB on crash.
+    Built in ``<path>.tmp`` (one batch) and renamed: no half-written DB on crash.
     """
     out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
     tmp.unlink(missing_ok=True)
 
-    seeds = list(edges)
-    ids, owner = _flatten(edges)
-
-    # Edge-sorted rows: sequential inserts into both B-trees.
-    order = np.argsort(ids, kind="stable")
-    ids, owner = ids[order], owner[order]
-    uniq, counts = np.unique(ids, return_counts=True)
-
-    con = sqlite3.connect(tmp)
+    writer = EdgeSqliteWriter(tmp)
     try:
-        for stmt in _SCHEMA:
-            con.execute(stmt)
-        con.executemany(
-            "INSERT INTO edges VALUES (?, ?)", zip(uniq.tolist(), counts.tolist(), strict=True)
-        )
-        con.executemany(
-            "INSERT INTO edge_seeds VALUES (?, ?)",
-            zip(ids.tolist(), (seeds[i] for i in owner.tolist()), strict=True),
-        )
-        con.executemany("INSERT INTO seeds VALUES (?, ?)", ((s, edges[s].size) for s in seeds))
-        con.commit()
+        writer.write(list(edges.items()))
     finally:
-        con.close()
+        writer.close()
+
+    # An empty dict writes nothing; the replaced file is still an empty export.
+    if not tmp.exists():
+        writer._connect()
+        writer.close()
     os.replace(tmp, out)
 
 
