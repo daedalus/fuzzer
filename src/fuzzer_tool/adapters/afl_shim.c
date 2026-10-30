@@ -5141,6 +5141,33 @@ __AFL_NO_COV static void __afl_cmplog_fini_dtor(void) { __afl_cmplog_fini(); }
 
 #if __AFL_EDGE
 
+/* ── Signal API interposers: real calls ───────────────────────────────
+ *
+ * sigaction / signal / sigprocmask / pthread_sigmask are interposed for
+ * the target (hidden, see "Signal API inside a guard"). The shim's own
+ * calls below must reach libc, so they are routed here by macro; the
+ * macro is #undef'd at the end of the shim, before the target's code. */
+typedef int (*__afl_sigaction_fn)(int, const struct sigaction *, struct sigaction *);
+typedef int (*__afl_sigmask_fn)(int, const sigset_t *, sigset_t *);
+
+__AFL_GCC_NO_COV static int __afl_real_sigaction(int sig, const struct sigaction *act,
+                                                 struct sigaction *old) {
+    static __afl_sigaction_fn real;
+    if (!real) real = (__afl_sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
+    if (!real) { errno = ENOSYS; return -1; }
+    return real(sig, act, old);
+}
+
+/* pthread_sigmask convention: 0 or an errno value. */
+__AFL_GCC_NO_COV static int __afl_real_sigmask(int how, const sigset_t *set, sigset_t *old) {
+    static __afl_sigmask_fn real;
+    if (!real) real = (__afl_sigmask_fn)dlsym(RTLD_NEXT, "pthread_sigmask");
+    if (!real) return ENOSYS;
+    return real(how, set, old);
+}
+
+#define sigaction(sig, act, old) __afl_real_sigaction(sig, act, old)
+
 /* ── Crash signal handler ─────────────────────────────────────────────
  * Uses sigsetjmp/siglongjmp instead of the traditional restore-and-re-raise
  * approach because glibc's abort() resets the handler to SIG_DFL after the
@@ -5180,6 +5207,15 @@ static int __afl_guard_signals[] = {
 static __thread sigjmp_buf *volatile __afl_guard_jmp = NULL;
 static __thread volatile sig_atomic_t __afl_guard_timed = 0;  /* active frame is timed */
 static volatile sig_atomic_t __afl_handlers_live = 0;
+/* A guarded call is in flight, process-wide, and the thread running it.
+ * Dispositions and exit() are process-wide; a worker the entry spawned has
+ * no frame, so these route its exit() to the owner. Plain stores, not a
+ * locked counter (+10 ns per call, ~8%): with guards on several host
+ * threads at once, the latest outermost one wins. */
+static volatile int __afl_guards_active = 0;
+static pthread_t __afl_guard_owner;
+/* __AFL_JMP_EXIT | status from a worker's exit(), for the owner. */
+static volatile sig_atomic_t __afl_exit_pending = 0;
 /* si_addr of the last guarded crash on this thread; read by
  * __afl_last_fault_addr() (guard-page overread labelling). */
 static __thread uintptr_t __afl_guard_fault = 0;
@@ -5516,6 +5552,82 @@ __AFL_GCC_NO_COV static void __afl_check_crash_handlers(void) {
         __afl_handlers_live = 0;
         return;
     }
+}
+
+/* ── Signal API inside a guard ────────────────────────────────────────
+ *
+ * Hidden: binds the wrapper and the library objects linked into it, never
+ * the host (same pattern as exit()). Outside a guard, all are the real
+ * calls.
+ *
+ *   sigaction / signal  a crash handler the target installs mid-call
+ *                       returned into the same fault forever (SIG_IGN:
+ *                       the kernel killed the host). Kept as the previous
+ *                       owner instead: the guard still catches the crash,
+ *                       strays outside it reach the target's handler, and
+ *                       the target reads back what it set.
+ *   sigprocmask /       a blocked hardware-fault signal is forced to
+ *   pthread_sigmask     SIG_DFL by the kernel and killed the host. Guard,
+ *                       timer and exit signals stay deliverable on the
+ *                       guarded thread; the rest of the mask applies.
+ *
+ * Not covered: sigset(), bsd_signal(), sysv_signal(), raw syscalls. */
+#define __AFL_EXIT_SIG           (SIGRTMIN + 6)   /* worker exit(), see Worker exit() */
+
+__AFL_GCC_NO_COV static int __afl_guard_index(int sig) {
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
+        if (__afl_guard_signals[i] == sig) return i;
+    return -1;
+}
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV int (sigaction)(int sig, const struct sigaction *act, struct sigaction *old) {
+    int i = __afl_guard_index(sig);
+    if (i < 0 || !__afl_guards_active || !__afl_handlers_live)
+        return __afl_real_sigaction(sig, act, old);
+
+    if (old) *old = __afl_old_handlers[i];
+    if (act) __afl_old_handlers[i] = *act;
+    return 0;
+}
+
+/* glibc's BSD semantics: SA_RESTART, the signal masked in its handler. */
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void (*(signal)(int sig, void (*handler)(int)))(int) {
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, sig);
+    sa.sa_flags = SA_RESTART;
+    if ((sigaction)(sig, &sa, &old) < 0) return SIG_ERR;
+    return old.sa_handler;
+}
+
+/* *set* without the signals a guard needs, when this thread is guarded. */
+__AFL_GCC_NO_COV static const sigset_t *__afl_mask_filter(int how, const sigset_t *set,
+                                                         sigset_t *tmp) {
+    if (!set || how == SIG_UNBLOCK || !__afl_guard_jmp) return set;
+    *tmp = *set;
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
+        sigdelset(tmp, __afl_guard_signals[i]);
+    sigdelset(tmp, __AFL_TIMEOUT_SIG);
+    sigdelset(tmp, __AFL_EXIT_SIG);
+    return tmp;
+}
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV int pthread_sigmask(int how, const sigset_t *set, sigset_t *old) {
+    sigset_t tmp;
+    return __afl_real_sigmask(how, __afl_mask_filter(how, set, &tmp), old);
+}
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV int sigprocmask(int how, const sigset_t *set, sigset_t *old) {
+    int e = pthread_sigmask(how, set, old);
+    if (!e) return 0;
+    errno = e;
+    return -1;
 }
 
 /* ── Guard timer ──────────────────────────────────────────────────────
@@ -6186,6 +6298,63 @@ __AFL_GCC_NO_COV uintptr_t __afl_last_fault_addr(void) {
     return __afl_guard_fault;
 }
 
+/* ── Worker exit() ────────────────────────────────────────────────────
+ *
+ * exit() on a worker thread the entry spawned ended the host: the worker
+ * has no frame to jump to, and jumping onto the owner's stack from another
+ * thread is not possible. The worker posts its status and signals the
+ * owner, whose handler leaves through the owner's guard; the worker ends
+ * itself only (pthread_exit):
+ *
+ *   owner: guard ─► entry ─► pthread_join ··· EXIT_SIG ─► siglongjmp ─► status
+ *   worker:                  exit(5) ─► pending=5, pthread_kill, pthread_exit
+ *
+ * A pending status is dropped at the next outermost guard, so a late
+ * signal cannot end a later call. Residual: a worker that exits while the
+ * owner is already joining it stays unjoined (its stack is not freed). */
+__AFL_GCC_NO_COV static void __afl_guard_enter(void) {
+    __afl_guard_owner = pthread_self();
+    __afl_exit_pending = 0;
+    __afl_guards_active = 1;
+}
+
+__AFL_GCC_NO_COV static void __afl_guard_leave(void) {
+    __afl_guards_active = 0;
+}
+
+__AFL_GCC_NO_COV static void __afl_exit_handler(int sig, siginfo_t *si, void *uc) {
+    (void)sig; (void)si; (void)uc;
+    sigjmp_buf *jb = __afl_guard_jmp;
+    int code = __afl_exit_pending;
+    if (!jb || !code) return;
+    __afl_exit_pending = 0;
+    __afl_guard_timed = 0;
+    siglongjmp(*jb, code);
+}
+
+__AFL_GCC_NO_COV static int __afl_exit_sig_ready(void) {
+    static volatile int live = 0;
+    if (live) return 1;
+    struct sigaction sa;
+    sa.sa_sigaction = __afl_exit_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, __AFL_TIMEOUT_SIG);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+    if (sigaction(__AFL_EXIT_SIG, &sa, NULL) != 0) return 0;
+    live = 1;
+    return 1;
+}
+
+/* Hand *status* to the owner and end this thread; returns only when no
+ * guard runs (the caller then exits for real). */
+__AFL_GCC_NO_COV static void __afl_worker_exit(int status) {
+    if (!__afl_guards_active || !__afl_exit_sig_ready()) return;
+    __afl_exit_pending = __AFL_JMP_EXIT | (status & 0xFF);
+    pthread_detach(pthread_self());
+    pthread_kill(__afl_guard_owner, __AFL_EXIT_SIG);
+    pthread_exit(NULL);
+}
+
 /* ── Guarded call wrapper ─────────────────────────────────────────────
  *
  * InProcessRunner's direct_lite mode calls this instead of the fuzz entry.
@@ -6219,7 +6388,10 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     uint64_t wg_prev = __afl_wguard_snap();
 
     /* Outermost frame starts a run; a nested call is part of its caller's. */
-    if (!prev) __afl_run_reset();
+    if (!prev) {
+        __afl_run_reset();
+        __afl_guard_enter();
+    }
 
     int code = sigsetjmp(jb, 1);
     if (code == 0) {
@@ -6232,6 +6404,7 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
         int rc = entry(data, size);
         __afl_guard_jmp = prev;
         __afl_guard_timed = prev_timed;
+        if (!prev) __afl_guard_leave();
         if (restore_budget) __afl_timer_budget(prev_budget);
         __afl_ph_leave(ph_prev);
         __afl_sancov_fold();
@@ -6241,6 +6414,7 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     __afl_wguard_land(wg_prev);
     __afl_guard_jmp = prev;
     __afl_guard_timed = prev_timed;
+    if (!prev) __afl_guard_leave();
     if (restore_budget) __afl_timer_budget(prev_budget);
     __afl_ph_unwind(ph_prev);
     __afl_sancov_fold();
@@ -6275,6 +6449,8 @@ __AFL_GCC_NO_COV static void __afl_guard_atfork_child(void) {
     __afl_guard_timed = 0;
     __afl_timer_state = 0;      /* POSIX timers are not inherited */
     __afl_timer_budget_us = 0;
+    __afl_guards_active = 0;    /* the parent's guards are not the child's */
+    __afl_exit_pending = 0;
 }
 
 /* ── exit() / _exit() inside a guarded call ──────────────────────────
@@ -6293,6 +6469,7 @@ __AFL_GCC_NO_COV static void __afl_guard_escape(int status) {
     sigjmp_buf *jb = __afl_guard_jmp;
     if (jb)
         siglongjmp(*jb, __AFL_JMP_EXIT | (status & 0xFF));
+    __afl_worker_exit(status);
 }
 
 __attribute__((visibility("hidden"), noreturn))
@@ -6916,3 +7093,6 @@ __AFL_NO_COV static void __afl_preload_init(void) {
 #if defined(__clang__)
 #pragma clang section data="" bss=""
 #endif
+
+/* The target's sigaction() calls bind to the interposer, not the macro. */
+#undef sigaction

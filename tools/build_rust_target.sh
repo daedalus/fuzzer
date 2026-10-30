@@ -42,6 +42,8 @@ WRAPPER_SRC="$ROOT/targets/rust_target.c"
 SHIM="$ROOT/src/fuzzer_tool/adapters/afl_shim.c"
 OUT_DIR="${FUZZ_BUILD_ROOT:-$ROOT/targets}"
 FRAME_POINTER="-fno-omit-frame-pointer"  # matches build_targets.sh: ctx hashing needs it
+# ASAN_CFLAGS / RUST_ASAN_FLAGS: recover mode, shared with build_targets.sh.
+. "$ROOT/tools/lib/asan_flags.sh"
 
 WITH_ASAN=0
 for arg in "$@"; do
@@ -224,20 +226,20 @@ if [ "$WITH_ASAN" -eq 1 ]; then
                  "to enable this. Falling back to coverage-only ASAN (the" \
                  "wrapper only, same as without nightly)."
             ASAN_CC="$CC"
-            build_variant "_asan" "-fsanitize=address" "$ASAN_CC" "$RLIB" "$RUST_LIBS -lasan"
+            build_variant "_asan" "$ASAN_CFLAGS" "$ASAN_CC" "$RLIB" "$RUST_LIBS -lasan"
         else
             ok "using $ASAN_CC (matches nightly's LLVM $LLVM_MAJOR) for real Rust-side ASAN"
             ASAN_TARGET_DIR="$(mktemp -d)"
             ( cd "$CRATE_DIR" && \
               RUSTC="$NIGHTLY_RUSTC" \
-              RUSTFLAGS="-Z sanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc-guard -Cllvm-args=-sanitizer-coverage-trace-compares" \
+              RUSTFLAGS="$RUST_ASAN_FLAGS -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc-guard -Cllvm-args=-sanitizer-coverage-trace-compares" \
               cargo build --release --target-dir "$ASAN_TARGET_DIR" )
             ASAN_RLIB="$ASAN_TARGET_DIR/release/libbuggy_rust_target.a"
             [ -f "$ASAN_RLIB" ] || fail "expected ASAN staticlib not found: $ASAN_RLIB"
             # No explicit -lasan here: forcing one on top of what clang
             # auto-selects is exactly what produced the "incompatible
             # runtimes" error above when this was first tried.
-            build_variant "_asan" "-fsanitize=address" "$ASAN_CC" "$ASAN_RLIB" "$RUST_LIBS"
+            build_variant "_asan" "$ASAN_CFLAGS" "$ASAN_CC" "$ASAN_RLIB" "$RUST_LIBS"
             warn "in-process (.so, dlopen via ctypes) loading of this ASAN" \
                  "build was NOT verified to work — confirmed failing with" \
                  "an undefined-symbol error when loaded the naive way." \
@@ -254,7 +256,7 @@ if [ "$WITH_ASAN" -eq 1 ]; then
              "code itself (stable rustc has no -Z sanitizer=address); only" \
              "targets/rust_target.c's own few lines get ASAN coverage." \
              "Run tools/fetch_rust_nightly.sh to enable real Rust-side ASAN."
-        build_variant "_asan" "-fsanitize=address" "$CC" "$RLIB" "$RUST_LIBS -lasan"
+        build_variant "_asan" "$ASAN_CFLAGS" "$CC" "$RLIB" "$RUST_LIBS -lasan"
     fi
 fi
 

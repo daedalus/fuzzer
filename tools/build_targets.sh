@@ -348,14 +348,8 @@ FRAME_POINTER="-fno-omit-frame-pointer"
 # Not covered: ASAN's per-module name keeps the path as passed (clang 18).
 DEBUG_CFLAGS="-g -ffile-prefix-map=$REPO_ROOT=/fuzz/src -ffile-prefix-map=$VENDOR=/fuzz/vendor -ffile-prefix-map=$TARGETS=/fuzz/build"
 
-# ASAN flags for every target and library pass. Recover mode is required by
-# in-process (direct_lite): the wrapper runs it with halt_on_error=0, which
-# only a -fsanitize-recover=address check site honours. A plain site runs
-# ASAN's Die() inside the fuzzer -- fuzzgoat_read_asan.so killed it on the
-# first injected bug. It is per call site, so a library built without it
-# stays fatal under a recover wrapper. Executables are unaffected: their
-# runtime default is still halt_on_error=1.
-ASAN_CFLAGS="-fsanitize=address -fsanitize-recover=address"
+# ASAN flags for every target and library pass (recover mode: see the file).
+. "$REPO_ROOT/tools/lib/asan_flags.sh"
 
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
