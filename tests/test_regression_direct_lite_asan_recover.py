@@ -28,6 +28,7 @@ from fuzzer_tool.services.fuzzer import _asan_fatal_in_process
 from tests.conftest import requires_clang
 
 SCRIPT = Path(__file__).parent.parent / "tools" / "build_targets.sh"
+ASAN_FLAGS = SCRIPT.parent / "lib" / "asan_flags.sh"
 
 RECOVER = "-fsanitize-recover=address"
 
@@ -51,8 +52,8 @@ def script_text() -> str:
     return SCRIPT.read_text()
 
 
-def test_regression_asan_cflags_recover(script_text):
-    m = re.search(r'^ASAN_CFLAGS="([^"]*)"', script_text, re.M)
+def test_regression_asan_cflags_recover():
+    m = re.search(r'^ASAN_CFLAGS="([^"]*)"', ASAN_FLAGS.read_text(), re.M)
     assert m, "ASAN_CFLAGS not defined"
     assert "-fsanitize=address" in m.group(1)
     assert RECOVER in m.group(1)
