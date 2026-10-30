@@ -57,6 +57,9 @@ class ExecMode(Enum):
 DEFAULT_INPROCESS_FUNC = "LLVMFuzzerTestOneInput"
 _SO_SUFFIXES = (".so", ".dylib", ".dll")
 
+# Seeds between heap trims; malloc_trim walks every arena.
+_TRIM_EVERY = 100
+
 
 class PruneMode(Enum):
     """Coverage-mode pruning criterion."""
@@ -503,7 +506,7 @@ def _minimize_with_coverage(
             replayed_counts.append(ids.size)
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
             # Reclaim heap memory periodically like in fuzz mode
-            if (i + 1) % 100 == 0:
+            if (i + 1) % _TRIM_EVERY == 0:
                 with contextlib.suppress(Exception):
                     freed = libc_mem.trim_heap() >> 10
                     if freed > 0:
@@ -518,14 +521,7 @@ def _minimize_with_coverage(
                 files_done = i + 1
                 total_files = len(corpus_files)
                 live_kb = None
-                trim_str = ""
                 with contextlib.suppress(Exception):
-                    freed = libc_mem.trim_heap() >> 10
-                    if freed > 0:
-                        if freed >= 1024:
-                            trim_str = f" | trim: {freed // 1024}MB"
-                        else:
-                            trim_str = f" | trim: {freed}KB"
                     live_kb = libc_mem.current_rss() >> 10
                 if elapsed > 0 and files_done > 0:
                     rate = files_done / elapsed
@@ -536,7 +532,7 @@ def _minimize_with_coverage(
                         rss_str += f" | live: {_fmt_kb(live_kb)}"
                     print(
                         f"\r[*] Replayed {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
-                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s | elapsed: {elapsed:.1f}s | edges: {len(unique_edges)}{rss_str}{trim_str}",
+                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s | elapsed: {elapsed:.1f}s | edges: {len(unique_edges)}{rss_str}",
                         end="",
                         flush=True,
                     )
@@ -545,7 +541,7 @@ def _minimize_with_coverage(
                     if live_kb is not None:
                         rss_str += f" | live: {_fmt_kb(live_kb)}"
                     print(
-                        f"\r[*] Replayed {files_done}/{total_files} | elapsed: {elapsed:.1f}s | edges: {len(unique_edges)}{rss_str}{trim_str}...",
+                        f"\r[*] Replayed {files_done}/{total_files} | elapsed: {elapsed:.1f}s | edges: {len(unique_edges)}{rss_str}...",
                         end="",
                         flush=True,
                     )
