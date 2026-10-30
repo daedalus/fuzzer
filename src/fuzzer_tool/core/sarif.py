@@ -13,6 +13,7 @@ Pure: dicts in, dict out. Reading sidecars and writing the file is
 from __future__ import annotations
 
 import posixpath
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Any
 
@@ -50,8 +51,11 @@ _TIERS: dict[str, tuple[Level, float]] = {
 _DEFAULT_TIER = (Level.WARNING, 5.0)
 _TIER_RANK = {t: i for i, t in enumerate(_TIERS)}
 
+# Crash .json sidecar: heterogeneous JSON.
+Sidecar = dict[str, Any]
 
-def _str(side: dict, key: str) -> str:
+
+def _str(side: Sidecar, key: str) -> str:
     """Sidecar string field; anything else reads as empty."""
     v = side.get(key)
     return v if isinstance(v, str) else ""
@@ -61,7 +65,7 @@ def _is_runtime(f: Frame) -> bool:
     return f.func.startswith(_RUNTIME_PREFIXES) or any(d in f.path for d in _RUNTIME_DIRS)
 
 
-def _artifact(path: str, src_root: str) -> dict:
+def _artifact(path: str, src_root: str) -> dict[str, Any]:
     """Relative to SRCROOT when *path* lies under *src_root*, else absolute.
 
     Paths are normalized first: ``/root/../etc`` is not under ``/root``.
@@ -77,7 +81,7 @@ def _artifact(path: str, src_root: str) -> dict:
     return {"uri": norm, "uriBaseId": SRCROOT} if src_root else {"uri": norm}
 
 
-def _location(f: Frame, src_root: str) -> dict:
+def _location(f: Frame, src_root: str) -> dict[str, Any]:
     """physicalLocation when the frame has a file, plus its function name."""
     loc: dict[str, Any] = {}
     if f.path:
@@ -106,7 +110,7 @@ def _primary(frames: list[Frame], src_root: str) -> Frame | None:
     return sited[0] if sited else None
 
 
-def _message(side: dict, sanitizer: str, error: str, site: Frame | None) -> str:
+def _message(side: Sidecar, sanitizer: str, error: str, site: Frame | None) -> str:
     """One line: "AddressSanitizer: heap-use-after-free READ of size 4 at 0x.. in foo"."""
     parts = [f"{sanitizer or 'crash'}: {error or 'unknown'}"]
     access, size = side.get("access_type"), side.get("access_size")
@@ -120,13 +124,13 @@ def _message(side: dict, sanitizer: str, error: str, site: Frame | None) -> str:
     return " ".join(parts)
 
 
-def _thread_flow(frames: list[Frame], src_root: str) -> dict:
+def _thread_flow(frames: list[Frame], src_root: str) -> dict[str, Any]:
     """Crash stack in execution order (outermost first), as SARIF wants."""
     steps = [{"location": _location(f, src_root)} for f in reversed(frames)]
     return {"threadFlows": [{"locations": steps}]}
 
 
-def _result(side: dict, src_root: str, rules: dict[str, dict]) -> dict:
+def _result(side: Sidecar, src_root: str, rules: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """One SARIF result; registers its rule in *rules*."""
     sanitizer, error = _str(side, "sanitizer"), _str(side, "error_type")
     rule_id = f"{sanitizer}/{error}" if sanitizer and error else UNKNOWN_RULE
@@ -164,7 +168,7 @@ def _result(side: dict, src_root: str, rules: dict[str, dict]) -> dict:
     return res
 
 
-def _add_rule(rules: dict[str, dict], rule_id: str, level: Level, score: float) -> None:
+def _add_rule(rules: dict[str, dict[str, Any]], rule_id: str, level: Level, score: float) -> None:
     """Register *rule_id*; its severity is the highest of its results."""
     rule = rules.get(rule_id)
     if rule is None:
@@ -183,10 +187,10 @@ def _add_rule(rules: dict[str, dict], rule_id: str, level: Level, score: float) 
         rule["defaultConfiguration"]["level"] = level.value
 
 
-def _properties(side: dict) -> dict:
+def _properties(side: Sidecar) -> dict[str, Any]:
     """Triage fields a reviewer needs to reproduce the crash."""
     keys = ("exploitability", "crash_input", "target", "parent_seed_hash", "cluster_id")
-    props = {k: _str(side, k) for k in keys if _str(side, k)}
+    props: dict[str, Any] = {k: _str(side, k) for k in keys if _str(side, k)}
     ops = side.get("mutation_ops")
     if isinstance(ops, list) and ops:
         props["mutation_ops"] = [str(o) for o in ops]
@@ -199,12 +203,45 @@ def _properties(side: dict) -> dict:
     return props
 
 
-def _rank(side: dict) -> int:
+def _rank(side: Sidecar) -> int:
     """Sort key: CRITICAL first, unknown tiers last."""
     return _TIER_RANK.get(_str(side, "exploitability"), len(_TIER_RANK))
 
 
-def build_sarif(sidecars: list[dict], src_root: str) -> dict:
+def _top_clusters(sidecars: Iterable[Sidecar], k: int) -> list[Sidecar]:
+    """First sidecar of each of the *k* most severe clusters, most severe first.
+
+    Same pick as a stable sort by tier then first-wins dedup per cluster, but
+    streaming: at most 2k sidecars live. Over 2k, prune to the best k; the
+    k-th kept becomes the cut, and nothing at or past it can re-enter, since
+    k better clusters already exist. Order key = (tier rank, input index).
+    """
+    if k <= 0:
+        return []
+
+    best: dict[str | int, tuple[int, int, Sidecar]] = {}
+    cut = (len(_TIER_RANK) + 1, 0)  # past every rank: nothing cut yet
+    for i, side in enumerate(sidecars):
+        key = (_rank(side), i)
+        if key >= cut:
+            continue
+
+        # No cluster id: its own cluster (int key never meets a str id).
+        cid: str | int = _str(side, "cluster_id") or i
+        cur = best.get(cid)
+        if cur is not None and cur[:2] < key:
+            continue
+        best[cid] = (key[0], i, side)
+
+        if len(best) > 2 * k:
+            kept = sorted(best.items(), key=lambda kv: kv[1][:2])[:k]
+            cut = kept[-1][1][:2]
+            best = dict(kept)
+
+    return [v[2] for v in sorted(best.values(), key=lambda v: v[:2])[:k]]
+
+
+def build_sarif(sidecars: Iterable[Sidecar], src_root: str) -> dict[str, Any]:
     """SARIF log for crash *sidecars* (``CrashMetadata.to_dict()`` shape).
 
     Args:
@@ -218,14 +255,8 @@ def build_sarif(sidecars: list[dict], src_root: str) -> dict:
     """
     src_root = posixpath.normpath(src_root) if src_root else ""
 
-    # One result per cluster; first sidecar wins.
-    seen: dict[str, dict] = {}
-    for side in sorted(sidecars, key=_rank):
-        key = _str(side, "cluster_id") or str(len(seen))
-        seen.setdefault(key, side)
-
-    rules: dict[str, dict] = {}
-    results = [_result(s, src_root, rules) for s in list(seen.values())[:MAX_RESULTS]]
+    rules: dict[str, dict[str, Any]] = {}
+    results = [_result(s, src_root, rules) for s in _top_clusters(sidecars, MAX_RESULTS)]
 
     run: dict[str, Any] = {
         "tool": {

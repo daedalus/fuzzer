@@ -13,10 +13,11 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.libc_symbols import libc_symbol
@@ -1160,7 +1161,7 @@ def saved_crash_sigs(crashes_dir: Path) -> list[str]:
         return []
 
     out: list[str] = []
-    for path in sorted(crashes_dir.glob("crash_*.json")):
+    for path in sorted(crashes_dir.glob(CRASH_SIDECAR_GLOB)):
         sig = _sidecar_sig(path)
         if sig is not None and sig not in out:
             out.append(sig)
@@ -1430,17 +1431,35 @@ MIN_CRASH_EXT = ".min"
 _CRASH_EXTS = (".bin", ".txt", ".sh", ".hex", ".json", MIN_CRASH_EXT)
 
 
-def load_crash_sidecars(crashes_dir: Path) -> list[dict]:
+# Crash .json sidecars written by save_crash().
+CRASH_SIDECAR_GLOB = "crash_*.json"
+
+
+def _read_regular(path: Path) -> str:
+    """Text of *path*; OSError unless it is a regular file.
+
+    O_NONBLOCK: opening a FIFO for read would otherwise wait for a writer.
+    fstat on the open fd, not stat on the name, so a swap cannot slip past.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, encoding="utf-8") as fh:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"not a regular file: {path}")
+        return fh.read()
+
+
+def iter_crash_sidecars(crashes_dir: Path) -> Iterator[dict[str, Any]]:
     """``.json`` sidecars written by save_crash, each with ``crash_input`` set.
 
-    ``crash_input`` is the sibling ``.bin`` name. Corrupt or non-object
-    sidecars are logged and skipped; other ``*.json`` files are ignored.
+    ``crash_input`` is the sibling ``.bin`` name. Corrupt, non-object or
+    non-regular sidecars are logged and skipped; other ``*.json`` files are
+    ignored. Lazy: one sidecar in memory at a time.
     """
-    out: list[dict] = []
-    for f in sorted(Path(crashes_dir).glob("crash_*.json")):
+    for f in sorted(Path(crashes_dir).glob(CRASH_SIDECAR_GLOB)):
+        # RecursionError: deeply nested JSON from a hostile crash dir.
         try:
-            side = json.loads(f.read_text())
-        except (OSError, ValueError) as e:
+            side = json.loads(_read_regular(f))
+        except (OSError, ValueError, RecursionError) as e:
             log.warning("Skipping unreadable crash sidecar %s: %s", f, e)
             continue
         if not isinstance(side, dict):
@@ -1448,8 +1467,12 @@ def load_crash_sidecars(crashes_dir: Path) -> list[dict]:
             continue
 
         side["crash_input"] = f.with_suffix(".bin").name
-        out.append(side)
-    return out
+        yield side
+
+
+def load_crash_sidecars(crashes_dir: Path) -> list[dict[str, Any]]:
+    """All of iter_crash_sidecars() as a list."""
+    return list(iter_crash_sidecars(crashes_dir))
 
 
 def _cluster_files(crashes_dir: Path, cluster_id: str) -> list[Path]:
