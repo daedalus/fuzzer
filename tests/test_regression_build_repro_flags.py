@@ -100,9 +100,10 @@ def test_regression_every_debug_compile_uses_debug_cflags(script_text: str):
 def test_regression_ffmpeg_gets_debug_cflags(script_text: str):
     """FFmpeg adds -g itself; the map rides in COV_FLAGS (--extra-cflags),
     set before cfg_stamp so a flag change reconfigures."""
-    hook = script_text.find('COV_FLAGS="$COV_FLAGS $DEBUG_CFLAGS"')
-    assert hook != -1, "FFmpeg COV_FLAGS lacks $DEBUG_CFLAGS"
-    assert hook < script_text.find("cfg_stamp=$(printf")
+    # Any append of $DEBUG_CFLAGS to COV_FLAGS, e.g. after $FRAME_POINTER.
+    hook = re.search(r'COV_FLAGS="\$COV_FLAGS [^"]*\$DEBUG_CFLAGS[^"]*"', script_text)
+    assert hook, "FFmpeg COV_FLAGS lacks $DEBUG_CFLAGS"
+    assert hook.start() < script_text.find("cfg_stamp=$(printf")
     assert '--extra-cflags="$COV_FLAGS"' in script_text
 
 
