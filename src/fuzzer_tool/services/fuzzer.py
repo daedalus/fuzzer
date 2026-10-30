@@ -1591,6 +1591,7 @@ class Fuzzer:
         secretary_window=500,
         secretary_exploration=None,
         elo=False,
+        elo_time_credit=False,
         invasion=False,
         round_robin=False,
         canary_scheduler=False,
@@ -4536,6 +4537,8 @@ class Fuzzer:
         # look these up off self via `available(f)` rather than taking them
         # as factory arguments -- see the registry module docstring).
         self._use_elo = elo
+        # Elo strategy matches judged per second (autofz port; FuzzRound times).
+        self._elo_time_credit = elo_time_credit
         self._use_garch = garch
         self._use_continuum = continuum
         self._use_pll = pll
@@ -8746,7 +8749,7 @@ class Fuzzer:
         except Exception as ex:
             log.debug("Chi-squared test failed: %s", ex)
 
-    def _record_seed_strategy_matches(self, score: float) -> None:
+    def _record_seed_strategy_matches(self, score: float, elapsed: float | None = None) -> None:
         """Record the active seed strategy's Elo match against every OTHER
         eligible strategy in the current pool. Only the strategies that were
         actually selectable at pick time participate, so never-enabled
@@ -8761,6 +8764,7 @@ class Fuzzer:
             f"seed_{self._seed_strategy}",
             [f"seed_{other}" for other in seed_strategies if other != self._seed_strategy],
             score,
+            elapsed,
         )
 
     def _settle_positions(self, outcome: Outcome, weight: float) -> None:
@@ -8789,7 +8793,7 @@ class Fuzzer:
         outcome = Outcome.GAIN if success else Outcome.MISS
         arena.settle(self._last_parent_seed, self._active_target_idx, outcome, weight)
 
-    def _record_operator_strategy_matches(self, score: float) -> None:
+    def _record_operator_strategy_matches(self, score: float, elapsed: float | None = None) -> None:
         """Record the active operator scheduler's Elo match against every other
         enabled scheduler. Only schedulers actually selected this run
         participate (random_stall is never recorded), so enabled-but-unused
@@ -8807,6 +8811,7 @@ class Fuzzer:
             self._meta_strategy,
             [other for other in all_strategies if other != self._meta_strategy],
             score,
+            elapsed,
         )
 
     def _check_canary_inspection(self) -> None:

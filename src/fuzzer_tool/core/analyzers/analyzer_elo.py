@@ -165,6 +165,16 @@ def _vs_baseline(score_a: float, plays: int, score_sum: float) -> float | None:
     return 0.5 + (score_a - score_sum / plays) / 2.0
 
 
+def _vs_rate(score_a: float, elapsed: float, timed_sum: float, time_sum: float) -> float:
+    """_vs_baseline per second (autofz): the bar is the idle arm's score rate
+    times this round's *elapsed*, so a slow round needs more to draw.
+
+    Clamped to [0, 1]; equal cost everywhere reduces to _vs_baseline.
+    """
+    bar = timed_sum / time_sum * elapsed
+    return min(1.0, max(0.0, 0.5 + (score_a - bar) / 2.0))
+
+
 def _lbeta(a: float, b: float) -> float:
     return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
 
@@ -255,9 +265,16 @@ class RoundRecorderMixin:
         raise NotImplementedError
 
     def record_strategy_matches(
-        self, strategy_a: str, opponents: Iterable[str], score_a: float
+        self,
+        strategy_a: str,
+        opponents: Iterable[str],
+        score_a: float,
+        elapsed: float | None = None,
     ) -> None:
-        """``record_strategy_match(strategy_a, b, score_a)`` for each b, in order."""
+        """``record_strategy_match(strategy_a, b, score_a)`` for each b, in order.
+
+        *elapsed* is ignored: only BayesianEloTracker times rounds.
+        """
         for b in opponents:
             self.record_strategy_match(strategy_a, b, score_a)
 
@@ -715,7 +732,11 @@ class EloTracker(RoundRecorderMixin):
         _record_strategy_win(self._strategy_win_count, strategy_a, strategy_b, score_a)
 
     def record_strategy_matches(
-        self, strategy_a: str, opponents: Iterable[str], score_a: float
+        self,
+        strategy_a: str,
+        opponents: Iterable[str],
+        score_a: float,
+        elapsed: float | None = None,
     ) -> None:
         """Score *strategy_a*, the arm that played, against each idle opponent.
 
@@ -723,7 +744,8 @@ class EloTracker(RoundRecorderMixin):
         ``1 - score_a`` credited each of them on every miss, so ratings
         tracked pick frequency, not hit rate. Each opponent instead supplies
         its historical mean score as the bar this round is judged against;
-        opponents never played are skipped and self is skipped.
+        opponents never played are skipped and self is skipped. *elapsed* is
+        ignored (legacy tracker, untimed).
         """
         ratings, count = self._strategy_ratings, self._strategy_match_count
         plays, sums = self._strategy_plays, self._strategy_score_sum
@@ -1006,6 +1028,10 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_trials: dict[str, int] = {}
         # Summed scores over those rounds: the bar idle arms are judged by.
         self._strategy_score_sum: dict[str, float] = {}
+        # Timed rounds only (--elo-time-credit): score and seconds, the rate
+        # idle arms are judged by per second.
+        self._strategy_timed_sum: dict[str, float] = {}
+        self._strategy_time_sum: dict[str, float] = {}
 
         # Adaptive K-factor tracking
         self._prediction_errors: array = array("d")
@@ -1224,7 +1250,11 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._track_strategy_wins(strategy_arena(strategy_a), (flag,))
 
     def record_strategy_matches(
-        self, strategy_a: str, opponents: Iterable[str], score_a: float
+        self,
+        strategy_a: str,
+        opponents: Iterable[str],
+        score_a: float,
+        elapsed: float | None = None,
     ) -> None:
         """Score *strategy_a*, the arm that played, against each idle opponent.
 
@@ -1234,6 +1264,10 @@ class BayesianEloTracker(RoundRecorderMixin):
         its historical mean score as the bar this round is judged against;
         opponents never played are skipped and self is skipped. Opponent
         posteriors, counts and wins are untouched and never created.
+
+        *elapsed* (seconds, --elo-time-credit) judges the round per second
+        against opponents with timed history (_vs_rate); None or <= 0 is
+        untimed.
         """
         mu, sig, count = self._strategy_mu, self._strategy_sigma_sq, self._strategy_match_count
         init_mu = self.initial_mu
@@ -1241,6 +1275,9 @@ class BayesianEloTracker(RoundRecorderMixin):
         expected = self._expected_score
         k = self._effective_k()
         trials, sums = self._strategy_trials, self._strategy_score_sum
+        timed_sums, time_sums = self._strategy_timed_sum, self._strategy_time_sum
+        # Ifs up: an untimed round never reads the timed sums.
+        timed = elapsed is not None and elapsed > 0.0
 
         # Favourite-won flags, one per rated opponent; extended once below.
         fav: list[bool] = []
@@ -1249,7 +1286,11 @@ class BayesianEloTracker(RoundRecorderMixin):
             if b == strategy_a:
                 continue
 
-            s_ab = _vs_baseline(score_a, trials.get(b, 0), sums.get(b, 0.0))
+            # time_sums only holds arms with seconds > 0 (see below).
+            if timed and b in time_sums:
+                s_ab = _vs_rate(score_a, elapsed, timed_sums[b], time_sums[b])
+            else:
+                s_ab = _vs_baseline(score_a, trials.get(b, 0), sums.get(b, 0.0))
             if s_ab is None:
                 continue
 
@@ -1282,6 +1323,9 @@ class BayesianEloTracker(RoundRecorderMixin):
         trials[strategy_a] = trials.get(strategy_a, 0) + 1
         hits[strategy_a] = hits.get(strategy_a, 0) + (score_a > 0.0)
         sums[strategy_a] = sums.get(strategy_a, 0.0) + score_a
+        if timed:
+            timed_sums[strategy_a] = timed_sums.get(strategy_a, 0.0) + score_a
+            time_sums[strategy_a] = time_sums.get(strategy_a, 0.0) + elapsed
 
     def select_strategy(self, strategies: list[str], temperature: float | None = None) -> str:
         """Select a strategy via Thompson sampling from its posterior."""
@@ -1466,6 +1510,8 @@ class BayesianEloTracker(RoundRecorderMixin):
             "strategy_hits": self._strategy_hits,
             "strategy_trials": self._strategy_trials,
             "strategy_score_sum": self._strategy_score_sum,
+            "strategy_timed_sum": self._strategy_timed_sum,
+            "strategy_time_sum": self._strategy_time_sum,
             "prediction_errors": list(self._prediction_errors),
             "best_win_rate": list(self._best_win_rate),
             "strategy_best_win_rate": {
@@ -1490,6 +1536,13 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_hits = data.get("strategy_hits", {})
         self._strategy_trials = data.get("strategy_trials", {})
         self._strategy_score_sum = data.get("strategy_score_sum", {})
+        # Only finite positive seconds: record_strategy_matches divides by
+        # them unchecked (an arm in time_sum is one with seconds > 0).
+        self._strategy_time_sum = {
+            k: t for k, t in data.get("strategy_time_sum", {}).items() if 0.0 < t < math.inf
+        }
+        timed = data.get("strategy_timed_sum", {})
+        self._strategy_timed_sum = {k: timed.get(k, 0.0) for k in self._strategy_time_sum}
         self._prediction_errors = array("d", data.get("prediction_errors", []))
         self._best_win_rate = array("d", data.get("best_win_rate", []))
         self._strategy_best_win_rate = {

@@ -65,6 +65,8 @@ _EXCLUDED_OPT_IN = frozenset(
         "hail_mary",
         "abort_is_crash",  # redefines a crash (assertions), not a strategy
         "novel_crash_reward",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "elo_time_credit",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "prune_cost",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_stride_cost",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the stride arm
         "seed_lottery_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_branch_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)

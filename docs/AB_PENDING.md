@@ -45,6 +45,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
+| Elo time credit (`--elo-time-credit`) | Strategy matches judged per second (autofz) | U | `--elo all --elo-time-credit` vs `--elo all`, fuzzgoat clang, wall-clock budget (not exec budget: per-exec budgets hide the gain); A/A first |
 | Tempered Elo Thompson | Draw width `2 − favourite win rate` | S | `--elo` vs previous commit |
 | Elo miss scoring | Rate on Beta hit rates / played arms only | U | design, then fuzzgoat |
 | MC Thompson estimand (`op_monte_carlo`) | Fractional Bernoulli + decay-to-prior | S | vs previous commit |
