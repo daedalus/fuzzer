@@ -131,11 +131,22 @@ def norm_ppf(p: float) -> float:
         q = p - 0.5
         r = q * q
         z = (
-            (((((_PPF_A[0] * r + _PPF_A[1]) * r + _PPF_A[2]) * r + _PPF_A[3]) * r + _PPF_A[4]) * r)
-            + _PPF_A[5]
-        ) * q / (
-            ((((_PPF_B[0] * r + _PPF_B[1]) * r + _PPF_B[2]) * r + _PPF_B[3]) * r + _PPF_B[4]) * r
-            + 1.0
+            (
+                (
+                    (
+                        (((_PPF_A[0] * r + _PPF_A[1]) * r + _PPF_A[2]) * r + _PPF_A[3]) * r
+                        + _PPF_A[4]
+                    )
+                    * r
+                )
+                + _PPF_A[5]
+            )
+            * q
+            / (
+                ((((_PPF_B[0] * r + _PPF_B[1]) * r + _PPF_B[2]) * r + _PPF_B[3]) * r + _PPF_B[4])
+                * r
+                + 1.0
+            )
         )
 
     # One Halley step on f(z) = Phi(z) - p.  erfc is used rather than erf

@@ -135,7 +135,6 @@ class TestRehydrateRoundTrip:
         for entry in corpus:
             assert rehydrate_by_hash(hash_data(entry), d) == entry
 
-
     def test_writer_never_emits_deltas(self, tmp_path):
         """Delta encoding is disabled: save_to_corpus always stores full seeds."""
         d, seen = _corpus(tmp_path), set()

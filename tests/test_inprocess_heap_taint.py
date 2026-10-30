@@ -29,7 +29,19 @@ def so(tmp_path_factory):
     d = tmp_path_factory.mktemp("taint")
     (d / "t.c").write_text(_SRC)
     for name, extra in (("plain", []), ("priv", ["-D__AFL_PRIVATE_HEAP=1"])):
-        cmd = ["clang", "-O0", "-shared", "-fPIC", "-fno-builtin", "-include", str(SHIM), *extra, "-o", str(d / f"{name}.so"), str(d / "t.c")]
+        cmd = [
+            "clang",
+            "-O0",
+            "-shared",
+            "-fPIC",
+            "-fno-builtin",
+            "-include",
+            str(SHIM),
+            *extra,
+            "-o",
+            str(d / f"{name}.so"),
+            str(d / "t.c"),
+        ]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr[-800:]
     return d

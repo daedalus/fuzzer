@@ -160,7 +160,9 @@ class OnlineGarch11:
         self._sum_sq = 0.0
         self._sigma2 = 0.0
         self._eps = 0.0
-        self._last_fit_at = phase_of("garch.refit", self._refit_interval) if self._refit_interval else 0
+        self._last_fit_at = (
+            phase_of("garch.refit", self._refit_interval) if self._refit_interval else 0
+        )
 
     # ── observation ───────────────────────────────────────────────────
 
@@ -188,7 +190,9 @@ class OnlineGarch11:
         self._sum_sq = 0.0
         self._sigma2 = 0.0
         self._eps = 0.0
-        self._last_fit_at = phase_of("garch.refit", self._refit_interval) if self._refit_interval else 0
+        self._last_fit_at = (
+            phase_of("garch.refit", self._refit_interval) if self._refit_interval else 0
+        )
 
     # ── readouts ──────────────────────────────────────────────────────
 

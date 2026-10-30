@@ -318,9 +318,7 @@ def test_interceptors_and_coverage_share_one_segment(tmp_path, shm):
     subprocess.run([str(exe)], capture_output=True, env=shm.env(_CMPLOG_OUT=str(log)), timeout=60)
 
     raw = shm.read()
-    _stack, _generation, _path_hash, edge_count, drops = struct.unpack(
-        "<IIQQQ", raw[:SHM_HEADER]
-    )
+    _stack, _generation, _path_hash, edge_count, drops = struct.unpack("<IIQQQ", raw[:SHM_HEADER])
     assert drops == 0, f"{drops} edges dropped on a trivial target — map is saturated"
 
     operands = set()

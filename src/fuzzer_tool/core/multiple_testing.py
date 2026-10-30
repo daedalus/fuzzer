@@ -229,10 +229,7 @@ def _periodicity_pvalue(fuzzer: FuzzerLike) -> float | None:
     except ImportError:
         return None
 
-    deltas = [
-        float(b) - float(a)
-        for a, b in zip(edges_series[:-1], edges_series[1:], strict=True)
-    ]
+    deltas = [float(b) - float(a) for a, b in zip(edges_series[:-1], edges_series[1:], strict=True)]
     res = detect_periodicity(deltas, min_samples=50)
     return res.p_value
 
@@ -283,9 +280,7 @@ def collect_current_pvalues(fuzzer: FuzzerLike) -> dict[str, float | None]:
     return pvalues
 
 
-def collect_and_correct(
-    fuzzer: FuzzerLike, alpha: float = 0.05
-) -> list[Correction]:
+def collect_and_correct(fuzzer: FuzzerLike, alpha: float = 0.05) -> list[Correction]:
     """Convenience wrapper: :func:`collect_current_pvalues` followed by
     :func:`benjamini_hochberg`.
 

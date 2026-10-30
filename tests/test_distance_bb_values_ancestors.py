@@ -18,8 +18,8 @@ and mask this exact bug -- which is exactly what happened when this
 fix was first drafted.
 """
 
-from fuzzer_tool.core.cfg import BasicBlock, FunctionCFG
 from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
+from fuzzer_tool.core.cfg import BasicBlock, FunctionCFG
 
 FUNC_NAME = "diamond_fn"
 
@@ -28,8 +28,7 @@ def _make_diamond_cfg() -> FunctionCFG:
     # 0(entry) -> 1, 0 -> 2; 1 -> 3(target); 2 -> 3(target). No back edges.
     edges = {0: [1, 2], 1: [3], 2: [3], 3: []}
     blocks = {
-        a: BasicBlock(start=a, end=a + 1, successors=list(succs))
-        for a, succs in edges.items()
+        a: BasicBlock(start=a, end=a + 1, successors=list(succs)) for a, succs in edges.items()
     }
     blocks[0].is_entry = True
     blocks[3].is_exit = True

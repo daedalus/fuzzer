@@ -208,9 +208,11 @@ class TestFingerprintRefit:
         monkeypatch.setattr(
             scheduler_substrate,
             "_seed_weights",
-            lambda n, family: scheduler_substrate.np.ones(n, dtype=scheduler_substrate.np.uint64)
-            if family == 0
-            else real(n, family),
+            lambda n, family: (
+                scheduler_substrate.np.ones(n, dtype=scheduler_substrate.np.uint64)
+                if family == 0
+                else real(n, family)
+            ),
         )
         canon = EdgeCanonicalizer()
         canon.refit({"a": {1: 1, 2: 2}, "b": {1: 2, 2: 1}})

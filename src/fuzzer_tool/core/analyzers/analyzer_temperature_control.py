@@ -122,9 +122,7 @@ class TemperatureController:
         # reference_rate set explicitly turns the setpoint absolute; left
         # None it tracks the campaign's own running maximum.
         self.reference_rate = reference_rate
-        self._pi = PIController(
-            kp=kp, ki=ki, out_min=CORRECTION_MIN, out_max=CORRECTION_MAX
-        )
+        self._pi = PIController(kp=kp, ki=ki, out_min=CORRECTION_MIN, out_max=CORRECTION_MAX)
         self._eso = ExtendedStateObserver(bandwidth=bandwidth)
         self._last_exec = 0
         self._last_edges = 0

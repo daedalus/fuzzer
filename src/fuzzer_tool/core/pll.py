@@ -218,9 +218,7 @@ class PhaseLockedLoop:
             raise ValueError(
                 f"center_freq {center_freq!r} must be in (0, 0.5] cycles/sample (Nyquist)"
             )
-        if not (
-            0.0 < dc_alpha <= 1.0 and 0.0 < amp_alpha <= 1.0 and 0.0 < detector_alpha <= 1.0
-        ):
+        if not (0.0 < dc_alpha <= 1.0 and 0.0 < amp_alpha <= 1.0 and 0.0 < detector_alpha <= 1.0):
             raise ValueError("dc_alpha, amp_alpha, detector_alpha must be in (0, 1]")
         if not (0.0 <= unlock_threshold < lock_threshold):
             raise ValueError(

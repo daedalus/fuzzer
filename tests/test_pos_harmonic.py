@@ -122,10 +122,24 @@ def test_state_round_trips_and_behaves_the_same():
     "bad",
     [
         {"version": 99, "seeds": {}},
-        {"version": 1, "seeds": {"1": {"stride": 1, "coeffs": [[0, 0]] * 6, "total": 1, "gains": 1}}},
-        {"version": 1, "seeds": {"1": {"stride": 16, "coeffs": [[0, 0]] * 5, "total": 1, "gains": 1}}},
-        {"version": 1, "seeds": {"1": {"stride": 16, "coeffs": [[float("nan"), 0]] * 6, "total": 1, "gains": 1}}},
-        {"version": 1, "seeds": {"1": {"stride": 16, "coeffs": [[0, 0]] * 6, "total": -1, "gains": 1}}},
+        {
+            "version": 1,
+            "seeds": {"1": {"stride": 1, "coeffs": [[0, 0]] * 6, "total": 1, "gains": 1}},
+        },
+        {
+            "version": 1,
+            "seeds": {"1": {"stride": 16, "coeffs": [[0, 0]] * 5, "total": 1, "gains": 1}},
+        },
+        {
+            "version": 1,
+            "seeds": {
+                "1": {"stride": 16, "coeffs": [[float("nan"), 0]] * 6, "total": 1, "gains": 1}
+            },
+        },
+        {
+            "version": 1,
+            "seeds": {"1": {"stride": 16, "coeffs": [[0, 0]] * 6, "total": -1, "gains": 1}},
+        },
         {"version": 1, "seeds": [1]},
         "junk",
     ],

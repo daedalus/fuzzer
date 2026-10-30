@@ -93,7 +93,9 @@ def _find_nightly_rustc():
 @pytest.fixture(scope="module")
 def rust_target_so(tmp_path_factory):
     subprocess.run(
-        ["cargo", "build", "--release"], cwd=CRATE_DIR, check=True,
+        ["cargo", "build", "--release"],
+        cwd=CRATE_DIR,
+        check=True,
         capture_output=True,
     )
     rlib = os.path.join(CRATE_DIR, "target", "release", "libbuggy_rust_target.a")
@@ -102,11 +104,26 @@ def rust_target_so(tmp_path_factory):
     out = tmp_path_factory.mktemp("rust_target") / "rust_target.so"
     cc, cov_flag = _pick_cc()
     cmd = [
-        cc, "-O2", "-g", "-fno-omit-frame-pointer", *cov_flag,
+        cc,
+        "-O2",
+        "-g",
+        "-fno-omit-frame-pointer",
+        *cov_flag,
         "-D__AFL_CMPLOG=1",
-        "-shared", "-fPIC",
-        "-include", SHIM, "-o", str(out), WRAPPER_SRC, rlib,
-        "-lpthread", "-ldl", "-lm", "-lrt", "-lutil", "-lgcc_s",
+        "-shared",
+        "-fPIC",
+        "-include",
+        SHIM,
+        "-o",
+        str(out),
+        WRAPPER_SRC,
+        rlib,
+        "-lpthread",
+        "-ldl",
+        "-lm",
+        "-lrt",
+        "-lutil",
+        "-lgcc_s",
     ]
     subprocess.run(cmd, check=True, capture_output=True)
     return str(out)
@@ -118,10 +135,24 @@ def rust_target_exe(tmp_path_factory):
     out = tmp_path_factory.mktemp("rust_target_exe") / "rust_target"
     cc, cov_flag = _pick_cc()
     cmd = [
-        cc, "-O2", "-g", "-fno-omit-frame-pointer", *cov_flag,
+        cc,
+        "-O2",
+        "-g",
+        "-fno-omit-frame-pointer",
+        *cov_flag,
         "-D__AFL_CMPLOG=1",
-        "-include", SHIM, "-o", str(out), WRAPPER_SRC, rlib,
-        "-lpthread", "-ldl", "-lm", "-lrt", "-lutil", "-lgcc_s",
+        "-include",
+        SHIM,
+        "-o",
+        str(out),
+        WRAPPER_SRC,
+        rlib,
+        "-lpthread",
+        "-ldl",
+        "-lm",
+        "-lrt",
+        "-lutil",
+        "-lgcc_s",
     ]
     subprocess.run(cmd, check=True, capture_output=True)
     return str(out)
@@ -160,10 +191,10 @@ def _run_guarded(so_path: str, data: bytes) -> int:
     [
         (b"not a trigger", False),
         (b"RUST\x00", False),  # unrecognized selector byte
-        (b"RUSTS", True),      # wild out-of-bounds read -- always faults
-        (b"RUSTO\x0a", False), # small OOB read -- silent without ASAN (that's the point)
-        (b"RUSTW\x0a", False), # small OOB write -- silent without ASAN (that's the point)
-        (b"RUSTP", True),      # safe-Rust panic (checked index)
+        (b"RUSTS", True),  # wild out-of-bounds read -- always faults
+        (b"RUSTO\x0a", False),  # small OOB read -- silent without ASAN (that's the point)
+        (b"RUSTW\x0a", False),  # small OOB write -- silent without ASAN (that's the point)
+        (b"RUSTP", True),  # safe-Rust panic (checked index)
     ],
 )
 def test_guarded_call_crash_detection(rust_target_so, data, expect_crash):
@@ -205,7 +236,9 @@ def test_subprocess_mode_detects_crash_via_exit_status(rust_target_exe):
     module docstring).
     """
     proc = subprocess.run(
-        [rust_target_exe], input=b"RUSTS", stdout=subprocess.DEVNULL,
+        [rust_target_exe],
+        input=b"RUSTS",
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
     report = SanitizerReport.parse(proc.stderr.decode(errors="replace"))
@@ -214,8 +247,10 @@ def test_subprocess_mode_detects_crash_via_exit_status(rust_target_exe):
     )
 
     proc = subprocess.run(
-        [rust_target_exe], input=b"benign, no trigger here",
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [rust_target_exe],
+        input=b"benign, no trigger here",
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     assert proc.returncode == 0
 
@@ -234,11 +269,15 @@ def test_wrapper_actually_has_instrumented_call_sites(rust_target_so):
     build without error.
     """
     result = subprocess.run(
-        ["objdump", "-d", rust_target_so], check=True, capture_output=True, text=True,
+        ["objdump", "-d", rust_target_so],
+        check=True,
+        capture_output=True,
+        text=True,
     )
     call_sites = result.stdout.count("call")  # cheap check, refined below
     guard_calls = sum(
-        1 for line in result.stdout.splitlines()
+        1
+        for line in result.stdout.splitlines()
         if "call" in line and "__sanitizer_cov_trace_pc_guard" in line
     )
     assert guard_calls > 0, (
@@ -285,7 +324,10 @@ def rust_target_so_nightly(tmp_path_factory):
     build_dir = tmp_path_factory.mktemp("nightly_cargo_target")
     subprocess.run(
         ["cargo", "build", "--release", "--target-dir", str(build_dir)],
-        cwd=CRATE_DIR, check=True, capture_output=True, env=env,
+        cwd=CRATE_DIR,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     rlib = build_dir / "release" / "libbuggy_rust_target.a"
     assert rlib.exists(), "nightly cargo build did not produce the expected staticlib"
@@ -293,11 +335,26 @@ def rust_target_so_nightly(tmp_path_factory):
     out = tmp_path_factory.mktemp("rust_target_nightly") / "rust_target.so"
     cc, cov_flag = _pick_cc()  # still clang for the wrapper side
     cmd = [
-        cc, "-O2", "-g", "-fno-omit-frame-pointer", *cov_flag,
+        cc,
+        "-O2",
+        "-g",
+        "-fno-omit-frame-pointer",
+        *cov_flag,
         "-D__AFL_CMPLOG=1",
-        "-shared", "-fPIC",
-        "-include", SHIM, "-o", str(out), WRAPPER_SRC, str(rlib),
-        "-lpthread", "-ldl", "-lm", "-lrt", "-lutil", "-lgcc_s",
+        "-shared",
+        "-fPIC",
+        "-include",
+        SHIM,
+        "-o",
+        str(out),
+        WRAPPER_SRC,
+        str(rlib),
+        "-lpthread",
+        "-ldl",
+        "-lm",
+        "-lrt",
+        "-lutil",
+        "-lgcc_s",
     ]
     subprocess.run(cmd, check=True, capture_output=True)
     return str(out)
@@ -331,7 +388,9 @@ def test_nightly_build_instruments_inside_the_crate(rust_target_so_nightly):
     """
     result = subprocess.run(
         ["objdump", "-d", "-C", rust_target_so_nightly],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     lines = result.stdout.splitlines()
     in_fn = False
@@ -375,7 +434,9 @@ def _find_matching_asan_clang(nightly_rustc: str):
     LLVM 20). Returns a clang binary name or None.
     """
     result = subprocess.run(
-        [nightly_rustc, "--version", "--verbose"], capture_output=True, text=True,
+        [nightly_rustc, "--version", "--verbose"],
+        capture_output=True,
+        text=True,
     )
     match = re.search(r"^LLVM version: (\d+)", result.stdout, re.MULTILINE)
     if not match:
@@ -417,20 +478,37 @@ def rust_target_exe_asan_nightly(tmp_path_factory):
     build_dir = tmp_path_factory.mktemp("asan_nightly_cargo_target")
     subprocess.run(
         ["cargo", "build", "--release", "--target-dir", str(build_dir)],
-        cwd=CRATE_DIR, check=True, capture_output=True, env=env,
+        cwd=CRATE_DIR,
+        check=True,
+        capture_output=True,
+        env=env,
     )
     rlib = build_dir / "release" / "libbuggy_rust_target.a"
     assert rlib.exists(), "ASAN cargo build did not produce the expected staticlib"
 
     out = tmp_path_factory.mktemp("rust_target_asan_nightly") / "rust_target"
     cmd = [
-        asan_cc, "-O2", "-g", "-fno-omit-frame-pointer", "-fsanitize=address",
+        asan_cc,
+        "-O2",
+        "-g",
+        "-fno-omit-frame-pointer",
+        "-fsanitize=address",
         "-D__AFL_CMPLOG=1",
-        "-include", SHIM, "-o", str(out), WRAPPER_SRC, str(rlib),
+        "-include",
+        SHIM,
+        "-o",
+        str(out),
+        WRAPPER_SRC,
+        str(rlib),
         # Deliberately NOT passing -lasan: forcing one on top of what the
         # matched clang auto-selects is exactly what reproduces the
         # "incompatible ASan runtimes" failure.
-        "-lpthread", "-ldl", "-lm", "-lrt", "-lutil", "-lgcc_s",
+        "-lpthread",
+        "-ldl",
+        "-lm",
+        "-lrt",
+        "-lutil",
+        "-lgcc_s",
     ]
     subprocess.run(cmd, check=True, capture_output=True)
     return str(out)
@@ -448,7 +526,9 @@ def test_asan_catches_small_overflows(rust_target_exe_asan_nightly):
     """
     for trigger, _direction in [(b"RUSTO\x0a", "READ"), (b"RUSTW\x0a", "WRITE")]:
         proc = subprocess.run(
-            [rust_target_exe_asan_nightly], input=trigger, capture_output=True,
+            [rust_target_exe_asan_nightly],
+            input=trigger,
+            capture_output=True,
         )
         stderr = proc.stderr.decode(errors="replace")
         assert "AddressSanitizer: heap-buffer-overflow" in stderr, (
@@ -459,7 +539,9 @@ def test_asan_catches_small_overflows(rust_target_exe_asan_nightly):
         )
 
     benign = subprocess.run(
-        [rust_target_exe_asan_nightly], input=b"benign, nothing here", capture_output=True,
+        [rust_target_exe_asan_nightly],
+        input=b"benign, nothing here",
+        capture_output=True,
     )
     assert benign.returncode == 0
     assert b"AddressSanitizer" not in benign.stderr

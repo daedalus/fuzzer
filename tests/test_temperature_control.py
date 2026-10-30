@@ -17,8 +17,6 @@ import math
 
 import pytest
 
-from fuzzer_tool.core.eso import ExtendedStateObserver
-from fuzzer_tool.core.pi_controller import PIController
 from fuzzer_tool.core.analyzers.analyzer_temperature_control import (
     CORRECTION_MAX,
     CORRECTION_MIN,
@@ -28,6 +26,8 @@ from fuzzer_tool.core.analyzers.analyzer_temperature_control import (
     TEMPERATURE_MIN,
     TemperatureController,
 )
+from fuzzer_tool.core.eso import ExtendedStateObserver
+from fuzzer_tool.core.pi_controller import PIController
 
 
 class TestPIControllerHasNoDerivative:
@@ -120,9 +120,7 @@ class TestPIAntiWindup:
         place only when the limit is loose relative to the output range,
         which is reachable since ``integral_limit`` is a parameter.
         """
-        loose = PIController(
-            kp=0.1, ki=0.5, out_min=-1.0, out_max=1.0, integral_limit=50.0
-        )
+        loose = PIController(kp=0.1, ki=0.5, out_min=-1.0, out_max=1.0, integral_limit=50.0)
         for _ in range(200):
             loose.update(1.0)
         # Conditional integration stops the accumulator near the rail rather
@@ -335,9 +333,7 @@ class TestTemperatureControllerLoop:
         assert st["setpoint"] == pytest.approx(0.5 * st["reference"])
 
     def test_an_explicit_reference_makes_the_setpoint_absolute(self):
-        ctl = TemperatureController(
-            period_execs=1000, setpoint_fraction=0.5, reference_rate=0.04
-        )
+        ctl = TemperatureController(period_execs=1000, setpoint_fraction=0.5, reference_rate=0.04)
         self._drive(ctl, [0.5] * 10)  # far above the reference
         assert ctl.stats()["setpoint"] == pytest.approx(0.02)
         assert ctl.stats()["reference"] == pytest.approx(0.04)
