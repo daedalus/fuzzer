@@ -930,7 +930,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `fuzz` | Run coverage-guided fuzzing (default) |
 | `rank` | Rank corpus seeds by interestingness (edge coverage, rarity, subsumption) |
 | `minimize` | Minimize corpus by removing redundant inputs |
-| `edge-dump` | Replay corpus, pickle `{seed_id: edge ids}` per seed (no pruning) |
+| `edge-dump` | Replay corpus, export `{seed_id: edge ids}` per seed to `.pkl` / `.sqlite` (no pruning, incremental) |
 | `sweep` | Linear corpus scan — replay every seed without mutations or scheduling (find missed crashes) |
 | `tmin` | Minimize a crash to smallest reproducer |
 | `replay` | Replay a crash input against the target |
@@ -1402,10 +1402,17 @@ fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 
 ```bash
 fuzzer-tool edge-dump ./target -d corpus -o ~/edges.pkl
-fuzzer-tool edge-dump ./t.so -d corpus -o ~/edges.pkl --inprocess-direct --inprocess-func fuzz_test
+fuzzer-tool edge-dump ./target -d corpus -o ~/edges.pkl -o ~/edges.sqlite   # both
+fuzzer-tool edge-dump ./t.so -d corpus -o ~/edges.sqlite --inprocess-direct --inprocess-func fuzz_test
 ```
 
-Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(seed)` (the `id_<hash>` key) -> sorted `uint32` edge ids. Read-only: nothing pruned, no twin collapse. Same backends and flags as `minimize -c` (`--inprocess`, `--inprocess-direct`, `--inprocess-func`); `-c` accepted, coverage always on. `pruned/`, `crashing/`, `irreplaceable/` excluded; `--max-seed-bytes` skips large seeds; timed-out seeds keep partial edges. Progress line and heap trim are minimize's (`_print_progress`, `_trim_heap`): rate, ETA, elapsed, unique edges, rss/live. No edges anywhere = failed measurement: nothing written, exit 1. Atomic write (tmp + rename). Tests: `tests/test_edge_export.py`.
+Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(seed)` (the `id_<hash>` key) -> sorted `uint32` edge ids. Read-only: nothing pruned, no twin collapse. Same backends and flags as `minimize -c` (`--inprocess`, `--inprocess-direct`, `--inprocess-func`); `-c` accepted, coverage always on. `pruned/`, `crashing/`, `irreplaceable/` excluded; `--max-seed-bytes` skips large seeds; timed-out seeds keep partial edges. Progress line and heap trim are minimize's (`_print_progress`, `_trim_heap`): rate, ETA, elapsed, unique edges, rss/live. New seeds with no edges at all = failed measurement: nothing written, exit 1 (not cached as negatives). Atomic write (tmp + rename).
+
+**Format by `-o` extension** (case-insensitive, repeatable; other extensions rejected before replay): `.pkl` = the dict above; `.sqlite` = edge-keyed inverse (`adapters/edge_sqlite.py`): `edges(edge_id PK, n_seeds)`, `edge_seeds(edge_id, seed_id)` PK both, `seeds(seed_id PK, n_edges)`. `seeds` keeps edgeless seeds so the dict round-trips. Writer is numpy-vectorized (one argsort + `np.unique`); measured even with a plain dict loop at 5k seeds x 300 edges (~1.9 s both: SQLite inserts dominate), 16% faster at 200 seeds.
+
+**Incremental.** An existing `-o` file is read first; its seed_ids are known negatives and are not replayed. With several outputs a seed is skipped only if every one holds it. New results merge into each file (new wins). Nothing new = no rewrite, exit 0. Unreadable output (corrupt, wrong shape) = abort before replay, file untouched.
+
+Tests: `tests/test_edge_export.py`, `test_edge_sqlite.py`, `test_edge_export_incremental.py`, `test_edge_export_inprocess.py`.
 
 ### Set cover (`core/set_cover.py`)
 

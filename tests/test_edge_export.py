@@ -59,7 +59,7 @@ def test_exports_edges_per_seed(tmp_path, monkeypatch):
     seeds = {"a": b"abc", "b": b"zz", "c": b"\x00\xff"}
     corpus, out = _setup(tmp_path, monkeypatch, seeds)
 
-    n = edge_export.export_edges("t", str(corpus), str(out))
+    n = edge_export.export_edges("t", str(corpus), [str(out)])
 
     got = _load(out)
     assert n == len(seeds)
@@ -75,7 +75,7 @@ def test_twins_not_collapsed(tmp_path, monkeypatch):
     seeds = {"a": b"ab", "b": b"ba"}
     corpus, out = _setup(tmp_path, monkeypatch, seeds)
 
-    edge_export.export_edges("t", str(corpus), str(out))
+    edge_export.export_edges("t", str(corpus), [str(out)])
 
     got = _load(out)
     assert len(got) == len(seeds)
@@ -86,7 +86,7 @@ def test_blackout_writes_nothing(tmp_path, monkeypatch, capsys):
     """Adversarial: no edges at all is a failed measurement, not an empty export."""
     corpus, out = _setup(tmp_path, monkeypatch, {"a": b"ab"}, blind=True)
 
-    assert edge_export.export_edges("t", str(corpus), str(out)) == 0
+    assert edge_export.export_edges("t", str(corpus), [str(out)]) == 0
     assert not out.exists()
     assert "No edges" in capsys.readouterr().err
 
@@ -98,7 +98,7 @@ def test_empty_seed_and_pruned_excluded(tmp_path, monkeypatch):
     pruned.mkdir()
     (pruned / "p").write_bytes(b"pp")
 
-    edge_export.export_edges("t", str(corpus), str(out))
+    edge_export.export_edges("t", str(corpus), [str(out)])
 
     got = _load(out)
     assert hash_data(b"pp") not in got
@@ -123,7 +123,7 @@ def test_running_stats(tmp_path, monkeypatch, capsys):
     seeds = {"a": b"ab", "b": b"bc"}
     corpus, out = _setup(tmp_path, monkeypatch, seeds)
 
-    edge_export.export_edges("t", str(corpus), str(out))
+    edge_export.export_edges("t", str(corpus), [str(out)])
 
     line = capsys.readouterr().out.split("\r")[-1]
     union = set(_expected(b"ab")) | set(_expected(b"bc"))
