@@ -1197,8 +1197,11 @@ def cmd_fuzz(args):
     if sarif is not None:
         from fuzzer_tool.services.sarif_export import export_sarif
 
-        n = export_sarif(crashes_dir, sarif, getattr(args, "sarif_src_root", ""))
-        print(f"[*] SARIF: {n} result(s) -> {sarif}")
+        try:
+            n = export_sarif(crashes_dir, sarif, getattr(args, "sarif_src_root", ""))
+            print(f"[*] SARIF: {n} result(s) -> {sarif}")
+        except ValueError as e:
+            print(f"[-] {e}", file=sys.stderr)
 
     if plot_graph_path is not None:
         from fuzzer_tool.core.plotting import generate_html_report
@@ -1812,7 +1815,12 @@ def cmd_sarif(args):
         print(f"[-] Crashes directory not found: {args.crashes_dir}", file=sys.stderr)
         return 1
 
-    n = export_sarif(args.crashes_dir, args.output, args.src_root)
+    try:
+        n = export_sarif(args.crashes_dir, args.output, args.src_root)
+    except ValueError as e:
+        print(f"[-] {e}", file=sys.stderr)
+        return 1
+
     print(f"[*] SARIF: {n} result(s) -> {args.output}")
     return 0
 

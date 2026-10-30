@@ -38,7 +38,7 @@ Control (A vs A, Hard Rule 46): -1.0% to -3.7% mean drift, same size as every ef
 ## 5. Costs if shipped
 
 - 2 MiB per segment (~10 segments per run, ~20 MiB pinned).
-- Needs a hugepage reservation (`vm.nr_hugepages`, root) or `shmget` fails: fallback path required.
+- Needs a hugepage reservation (`vm.nr_hugepages`, root to provision) or `shmget` fails: fallback path required. Non-root use of a reserved pool needs `vm.hugetlb_shm_group` (or `CAP_IPC_LOCK`).
 - Shmem THP (`madvise`) cannot back segments < 2 MiB.
 
 ## 6. Not done

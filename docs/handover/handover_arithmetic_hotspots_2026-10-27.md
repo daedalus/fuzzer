@@ -301,8 +301,8 @@ corpus.
 
 ### 7.6 Tooling notes
 
-- `fuzzer-tool fuzz <target.so> -d CORPUS -o CRASHES` (`-c` toggles
-  coverage; it does not take a path).
+- `fuzzer-tool fuzz <target.so> -d CORPUS -o CRASHES` (coverage is on by
+  default; `-c` is a no-op, `--no-coverage` disables it; neither takes a path).
 - Use `date` arithmetic for wall time inside `sh -c`; `time` is not a binary
   there.
 - `pip install -e .` and `pip install pytest ruff py-spy
