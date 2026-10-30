@@ -115,6 +115,7 @@ class FuzzRound:
         "_returncode",
         "_stderr",
         "_t_elapsed",
+        "_t_round",
         "_collect_now",
         "_cmplog_found",
         "_smt_found",
@@ -164,6 +165,8 @@ class FuzzRound:
         self._effective = None
         self._surprisal_weight = 0.0
         self._distance: float | None = None
+        # Round start, stamped only under --elo-time-credit.
+        self._t_round: float | None = None
 
     def run(self) -> bool:
         """Run the round; True when the mutant crashed or was admitted."""
@@ -318,6 +321,7 @@ class FuzzRound:
         # prediction errors if record_match hasn't been called yet.
         if f._use_elo and f._elo:
             f._elo._eff_k_cache = None
+        self._stamp_round()
         f._last_parent_seed = data
         if f._op_strata is not None:
             f._op_strata.set_stratum(f._strata_stratum(data))
@@ -1907,18 +1911,29 @@ class FuzzRound:
             if f._use_canary and f._canary:
                 f._check_canary_inspection()
 
+    def _stamp_round(self) -> None:
+        """Start the round timer for --elo-time-credit (autofz: arms pay for time)."""
+        f = self._f
+        # getattr: partial fuzzers (tests, __new__-built) lack the flag.
+        if getattr(f, "_elo_time_credit", False):
+            self._t_round = clock_of(f).monotonic()
+
     def _record_arenas(self) -> None:
         f = self._f
         score = self._surprisal_weight if self._success else 0.0
+        # Seconds this round took (mutate + exec), None when untimed.
+        t0 = self._t_round
+        elapsed = None if t0 is None else clock_of(f).monotonic() - t0
+
         # Meta-elo: record operator strategy-level match. Only when the current
         # strategy is a real selectable scheduler (random_stall is excluded, so
         # stall recovery never accrues phantom matches)
         if f._use_elo and f._elo and f._meta_strategy:
-            f._record_operator_strategy_matches(score)
+            f._record_operator_strategy_matches(score, elapsed)
 
         # Meta-elo: record seed strategy-level match
         if f._use_elo and f._elo and f._seed_strategy:
-            f._record_seed_strategy_matches(score)
+            f._record_seed_strategy_matches(score, elapsed)
 
         # Position arena matches and burn-front credit
         f._settle_positions(Outcome.GAIN if self._success else Outcome.MISS, self._surprisal_weight)

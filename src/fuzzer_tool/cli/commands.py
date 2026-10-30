@@ -994,6 +994,7 @@ def cmd_fuzz(args):
         occupation=getattr(args, "occupation", False),
         causal_sector=getattr(args, "causal_sector", False),
         elo=getattr(args, "elo", False),
+        elo_time_credit=getattr(args, "elo_time_credit", False),
         lineage=getattr(args, "lineage", False),
         lineage_backtrack=getattr(args, "lineage_backtrack", False),
         mds_select=getattr(args, "mds_select", False),
@@ -3341,6 +3342,12 @@ def main() -> int:
         "replicator, EXP3, eps-greedy, hierarchical, GP-UCB), seed schedulers "
         "(GA, QEA, Bayesian, Markov, Boltzmann) and the mutation scheduling stack "
         "(Metropolis, Shapley, MI-guided, secretary, WFC, lineage, fast power schedule).",
+    )
+    fuzz_parser.add_argument(
+        "--elo-time-credit",
+        action="store_true",
+        help="Judge Elo operator/seed strategy matches per second, not per round "
+        "(autofz): a slow strategy must out-yield a fast one to draw. Needs --elo.",
     )
     fuzz_parser.add_argument(
         "--lineage",
