@@ -56,3 +56,43 @@ def harvest_tokens(data: bytes, hashes: array) -> list[bytes]:
             continue
         tokens.append(tok)
     return tokens
+
+
+def frozen_tokens(data: bytes, mutable: np.ndarray) -> list[bytes]:
+    """Tokens from a LearnAFL path mask (``core/schedulers/pos_learn.py``).
+
+    A byte havoc changed without moving the path is *mutable*; the rest is the
+    format the path needs (``MAGIC`` below)::
+
+        data     M A G I C 00 00 H D R X ...
+        mutable  . . . . . x  x  . . . . ...
+        tokens   '-MAGIC-'       '-HDRX-'
+
+    Args:
+        data: The seed the mask was learned on.
+        mutable: Bool array; ``mutable[i]`` is set once byte ``i`` was seen
+            changed in a path-preserving mutant.
+
+    Returns:
+        Each maximal frozen run of length MIN..MAX_AUTO_TOKEN whose bytes are
+        not all identical, in offset order.
+    """
+    n = min(len(data), len(mutable))
+    if n < MIN_AUTO_TOKEN:
+        return []
+
+    # Run edges: +1 where a frozen run starts, -1 where it ends.
+    frozen = np.concatenate(([False], ~mutable[:n], [False])).astype(np.int8)
+    edges = np.diff(frozen)
+    starts = np.flatnonzero(edges == 1)
+    ends = np.flatnonzero(edges == -1)
+    sizes = ends - starts
+    keep = (sizes >= MIN_AUTO_TOKEN) & (sizes <= MAX_AUTO_TOKEN)
+
+    tokens = []
+    for lo, hi in zip(starts[keep].tolist(), ends[keep].tolist(), strict=True):
+        tok = data[lo:hi]
+        if tok.count(tok[:1]) == len(tok):
+            continue
+        tokens.append(tok)
+    return tokens
