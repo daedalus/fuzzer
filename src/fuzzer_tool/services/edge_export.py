@@ -13,12 +13,13 @@ import sqlite3
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 
 from fuzzer_tool.adapters.edge_sqlite import read_edges_sqlite, write_edges_sqlite
-from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.adapters.filesystem import count_archive_seeds, hash_data, iter_archive_seeds
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.services.minimize import (
@@ -42,6 +43,34 @@ _PROGRESS_EVERY = 10
 # Output format by file extension (case-insensitive); see _FORMATS.
 _PKL = ".pkl"
 _SQLITE = ".sqlite"
+
+
+class _CorpusSeeds:
+    """Live seeds: loose files, then seeds.zip / seeds.tar.gz members; size-capped.
+
+    Archive sizes are only known once read, so ``oversized`` is final after
+    iteration.
+    """
+
+    def __init__(self, corpus_dir: Path, max_seed_bytes: int) -> None:
+        self._corpus = corpus_dir
+        self._max = max_seed_bytes
+        self._files, over = _split_oversized(_discover_corpus_files(corpus_dir), max_seed_bytes)
+        self.oversized = len(over)
+        self.total = len(self._files) + count_archive_seeds(corpus_dir)
+
+    def __iter__(self) -> Iterator[bytes]:
+        for fpath in self._files:
+            if not fpath.exists():
+                print(f"[!] Skipping missing seed: {fpath}")
+                continue
+            yield fpath.read_bytes()
+
+        for data in iter_archive_seeds(self._corpus):
+            if self._max and len(data) > self._max:
+                self.oversized += 1
+                continue
+            yield data
 
 
 class _Sink:
@@ -108,18 +137,16 @@ def export_edges(
     # Known only if every output holds it, e.g. pkl {a,b} + sqlite {a} -> skip {a}.
     known = set.intersection(*(set(s.prior) for s in sinks))
 
-    files = _discover_corpus_files(Path(corpus_dir))
-    if not files:
+    seeds = _CorpusSeeds(Path(corpus_dir), max_seed_bytes)
+    if not seeds.total:
         print(f"[-] Corpus is empty: {corpus_dir}", file=sys.stderr)
         return 0
 
-    to_replay, oversized = _split_oversized(files, max_seed_bytes)
-    if oversized:
-        print(f"[*] Skipped: {len(oversized)} seeds over {max_seed_bytes} bytes")
-
     edges = _replay_all(
-        to_replay, target, timeout, file_mode, target_args, exec_mode, inprocess_func, known
+        seeds, target, timeout, file_mode, target_args, exec_mode, inprocess_func, known
     )
+    if seeds.oversized:
+        print(f"[*] Skipped: {seeds.oversized} seeds over {max_seed_bytes} bytes")
     if edges is None:
         return 0
 
@@ -154,8 +181,11 @@ def _resolve_sinks(out_paths: list[str]) -> list[_Sink] | None:
     return sinks
 
 
-def _replay_all(files, target, timeout, file_mode, target_args, exec_mode, func, known):
-    """``{seed_id: edge ids}`` over *files* not in *known*, or None when the runner cannot start."""
+def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func, known):
+    """``{seed_id: edge ids}`` over *seeds* not in *known*, or None when the runner cannot start.
+
+    A seed seen twice (loose and archived) replays once.
+    """
     tmp_dir = Path(tempfile.mkdtemp(prefix="edump_"))
 
     # Caller-context edge ids hash a return address; ASLR makes them noise.
@@ -180,19 +210,17 @@ def _replay_all(files, target, timeout, file_mode, target_args, exec_mode, func,
                 return None
             replay = _runner_replay(runner)
 
-        n = len(files)
+        n = seeds.total
         start_time = time.time()
         unique: set[int] = set()
         peak_rss_kb = _maxrss_kb()
-        for i, fpath in enumerate(files):
-            if not fpath.exists():
-                print(f"[!] Skipping missing seed: {fpath}")
-                continue
-
-            data = fpath.read_bytes()
+        i = -1
+        for i, data in enumerate(seeds):
             key = hash_data(data)
             if key in known:
                 skipped += 1
+                continue
+            if key in edges:
                 continue
 
             shm.reset_edge_map()
@@ -205,8 +233,11 @@ def _replay_all(files, target, timeout, file_mode, target_args, exec_mode, func,
             if (i + 1) % _TRIM_EVERY == 0:
                 _trim_heap()
 
-            if (i + 1) % _PROGRESS_EVERY == 0 or i + 1 == n:
+            if (i + 1) % _PROGRESS_EVERY == 0:
                 _print_progress(i + 1, n, start_time, len(unique), peak_rss_kb)
+
+        # Final line: archive members over the cap never reach i + 1 == n.
+        _print_progress(i + 1, n, start_time, len(unique), peak_rss_kb)
     finally:
         if runner is not None:
             runner.stop()
@@ -217,7 +248,7 @@ def _replay_all(files, target, timeout, file_mode, target_args, exec_mode, func,
     if skipped:
         print(f"[*] Already exported: {skipped} seeds skipped")
     if timeouts:
-        print(f"[*] Timed out: {timeouts}/{len(files)} seeds (partial edges kept)")
+        print(f"[*] Timed out: {timeouts}/{len(edges)} seeds (partial edges kept)")
     return edges
 
 
