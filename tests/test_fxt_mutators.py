@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import fuzzer_tool.core.mutations.fxt as F
+from fuzzer_tool.core.hadamard import hadamard_rows
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.rand_pool import RandPool
@@ -33,6 +34,10 @@ OPS = (
     "fib_encode",
 )
 SEEDS = tuple(range(30))
+# hadamard_oa writes an order-8 row into a 1-byte word.
+_MIN_LEN_EXEMPT = {"hadamard_oa": (1,)}
+# x^4 + x + 1 m-sequence, period 15 (independent of fxt.py).
+_MSEQ15 = (1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1)
 FILL = 0x11
 
 
@@ -97,6 +102,8 @@ class TestRegistration:
     @pytest.mark.parametrize("data", (b"", b"\x11"))
     def test_too_short_is_untouched(self, name, data):
         # Adversarial: no op may draw or index past a 0/1-byte input.
+        if len(data) in _MIN_LEN_EXEMPT.get(name, ()):
+            pytest.skip(f"{name} mutates {len(data)}-byte input (TestHadamardOA)")
         assert getattr(F, name)(data, ScriptedRng()) == data
 
     @pytest.mark.parametrize("name", OPS)
@@ -428,10 +435,11 @@ class TestHilbertPatch:
 
 # ── hadamard_oa ───────────────────────────────────────────────────────────
 class TestHadamardOA:
-    def _draw(self, row, offset, endian, mode):
-        return ScriptedRng(
-            randints=[row, offset], choice_idxs=[F.ENDIANS.index(endian), F.OA_MODES.index(mode)]
-        )
+    def _draw(self, row, offset, endian, mode, width=2):
+        # Width is drawn first (index into the widths that fit), then row,
+        # offset, (endian, mode) -- the order hadamard_oa consumes them.
+        idxs = [F.OA_WIDTHS.index(width), F.OA_KNOBS.index((endian, mode))]
+        return ScriptedRng(randints=[row, offset], choice_idxs=idxs)
 
     def test_rows_are_pairwise_orthogonal(self):
         # Falsification: distinct rows differ in exactly 8 of 16 bits.
@@ -469,6 +477,48 @@ class TestHadamardOA:
         data = b"\xff\x0f"
         out = F.hadamard_oa(data, self._draw(3, 0, "big", "xor"))
         assert int.from_bytes(out, "big") == 0xFF0F ^ F.HADAMARD_ROWS[3]
+
+    def test_width_2_keeps_m_sequence_rows(self):
+        # Order 16 stays bit-identical to the pre-width table.
+        assert F.OA_TABLES[2] is F.HADAMARD_ROWS
+        assert F.HADAMARD_ROWS[1] == sum(b << (j + 1) for j, b in enumerate(_MSEQ15))
+
+    @pytest.mark.parametrize("width", (1, 2, 4))
+    def test_set_writes_row_of_width(self, width):
+        order = 8 * width
+        table = hadamard_rows(order) if width != 2 else F.HADAMARD_ROWS
+        out = F.hadamard_oa(bytes(width + 2), self._draw(order - 1, 1, "big", "set", width))
+        assert out[:1] == out[width + 1 :] == b"\x00"
+        assert int.from_bytes(out[1 : width + 1], "big") == table[order - 1]
+
+    @pytest.mark.parametrize("width", (1, 4))
+    def test_xor_toggles_row_of_width(self, width):
+        order = 8 * width
+        data = bytes(range(0xA0, 0xA0 + width))
+        out = F.hadamard_oa(data, self._draw(2, 0, "little", "xor", width))
+        want = int.from_bytes(data, "little") ^ hadamard_rows(order)[2]
+        assert int.from_bytes(out, "little") == want
+
+    @pytest.mark.parametrize("n", (1, 2, 3, 4, 64))
+    def test_widest_fitting_width_is_offered(self, n):
+        width = max(w for w in F.OA_WIDTHS if w <= n)
+        out = F.hadamard_oa(bytes(n), self._draw(1, 0, "little", "set", width))
+        assert int.from_bytes(out[:width], "little") != 0
+        assert out[width:] == bytes(n - width)
+
+    def test_adversarial_empty_buffer_is_unchanged_and_draws_nothing(self):
+        assert F.hadamard_oa(b"", ScriptedRng()) == b""
+
+    def test_adversarial_one_byte_buffer_gets_order_8_row(self):
+        out = F.hadamard_oa(b"\x00", self._draw(7, 0, "big", "set", 1))
+        assert out[0] == hadamard_rows(8)[7]
+
+    @pytest.mark.parametrize("n", (1, 3))
+    def test_adversarial_short_buffer_rejects_wide_draw(self, n):
+        # Scripting index 2 (width 4) on a buffer < 4 bytes must not write
+        # past the end: the fit tuple has no index 2.
+        with pytest.raises(IndexError):
+            F.hadamard_oa(bytes(n), ScriptedRng(randints=[0, 0], choice_idxs=[2, 0]))
 
 
 # ── fib_encode ────────────────────────────────────────────────────────────

@@ -14,43 +14,13 @@ Oracle for tests only (FINDINGS P4-14): n <= 8 keeps n! tractable.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from itertools import accumulate
 
 from fuzzer_tool.core.job_scheduling import Job
+from fuzzer_tool.core.permutation import sjt_swaps
 
-LEFT = -1
-
-
-def sjt_swaps(n: int) -> Iterator[int]:
-    """Yield i for each adjacent swap (i, i+1) of an SJT walk (Even's rule).
-
-    Starting from the identity, the n! - 1 swaps visit every permutation
-    once. E.g. n=3: 012 -> 021 -> 201 -> 210 -> 120 -> 102.
-    """
-    perm = list(range(n))
-    pos = list(range(n))
-    dirs = [LEFT] * n
-    while True:
-        # Largest mobile value: its neighbour in its direction is smaller.
-        mobile = -1
-        for v in range(n - 1, -1, -1):
-            q = pos[v] + dirs[v]
-            if 0 <= q < n and perm[q] < v:
-                mobile = v
-                break
-        if mobile < 0:
-            return
-
-        p = pos[mobile]
-        q = p + dirs[mobile]
-        other = perm[q]
-        perm[p], perm[q] = other, mobile
-        pos[mobile], pos[other] = q, p
-        yield min(p, q)
-
-        for v in range(mobile + 1, n):
-            dirs[v] = -dirs[v]
+__all__ = ["sjt_min_fmax", "sjt_swaps"]
 
 
 def _violations(seq: list[Job], prec: dict[object, set[object]]) -> int:

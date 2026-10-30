@@ -7,8 +7,8 @@ skipped any input whose hash was seen, without comparing bytes.
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import hash_data, load_corpus
+from fuzzer_tool.core.hash_inverse import xxh64_collide
 from fuzzer_tool.services.import_corpus import import_from_afl, import_from_libfuzzer
-from tests.support.xxh64_collide import colliding
 
 _REF = b"R" * 64 + b"shared-tail"
 _PREFIXES = [b"orlp-xxh64-second-preimage-%04d" % i for i in range(1, 3)]
@@ -16,7 +16,7 @@ _PREFIXES = [p + b"!" * (32 - len(p)) for p in _PREFIXES]
 
 
 def _forged(n: int) -> list[bytes]:
-    return colliding(_REF, _PREFIXES[: n - 1])
+    return xxh64_collide(_REF, _PREFIXES[: n - 1])
 
 
 def _stored(root: Path) -> list[bytes]:

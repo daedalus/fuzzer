@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import bisect
 import itertools
+import math
 import os
 
 import numpy as np
@@ -681,6 +682,31 @@ class RandPool:
         perturbed-history exploration over K arms.
         """
         return self._rng.binomial(counts, p)
+
+    def poisson_array(self, lams) -> np.ndarray:
+        """Return one Poisson(lams[i]) draw per element, as an array.
+
+        One C-level numpy call (no pool words consumed); keeps the shape of
+        *lams*. Negative rates raise ``ValueError``.
+        """
+        return self._rng.poisson(lams)
+
+    def geometric(self, p: float) -> int:
+        """Return the number of failures before the first success.
+
+        Inversion with one :meth:`random` draw: ``floor(log(V) / log(1-p))``
+        with ``V = 1 - U`` in ``(0, 1]``, so ``U = 0`` never reaches
+        ``log(0)``. ``log1p`` keeps tiny *p* accurate. ``p == 1`` is
+        certain and returns 0 without drawing.
+
+        Raises:
+            ValueError: *p* outside ``(0, 1]`` (NaN included).
+        """
+        if not 0.0 < p <= 1.0:
+            raise ValueError(f"geometric needs 0 < p <= 1, got {p}")
+        if p == 1.0:
+            return 0
+        return math.floor(math.log(1.0 - self.random()) / math.log1p(-p))
 
     def random_array(self, shape) -> np.ndarray:
         """Return uniform floats in [0.0, 1.0) as an array of *shape*.

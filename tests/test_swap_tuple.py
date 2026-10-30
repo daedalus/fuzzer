@@ -20,6 +20,7 @@ import pytest
 
 from fuzzer_tool.core.exhaustive_pool import ExhaustivePool
 from fuzzer_tool.core.mutations.generic import _swap_tuple
+from fuzzer_tool.core.permutation import perm_sign
 from fuzzer_tool.core.rand_pool import RandPool
 
 
@@ -30,20 +31,10 @@ def rng(request):
 
 def _permutation_sign(mapping: dict[int, int]) -> int:
     """Sign of the permutation described by ``mapping`` (identity elsewhere)."""
-    visited = set()
-    sign = 1
-    for start in mapping:
-        if start in visited:
-            continue
-        cycle_len = 0
-        node = start
-        while node not in visited:
-            visited.add(node)
-            node = mapping.get(node, node)
-            cycle_len += 1
-        if cycle_len > 0:
-            sign *= (-1) ** (cycle_len - 1)
-    return sign
+    perm = list(range(max(mapping, default=-1) + 1))
+    for k, v in mapping.items():
+        perm[k] = v
+    return perm_sign(perm)
 
 
 # ── Basic shape: plain length domain ─────────────────────────────────────
@@ -116,7 +107,7 @@ def test_even_m_rotation_is_an_odd_permutation(rng):
     # handover's §10a.1 recommends rotation for.
     for m in (2, 4, 6, 8):
         picked, permuted = _swap_tuple(10, rng, m)
-        mapping = dict(zip(picked, permuted))
+        mapping = dict(zip(picked, permuted, strict=True))
         assert _permutation_sign(mapping) == -1
 
 
@@ -129,7 +120,7 @@ def test_odd_m_fallback_is_not_confined_to_rotation_parity(rng):
     signs = set()
     for _ in range(300):
         picked, permuted = _swap_tuple(10, rng, 3)
-        mapping = dict(zip(picked, permuted))
+        mapping = dict(zip(picked, permuted, strict=True))
         signs.add(_permutation_sign(mapping))
     assert signs == {1, -1}
 

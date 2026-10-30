@@ -723,6 +723,13 @@ class ExhaustivePool:
     def lognormvariate_list(self, mu: float, sigma: float, count: int) -> list[float]:
         self._continuous("lognormvariate_list()")
 
+    # Unbounded support: no finite enumeration either.
+    def poisson_array(self, lams):
+        self._continuous("poisson_array() (unbounded support)")
+
+    def geometric(self, p: float) -> int:
+        self._continuous("geometric() (unbounded support)")
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         state = "exhausted" if self._exhausted else "running"
         if self._budget_exhausted:

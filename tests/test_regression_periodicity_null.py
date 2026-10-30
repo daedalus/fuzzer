@@ -41,38 +41,15 @@ from fuzzer_tool.core.periodicity import (
     fit_ar_yule_walker,
     prewhiten,
 )
-
-
-def _cox(rng: np.random.Generator, n: int, tau: float = 40.0, base: float = 3.0):
-    """Poisson counts whose rate is itself a slowly drifting OU process."""
-    a = math.exp(-1.0 / tau)
-    z = 0.0
-    out = np.empty(n)
-    for i in range(n):
-        z = a * z + math.sqrt(1.0 - a * a) * rng.standard_normal()
-        out[i] = rng.poisson(max(0.05, base * math.exp(0.6 * z)))
-    return out
-
-
-def _ar1(rng: np.random.Generator, n: int, phi: float):
-    e = rng.standard_normal(n)
-    x = np.empty(n)
-    x[0] = e[0] / math.sqrt(1.0 - phi * phi)
-    for i in range(1, n):
-        x[i] = phi * x[i - 1] + e[i]
-    return x
-
-
-def _pink(rng: np.random.Generator, n: int, beta: float):
-    f = np.fft.rfftfreq(n)[1:]
-    phase = rng.uniform(0.0, 2.0 * math.pi, f.size)
-    spec = np.concatenate(([0.0], f ** (-beta / 2.0) * np.exp(1j * phase)))
-    return np.fft.irfft(spec, n=n)
+from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.synthetic_series import ar1, cox, garch, pink
 
 
 def _rate(series_fn, reps: int, **kw) -> float:
     hits = sum(
-        1 for _ in range(reps) if detect_periodicity(series_fn().tolist(), min_samples=50, **kw).significant
+        1
+        for _ in range(reps)
+        if detect_periodicity(series_fn().tolist(), min_samples=50, **kw).significant
     )
     return hits / reps
 
@@ -83,16 +60,17 @@ def _rate(series_fn, reps: int, **kw) -> float:
 @pytest.mark.parametrize("n", [256, 512])
 def test_drifting_rate_null_is_not_flagged_wholesale(n: int) -> None:
     """Was 0.378 (n=256) and 0.540 (n=512) against a nominal 0.05."""
-    rng = np.random.default_rng(20260913 + n)
-    rate = _rate(lambda: _cox(rng, n), 150)
+    rng = RandPool(seed=20260913 + n)
+    rate = _rate(lambda: cox(rng, n), 150)
     assert rate < 0.20, f"drifting-rate false-positive rate {rate:.3f} at n={n}"
 
 
 @pytest.mark.parametrize("phi", [0.7, 0.9, -0.6])
 def test_autocorrelated_nulls_are_not_flagged_wholesale(phi: float) -> None:
     """AR(1) nulls ran 0.85-0.98 before the fix, in both signs of phi."""
-    rng = np.random.default_rng(hash(("ar", phi)) % (2**32))
-    rate = _rate(lambda: _ar1(rng, 512, phi), 150)
+    # Seed from phi itself: hash() of a str-bearing tuple varies per process.
+    rng = RandPool(seed=round((phi + 1.0) * 1000))
+    rate = _rate(lambda: ar1(rng, 512, phi), 150)
     assert rate < 0.20, f"AR(1) phi={phi} false-positive rate {rate:.3f}"
 
 
@@ -102,8 +80,8 @@ def test_raw_periodogram_still_reproduces_the_defect() -> None:
     Without this the fix is unfalsifiable from inside the suite: nothing else
     here can tell 'the null was repaired' from 'the test went blind'.
     """
-    rng = np.random.default_rng(4242)
-    raw = _rate(lambda: _ar1(rng, 512, 0.7), 120, prewhiten_series=False)
+    rng = RandPool(seed=4242)
+    raw = _rate(lambda: ar1(rng, 512, 0.7), 120, prewhiten_series=False)
     assert raw > 0.5, f"expected the documented inflation, saw {raw:.3f}"
 
 
@@ -147,11 +125,11 @@ def test_a_real_tone_is_not_cancelled_by_its_own_background_fit(amp: float) -> N
 
 def test_prewhitening_does_not_shift_a_peaks_frequency() -> None:
     """The filter changes amplitudes, not frequencies."""
-    rng = np.random.default_rng(99)
+    rng = RandPool(seed=99)
     n = 512
     t = np.arange(n)
     for bin_k in (16, 64, 128):
-        x = _ar1(rng, n, 0.7) + 6.0 * np.sin(2.0 * math.pi * bin_k * t / n)
+        x = ar1(rng, n, 0.7) + 6.0 * np.sin(2.0 * math.pi * bin_k * t / n)
         res = detect_periodicity(x.tolist(), min_samples=50)
         assert res.significant
         m = res.n_samples - res.ar_order
@@ -171,26 +149,16 @@ def test_volatility_clustering_never_inflated_this_test() -> None:
     looks like it should explain the false positives. It does not -- measured
     0.044 against a 0.049 control. Only mean-level rate drift does.
     """
-    rng = np.random.default_rng(31337)
-
-    def garch(n: int, omega=0.05, alpha=0.15, beta=0.80):
-        s2 = omega / (1.0 - alpha - beta)
-        x = np.empty(n)
-        e = rng.standard_normal(n)
-        for i in range(n):
-            x[i] = math.sqrt(s2) * e[i]
-            s2 = omega + alpha * x[i] ** 2 + beta * s2
-        return x
-
-    raw = _rate(lambda: garch(512), 150, prewhiten_series=False)
+    rng = RandPool(seed=31337)
+    raw = _rate(lambda: garch(rng, 512, 0.05, 0.15, 0.80), 150, prewhiten_series=False)
     assert raw < 0.13, f"raw g-test on clustered variance: {raw:.3f}"
 
 
 @pytest.mark.parametrize("beta", [1.0, 2.0])
 def test_pure_power_law_was_already_handled_by_the_bin_gate(beta: float) -> None:
     """1/f peaks collapse into bin 1, which ``peak_bin >= 2`` rejects."""
-    rng = np.random.default_rng(int(beta * 10) + 88)
-    raw = _rate(lambda: _pink(rng, 512, beta), 120, prewhiten_series=False)
+    rng = RandPool(seed=int(beta * 10) + 88)
+    raw = _rate(lambda: pink(rng, 512, beta), 120, prewhiten_series=False)
     assert raw < 0.05, f"raw rate on 1/f^{beta}: {raw:.3f}"
 
 
@@ -257,8 +225,8 @@ def test_yule_walker_rejects_a_singular_system() -> None:
 
 
 def test_result_reports_the_background_it_removed() -> None:
-    rng = np.random.default_rng(12)
-    res = detect_periodicity(_ar1(rng, 512, 0.8).tolist(), min_samples=50)
+    rng = RandPool(seed=12)
+    res = detect_periodicity(ar1(rng, 512, 0.8).tolist(), min_samples=50)
     assert res.ar_order >= 1
     assert len(res.ar_coeffs) == res.ar_order
     assert res.n_samples == 512  # reports what the caller passed, not the residual

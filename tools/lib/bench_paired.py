@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import re
 import shutil
@@ -48,13 +47,19 @@ import subprocess
 import sys
 import tempfile
 import time
-from itertools import product
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import bench_lock  # noqa: E402
 from eval_set import DEFAULT_ITERS, SEED_DIRS, SEEDS, TARGET_SETS, cells  # noqa: E402
+
+from fuzzer_tool.core.exact_tests import (  # noqa: E402
+    fisher_exact,
+    mcnemar_exact,
+    wilcoxon_signed_rank,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 # $FUZZ_BENCH_RESULTS keeps results out of the source tree (AGENTS.md Rule 17).
@@ -627,110 +632,11 @@ def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total:
 # ── Analysis ───────────────────────────────────────────────────────────
 
 
-def _mcnemar_exact(b: int, c: int) -> float:
-    """Two-sided exact McNemar p-value on discordant counts *b* and *c*.
-
-    Under the null the discordant pairs split Binomial(b + c, 0.5). Exact
-    rather than the chi-square approximation because the discordant count
-    is routinely under 25 at these matrix sizes, where the approximation
-    is anticonservative.
-    """
-    n = b + c
-    if n == 0:
-        return 1.0
-    k = min(b, c)
-    tail = sum(math.comb(n, i) for i in range(k + 1)) / (2**n)
-    return min(1.0, 2 * tail)
-
-
-def _wilcoxon_signed_rank(deltas: list[float]) -> tuple[float, float]:
-    """Two-sided Wilcoxon signed-rank test on paired deltas.
-
-    McNemar binarises the same deltas (sign only) for the binary outcome; this
-    uses the magnitude rank instead, giving more power at the same cell count
-    because it is the right test for a paired continuous measurement. Zeros
-    carry no sign information and are dropped before ranking.
-
-    Returns ``(statistic, p_value)`` where *statistic* is the smaller of the
-    two rank sums (W- by convention). Exact permutation distribution for
-    n <= 20, normal approximation with continuity correction above.
-    """
-    ranked = sorted((abs(d), i) for i, d in enumerate(deltas) if d != 0.0)
-    if not ranked:
-        return 0.0, 1.0
-
-    ranks = _tied_ranks(ranked)
-    signs = [1.0 if deltas[idx] > 0 else -1.0 for _, idx in ranked]
-    w_pos = sum(r for r, s in zip(ranks, signs, strict=False) if s > 0)
-    w_neg = sum(r for r, s in zip(ranks, signs, strict=False) if s < 0)
-    stat = min(w_pos, w_neg)
-    total = sum(ranks)
-
-    n = len(ranked)
-    if n <= 20:
-        return stat, _exact_signed_p(ranks, stat, total)
-
-    # Normal approximation with continuity correction.
-    mean = n * (n + 1) / 4.0
-    var = n * (n + 1) * (2 * n + 1) / 24.0
-    z = (abs(w_pos - mean) - 0.5) / math.sqrt(var)
-    if z < 0:
-        return stat, 1.0
-    # Standard normal tail via the error function.
-    p = math.erfc(z / math.sqrt(2.0))
-    return stat, min(1.0, p)
-
-
-def _tied_ranks(ranked: list[tuple[float, int]]) -> list[float]:
-    """1-based ranks of sorted *ranked*, averaging ties so the null is exact under H0."""
-    ranks = [0.0] * len(ranked)
-    i = 0
-    while i < len(ranked):
-        j = i
-        while j + 1 < len(ranked) and ranked[j + 1][0] == ranked[i][0]:
-            j += 1
-        avg = (i + 1 + j + 1) / 2.0
-        for k in range(i, j + 1):
-            ranks[k] = avg
-        i = j + 1
-    return ranks
-
-
-def _exact_signed_p(ranks: list[float], stat: float, total: float) -> float:
-    """Exact two-sided signed-rank p-value by enumerating all 2^n sign assignments.
-
-    W+ under the null is the sum of a random subset of the ranks, so every
-    assignment is equally likely.
-    """
-    n = len(ranks)
-    count_le = count_ge = 0
-    for signs in product((-1, 1), repeat=n):
-        w = sum(r for r, s in zip(ranks, signs, strict=False) if s > 0)
-        if w <= stat + 1e-12:
-            count_le += 1
-        if w >= total - stat - 1e-12:
-            count_ge += 1
-    return min(1.0, 2.0 * min(count_le, count_ge) / (2**n))
-
-
-def _fisher_exact(a: int, b: int, c: int, d: int) -> float:
-    """Two-sided Fisher exact p-value for the 2x2 table [[a, b], [c, d]].
-
-    Reported only as a contrast: it treats the two arms as independent
-    samples and so discards the pairing the matrix was built to create.
-    Where the two disagree, McNemar is the one to believe.
-    """
-    n = a + b + c + d
-    if n == 0:
-        return 1.0
-
-    def prob(x):
-        return math.comb(a + b, x) * math.comb(c + d, a + c - x) / math.comb(n, a + c)
-
-    lo = max(0, a + c - (c + d))
-    hi = min(a + b, a + c)
-    observed = prob(a)
-    return min(1.0, sum(prob(x) for x in range(lo, hi + 1) if prob(x) <= observed * (1 + 1e-9)))
+# Exact tests live in core (single source of truth); private names kept for
+# tools/ab_synergy_multi_ffmpeg.py and tests/test_bench_paired_stats.py.
+_mcnemar_exact = mcnemar_exact
+_fisher_exact = fisher_exact
+_wilcoxon_signed_rank = wilcoxon_signed_rank
 
 
 def _key(row: dict) -> tuple[str, int]:

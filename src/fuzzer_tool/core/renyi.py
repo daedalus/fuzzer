@@ -18,16 +18,93 @@ For fuzzing:
 Also provides:
 - Tsallis entropy: another non-extensive entropy measure
 - Coverage spectrum analysis: per-edge hit count distribution profiling
+- renyi_divergence: D_α(P||Q), the order-α generalization of KL
 
-Scope: this module measures the entropy of one distribution. It does not compare
-two. The Jensen-Shannon divergence the fuzzer uses lives in
-edge_tracker._js_divergence and the one asymmetric KL in DifferentialTracker.
-The list above used to promise a Renyi divergence; no such function was ever
-written here.
+Scope: renyi_divergence is a library diagnostic with no production caller.
+The Jensen-Shannon divergence the fuzzer scores with lives in
+edge_tracker._js_divergence and the smoothed asymmetric KL in
+DifferentialTracker.
 """
 
 import math
 from collections import Counter
+from collections.abc import Mapping, Sequence
+
+# |α - 1| below this takes the KL limit instead of the 0/0-prone formula.
+_ALPHA_ONE_TOL = 1e-10
+
+
+def renyi_divergence(p: Mapping | Sequence, q: Mapping | Sequence, alpha: float) -> float:
+    """Rényi divergence D_α(P||Q) in bits.
+
+    D_α = log2(sum p^α q^(1-α)) / (α - 1). Limits: α=0 -> -log2 Q(supp P),
+    α=1 -> KL(P||Q), α=inf -> log2 max p/q. Non-decreasing in α.
+
+    Inputs are counts or probabilities, normalized here (like
+    RenyiEntropy). Mappings align by key, sequences by index; a missing
+    key is mass 0.
+
+    Args:
+        p: Distribution P (key -> mass, or index-aligned masses).
+        q: Reference distribution Q.
+        alpha: Order, >= 0; math.inf allowed.
+
+    Returns:
+        Divergence in bits, >= 0. inf when Q has no mass on supp P, or
+        for α >= 1 when supp P is not inside supp Q.
+
+    Raises:
+        ValueError: alpha < 0 or NaN; a mass negative or non-finite; a
+            distribution with zero total mass.
+    """
+    if not alpha >= 0:
+        raise ValueError(f"alpha must be >= 0, got {alpha}")
+
+    pairs = _aligned_pairs(p, q)
+
+    if alpha == 0:
+        mass = sum(qi for _, qi in pairs)
+        return -math.log2(mass) if mass > 0 else math.inf
+
+    if alpha >= 1 and any(qi == 0 for _, qi in pairs):
+        return math.inf
+
+    return max(0.0, _divergence_value(pairs, alpha))
+
+
+def _divergence_value(pairs: list[tuple[float, float]], alpha: float) -> float:
+    """D_α for α > 0 over supp P pairs; caller handled α >= 1 support gaps."""
+    if alpha == math.inf:
+        return math.log2(max(pi / qi for pi, qi in pairs))
+
+    if abs(alpha - 1.0) < _ALPHA_ONE_TOL:
+        return sum(pi * math.log2(pi / qi) for pi, qi in pairs)
+
+    # α < 1: terms with q = 0 vanish; an empty overlap means disjoint supports.
+    total = sum(pi**alpha * qi ** (1.0 - alpha) for pi, qi in pairs if qi > 0)
+    if total <= 0:
+        return math.inf
+    return math.log2(total) / (alpha - 1.0)
+
+
+def _aligned_pairs(p: Mapping | Sequence, q: Mapping | Sequence) -> list[tuple[float, float]]:
+    """Normalized (p_i, q_i) for every key with p_i > 0."""
+    pm, qm = _as_masses(p), _as_masses(q)
+    p_total, q_total = sum(pm.values()), sum(qm.values())
+    if p_total <= 0 or q_total <= 0:
+        raise ValueError("distributions need positive total mass")
+
+    return [(v / p_total, qm.get(k, 0.0) / q_total) for k, v in pm.items() if v > 0]
+
+
+def _as_masses(dist: Mapping | Sequence) -> dict:
+    """Key -> mass dict; rejects negative or non-finite masses."""
+    masses = dict(dist.items()) if isinstance(dist, Mapping) else dict(enumerate(dist))
+    for v in masses.values():
+        if not (math.isfinite(v) and v >= 0):
+            raise ValueError(f"masses must be finite and >= 0, got {v}")
+    return masses
+
 
 try:
     import numpy as np

@@ -22,48 +22,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+# Hadamard constructions live in src; private aliases kept for callers.
+from fuzzer_tool.core.hadamard import _paley, _sylvester_double  # noqa: F401
+from fuzzer_tool.core.hadamard import hadamard as _hadamard
+from fuzzer_tool.core.numtheory import is_prime as _is_prime  # noqa: F401
+
 Row = tuple[int, ...]
 
 _MAX_ORDER = 64
-_PALEY_MOD = 4
-_PALEY_RESIDUE = 3
-
-
-def _is_prime(q: int) -> bool:
-    return q > 1 and all(q % d for d in range(2, int(q**0.5) + 1))
-
-
-def _paley(q: int) -> list[list[int]]:
-    """Paley I Hadamard matrix of order q+1 (q prime, q = 3 mod 4)."""
-    squares = {(x * x) % q for x in range(1, q)}
-
-    def chi(a: int) -> int:
-        a %= q
-        if a == 0:
-            return 0
-        return 1 if a in squares else -1
-
-    # S = [[0, 1..1], [-1, Q]] is skew; H = S + I.
-    h = [[1] + [1] * q]
-    for i in range(q):
-        h.append([-1] + [chi(j - i) + (1 if i == j else 0) for j in range(q)])
-    return h
-
-
-def _sylvester_double(h: list[list[int]]) -> list[list[int]]:
-    return [r + r for r in h] + [r + [-v for v in r] for r in h]
-
-
-def _hadamard(n: int) -> list[list[int]] | None:
-    """Hadamard matrix of order *n*, or None if none is constructed here."""
-    if n == 1:
-        return [[1]]
-    if _is_prime(n - 1) and (n - 1) % _PALEY_MOD == _PALEY_RESIDUE:
-        return _paley(n - 1)
-    if n % 2:
-        return None
-    half = _hadamard(n // 2)
-    return _sylvester_double(half) if half is not None else None
 
 
 def _order_for(k: int) -> int:

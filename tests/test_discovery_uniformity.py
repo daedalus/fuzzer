@@ -9,13 +9,14 @@ worse than no detector -- see the module docstring for the mid-p/KS design
 this replaced after that measurement came back badly miscalibrated.
 """
 
-import random
+import numpy as np
 
 from fuzzer_tool.core.analyzers.analyzer_discovery_uniformity import (
     DiscoveryUniformityDetector,
     dispersion_pvalue,
     fit_negative_binomial,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 def _feed(d, counts):
@@ -24,23 +25,8 @@ def _feed(d, counts):
     return d
 
 
-def _poisson_sample(rng, lam):
-    # Knuth's algorithm -- fine for the small lambdas a stats-tick edge
-    # delta actually takes, avoids a numpy/scipy test dependency.
-    if lam <= 0:
-        return 0
-    lim = pow(2.718281828459045, -lam)
-    k, p = 0, 1.0
-    while True:
-        k += 1
-        p *= rng.random()
-        if p <= lim:
-            return k - 1
-
-
 def _poisson_series(n, lam, seed=0):
-    rng = random.Random(seed)
-    return [_poisson_sample(rng, lam) for _ in range(n)]
+    return RandPool(seed=seed).poisson_array(np.full(n, lam)).tolist()
 
 
 class TestDispersionPvalue:
@@ -53,8 +39,7 @@ class TestDispersionPvalue:
 
     def test_a_genuine_poisson_draw_is_not_a_rejection(self):
         """A real Poisson(lambda) sample lands well inside the null."""
-        rng = random.Random(42)
-        counts = [_poisson_sample(rng, 6.0) for _ in range(200)]
+        counts = _poisson_series(200, lam=6.0, seed=42)
         assert dispersion_pvalue(counts) > 0.05
 
     def test_wildly_overdispersed_is_rejected(self):
@@ -112,7 +97,7 @@ class TestDiscrimination:
         """Alternating feast/famine ticks with the *same* long-run mean as a
         steady process -- a plain rate/mean check would miss this; the
         dispersion statistic is exactly what exposes the per-tick shape."""
-        rng = random.Random(5)
+        rng = RandPool(seed=5)
         bursty = []
         for _ in range(150):
             bursty.append(0)
@@ -155,18 +140,9 @@ class TestFitNegativeBinomial:
         """Sample from NB(r=3, p=0.4) via r iid geometric draws (the sum
         representation the wiki article gives) and check the moment
         estimator lands near the generating parameters."""
-        rng = random.Random(7)
+        rng = RandPool(seed=7)
         r_true, p_true = 3, 0.4
-
-        def _geometric(rng, p):
-            k = 0
-            while rng.random() >= p:
-                k += 1
-            return k
-
-        counts = [
-            sum(_geometric(rng, p_true) for _ in range(r_true)) for _ in range(4000)
-        ]
+        counts = [sum(rng.geometric(p_true) for _ in range(r_true)) for _ in range(4000)]
         nb = fit_negative_binomial(counts)
         assert nb is not None
         assert abs(nb["r"] - r_true) / r_true < 0.15
@@ -180,7 +156,7 @@ class TestFitNegativeBinomial:
         assert "nb_r" not in v
 
         d2 = DiscoveryUniformityDetector(window=450, min_obs=32)
-        rng = random.Random(5)
+        rng = RandPool(seed=5)
         bursty = []
         for _ in range(150):
             bursty.append(0)

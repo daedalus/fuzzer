@@ -220,7 +220,6 @@ def fisher_g_pvalue(g: float, m: int, alpha: float = 0.05) -> float:
     return s
 
 
-
 _LN2 = math.log(2.0)
 
 PREWHITEN_MAX_ORDER = 8
@@ -400,7 +399,7 @@ def detect_periodicity(
     ``prewhiten_series`` defaults True and an AR(p) background fit (see
     :func:`prewhiten`) flattens the spectrum before the periodogram is
     scored. Measured false-positive rates at nominal alpha=0.05, 500-1000
-    replicates, raw versus pre-whitened:
+    replicates, raw versus pre-whitened (nulls from :mod:`.synthetic_series`):
 
     ===========================  =====  ==========  =============
     null                         n      raw         pre-whitened

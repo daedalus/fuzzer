@@ -83,4 +83,12 @@ suppress = [
     "src/fuzzer_tool/core/edge_matrix.py:rank_corr",
     # Local AUC replaced by core/rank_stats.rank_auc, imported under the same name.
     "tests/test_entropy_kl_miller_madow.py:auc",
+    # Test/tool-only algorithms moved into core (one source each):
+    # sjt_swaps re-exported from core/permutation; the rest were nested
+    # helpers of functions now in core/synthetic_series, core/exact_tests,
+    # core/hadamard.
+    "tests/support/sjt.py:sjt_swaps",
+    "tests/test_regression_periodicity_null.py:garch",
+    "tools/lib/bench_paired.py:prob",
+    "tools/lib/factorial_design.py:chi",
 ]

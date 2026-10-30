@@ -12,7 +12,7 @@ descriptions (FXT is GPL); no FXT code.
     haar_coef        24, 27    every wavelet coefficient but one
     revbin_permute   2.1       element multiset; an involution
     hilbert_patch    1.31      locality: touched cells form a 2D path
-    hadamard_oa      19.1      written word is a Hadamard row (OA strength 2)
+    hadamard_oa      19.1      written 1/2/4-byte word is a Hadamard row (OA strength 2)
     fib_encode       14.2      Fibonacci universal code of each byte
 
 All are length-preserving and return *data* unchanged when it cannot hold
@@ -24,6 +24,7 @@ from __future__ import annotations
 from functools import cache, lru_cache
 from math import gcd
 
+from fuzzer_tool.core.hadamard import hadamard_rows
 from fuzzer_tool.core.mutations.structured import _edit_codebits, _pad_random, _region, _splice
 
 ENDIANS = ("little", "big")
@@ -397,8 +398,11 @@ def hilbert_patch(data: bytes, rng) -> bytes:
 # 16-bit words, bit j set where the entry is -1. Columns 1..15 form a
 # strength-2 orthogonal array: over the rows, every pair of flag bits takes
 # 00/01/10/11 equally often; 16 writes cover all pairwise flag interactions.
+# 1- and 4-byte words use the order-8 / order-32 Paley rows (core/hadamard).
 OA_ORDER = 16
 OA_MODES = ("set", "xor")
+OA_WIDTHS = (1, 2, 4)
+_BYTE_BITS = 8
 
 
 def _hadamard_rows() -> tuple[int, ...]:
@@ -413,9 +417,28 @@ def _hadamard_rows() -> tuple[int, ...]:
 
 HADAMARD_ROWS = _hadamard_rows()
 
+# Width -> row table. Width 2 keeps the m-sequence rows: seeded 16-bit
+# mutants stay bit-identical.
+OA_TABLES = {
+    1: hadamard_rows(_BYTE_BITS),
+    2: HADAMARD_ROWS,
+    4: hadamard_rows(4 * _BYTE_BITS),
+}
+
+# (width, rows, last row index), widest last. Buffer length -> arms that
+# fit; lengths >= _OA_WIDEST take every arm.
+_OA_ARMS = tuple((w, OA_TABLES[w], len(OA_TABLES[w]) - 1) for w in OA_WIDTHS)
+_OA_WIDEST = OA_WIDTHS[-1]
+_OA_FIT = tuple(tuple(a for a in _OA_ARMS if a[0] <= n) for n in range(_OA_WIDEST))
+
+# (endian, mode) pairs: one draw instead of two pays for the width draw.
+OA_KNOBS = tuple((e, m) for e in ENDIANS for m in OA_MODES)
+
 
 def hadamard_oa(data: bytes, rng) -> bytes:
-    """Write (or XOR) one Hadamard row into a 16-bit flag word.
+    """Write (or XOR) one Hadamard row into a 1/2/4-byte flag word.
+
+    Draws width (from those fitting *data*), row, offset, (endian, mode).
 
     Args:
         data: Input bytes.
@@ -424,18 +447,19 @@ def hadamard_oa(data: bytes, rng) -> bytes:
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    if len(data) < 2:
+    n = len(data)
+    if not n:
         return data
 
-    row = HADAMARD_ROWS[rng.randint(0, OA_ORDER - 1)]
-    offset = rng.randint(0, len(data) - 2)
-    endian = rng.choice(ENDIANS)
-    mode = rng.choice(OA_MODES)
+    width, table, top = rng.choice(_OA_ARMS if n >= _OA_WIDEST else _OA_FIT[n])
+    row = table[rng.randint(0, top)]
+    offset = rng.randint(0, n - width)
+    endian, mode = rng.choice(OA_KNOBS)
 
     word = row
     if mode == OA_MODES[1]:
-        word ^= int.from_bytes(data[offset : offset + 2], endian)
-    return _splice(data, offset, word.to_bytes(2, endian))
+        word ^= int.from_bytes(data[offset : offset + width], endian)
+    return _splice(data, offset, word.to_bytes(width, endian))
 
 
 # ── fib_encode (14.2) ────────────────────────────────────────────────────
