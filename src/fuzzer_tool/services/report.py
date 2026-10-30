@@ -2244,7 +2244,9 @@ def _misc_strategy_lines(f, strategies: list[str]) -> None:
 
     # Transfer entropy
     if f._use_transfer_entropy and f._te:
-        strategies.append(f"  Transfer entropy: history={f._te.k}")
+        strategies.append(
+            f"  Transfer entropy: history={f._te.k}, correction={f._te.correction.name.lower()}"
+        )
 
     # Secretary
     if f._secretary:

@@ -135,7 +135,7 @@ class TestScoring:
         assert score[3] == pytest.approx(2.0)
 
     def test_delimiter_set_is_the_documented_one(self):
-        assert set(DELIMS) == set(b"\x00\n\r ,:;=/<>\"{}[]")
+        assert set(DELIMS) == set(b'\x00\n\r ,:;=/<>"{}[]')
 
     def test_delimiter_term_needs_a_byte_that_differs(self):
         # Inside a NUL run the previous byte is a delimiter but nothing
@@ -217,7 +217,9 @@ class TestScoring:
         assert scores == sorted(scores, reverse=True)
         # Ties go to the lower offset.
         for (o1, s1), (o2, s2) in zip(
-            zip(offsets, scores), zip(offsets[1:], scores[1:]), strict=False
+            zip(offsets, scores, strict=False),
+            zip(offsets[1:], scores[1:], strict=False),
+            strict=False,
         ):
             assert s1 > s2 or o1 < o2
 
@@ -324,9 +326,7 @@ class TestCache:
     def test_table_is_built_once_per_seed(self, monkeypatch):
         calls = []
         real = pos_boundary.top_boundaries
-        monkeypatch.setattr(
-            pos_boundary, "top_boundaries", lambda d: calls.append(d) or real(d)
-        )
+        monkeypatch.setattr(pos_boundary, "top_boundaries", lambda d: calls.append(d) or real(d))
         s = _sched()
         for _ in range(5):
             s.propose(b"ab,cd", 5)
@@ -350,9 +350,7 @@ class TestCache:
         s.propose(b"zz,new", 6)  # evicts seeds[1], not seeds[0]
         calls = []
         real = pos_boundary.top_boundaries
-        monkeypatch.setattr(
-            pos_boundary, "top_boundaries", lambda d: calls.append(d) or real(d)
-        )
+        monkeypatch.setattr(pos_boundary, "top_boundaries", lambda d: calls.append(d) or real(d))
         s.propose(seeds[0], len(seeds[0]))
         assert calls == []
         s.propose(seeds[1], len(seeds[1]))

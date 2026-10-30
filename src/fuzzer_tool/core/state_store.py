@@ -247,18 +247,17 @@ class StateStore:
                     # AttributeError instead, and would otherwise abort the
                     # whole save from inside one section -- the same
                     # all-or-nothing failure this guard exists to break up.
-                    blob = pickle.dumps(
-                        self._writable_sections(), protocol=pickle.HIGHEST_PROTOCOL
-                    )
+                    blob = pickle.dumps(self._writable_sections(), protocol=pickle.HIGHEST_PROTOCOL)
                 # compresslevel 1, not gzip's default 9. The save blocks the
                 # fuzz loop and runs every stats interval; on an FFmpeg
                 # campaign the pickle reaches ~156 MB and level 9 took 11.0s
                 # per save against 0.87s at level 1, for a file 18.1 MB
                 # instead of 13.9 MB. Decompression is ~0.44s either way and
                 # the format is unchanged, so every reader is unaffected.
-                with open(fd, "wb") as raw, gzip.GzipFile(
-                    fileobj=raw, mode="wb", mtime=0, compresslevel=_GZIP_LEVEL
-                ) as fh:
+                with (
+                    open(fd, "wb") as raw,
+                    gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, compresslevel=_GZIP_LEVEL) as fh,
+                ):
                     fh.write(blob)
                 Path(tmp).replace(self.path)
             except BaseException:

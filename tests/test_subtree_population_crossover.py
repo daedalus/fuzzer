@@ -105,7 +105,9 @@ class TestCanonicalHashing:
         from fuzzer_tool.core.grammar import TreeNode
 
         a = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
-        e = TreeNode(rule="different_rule", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+        e = TreeNode(
+            rule="different_rule", children=[self._leaf("k", b"key"), self._leaf("v", b"val")]
+        )
         assert a.canonical_hash() != e.canonical_hash()
 
     def test_collect_interior_hashes_matches_per_node_hash(self):

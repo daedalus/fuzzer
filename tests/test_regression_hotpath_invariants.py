@@ -112,7 +112,9 @@ class TestCrpsClosedForm:
     def _numeric_crps(mu: float, sigma: float, obs: float) -> float:
         """Direct quadrature of integral (F(y) - 1[y >= obs])^2 dy."""
         ys = np.linspace(1e-9, 5.0, 2_000_001)
-        phi = np.array([0.5 * (1.0 + math.erf(v / math.sqrt(2.0))) for v in (np.log(ys) - mu) / sigma])
+        phi = np.array(
+            [0.5 * (1.0 + math.erf(v / math.sqrt(2.0))) for v in (np.log(ys) - mu) / sigma]
+        )
         return float(np.trapezoid((phi - (ys >= obs)) ** 2, ys))
 
     def test_closed_form_matches_numeric_integration(self):

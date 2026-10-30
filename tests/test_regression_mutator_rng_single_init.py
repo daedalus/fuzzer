@@ -83,9 +83,7 @@ class TestSinglePoolPerMutator:
         for node in ast.walk(tree):
             if not isinstance(node, ast.BoolOp) or not isinstance(node.op, ast.Or):
                 continue
-            reads_rng = any(
-                isinstance(v, ast.Attribute) and v.attr == "_rng" for v in node.values
-            )
+            reads_rng = any(isinstance(v, ast.Attribute) and v.attr == "_rng" for v in node.values)
             names = {v.id for v in node.values if isinstance(v, ast.Name)}
             assert not (reads_rng and "random" in names), (
                 f"{cls.__name__} still falls back to the stdlib random module"

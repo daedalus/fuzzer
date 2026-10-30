@@ -62,9 +62,7 @@ def test_operators_service_has_no_available_attribute() -> None:
     # Comments are stripped first: the fix's own explanatory comment names the
     # dead attribute on purpose, and an unstripped scan matches that.
     src = __import__("inspect").getsource(fuzzer_mod.Fuzzer)
-    code = "\n".join(
-        line for line in src.splitlines() if not line.lstrip().startswith("#")
-    )
+    code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
     assert "self._operators._available" not in code, (
         "the phantom attribute is back; the work functional degenerates to L*log(L)"
     )
@@ -124,10 +122,7 @@ def test_true_probs_are_pooled_and_recover_renyi_entropy() -> None:
     import random
 
     p = {"a": 0.7, "b": 0.3}
-    law = {
-        path: p[path[0]] * p[path[1]]
-        for path in itertools.product(("a", "b"), repeat=2)
-    }
+    law = {path: p[path[0]] * p[path[1]] for path in itertools.product(("a", "b"), repeat=2)}
     beta = 1.0
     truth = -math.log(sum(v ** (1.0 + beta) for v in law.values())) / beta
 
@@ -205,9 +200,7 @@ def test_crooks_is_gone() -> None:
 
 def test_unpooled_counter_survives_a_resume() -> None:
     wf = WorkFunctional(beta=1.0, window=100)
-    wf.observe(
-        TrajectoryRecord(ops=("a", "b"), probs=(0.5, 0.5), outcome="boring", state_key="S")
-    )
+    wf.observe(TrajectoryRecord(ops=("a", "b"), probs=(0.5, 0.5), outcome="boring", state_key="S"))
     restored = WorkFunctional()
     restored.restore(wf.snapshot())
     assert restored.stats("S")["unpooled"] == 1

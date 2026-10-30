@@ -24,10 +24,7 @@ def _cfg(edges: dict[int, list[int]], entry: int) -> FunctionCFG:
     gets a block; ``entry`` is flagged ``is_entry``.
     """
     addrs = set(edges) | {a for succs in edges.values() for a in succs}
-    blocks = {
-        a: BasicBlock(start=a, end=a + 1, successors=list(edges.get(a, [])))
-        for a in addrs
-    }
+    blocks = {a: BasicBlock(start=a, end=a + 1, successors=list(edges.get(a, []))) for a in addrs}
     blocks[entry].is_entry = True
     return FunctionCFG(name="f", start=min(addrs), end=max(addrs) + 1, blocks=blocks)
 

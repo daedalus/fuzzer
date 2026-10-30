@@ -25,7 +25,10 @@ import pytest
 
 SHIM = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "src", "fuzzer_tool", "adapters", "afl_shim.c",
+    "src",
+    "fuzzer_tool",
+    "adapters",
+    "afl_shim.c",
 )
 
 pytestmark = pytest.mark.skipif(shutil.which("gcc") is None, reason="no C compiler")
@@ -80,13 +83,28 @@ def built(tmp_path_factory):
     src.write_text(_DRIVER)
     native = d / "native"
     shim = d / "shim"
-    r = subprocess.run(["gcc", "-O1", "-g", "-o", str(native), str(src)], capture_output=True, text=True)
+    r = subprocess.run(
+        ["gcc", "-O1", "-g", "-o", str(native), str(src)], capture_output=True, text=True
+    )
     if r.returncode != 0:
         pytest.skip(f"native driver failed to build: {r.stderr[:300]}")
     r = subprocess.run(
-        ["gcc", "-O1", "-g", "-D__AFL_CMPLOG=1", "-D__AFL_CTX_SENSITIVE=0",
-         "-include", SHIM, "-o", str(shim), str(src), "-ldl", "-lpthread"],
-        capture_output=True, text=True,
+        [
+            "gcc",
+            "-O1",
+            "-g",
+            "-D__AFL_CMPLOG=1",
+            "-D__AFL_CTX_SENSITIVE=0",
+            "-include",
+            SHIM,
+            "-o",
+            str(shim),
+            str(src),
+            "-ldl",
+            "-lpthread",
+        ],
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         pytest.skip(f"shim failed to build: {r.stderr[:300]}")
@@ -101,5 +119,7 @@ def test_unterminated_operand_at_page_edge(built, case):
         pytest.skip(f"libc itself faults on {case} here (rc={r.returncode}); not a valid probe")
     env = {**os.environ, "_CMPLOG_OUT": str(d / "cmplog.out"), "__AFL_COMPCOV_LEVEL": "2"}
     r = subprocess.run([shim, case], capture_output=True, text=True, env=env, timeout=30)
-    assert r.returncode == 0, f"{case}: rc={r.returncode} (139 = shim SIGSEGV) stderr={r.stderr[:200]}"
+    assert r.returncode == 0, (
+        f"{case}: rc={r.returncode} (139 = shim SIGSEGV) stderr={r.stderr[:200]}"
+    )
     assert f"{case} ok" in r.stdout

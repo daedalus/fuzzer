@@ -11,6 +11,7 @@ Also supports optional hardware performance counter tracking on child processes.
 
 import collections
 import contextlib
+import enum
 import hashlib
 import logging
 import os
@@ -244,6 +245,154 @@ def _kill_process_group(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
+# ── Stragglers: descendants the group kill misses ───────────────────────
+#
+# killpg() reaches the target's process group only:
+#
+#   target ─┬─ bg child       same group        -> killpg
+#           └─ setsid() child own session       -> descendant walk (target
+#                                                  alive), else the stderr
+#                                                  pipe it still holds
+#
+# Each pass reads /proc; they run on kill paths only (timeout, or the
+# target exited with its stderr pipe held open), never per clean exec.
+
+_PROC = "/proc"
+# Freeze-and-rescan passes: a straggler can fork between scan and stop.
+_STOP_ROUNDS = 3
+
+
+def _proc_pids() -> list[int]:
+    return [int(name) for name in os.listdir(_PROC) if name.isdigit()]
+
+
+def _ppid_of(pid: int) -> int | None:
+    """Parent pid from /proc/<pid>/stat; None once the process is gone."""
+    try:
+        with open(f"{_PROC}/{pid}/stat", "rb") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    # comm may hold spaces and ')': split after the last one.
+    return int(stat.rsplit(b")", 1)[1].split()[1])
+
+
+def _descendants(pid: int) -> list[int]:
+    """Every live descendant of *pid*, setsid() or not: ppid links survive it."""
+    children: dict[int, list[int]] = collections.defaultdict(list)
+    for p in _proc_pids():
+        ppid = _ppid_of(p)
+        if ppid is not None:
+            children[ppid].append(p)
+
+    found: list[int] = []
+    stack = [pid]
+    while stack:
+        kids = children.get(stack.pop(), ())
+        found += kids
+        stack += kids
+    return found
+
+
+def _fd_writable(pid: int, fd: str) -> bool:
+    """True when *fd* of *pid* is open for writing (fdinfo access mode)."""
+    try:
+        with open(f"{_PROC}/{pid}/fdinfo/{fd}") as f:
+            info = f.read()
+    except OSError:
+        return False
+    for line in info.splitlines():
+        if line.startswith("flags:"):
+            return int(line.split()[1], 8) & os.O_ACCMODE != os.O_RDONLY
+    return False
+
+
+def _pipe_writers(ino: int) -> set[int]:
+    """Pids other than ours holding the write end of pipe *ino*.
+
+    The read end is excluded: a fork of this process inherits it and is
+    no target descendant.
+    """
+    link = f"pipe:[{ino}]"
+    me = os.getpid()
+    found: set[int] = set()
+    for p in _proc_pids():
+        if p == me:
+            continue
+        fd_dir = f"{_PROC}/{p}/fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue  # gone, or not ours to read
+        for fd in fds:
+            try:
+                target = os.readlink(f"{fd_dir}/{fd}")
+            except OSError:
+                continue  # closed since listdir
+            if target == link and _fd_writable(p, fd):
+                found.add(p)
+                break
+    return found
+
+
+def _signal_all(pids, sig: int) -> None:
+    for p in pids:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(p, sig)
+
+
+def _kill_stragglers(pid: int, stderr_fd: int) -> None:
+    """SIGKILL *pid*'s group, its descendants and its stderr pipe's writers.
+
+    SIGSTOP first, rescanning until nothing new appears: a frozen tree
+    keeps its ppid links while it is collected. Call before reaping *pid*,
+    so its group id cannot be reused yet.
+    """
+    ino = os.fstat(stderr_fd).st_ino
+    doomed = {pid}
+    for _ in range(_STOP_ROUNDS):
+        found = set(_descendants(pid)) | _pipe_writers(ino)
+        fresh = found - doomed
+        if not fresh:
+            break
+        doomed |= fresh
+        _signal_all(fresh, signal.SIGSTOP)
+
+    _kill_process_group(pid)
+    _signal_all(doomed - {pid}, signal.SIGKILL)
+
+
+class _Drain(enum.Enum):
+    """How a stderr drain ended."""
+
+    EOF = enum.auto()  # every writer closed the pipe
+    EXITED = enum.auto()  # target exited; a straggler still holds the pipe
+    TIMEOUT = enum.auto()
+
+
+def _open_pidfd(pid: int) -> int | None:
+    """pidfd for *pid*, or None (kernel < 5.3, or already reaped)."""
+    try:
+        return os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        return None
+
+
+def _drain_rest(fd: int, tail: "_TailBuffer") -> _Drain:
+    """Read what the exited target left in the pipe, without blocking."""
+    os.set_blocking(fd, False)
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            return _Drain.EXITED
+        except OSError:
+            return _Drain.EOF
+        if not chunk:
+            return _Drain.EOF
+        tail.add(chunk)
+
+
 def _timeout_stderr(data: bytes) -> str:
     """stderr for a timed-out run: what the target wrote, else the sentinel.
 
@@ -254,12 +403,16 @@ def _timeout_stderr(data: bytes) -> str:
     return data.decode(errors="replace") if data else "timeout"
 
 
-def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
-    """Read *fd* until EOF or *timeout*, returning (data, timed_out).
+def _drain_until_eof(
+    fd: int, timeout: float | None, pidfd: int | None = None
+) -> tuple[bytes, _Drain]:
+    """Read *fd* until EOF, the target's exit (*pidfd*) or *timeout*.
 
     EOF means every writer closed the pipe, which for a spawned child means
     it exited. Polling the pipe is therefore both the stderr drain and the
-    liveness wait, in one syscall per wakeup and no threads.
+    liveness wait, in one syscall per wakeup and no threads. A background
+    descendant holding the pipe delays EOF past the exit; *pidfd* ends the
+    wait at the exit instead (``_Drain.EXITED``).
 
     Returns the bytes captured so far when the deadline expires; a timed-out
     target's partial stderr is still worth having for triage.
@@ -267,6 +420,8 @@ def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
     tail = _TailBuffer()
     poller = select.poll()
     poller.register(fd, select.POLLIN)
+    if pidfd is not None:
+        poller.register(pidfd, select.POLLIN)
     deadline = None if timeout is None else time.monotonic() + timeout
 
     while True:
@@ -275,10 +430,13 @@ def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
         else:
             remaining_ms = (deadline - time.monotonic()) * 1000.0
             if remaining_ms <= 0:
-                return tail.getvalue(), True
+                return tail.getvalue(), _Drain.TIMEOUT
             ready = poller.poll(remaining_ms)
         if not ready:
-            return tail.getvalue(), True
+            return tail.getvalue(), _Drain.TIMEOUT
+        if any(f == pidfd for f, _ in ready):
+            outcome = _drain_rest(fd, tail)
+            return tail.getvalue(), outcome
         try:
             chunk = os.read(fd, 65536)
         except OSError:
@@ -286,7 +444,7 @@ def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
         if not chunk:
             break  # EOF: the child closed its stderr, i.e. exited
         tail.add(chunk)
-    return tail.getvalue(), False
+    return tail.getvalue(), _Drain.EOF
 
 
 # Fallback reap backoff, for kernels without pidfd_open (< 5.3).
@@ -294,12 +452,13 @@ _REAP_POLL_MIN_S = 0.00005
 _REAP_POLL_MAX_S = 0.01
 
 
-def _reap_by(pid: int, deadline: float | None) -> int | None:
+def _reap_by(pid: int, deadline: float | None, pidfd: int | None = None) -> int | None:
     """Reap *pid* by *deadline*; wait status, or None if still running.
 
     EOF on stderr does not prove exit: a target can close fd 2 and loop.
     The pipe also closes just before the child turns zombie, so most clean
     exits land here still running; a pidfd wakes on exit with no sleep.
+    *pidfd* is the caller's (left open); None opens and closes one here.
     """
     done, status = os.waitpid(pid, os.WNOHANG)
     if done:
@@ -308,9 +467,10 @@ def _reap_by(pid: int, deadline: float | None) -> int | None:
     if deadline is None:
         return os.waitpid(pid, 0)[1]
 
-    try:
-        pidfd = os.pidfd_open(pid)
-    except (AttributeError, OSError):
+    own = pidfd is None
+    if own:
+        pidfd = _open_pidfd(pid)
+    if pidfd is None:
         return _poll_reap(pid, deadline)
 
     # pidfd turns readable once the child exits.
@@ -321,7 +481,8 @@ def _reap_by(pid: int, deadline: float | None) -> int | None:
         if left_ms <= 0 or not poller.poll(left_ms):
             return None
     finally:
-        os.close(pidfd)
+        if own:
+            os.close(pidfd)
     return os.waitpid(pid, 0)[1]
 
 
@@ -354,14 +515,18 @@ class _Pump:
     i.e. the child exited (see ``_drain_until_eof``).
     """
 
-    def __init__(self, stderr_fd: int, stdin_fd: int | None, data: bytes):
+    def __init__(self, stderr_fd: int, stdin_fd: int | None, data: bytes, pidfd: int | None):
         self._err = stderr_fd
         self._in = stdin_fd
+        self._pidfd = pidfd
         self._data = memoryview(data)
         self._sent = 0
         self._tail = _TailBuffer()
         self._poller = select.poll()
         self._poller.register(stderr_fd, select.POLLIN)
+        # Exit wakes the pump even while a straggler holds stderr open.
+        if pidfd is not None:
+            self._poller.register(pidfd, select.POLLIN)
         if stdin_fd is None:
             return
         if not data:
@@ -401,24 +566,27 @@ class _Pump:
         self._tail.add(chunk)
         return True
 
-    def run(self, deadline: float | None) -> tuple[bytes, bool]:
-        """Pump until stderr EOF or *deadline*: (stderr, timed_out)."""
+    def run(self, deadline: float | None) -> tuple[bytes, _Drain]:
+        """Pump until stderr EOF, the target's exit or *deadline*."""
         try:
             while True:
                 left_ms = None if deadline is None else (deadline - time.monotonic()) * 1000.0
                 if left_ms is not None and left_ms <= 0:
-                    return self._tail.getvalue(), True
+                    return self._tail.getvalue(), _Drain.TIMEOUT
 
                 ready = self._poller.poll(left_ms)
                 if not ready:
-                    return self._tail.getvalue(), True
+                    return self._tail.getvalue(), _Drain.TIMEOUT
 
                 for fd, _ in ready:
                     if fd == self._in:
                         self._feed()
                         continue
+                    if fd == self._pidfd:
+                        outcome = _drain_rest(self._err, self._tail)
+                        return self._tail.getvalue(), outcome
                     if not self._drain():
-                        return self._tail.getvalue(), False
+                        return self._tail.getvalue(), _Drain.EOF
         finally:
             self._close_stdin()
 
@@ -494,15 +662,20 @@ def _spawn_capture(
         _attach_sessions(sessions, pid)
 
         # The pump owns (and closes) stdin_w from here.
-        pump = _Pump(stderr_r, stdin_w, data or b"")
-        fds = [stderr_r]
+        pidfd = _open_pidfd(pid)
+        pump = _Pump(stderr_r, stdin_w, data or b"", pidfd)
+        fds = [stderr_r] if pidfd is None else [stderr_r, pidfd]
         deadline = time.monotonic() + timeout
-        stderr_data, timed_out = pump.run(deadline)
-        status = None if timed_out else _reap_by(pid, deadline)
+        stderr_data, outcome = pump.run(deadline)
+        # Exited with stderr still held: a descendant outlived it. Kill before
+        # the reap, while the zombie pins its group id.
+        if outcome is _Drain.EXITED:
+            _kill_stragglers(pid, stderr_r)
+        status = None if outcome is _Drain.TIMEOUT else _reap_by(pid, deadline, pidfd)
 
         # Deadline hit, or fd 2 closed by a still-running target.
         if status is None:
-            _kill_process_group(pid)
+            _kill_stragglers(pid, stderr_r)
             os.waitpid(pid, 0)
             _untrack(pid)
             return -1, _timeout_stderr(stderr_data), pid
@@ -774,12 +947,21 @@ def run_target_fast(
             lbr_session.attach(pid)
 
         deadline = None if timeout is None else time.monotonic() + timeout
-        stderr_data, timed_out = _drain_until_eof(stderr_r, timeout)
-        status = None if timed_out else _reap_by(pid, deadline)
+        pidfd = _open_pidfd(pid)
+        try:
+            stderr_data, outcome = _drain_until_eof(stderr_r, timeout, pidfd)
+            # Exited with stderr still held: a descendant outlived it. Kill before
+            # the reap, while the zombie pins its group id.
+            if outcome is _Drain.EXITED:
+                _kill_stragglers(pid, stderr_r)
+            status = None if outcome is _Drain.TIMEOUT else _reap_by(pid, deadline, pidfd)
+        finally:
+            if pidfd is not None:
+                os.close(pidfd)
 
         # Drain deadline hit, or fd 2 closed by a still-running target.
         if status is None:
-            _kill_process_group(pid)
+            _kill_stragglers(pid, stderr_r)
             os.waitpid(pid, 0)
             _untrack(pid)
             return -1, _timeout_stderr(stderr_data), pid

@@ -274,9 +274,7 @@ def whittle_index_table(
     indexable = [True] * K
     for s in range(K):
         flags = active_flags[s]
-        crossings = [
-            i for i in range(1, grid_points) if flags[i - 1] and not flags[i]
-        ]
+        crossings = [i for i in range(1, grid_points) if flags[i - 1] and not flags[i]]
         if not crossings:
             # Active preferred (or tied) across the whole grid: index is
             # at or above the top of the range we searched.
@@ -424,7 +422,9 @@ class WhittleIndexScheduler:
             elif idx == best_index:
                 best_ops.append(op)
 
-        chosen = best_ops[0] if len(best_ops) == 1 else best_ops[int(self._rng.random() * len(best_ops))]
+        chosen = (
+            best_ops[0] if len(best_ops) == 1 else best_ops[int(self._rng.random() * len(best_ops))]
+        )
         self._last_op = chosen
         return chosen
 
@@ -453,12 +453,8 @@ class WhittleIndexScheduler:
             "whittle_pulls": self._total_pulls,
             "n_arms": len(self._state),
             "states": dict(self._state),
-            "indices": {
-                op: self._table[op][self._state[op]] for op in self._state
-            },
-            "indexable": {
-                op: self._indexable[op][self._state[op]] for op in self._state
-            },
+            "indices": {op: self._table[op][self._state[op]] for op in self._state},
+            "indexable": {op: self._indexable[op][self._state[op]] for op in self._state},
             "best_op": (
                 max(
                     self._state,

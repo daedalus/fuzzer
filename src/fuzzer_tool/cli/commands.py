@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from fuzzer_tool.core import z3_budget
+from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
@@ -992,6 +993,7 @@ def cmd_fuzz(args):
         mi_guided=getattr(args, "mi_guided", False),
         renyi_weight=getattr(args, "renyi_weight", False),
         transfer_entropy=getattr(args, "transfer_entropy", False),
+        te_correction=TECorrection[getattr(args, "te_correction", "shuffle").upper()],
         occupation=getattr(args, "occupation", False),
         causal_sector=getattr(args, "causal_sector", False),
         elo=getattr(args, "elo", False),
@@ -2488,6 +2490,9 @@ def cmd_sweep(args):
 # choices dest, so the True-flip loop never sees it; documented so it stays
 # out if it ever grows a boolean form.
 #
+# te_correction (--te-correction) is excluded: an estimator choice for
+# --transfer-entropy, not a strategy; analytic is the cheaper, more biased one.
+#
 # job_scheduler (--job-scheduler) is excluded because it changes
 # maintenance-tick *cadence* (crash/sanitizer replays and gc.collect move
 # from an i % 500 gate to the stats-interval cadence memory pruning
@@ -3322,6 +3327,13 @@ def main() -> int:
         "--transfer-entropy",
         action="store_true",
         help="Enable transfer entropy causal tracking (byte→edge influence detection)",
+    )
+    fuzz_parser.add_argument(
+        "--te-correction",
+        choices=[m.name.lower() for m in TECorrection],
+        default=TECorrection.SHUFFLE.name.lower(),
+        help="Transfer-entropy bias correction: 'shuffle' (surrogate floor, default) "
+        "or 'analytic' (Panzeri-Treves, no shuffles; leaves spurious TE on sparse data).",
     )
     fuzz_parser.add_argument(
         "--occupation",

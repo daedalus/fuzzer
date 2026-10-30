@@ -198,9 +198,7 @@ class TestWiring:
 
         captured = {}
         monkeypatch.setattr(commands, "cmd_fuzz", lambda a: captured.setdefault("a", a) and 0)
-        monkeypatch.setattr(
-            sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", "--op-good-turing"]
-        )
+        monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", "--op-good-turing"])
         commands.main()
         assert captured["a"].op_good_turing is True
         assert "op_good_turing" in commands._HAIL_MARY_FLAGS

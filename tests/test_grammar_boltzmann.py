@@ -103,8 +103,7 @@ class TestBoltzmannSizeTuning:
         g = Grammar(seed=123)
         g.parse(RECURSIVE_SPEC)
         sizes = [
-            len(g.generate_boltzmann("expr", max_depth=40, target_size=target))
-            for _ in range(1500)
+            len(g.generate_boltzmann("expr", max_depth=40, target_size=target)) for _ in range(1500)
         ]
         mean = statistics.mean(sizes)
         # Loose tolerance: this targets the *expected* size, not an exact
@@ -114,9 +113,7 @@ class TestBoltzmannSizeTuning:
     def test_larger_target_gives_larger_mean(self):
         g = Grammar(seed=123)
         g.parse(RECURSIVE_SPEC)
-        small = [
-            len(g.generate_boltzmann("expr", max_depth=40, target_size=4)) for _ in range(800)
-        ]
+        small = [len(g.generate_boltzmann("expr", max_depth=40, target_size=4)) for _ in range(800)]
         large = [
             len(g.generate_boltzmann("expr", max_depth=40, target_size=40)) for _ in range(800)
         ]

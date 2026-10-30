@@ -210,9 +210,7 @@ def test_regression_extralibs_bogus_lib_dropped(tmp_path):
     assert "-lnosuchlib_fuzz" not in r.stdout
 
 
-def _versions(
-    tmp_path: Path, variant: str, stale: str = "", opts: str = ""
-) -> list[str]:
+def _versions(tmp_path: Path, variant: str, stale: str = "", opts: str = "") -> list[str]:
     """Run build_ffmpeg_versions for one variant against stubbed builders; return their calls."""
     vendor, build = tmp_path / "vendor", tmp_path / "build"
     _tree(vendor, "9.0.2")
@@ -332,6 +330,8 @@ def test_regression_versions_matrix_wired_in_main():
     text = BUILD_SCRIPT.read_text()
     main = text.split("# ── Main ──", 1)[1]
 
-    assert re.search(r'build_ffmpeg_versions "_asan" "\$ASAN_CFLAGS"\n\s+build_ffmpeg_version_ubsan', main)
+    assert re.search(
+        r'build_ffmpeg_versions "_asan" "\$ASAN_CFLAGS"\n\s+build_ffmpeg_version_ubsan', main
+    )
     assert re.search(r"build_ngram_so_targets\n\s+build_ffmpeg_version_ngram", main)
     assert "--ffmpeg-opts=*) FFMPEG_OPTS=" in text

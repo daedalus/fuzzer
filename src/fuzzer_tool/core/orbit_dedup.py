@@ -72,7 +72,9 @@ def parse_orbit_spec(spec: str) -> list[OrbitSpec]:
             continue
         m = _ITEM_RE.match(raw)
         if m is None:
-            raise ValueError(f"bad orbit spec {raw!r}; expected swap@OFF:SIZExCOUNT|endian@OFF:SIZE")
+            raise ValueError(
+                f"bad orbit spec {raw!r}; expected swap@OFF:SIZExCOUNT|endian@OFF:SIZE"
+            )
         items.append(_build_item(raw, m))
     if not items:
         raise ValueError("empty orbit spec")

@@ -57,11 +57,7 @@ def _make_fake_fuzzer(**overrides):
 
 
 def _lines(out: str) -> dict[str, str]:
-    return {
-        line.split(":", 1)[0].strip(): line
-        for line in out.splitlines()
-        if ":" in line
-    }
+    return {line.split(":", 1)[0].strip(): line for line in out.splitlines() if ":" in line}
 
 
 def test_mcts_appears_only_under_seed_selection(capsys):

@@ -12,7 +12,6 @@ from fuzzer_tool.core.job_scheduling import (
     wmdd_order,
 )
 
-
 # --------------------------------------------------------------------------
 # edf_order
 # --------------------------------------------------------------------------
@@ -153,7 +152,12 @@ def test_lawler_order_respects_precedence():
 def test_lawler_order_is_exact_against_brute_force():
     import itertools
 
-    jobs = [Job(0, 2, due_date=5), Job(1, 3, due_date=8), Job(2, 1, due_date=3), Job(3, 4, due_date=12)]
+    jobs = [
+        Job(0, 2, due_date=5),
+        Job(1, 3, due_date=8),
+        Job(2, 1, due_date=3),
+        Job(3, 4, due_date=12),
+    ]
     # Precedence: job 2 must follow job 0.
     precedence = {2: {0}}
 
@@ -282,7 +286,7 @@ def test_multifit_makespan_within_classic_bound_of_optimal():
         best = float("inf")
         for assignment in itertools.product(range(m), repeat=len(ids)):
             loads = [0] * m
-            for idx, machine in zip(ids, assignment):
+            for idx, machine in zip(ids, assignment, strict=False):
                 loads[machine] += sizes[idx]
             best = min(best, max(loads))
         return best

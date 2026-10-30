@@ -11,8 +11,6 @@ compatibility, and degenerate-input safety.
 
 import random
 
-import pytest
-
 from fuzzer_tool.core.rand_pool import RandPool
 
 
@@ -111,9 +109,11 @@ class TestWebmBlockLacing:
 
     def test_no_simpleblock_is_a_safe_noop(self):
         """Elements with no (Simple)Block leaf must not raise."""
-        from fuzzer_tool.core.mutations.webm import Element, KNOWN_IDS, WebmMutator
+        from fuzzer_tool.core.mutations.webm import KNOWN_IDS, Element, WebmMutator
 
-        ebml = Element(elem_id=0x1A45DFA3, id_raw=KNOWN_IDS[0x1A45DFA3], size_raw=b"\x80", size_val=0)
+        ebml = Element(
+            elem_id=0x1A45DFA3, id_raw=KNOWN_IDS[0x1A45DFA3], size_raw=b"\x80", size_val=0
+        )
         mut = WebmMutator()
         mut._rng = _rng()
         out = mut._mutate_block_lacing([ebml], 4096)

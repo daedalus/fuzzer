@@ -29,8 +29,9 @@ import pytest
 from fuzzer_tool.core import randomness as R
 from fuzzer_tool.core.mutations import structured as S
 from fuzzer_tool.core.numtheory import euclid_steps
-from fuzzer_tool.core.permutation import cycle_type
+from fuzzer_tool.core.permutation import cycle_type, perm_sign
 from fuzzer_tool.core.rand_pool import RandPool
+from tests.support.scripted_rng import ScriptedRng
 
 # Fixed seed for every statistical assertion in this file.
 SEED = 20240609
@@ -358,6 +359,44 @@ class TestCycleLock:
         base = noise(2048)
         out = S.cycle_lock(base, rng=rp)
         assert len(out) == len(base)
+
+    def _transposition(self, monkeypatch, n: int, swap: int) -> list[int]:
+        """Run cycle_lock in transposition mode on n u32 words, scripted draws."""
+        monkeypatch.setattr(S, "_region", lambda *a, **k: (8, n * 4))
+        rng = ScriptedRng(
+            choice_idxs=(S._WIDTHS.index(4), S._CYCLE_MODES.index("transposition")),
+            randints=(1, swap),  # little-endian, then the swapped slot
+        )
+        out = S.cycle_lock(bytes(8 + n * 4), rng=rng)
+        return self._words(out, 8, 4, False, n)
+
+    @pytest.mark.parametrize("n", [7, 16])
+    def test_transposition_is_one_adjacent_swap(self, monkeypatch, n):
+        """Identity with slots (i, i+1) exchanged: one 2-cycle, odd sign."""
+        swap = n // 2
+        perm = self._transposition(monkeypatch, n, swap)
+
+        expected = list(range(n))
+        expected[swap], expected[swap + 1] = swap + 1, swap
+        assert perm == expected
+        assert sorted(cycle_type(perm)) == [1] * (n - 2) + [2]
+        assert perm_sign(perm) == -1
+
+    @pytest.mark.parametrize("swap_of", [lambda n: 0, lambda n: n - 2])
+    def test_transposition_at_region_edges(self, monkeypatch, swap_of):
+        """Adversarial: smallest region (4 words), swap at either end."""
+        n = 4
+        swap = swap_of(n)
+        perm = self._transposition(monkeypatch, n, swap)
+        assert perm[swap] == swap + 1 and perm[swap + 1] == swap
+        assert perm_sign(perm) == -1
+
+    def test_regression_odd_n_shapes_were_all_even(self):
+        """Falsification: without transposition, odd n never yields an odd
+        permutation -- identity is even and an odd-length n-cycle is even."""
+        for n in (5, 9, 65):
+            assert perm_sign([(i + 1) % n for i in range(n)]) == 1
+            assert perm_sign(list(range(n))) == 1
 
 
 class TestLagCorrelate:

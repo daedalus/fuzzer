@@ -75,10 +75,7 @@ def context_report(
 
 def energy_weights(report: dict[Hashable, dict], floor: float = 0.05) -> dict:
     """Weight per context: determined regions get ``floor``, others ``1 + h``."""
-    return {
-        c: (floor if r["status"] == "determined" else 1.0 + r["h"])
-        for c, r in report.items()
-    }
+    return {c: (floor if r["status"] == "determined" else 1.0 + r["h"]) for c, r in report.items()}
 
 
 def prefix_context(data: bytes, k: int = 4) -> bytes:

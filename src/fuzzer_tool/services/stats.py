@@ -20,6 +20,7 @@ Extracted from Fuzzer class (~lines 3101-3613, 3435-3508). Contains:
 import contextlib
 import json
 import logging
+import math
 import os
 import resource
 import time
@@ -298,6 +299,28 @@ def _scheduler_stats(f, stats: dict) -> None:
         }
 
 
+# Strict JSON has no Infinity: dump_stats writes D = inf (disjoint supports) as this.
+_INF_JSON = "inf"
+
+# Rényi order of the dump-to-dump drift: finite unless supports are disjoint.
+_DRIFT_ALPHA = 0.5
+
+
+def _renyi_drift(f, edge_hits: dict) -> float | str | None:
+    """D_1/2(hits now || hits at the previous dump), bits; None on the first.
+
+    Swaps in the new snapshot (one dict, replaced per dump: bounded).
+    """
+    from fuzzer_tool.core.renyi import renyi_divergence
+
+    prev, f._renyi_prev_hits = f._renyi_prev_hits, edge_hits
+    if not prev:
+        return None
+
+    drift = renyi_divergence(edge_hits, prev, _DRIFT_ALPHA)
+    return _INF_JSON if math.isinf(drift) else round(drift, 4)
+
+
 def _renyi_stats(f, stats: dict) -> None:
     """Rényi coverage-spectrum entry for dump_stats() (--renyi-weight)."""
     if f._use_renyi_weight:
@@ -322,6 +345,9 @@ def _renyi_stats(f, stats: dict) -> None:
                     for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()
                 },
             }
+            drift = _renyi_drift(f, edge_hits)
+            if drift is not None:
+                stats["renyi"]["drift_half"] = drift
 
 
 def _zipf_stats(f, stats: dict) -> None:

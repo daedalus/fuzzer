@@ -130,9 +130,7 @@ class GradientBanditScheduler:
         if temperature <= 0.0:
             raise ValueError(f"temperature must be positive, got {temperature!r}")
         if min_temperature <= 0.0:
-            raise ValueError(
-                f"min_temperature must be positive, got {min_temperature!r}"
-            )
+            raise ValueError(f"min_temperature must be positive, got {min_temperature!r}")
         if not (0.0 <= floor < 1.0):
             raise ValueError(f"floor must be in [0, 1), got {floor!r}")
 
@@ -278,8 +276,6 @@ class GradientBanditScheduler:
             "avg_reward": self._avg_reward,
             "n_arms": len(self.preferences),
             "best_op": (
-                max(self.preferences, key=self.preferences.get)
-                if self.preferences
-                else None
+                max(self.preferences, key=self.preferences.get) if self.preferences else None
             ),
         }

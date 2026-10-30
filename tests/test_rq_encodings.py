@@ -911,9 +911,7 @@ class TestHashFlaggedPairsKeepExactInverters:
     def _mutations(self, is_hash):
         x, want = b"abcd", b"wxyz"
         data = b"\x00" * 4 + x + b"\x00" * 8
-        return generate_mutations(
-            _crc_le(x), _crc_le(want), 32, "CMP", data, is_hash=is_hash
-        )
+        return generate_mutations(_crc_le(x), _crc_le(want), 32, "CMP", data, is_hash=is_hash)
 
     def test_unflagged_pair_is_solved_by_crc32(self):
         assert any(enc.name().startswith("crc32") for _o, _r, enc in self._mutations(None))

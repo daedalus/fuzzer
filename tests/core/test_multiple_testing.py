@@ -161,9 +161,7 @@ def test_holm_adjusted_is_none():
 # ── collect_current_pvalues: reading off a duck-typed fuzzer ───────────
 
 
-def _fake_fuzzer(
-    structure_fn=None, discovery_uniformity=None, garch=None, discovery_edges=None
-):
+def _fake_fuzzer(structure_fn=None, discovery_uniformity=None, garch=None, discovery_edges=None):
     return SimpleNamespace(
         _structure_fn=structure_fn,
         _discovery_uniformity=discovery_uniformity,

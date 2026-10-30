@@ -138,17 +138,11 @@ def test_conditional_entropy_uniform_two_paths_is_one_bit():
     pairs = [("c", i % 2) for i in range(4000)]
     assert conditional_entropy(pairs, miller_madow=False) == pytest.approx(1.0)
     # Miller-Madow adds (k-1)/(2 n ln2) = 1/(8000 ln2)
-    assert conditional_entropy(pairs) == pytest.approx(
-        1.0 + 1 / (2 * 4000 * math.log(2))
-    )
+    assert conditional_entropy(pairs) == pytest.approx(1.0 + 1 / (2 * 4000 * math.log(2)))
 
 
 def test_context_report_statuses_and_weights():
-    pairs = (
-        [("magic", "A")] * 30
-        + [("body", i % 4) for i in range(40)]
-        + [("rare", "A")] * 2
-    )
+    pairs = [("magic", "A")] * 30 + [("body", i % 4) for i in range(40)] + [("rare", "A")] * 2
     rep = context_report(pairs, min_n=8)
     assert rep["magic"]["status"] == "determined"
     assert rep["body"]["status"] == "open"

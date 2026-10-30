@@ -104,7 +104,7 @@ def test_marginal_cost_defined_after_two_picks():
 
 
 def test_penalty_shifts_pick_away_from_stale_but_historically_good_seed():
-    """"expensive" keeps a decent lifetime energy (reward_prob/cost) from
+    """ "expensive" keeps a decent lifetime energy (reward_prob/cost) from
     an early streak, but produces zero *new* output in the second round
     while burning a lot of additional cost -- exactly the case the
     lifetime average is slow to reflect. With the penalty enabled, the
@@ -159,9 +159,7 @@ def test_penalty_never_helps_the_flagged_seed():
             f_base.seed_meta = dict(zip(f_base.corpus, round2, strict=False))
             baseline_pick = sp_base._pick_ecofuzz_seed()
 
-            f_gated = _make_fuzzer_mock(
-                round1, mc_penalty_multiplier=multiplier, rng=_FakeRNG(u)
-            )
+            f_gated = _make_fuzzer_mock(round1, mc_penalty_multiplier=multiplier, rng=_FakeRNG(u))
             sp_gated = _new_picker(f_gated)
             sp_gated._pick_ecofuzz_seed()
             f_gated.seed_meta = dict(zip(f_gated.corpus, round2, strict=False))

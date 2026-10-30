@@ -224,17 +224,13 @@ class TestSeenHashesCap:
     previously-known hash the moment it's enforced."""
 
     def test_bound_helper_is_noop_below_cap(self, monkeypatch):
-        monkeypatch.setattr(
-            "fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 10
-        )
+        monkeypatch.setattr("fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 10)
         seen = {f"h{i}" for i in range(10)}
         _bound_seen_hashes(seen)
         assert len(seen) == 10
 
     def test_bound_helper_evicts_to_half_not_to_zero(self, monkeypatch):
-        monkeypatch.setattr(
-            "fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 10
-        )
+        monkeypatch.setattr("fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 10)
         seen = {f"h{i}" for i in range(11)}
         _bound_seen_hashes(seen)
         # The old behaviour was seen_hashes.clear() -- an unconditional
@@ -253,9 +249,7 @@ class TestSeenHashesCap:
         half the cap instead of a full wipe, this asserts the retained half
         is unaffected.
         """
-        monkeypatch.setattr(
-            "fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 20
-        )
+        monkeypatch.setattr("fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 20)
         seen: set[str] = set()
         # Save one seed we'll re-check at the end, then enough distinct
         # seeds to push seen_hashes past the (patched) cap.
@@ -280,9 +274,7 @@ class TestSeenHashesCap:
     def test_never_wipes_the_whole_set(self, monkeypatch):
         """Regression guard for the literal old bug shape: the cap must
         never reduce seen_hashes to empty in one step."""
-        monkeypatch.setattr(
-            "fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 100
-        )
+        monkeypatch.setattr("fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 100)
         seen = {f"h{i}" for i in range(500)}
         _bound_seen_hashes(seen)
         assert len(seen) == 50
