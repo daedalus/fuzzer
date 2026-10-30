@@ -82,6 +82,8 @@ def test_untimed_is_a_draw():
 
 def test_control_untimed_replays_identically():
     """Control (Hard Rule 46): the untimed oracle against itself."""
+    mu, _ = _ratings(_replay(None))
+    assert set(mu) == {A, B}  # the replay rated both arms
     assert _ratings(_replay(None)) == _ratings(_replay(None))
 
 
@@ -90,6 +92,7 @@ def test_equal_cost_reduces_to_untimed():
     timed_mu, timed_sig = _ratings(_replay(0.25))
     mu, sig = _ratings(_replay(None))
 
+    assert set(mu) == {A, B}  # non-empty: an empty map would match trivially
     assert timed_mu == pytest.approx(mu)
     assert timed_sig == pytest.approx(sig)
 
@@ -139,6 +142,20 @@ def test_time_sums_round_trip():
 
     assert restored._strategy_time_sum == {B: 0.5}
     assert restored._strategy_timed_sum == {B: 1.0}
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_regression_restored_bad_time_sum_is_untimed(bad):
+    """Adversarial: a crafted state with a non-positive or non-finite time
+    sum must not divide by it; the arm falls back to the per-round bar."""
+    data = _primed().to_dict()
+    data["strategy_time_sum"][B] = bad
+    elo = BayesianEloTracker()
+    elo.from_dict(data)
+    elo.record_strategy_matches(A, [B], 1.0, 2.0)
+
+    assert B not in elo._strategy_time_sum
+    assert elo._strategy_mu[A] == pytest.approx(elo.initial_mu)
 
 
 def test_legacy_state_loads_without_time_sums():

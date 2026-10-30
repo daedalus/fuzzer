@@ -1536,8 +1536,13 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_hits = data.get("strategy_hits", {})
         self._strategy_trials = data.get("strategy_trials", {})
         self._strategy_score_sum = data.get("strategy_score_sum", {})
-        self._strategy_timed_sum = data.get("strategy_timed_sum", {})
-        self._strategy_time_sum = data.get("strategy_time_sum", {})
+        # Only finite positive seconds: record_strategy_matches divides by
+        # them unchecked (an arm in time_sum is one with seconds > 0).
+        self._strategy_time_sum = {
+            k: t for k, t in data.get("strategy_time_sum", {}).items() if 0.0 < t < math.inf
+        }
+        timed = data.get("strategy_timed_sum", {})
+        self._strategy_timed_sum = {k: timed.get(k, 0.0) for k in self._strategy_time_sum}
         self._prediction_errors = array("d", data.get("prediction_errors", []))
         self._best_win_rate = array("d", data.get("best_win_rate", []))
         self._strategy_best_win_rate = {
