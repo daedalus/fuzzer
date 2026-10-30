@@ -1405,7 +1405,7 @@ fuzzer-tool edge-dump ./target -d corpus -o ~/edges.pkl
 fuzzer-tool edge-dump ./t.so -d corpus -o ~/edges.pkl --inprocess-direct --inprocess-func fuzz_test
 ```
 
-Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(seed)` (the `id_<hash>` key) -> sorted `uint32` edge ids. Read-only: nothing pruned, no twin collapse. Same backends and flags as `minimize -c`. `pruned/`, `crashing/`, `irreplaceable/` excluded; `--max-seed-bytes` skips large seeds; timed-out seeds keep partial edges. Progress line and heap trim are minimize's (`_print_progress`, `_trim_heap`): rate, ETA, elapsed, unique edges, rss/live. No edges anywhere = failed measurement: nothing written, exit 1. Atomic write (tmp + rename). Tests: `tests/test_edge_export.py`.
+Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(seed)` (the `id_<hash>` key) -> sorted `uint32` edge ids. Read-only: nothing pruned, no twin collapse. Same backends and flags as `minimize -c` (`--inprocess`, `--inprocess-direct`, `--inprocess-func`); `-c` accepted, coverage always on. `pruned/`, `crashing/`, `irreplaceable/` excluded; `--max-seed-bytes` skips large seeds; timed-out seeds keep partial edges. Progress line and heap trim are minimize's (`_print_progress`, `_trim_heap`): rate, ETA, elapsed, unique edges, rss/live. No edges anywhere = failed measurement: nothing written, exit 1. Atomic write (tmp + rename). Tests: `tests/test_edge_export.py`.
 
 ### Set cover (`core/set_cover.py`)
 
