@@ -7085,6 +7085,12 @@ def main() -> int:
     ed_parser.add_argument("-o", "--out", required=True, help="Output pickle path")
     ed_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     ed_parser.add_argument(
+        "-c",
+        "--coverage",
+        action="store_true",
+        help="Enable SHM coverage (always on: edges need it; minimize parity)",
+    )
+    ed_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
     ed_parser.add_argument(
