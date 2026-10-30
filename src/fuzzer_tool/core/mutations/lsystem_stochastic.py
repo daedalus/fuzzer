@@ -8,11 +8,19 @@ rule set yields many different derivations of the same window::
 Same window, generation count, cap and overwrite as
 :mod:`fuzzer_tool.core.mutations.lsystem_expand`; successors are slices of
 the window, weights are small integers.
+
+Draws are integers, not floats: cumulative weights are scaled to one fixed
+range ``SCALE`` (divisible by every possible weight total), so ``r`` in
+``[0, SCALE)`` picks each successor with exactly its weight's share and the
+operator stays enumerable (``ExhaustivePool``)::
+
+    1:3 -> thresholds (SCALE/4, SCALE)    1:1 -> (SCALE/2, SCALE)
 """
 
 from __future__ import annotations
 
 from bisect import bisect_right
+from math import lcm
 
 from fuzzer_tool.core.mutations.lsystem_expand import (
     _BYTE,
@@ -28,23 +36,26 @@ MAX_BRANCH = 3
 #: Largest integer weight of one successor.
 MAX_WEIGHT = 4
 
-#: symbol -> (cumulative thresholds ending at 1.0, successors).
-Rules = dict[int, tuple[tuple[float, ...], tuple[bytes, ...]]]
+#: Draw range: every weight total (2..MAX_BRANCH * MAX_WEIGHT) divides it.
+SCALE = lcm(*range(2, MAX_BRANCH * MAX_WEIGHT + 1))
+
+#: symbol -> (cumulative thresholds ending at SCALE, successors).
+Rules = dict[int, tuple[tuple[int, ...], tuple[bytes, ...]]]
 
 
 def derive_stoch(axiom: bytes, rules: Rules, gens: int, cap: int, rng) -> bytes:
     """Rewrite *axiom* in parallel, picking each successor at random.
 
-    One uniform draw per symbol per generation (symbols without a rule
-    ignore theirs); the draw ``u`` picks successor ``bisect_right(thresholds, u)``.
-    A generation over *cap* is not applied.
+    One integer draw per symbol per generation in ``[0, SCALE)`` (symbols
+    without a rule ignore theirs); the draw ``r`` picks successor
+    ``bisect_right(thresholds, r)``. A generation over *cap* is not applied.
 
     Args:
         axiom: Start string.
         rules: Symbol -> (cumulative thresholds, successors).
         gens: Generations to apply.
         cap: Longest string allowed.
-        rng: Draw source with ``random_list``.
+        rng: Draw source with ``randrange_list``.
 
     Returns:
         The last generation that fits in *cap*.
@@ -52,11 +63,11 @@ def derive_stoch(axiom: bytes, rules: Rules, gens: int, cap: int, rng) -> bytes:
     get = rules.get
     cur = axiom
     for _ in range(gens):
-        draws = rng.random_list(len(cur))
-        parts = []
-        for b, u in zip(cur, draws, strict=True):
-            rule = get(b)
-            parts.append(_BYTE[b] if rule is None else rule[1][bisect_right(rule[0], u)])
+        draws = rng.randrange_list(SCALE, len(cur))
+        parts = [
+            _BYTE[b] if (rule := get(b)) is None else rule[1][bisect_right(rule[0], u)]
+            for b, u in zip(cur, draws, strict=True)
+        ]
         if sum(map(len, parts)) > cap:
             break
         cur = b"".join(parts)
@@ -73,12 +84,11 @@ def _rule(axiom: bytes, rng) -> tuple[tuple[float, ...], tuple[bytes, ...]]:
         succs.append(axiom[start : start + length])
         weights.append(rng.randint(1, MAX_WEIGHT))
 
-    total = sum(weights)
+    unit = SCALE // sum(weights)
     acc, cum = 0, []
     for w in weights:
-        acc += w
-        cum.append(acc / total)
-    cum[-1] = 1.0
+        acc += w * unit
+        cum.append(acc)
     return tuple(cum), tuple(succs)
 
 

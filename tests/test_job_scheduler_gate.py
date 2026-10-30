@@ -46,8 +46,12 @@ def test_maintenance_queue_always_constructed_regardless_of_flag():
     # so toggling the flag doesn't need to rebuild anything.
     legacy = _make_fuzzer(job_scheduler=False)
     scheduled = _make_fuzzer(job_scheduler=True)
-    assert len(legacy._maintenance) == 4
-    assert len(scheduled._maintenance) == 4
+    # Membership, not a count: jobs get added (memory_prune was the 5th).
+    core = ("gc", "crash_replays", "crash_tmin", "sanitizer_replays")
+    assert len(legacy._maintenance) == len(scheduled._maintenance) >= len(core)
+    for job in core:
+        assert job in legacy._maintenance
+        assert job in scheduled._maintenance
 
 
 def test_legacy_memory_prune_tick_respects_threshold_off_switch():
