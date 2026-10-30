@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from fuzzer_tool.core.mutations.ntt_poly import (
-    sniff_ntt_modulus,
-    ntt_poly_mutate,
     _MOD_BE,
     _MOD_LE,
+    ntt_poly_mutate,
+    sniff_ntt_modulus,
 )
 from fuzzer_tool.core.ntt import DEFAULT_MOD
 from fuzzer_tool.core.operator_registry import REGISTRY
@@ -38,9 +38,7 @@ class TestMutate:
         rng = RandPool(seed=2)
         out = ntt_poly_mutate(b"", rng)
         assert sniff_ntt_modulus(out) is True
-        assert DEFAULT_MOD.to_bytes(4, "big") in out or DEFAULT_MOD.to_bytes(
-            4, "little"
-        ) in out
+        assert DEFAULT_MOD.to_bytes(4, "big") in out or DEFAULT_MOD.to_bytes(4, "little") in out
 
     def test_transform_preserves_length_when_modulus_present(self):
         rng = RandPool(seed=3)

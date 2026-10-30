@@ -6630,9 +6630,13 @@ class OperatorEngine:
 
     def _learn_auto_tokens(self, data: bytes, hashes: array) -> None:
         """Add the drained map's atomic tokens to the dictionary, capped."""
+        self._add_auto_tokens(harvest_tokens(data, hashes))
+
+    def _add_auto_tokens(self, tokens: list[bytes]) -> None:
+        """Append unseen *tokens* to the dictionary, up to AUTO_DICT_CAP per run."""
         f = self.f
         known = set(f.dictionary)
-        for tok in harvest_tokens(data, hashes):
+        for tok in tokens:
             if self._auto_tokens >= AUTO_DICT_CAP:
                 return
             if tok in known:
@@ -6640,6 +6644,22 @@ class OperatorEngine:
             f.dictionary.append(tok)
             known.add(tok)
             self._auto_tokens += 1
+
+    def _learn_restore(self, data: bytes, buf: bytearray) -> None:
+        """--pos-learn: copy a stable mask's frozen bytes back (LearnAFL).
+
+        Only when the learn arm served a position this round: another arm's
+        round is not this arm's to rewrite.
+        """
+        learn = getattr(self.f, "_pos_learn", None)
+        if learn is None:
+            return
+
+        arena = getattr(self.f, "_position_arena", None)
+        if not isinstance(arena, PositionArena) or "learn" not in arena.used():
+            return
+
+        learn.restore(data, buf)
 
     def effector_live(self, data: bytes) -> array | None:
         """Sorted byteflip-LIVE offsets of *data*, or None before its map drains."""
@@ -7340,6 +7360,7 @@ class OperatorEngine:
 
         if f._frameshift.relations:
             f._frameshift.apply_to_buffer(buf)
+        self._learn_restore(data, buf)
         # Last, so the checksum covers every edit this round made.
         sites = getattr(f, "_cksum_sites", None)
         if sites is not None:

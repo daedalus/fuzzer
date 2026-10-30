@@ -9,11 +9,12 @@ These are intended to be imported by structured.py / the operator registry.
 from __future__ import annotations
 
 import random
-from typing import Callable
+from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # Pure formulas (branch-free, arbitrary-precision)
 # ---------------------------------------------------------------------------
+
 
 def clear_rightmost_1(x: int) -> int:
     """Turn off the rightmost 1-bit.  x & (x - 1)"""

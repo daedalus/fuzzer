@@ -49,8 +49,7 @@ class TestNormCdf:
     def test_beats_the_unscaled_logistic_it_replaced(self):
         """The old surrogate is off by >0.1 where Phi is off by ~0."""
         worst = max(
-            abs(1.0 / (1.0 + math.exp(-z / 100.0)) - norm_cdf(z / 100.0))
-            for z in range(-600, 601)
+            abs(1.0 / (1.0 + math.exp(-z / 100.0)) - norm_cdf(z / 100.0)) for z in range(-600, 601)
         )
         assert worst > 0.11
 

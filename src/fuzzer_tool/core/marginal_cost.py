@@ -115,9 +115,7 @@ class MarginalCostTracker:
             return None
         return sum(values) / len(values)
 
-    def should_stop(
-        self, key: str, multiplier: float, keys: list[str] | None = None
-    ) -> bool:
+    def should_stop(self, key: str, multiplier: float, keys: list[str] | None = None) -> bool:
         """The handover §1 proposal-#2 stopping rule: ``True`` once
         ``key``'s marginal cost exceeds ``multiplier`` times the
         population-average marginal cost across ``keys``.

@@ -74,7 +74,7 @@ _CHUNK = 8192  # windows per entropy batch: bounds the (chunk, W, W) temporary
 
 #: Bytes after which a field usually starts: NUL, LF, CR, space and the
 #: common structural punctuation ``, : ; = / < > " { } [ ]``.
-DELIMS = frozenset(b"\x00\n\r ,:;=/<>\"{}[]")
+DELIMS = frozenset(b'\x00\n\r ,:;=/<>"{}[]')
 CLASS_LUT = np.frombuffer(BYTE_CLASS, dtype=np.uint8)  # shared with pos_context
 _DELIM_LUT = np.zeros(256, dtype=bool)
 _DELIM_LUT[list(DELIMS)] = True

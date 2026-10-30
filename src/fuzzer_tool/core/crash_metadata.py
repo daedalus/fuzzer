@@ -215,7 +215,9 @@ class CrashMetadata:
                 + ("sanitizer runtime" if sym.get("symbolized") else "raw pc, no symbolizer")
                 + ") ==="
             )
-            lines.append(f"  signal={sym.get('signal')} pc={sym.get('pc')} fault={sym.get('fault_addr')}")
+            lines.append(
+                f"  signal={sym.get('signal')} pc={sym.get('pc')} fault={sym.get('fault_addr')}"
+            )
             for i, fr in enumerate(sym.get("frames", [])[:24]):
                 where = fr.get("file") or ""
                 if where and fr.get("line"):

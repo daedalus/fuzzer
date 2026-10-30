@@ -33,9 +33,7 @@ class TestBottleneckEdges:
     def test_unmapped_addresses_are_ignored(self):
         # 0xdead isn't a node in this ICFG at all -- must not raise or
         # otherwise disrupt resolution of the real address alongside it.
-        cut = self.ICFG.bottleneck_edges(
-            hit_addrs={0x10, 0xDEAD}, target_addrs={0x50}
-        )
+        cut = self.ICFG.bottleneck_edges(hit_addrs={0x10, 0xDEAD}, target_addrs={0x50})
         assert cut == {(0x40, 0x50)}
 
     def test_empty_when_target_unmapped(self):

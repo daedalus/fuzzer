@@ -222,7 +222,9 @@ class TestPersistence:
 
     def test_legacy_minimax_blob_is_discarded(self):
         s = _sched()
-        s.from_dict({"visits": {"a": 9000.0}, "values": {"a": 8000.0}, "selections": 5, "updates": 5})
+        s.from_dict(
+            {"visits": {"a": 9000.0}, "values": {"a": 8000.0}, "selections": 5, "updates": 5}
+        )
         assert s.visits == {} and s.values == {}
         assert s.selections == 5
 

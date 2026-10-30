@@ -108,8 +108,8 @@ class TestHashOracle:
         assert "sha256_cpub_n(" in hash_src
 
     def test_ripemd160_both_paths_called(self, hash_src):
-        assert "ripemd160_256(" in hash_src       # scalar reference
-        assert "ripemd160_256_n(" in hash_src     # SIMD under test
+        assert "ripemd160_256(" in hash_src  # scalar reference
+        assert "ripemd160_256_n(" in hash_src  # SIMD under test
 
     def test_each_family_aborts_on_mismatch(self, hash_src):
         assert "memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9301); abort(); }" in hash_src
@@ -123,8 +123,8 @@ class TestHashOracle:
         assert "n > HASH_DIFF_MAX_RECS" in hash_src
 
     def test_record_sizes_match_the_hashers(self, hash_src):
-        assert "size / 65u" in hash_src   # 65-byte uncompressed pubkey records
-        assert "size / 32u" in hash_src   # 32-byte ripemd records
+        assert "size / 65u" in hash_src  # 65-byte uncompressed pubkey records
+        assert "size / 32u" in hash_src  # 32-byte ripemd records
 
 
 class TestBuildWiring:

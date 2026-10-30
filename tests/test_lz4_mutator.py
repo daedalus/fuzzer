@@ -345,9 +345,7 @@ _CORRUPT = 3  # randint(0, 3) < 3 -> False (corrupt)
 
 
 def test_block_checksum_repair():
-    out = _mut(
-        _sample(FLG_B_INDEP), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, _REPAIR, 0]
-    )
+    out = _mut(_sample(FLG_B_INDEP), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, _REPAIR, 0])
     frame = parse_lz4(out)
     assert out[_HDR_START] & FLG_B_CHECKSUM
     assert [b.checksum for b in frame.blocks] == [_ref_xxh32(b.data) for b in frame.blocks]
@@ -365,25 +363,19 @@ def test_block_checksum_repair_fixes_bad_input():
 
 def test_block_checksum_corrupt():
     bit = 5
-    out = _mut(
-        _sample(), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, _CORRUPT, 1, bit]
-    )
+    out = _mut(_sample(), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, _CORRUPT, 1, bit])
     blk = parse_lz4(out).blocks[1]
     assert blk.checksum == _ref_xxh32(_P2) ^ (1 << bit)
 
 
 def test_content_checksum_corrupt():
     bit = 3
-    out = _mut(
-        _sample(), randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, _CORRUPT, bit]
-    )
+    out = _mut(_sample(), randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, _CORRUPT, bit])
     assert struct.unpack_from("<I", out, len(out) - 4)[0] == _ref_xxh32(_CONTENT) ^ (1 << bit)
 
 
 def test_content_checksum_repair_enables_flag():
-    out = _mut(
-        _sample(FLG_B_INDEP), randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, _REPAIR]
-    )
+    out = _mut(_sample(FLG_B_INDEP), randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, _REPAIR])
     assert out[_HDR_START] & FLG_C_CHECKSUM
     assert struct.unpack_from("<I", out, len(out) - 4)[0] == _ref_xxh32(_CONTENT)
     _assert_hc(out)

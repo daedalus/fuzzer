@@ -342,9 +342,16 @@ def _ngram_target(tmp_path, k):
     src.write_text(_LOOP_TARGET)
     out = tmp_path / f"loop_k{k}"
     flags = [
-        "-O2", "-fPIE", "-pie", "-fno-omit-frame-pointer", "-D__AFL_CMPLOG=1",
-        f"-D__AFL_NGRAM_K={k}", *NOBUILTIN, "-fsanitize-coverage=trace-pc-guard",
-        "-include", str(SHIM),
+        "-O2",
+        "-fPIE",
+        "-pie",
+        "-fno-omit-frame-pointer",
+        "-D__AFL_CMPLOG=1",
+        f"-D__AFL_NGRAM_K={k}",
+        *NOBUILTIN,
+        "-fsanitize-coverage=trace-pc-guard",
+        "-include",
+        str(SHIM),
     ]
     _clang(*flags, "-o", str(out), str(src), "-ldl")
     return out

@@ -309,9 +309,7 @@ class TestSimulateIntegration:
         # fully-connected transition graph (strong coupling structure).
         sched.successes = {op: 8.0 for op in ops}
         sched.attempts = {op: 10.0 for op in ops}
-        sched.transition_counts = {
-            src: {dst: 1 for dst in ops if dst != src} for src in ops
-        }
+        sched.transition_counts = {src: {dst: 1 for dst in ops if dst != src} for src in ops}
         r_before, _ = sched.diagnostics()["r"], None
         for _ in range(30):
             sched._pending = sched.recompute_batch

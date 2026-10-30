@@ -3,29 +3,30 @@
 from __future__ import annotations
 
 import random
+
 import pytest
 
 from fuzzer_tool.core.mutations.hackers_delight import (
     clear_rightmost_1,
-    isolate_rightmost_1,
+    clear_rightmost_run,
     isolate_rightmost_0,
+    isolate_rightmost_1,
     mask_trailing_zeros,
     right_propagate_1,
-    clear_rightmost_run,
-    snoob,
-    snoob_prev,
     rightmost_clear,
     rightmost_isolate,
     rightmost_propagate,
     rightmost_run_clear,
     same_popcount_next,
     same_popcount_prev,
+    snoob,
+    snoob_prev,
 )
-
 
 # ---------------------------------------------------------------------------
 # Pure formula oracles (book examples + edge cases)
 # ---------------------------------------------------------------------------
+
 
 def test_clear_rightmost_1():
     assert clear_rightmost_1(0b01011000) == 0b01010000
@@ -101,14 +102,18 @@ def test_snoob_prev_basic():
 # Windowed mutators – smoke & identity
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("op", [
-    rightmost_clear,
-    rightmost_isolate,
-    rightmost_propagate,
-    rightmost_run_clear,
-    same_popcount_next,
-    same_popcount_prev,
-])
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        rightmost_clear,
+        rightmost_isolate,
+        rightmost_propagate,
+        rightmost_run_clear,
+        same_popcount_next,
+        same_popcount_prev,
+    ],
+)
 def test_operator_short_buffer_identity(op):
     rng = random.Random(0)
     for length in range(0, 9):

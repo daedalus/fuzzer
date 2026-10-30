@@ -35,9 +35,7 @@ class TestEloTrackerColumns:
         elo = EloTracker(k_factor=24.0, min_matches=1)
         elo.record_round(["a", "b"], {"a"})
         report = _elo_ratings(_fake_fuzzer(elo))
-        row_lines = [
-            line for line in report.splitlines() if line.strip().startswith(("1 ", "2 "))
-        ]
+        row_lines = [line for line in report.splitlines() if line.strip().startswith(("1 ", "2 "))]
         assert row_lines, report
         for line in row_lines:
             assert "24.0" in line
@@ -87,9 +85,7 @@ class TestBayesianEloTrackerColumns:
         elo.record_round(["a", "b"], {"a"})
         report = _elo_ratings(_fake_fuzzer(elo))
         eff_k = elo._effective_k()
-        row_lines = [
-            line for line in report.splitlines() if line.strip().startswith(("1 ", "2 "))
-        ]
+        row_lines = [line for line in report.splitlines() if line.strip().startswith(("1 ", "2 "))]
         assert row_lines, report
         for line in row_lines:
             assert f"{eff_k:.1f}" in line

@@ -73,11 +73,9 @@ def test_pairwise_closed_form_matches_double_loop():
     got = universal_pattern(r, th, **kw)
     fields = [
         a * jn(n, 3.0 * r) * np.cos(n * th + 0.4 * n * 0.0)
-        for a, n in zip(kw["amplitudes"], kw["modes"])
+        for a, n in zip(kw["amplitudes"], kw["modes"], strict=False)
     ]
-    ref = sum(fields) + 0.7 * sum(
-        fields[i] * fields[j] for i in range(3) for j in range(i + 1, 3)
-    )
+    ref = sum(fields) + 0.7 * sum(fields[i] * fields[j] for i in range(3) for j in range(i + 1, 3))
     assert np.allclose(got, ref, atol=1e-12)
 
 

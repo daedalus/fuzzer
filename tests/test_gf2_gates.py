@@ -27,7 +27,9 @@ FULL = exp.SOLVED_ALL
 def oracle(tmp_path_factory):
     lib = tmp_path_factory.mktemp("gf2") / "gf2_gates_ref.so"
     src = exp.REPO / "targets" / "gf2_gates.c"
-    subprocess.run(["cc", "-O2", "-shared", "-fPIC", "-DGATES_PLAIN", "-o", str(lib), str(src)], check=True)
+    subprocess.run(
+        ["cc", "-O2", "-shared", "-fPIC", "-DGATES_PLAIN", "-o", str(lib), str(src)], check=True
+    )
     return exp.Oracle(lib)
 
 

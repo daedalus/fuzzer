@@ -87,8 +87,17 @@ def one_edge_so(tmp_path_factory):
     so = d / "libone.so"
     r = subprocess.run(
         [
-            "gcc", "-O1", "-g", "-shared", "-fPIC", "-D__AFL_CTX_SENSITIVE=0",
-            "-include", SHIM, "-o", str(so), str(src),
+            "gcc",
+            "-O1",
+            "-g",
+            "-shared",
+            "-fPIC",
+            "-D__AFL_CTX_SENSITIVE=0",
+            "-include",
+            SHIM,
+            "-o",
+            str(so),
+            str(src),
         ],
         capture_output=True,
         text=True,

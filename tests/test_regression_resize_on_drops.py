@@ -179,9 +179,7 @@ class TestItIsActuallyWiredIn:
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         lines = inspect.getsource(Fuzzer.run).splitlines()
-        snap = next(
-            i for i, ln in enumerate(lines) if "record_coverage_snapshot" in ln
-        )
+        snap = next(i for i, ln in enumerate(lines) if "record_coverage_snapshot" in ln)
         window = "\n".join(lines[snap : snap + 4])
         assert "_maybe_resize_on_drops()" in window, (
             "the drop-resize check drifted away from the stats-interval block"

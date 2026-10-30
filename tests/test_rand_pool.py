@@ -855,9 +855,7 @@ class TestRandomBetween:
         p1 = RandPool(seed=7)
         p2 = RandPool(seed=7)
         p1.random_between(0, 10)
-        assert [p1.randint(0, 255) for _ in range(5)] != [
-            p2.randint(0, 255) for _ in range(5)
-        ]
+        assert [p1.randint(0, 255) for _ in range(5)] != [p2.randint(0, 255) for _ in range(5)]
 
     def test_randbelow_rejects_non_positive(self):
         p = RandPool()
@@ -913,12 +911,8 @@ class TestWideRange:
         p1 = RandPool(seed=42)
         p2 = RandPool(seed=42)
         # consume a few draws so the pool is live
-        assert [p1.randint(0, 255) for _ in range(20)] == [
-            p2.randint(0, 255) for _ in range(20)
-        ]
-        assert [p1.randrange(1000) for _ in range(20)] == [
-            p2.randrange(1000) for _ in range(20)
-        ]
+        assert [p1.randint(0, 255) for _ in range(20)] == [p2.randint(0, 255) for _ in range(20)]
+        assert [p1.randrange(1000) for _ in range(20)] == [p2.randrange(1000) for _ in range(20)]
 
     def test_ogg_granule_style_call(self):
         """Exact call pattern from core/mutations/ogg.py:_mutate_granule_position."""

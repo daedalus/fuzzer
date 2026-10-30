@@ -25,6 +25,7 @@ Provides:
 
 import math
 from collections import Counter, defaultdict
+from enum import Enum, auto
 
 try:
     import numpy as np
@@ -37,6 +38,25 @@ except ImportError:
 _LN2 = math.log(2)
 
 
+class TECorrection(Enum):
+    """Bias correction behind ``TransferEntropy.transfer_entropy`` (--te-correction).
+
+    SHUFFLE: surrogate-shuffle floor; accurate in sparse contexts.
+    ANALYTIC: Panzeri-Treves closed form; no shuffles, leaves spurious TE
+        when contexts are sparse (see transfer_entropy's docstring).
+    """
+
+    SHUFFLE = auto()
+    ANALYTIC = auto()
+
+
+# Mode -> method transfer_entropy() resolves to; bound once in __init__.
+_SCORERS = {
+    TECorrection.SHUFFLE: "transfer_entropy",
+    TECorrection.ANALYTIC: "pt_corrected_te",
+}
+
+
 def panzeri_treves_bias(joint_target: dict, joint_both: dict, n: int) -> float:
     """First-order Panzeri-Treves (1996) bias of the plug-in TE, in bits.
 
@@ -44,7 +64,7 @@ def panzeri_treves_bias(joint_target: dict, joint_both: dict, n: int) -> float:
     seen in context c. TE = H(Y|Y_hist) - H(Y|Y_hist, X), so
     bias[TE] = (excess(Y_hist, X) - excess(Y_hist)) / (2 N ln 2).
     Can be negative: observed m_c undercount sparse contexts' true bins.
-    Diagnostic only; transfer_entropy() uses the shuffle correction.
+    Scores only under TECorrection.ANALYTIC; the default is the shuffle.
 
     Args:
         joint_target: (y_future, y_hist) -> count.
@@ -90,11 +110,25 @@ class TransferEntropy:
     Args:
         history_length: Number of past values to condition on (k in T_{X→Y}).
         n_bins: Number of bins for discretization (if data isn't already discrete).
+        correction: Bias correction ``transfer_entropy()`` applies.
+
+    Raises:
+        KeyError: ``correction`` is not a TECorrection.
     """
 
-    def __init__(self, history_length: int = 1, n_bins: int = 256):
+    def __init__(
+        self,
+        history_length: int = 1,
+        n_bins: int = 256,
+        correction: TECorrection = TECorrection.SHUFFLE,
+    ):
         self.k = history_length
         self.n_bins = n_bins
+        self.correction = correction
+
+        # Ifs up: the instance attribute shadows the class method, so every
+        # caller (internal flows included) gets the mode without branching.
+        self.transfer_entropy = getattr(self, _SCORERS[correction])
 
     def _build_joints(
         self,
@@ -149,8 +183,8 @@ class TransferEntropy:
 
         Checked whether the shuffle loop could be replaced with the
         analytic Panzeri & Treves (1996) / Miller-Madow bias formula
-        (kept as ``panzeri_treves_bias`` / ``pt_corrected_te`` for
-        comparison, not used for scoring for the reason below)
+        (kept as ``panzeri_treves_bias`` / ``pt_corrected_te``, opt-in via
+        TECorrection.ANALYTIC, not the default for the reason below)
         (bias of a plug-in conditional entropy ~ (sum of per-context
         alphabet sizes - 1) / (2N ln 2)) -- it would turn an O(n_surrogates)
         resampling loop into an O(1) closed-form correction. Verified
@@ -208,11 +242,21 @@ class TransferEntropy:
         bias = float(np.mean(h_target - h_both_s))
         return max(0.0, te_raw - bias)
 
-    def pt_corrected_te(self, source: list[int], target: list[int]) -> float:
+    def pt_corrected_te(
+        self,
+        source: list[int],
+        target: list[int],
+        n_surrogates: int = 0,
+    ) -> float:
         """T_{source -> target} with the analytic Panzeri-Treves correction.
 
-        Comparison diagnostic, not used for scoring: undercorrects in the
-        sparse-context regime fuzzing data lives in (see transfer_entropy).
+        Scores only under TECorrection.ANALYTIC (opt-in): undercorrects in
+        the sparse-context regime fuzzing data lives in (see transfer_entropy).
+
+        Args:
+            source: Time series of source values (X).
+            target: Time series of target values (Y).
+            n_surrogates: Ignored; keeps the transfer_entropy signature.
 
         Returns:
             max(0, raw plug-in TE - panzeri_treves_bias) in bits.

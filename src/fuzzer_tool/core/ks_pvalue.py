@@ -79,8 +79,5 @@ def kolmogorov_pvalue_one_sample(d: float, n: int) -> float:
     if d <= 0 or n <= 0:
         return 1.0
     lam = (math.sqrt(n) + 0.12 + 0.11 / math.sqrt(n)) * d
-    s = sum(
-        (-1) ** (j - 1) * math.exp(-2.0 * j * j * lam * lam)
-        for j in range(1, 101)
-    )
+    s = sum((-1) ** (j - 1) * math.exp(-2.0 * j * j * lam * lam) for j in range(1, 101))
     return max(0.0, min(1.0, 2.0 * s))

@@ -20,7 +20,8 @@ Also provides:
 - Coverage spectrum analysis: per-edge hit count distribution profiling
 - renyi_divergence: D_α(P||Q), the order-α generalization of KL
 
-Scope: renyi_divergence is a library diagnostic with no production caller.
+Scope: renyi_divergence feeds only the --renyi-weight dump's drift_half
+(services/stats.py), a diagnostic; it does not score.
 The Jensen-Shannon divergence the fuzzer scores with lives in
 edge_tracker._js_divergence and the smoothed asymmetric KL in
 DifferentialTracker.

@@ -104,6 +104,10 @@ Arms::
                  bins with the most gain above the seed's pooled rate
                  (Kadane over per-bin excess; opt-in, --pos-kadane, NOT
                  implied by --position-arena; see core/schedulers/pos_kadane.py)
+    learn        PositionLearnScheduler, LearnAFL's path mask: frozen bytes while
+                 the mask changes, mutable bytes (frozen ones restored) once
+                 stable (opt-in, --pos-learn, NOT implied by --position-arena;
+                 see core/schedulers/pos_learn.py)
     consolidated PositionConsolidatedScheduler, uniform/boundary/levy/bin
                  candidates scored by context x per-seed bin rates
                  (opt-in, --pos-consolidated; see
@@ -128,7 +132,7 @@ served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
 ``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci``,
-``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask``, ``centroid``, ``good_turing``, ``saliency``, ``harmonic``, ``kadane`` and ``consolidated`` are each
+``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask``, ``centroid``, ``good_turing``, ``saliency``, ``harmonic``, ``kadane``, ``learn`` and ``consolidated`` are each
 credited off-policy on every settled round, whoever served the positions, like
 ``seed_canary`` on the seed side.
 """
@@ -179,6 +183,7 @@ POSITION_STRATEGY_NAMES = (
     "harmonic",
     "kadane",
     "consolidated",
+    "learn",
 )
 
 
@@ -236,6 +241,7 @@ class PositionArena:
         saliency: PositionScheduler | None = None,
         harmonic: PositionScheduler | None = None,
         kadane: PositionScheduler | None = None,
+        learn: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         # None = every arm whose feature is on; otherwise only these (+ uniform).
@@ -271,6 +277,7 @@ class PositionArena:
         self._saliency = saliency if self.allows("saliency") else None
         self._harmonic = harmonic if self.allows("harmonic") else None
         self._kadane = kadane if self.allows("kadane") else None
+        self._learn = learn if self.allows("learn") else None
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
         # Off-policy arms: fed every settled round whoever served. Single list
@@ -294,6 +301,7 @@ class PositionArena:
                 self._saliency,
                 self._harmonic,
                 self._kadane,
+                self._learn,
                 self._consolidated,
             )
             if e is not None
