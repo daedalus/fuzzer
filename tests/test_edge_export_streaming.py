@@ -155,48 +155,129 @@ def test_no_file_without_writes(cls, name, tmp_path):
     assert not (tmp_path / name).exists()
 
 
-def test_pickle_batches_concatenate(tmp_path):
+def test_regression_pickle_single_load(tmp_path):
+    """Several batches still make one pickle: one pickle.load returns every seed."""
     out = tmp_path / "e.pkl"
     w = EdgePickleWriter(out)
     w.open()
     for i in range(0, 5, BATCH):
         w.write([(f"s{j}", _arr(j)) for j in range(i, min(i + BATCH, 5))])
+
+        # Complete after every batch, not only after close.
+        with open(out, "rb") as f:
+            assert len(pickle.load(f)) == min(i + BATCH, 5)
+            assert f.read() == b""
     w.close()
 
     with open(out, "rb") as f:
-        first = pickle.load(f)
-    assert len(first) == BATCH
-    assert {k: v.tolist() for k, v in read_edges_pickle(out).items()} == {
-        f"s{i}": [i] for i in range(5)
-    }
+        got = pickle.load(f)
+    assert {k: v.tolist() for k, v in got.items()} == {f"s{i}": [i] for i in range(5)}
+    assert all(v.dtype == np.uint32 for v in got.values())
+    assert not any(v.flags.writeable for v in got.values())  # frombuffer: documented read-only
 
 
-def test_pickle_torn_tail_repaired(tmp_path, caplog):
-    """Adversarial: a half-written last batch is cut off; earlier batches survive."""
+def test_pickle_reopen_appends_same_pickle(tmp_path):
+    """Falsification: a second run extends the one dict, it does not add a pickle."""
     out = tmp_path / "e.pkl"
-    _write(EdgePickleWriter(out), [(f"s{i}", _arr(i)) for i in range(4)])
-    good = out.stat().st_size
-    tail = pickle.dumps({"torn": np.array([7], dtype=np.uint32)})
-    with open(out, "ab") as f:
-        f.write(tail[: len(tail) // 2])
+    _write(EdgePickleWriter(out), [("a", _arr(1))])
+    _write(EdgePickleWriter(out), [("b", _arr(2))])
+
+    with open(out, "rb") as f:
+        assert set(pickle.load(f)) == {"a", "b"}
+        assert f.read() == b""
+
+
+@pytest.mark.parametrize("cut", [1, 5, 20])
+def test_pickle_torn_tail_repaired(cut, tmp_path, caplog):
+    """Adversarial: a kill mid-batch is cut back to the last complete batch."""
+    out = tmp_path / "e.pkl"
+    w = EdgePickleWriter(out)
+    w.open()
+    w.write([(f"s{i}", _arr(i)) for i in range(2)])
+    w.write([(f"t{i}", _arr(i)) for i in range(2)])
+    w.close()
+    with open(out, "r+b") as f:
+        f.truncate(out.stat().st_size - cut)  # STOP gone, maybe part of batch 2
 
     w = EdgePickleWriter(out)
-    assert w.open() == {f"s{i}" for i in range(4)}
-    assert out.stat().st_size == good
+    known = w.open()
+    assert {"s0", "s1"} <= known <= {"s0", "s1", "t0", "t1"}
     assert "torn" in caplog.text.lower()
     w.write([("new", _arr(9))])
     w.close()
-    assert set(read_edges_pickle(out)) == {f"s{i}" for i in range(4)} | {"new"}
+
+    with open(out, "rb") as f:
+        got = pickle.load(f)
+    assert set(got) == known | {"new"}
+    assert {k: v.tolist() for k, v in got.items() if k.startswith("s")} == {"s0": [0], "s1": [1]}
 
 
-def test_pickle_legacy_single_dict(tmp_path):
-    """A pre-batch export (one dict) is read as one batch and appended to."""
+def test_pickle_trailing_junk_cut(tmp_path, caplog):
+    """Adversarial: bytes after the pickle's STOP are not left behind."""
     out = tmp_path / "e.pkl"
-    with open(out, "wb") as f:
-        pickle.dump({"old": np.array([1], dtype=np.uint32)}, f)
+    _write(EdgePickleWriter(out), [("a", _arr(1))])
+    with open(out, "ab") as f:
+        f.write(b"junk")
 
     w = EdgePickleWriter(out)
-    assert w.open() == {"old"}
+    assert w.open() == {"a"}
+    w.write([("b", _arr(2))])
+    w.close()
+    with open(out, "rb") as f:
+        assert set(pickle.load(f)) == {"a", "b"}
+        assert f.read() == b""
+
+
+def test_pickle_open_does_not_load_arrays(tmp_path, monkeypatch):
+    """Known ids come back without rebuilding a single ndarray."""
+    out = tmp_path / "e.pkl"
+    _write(EdgePickleWriter(out), [(f"s{i}", _arr(i, i + 1)) for i in range(4)])
+
+    def no_arrays(*a, **kw):
+        raise AssertionError("ndarray rebuilt")
+
+    # Arrays are stored as numpy.frombuffer(bytes, dtype); unpickling resolves it by name.
+    monkeypatch.setattr(np, "frombuffer", no_arrays)
+
+    # Control: a full load does hit the patched rebuild, so the probe can fail.
+    with pytest.raises(AssertionError, match="rebuilt"), open(out, "rb") as f:
+        pickle.load(f)
+    assert EdgePickleWriter(out).open() == {f"s{i}" for i in range(4)}
+
+
+@pytest.mark.parametrize("batches", [1, 3])
+def test_pickle_legacy_migrated(batches, tmp_path):
+    """Old exports (one dict, or back-to-back batch pickles) become one pickle."""
+    out = tmp_path / "e.pkl"
+    with open(out, "wb") as f:
+        for b in range(batches):
+            pickle.dump({f"old{b}": np.array([b], dtype=np.uint32)}, f, protocol=5)
+
+    w = EdgePickleWriter(out)
+    assert w.open() == {f"old{b}" for b in range(batches)}
     w.write([("new", _arr(2))])
     w.close()
-    assert set(read_edges_pickle(out)) == {"old", "new"}
+
+    with open(out, "rb") as f:
+        got = pickle.load(f)
+        assert f.read() == b""
+    assert set(got) == {f"old{b}" for b in range(batches)} | {"new"}
+    assert set(read_edges_pickle(out)) == set(got)
+
+
+def test_pickle_2d_array_round_trips(tmp_path):
+    """Adversarial: a non-1-D array falls back to numpy's reducer, shape intact."""
+    out = tmp_path / "e.pkl"
+    grid = np.arange(6, dtype=np.uint32).reshape(2, 3)
+    _write(EdgePickleWriter(out), [("g", grid), ("v", _arr(4, 5))])
+    with open(out, "rb") as f:
+        got = pickle.load(f)
+    assert got["g"].shape == (2, 3) and got["g"].tolist() == grid.tolist()
+    assert got["v"].tolist() == [4, 5]
+
+
+def test_pickle_not_an_export_refused(tmp_path):
+    out = tmp_path / "e.pkl"
+    out.write_bytes(pickle.dumps([1, 2, 3]))
+    with pytest.raises(ValueError):
+        EdgePickleWriter(out).open()
