@@ -48,8 +48,9 @@ _SQLITE = ".sqlite"
 class _CorpusSeeds:
     """Live seeds: loose files, then seeds.zip / seeds.tar.gz members; size-capped.
 
-    Archive sizes are only known once read, so ``oversized`` is final after
-    iteration.
+    Archives are streamed in place, one member at a time, in one pass.
+    Archive sizes are only known once read, so ``oversized`` and ``seen``
+    are final after iteration. ``total`` is None when a tar makes it unknown.
     """
 
     def __init__(self, corpus_dir: Path, max_seed_bytes: int) -> None:
@@ -57,19 +58,23 @@ class _CorpusSeeds:
         self._max = max_seed_bytes
         self._files, over = _split_oversized(_discover_corpus_files(corpus_dir), max_seed_bytes)
         self.oversized = len(over)
-        self.total = len(self._files) + count_archive_seeds(corpus_dir)
+        self.seen = 0
+        archived = count_archive_seeds(corpus_dir)
+        self.total = None if archived is None else len(self._files) + archived
 
     def __iter__(self) -> Iterator[bytes]:
         for fpath in self._files:
             if not fpath.exists():
                 print(f"[!] Skipping missing seed: {fpath}")
                 continue
+            self.seen += 1
             yield fpath.read_bytes()
 
         for data in iter_archive_seeds(self._corpus):
             if self._max and len(data) > self._max:
                 self.oversized += 1
                 continue
+            self.seen += 1
             yield data
 
 
@@ -138,7 +143,7 @@ def export_edges(
     known = set.intersection(*(set(s.prior) for s in sinks))
 
     seeds = _CorpusSeeds(Path(corpus_dir), max_seed_bytes)
-    if not seeds.total:
+    if seeds.total == 0 and not seeds.oversized:
         print(f"[-] Corpus is empty: {corpus_dir}", file=sys.stderr)
         return 0
 
@@ -148,6 +153,11 @@ def export_edges(
     if seeds.oversized:
         print(f"[*] Skipped: {seeds.oversized} seeds over {max_seed_bytes} bytes")
     if edges is None:
+        return 0
+
+    # A streamed tar has no up-front count: emptiness shows only now.
+    if not seeds.seen:
+        print(f"[-] No seeds to replay in {corpus_dir}", file=sys.stderr)
         return 0
 
     if not edges:
@@ -210,7 +220,7 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
                 return None
             replay = _runner_replay(runner)
 
-        n = seeds.total
+        n = seeds.total or 0  # 0 = unknown: progress shows no ETA
         start_time = time.time()
         unique: set[int] = set()
         peak_rss_kb = _maxrss_kb()

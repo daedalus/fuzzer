@@ -742,11 +742,17 @@ def iter_archive_seeds(corpus_dir: Path) -> Iterator[bytes]:
     yield from (data for data, protected in seed_tar.live(corpus_dir) if not protected)
 
 
-def count_archive_seeds(corpus_dir: Path) -> int:
-    """Seeds :func:`iter_archive_seeds` yields (zip members are read to count)."""
+def count_archive_seeds(corpus_dir: Path) -> int | None:
+    """Seeds :func:`iter_archive_seeds` yields, read from the zip index (nothing inflated).
+
+    None when seeds.tar.gz exists: a gzip stream cannot be counted without
+    decompressing it, so its total is unknown until it has been read.
+    """
+    if (Path(corpus_dir) / seed_tar.TAR_NAME).is_file():
+        return None
+
     store = _seed_store(Path(corpus_dir))
-    zipped = sum(1 for _, protected in store.live() if not protected) if store else 0
-    return zipped + seed_tar.count(corpus_dir)
+    return store.unprotected_count() if store is not None else 0
 
 
 def _iter_full_dir(base: Path) -> Iterator[bytes]:
