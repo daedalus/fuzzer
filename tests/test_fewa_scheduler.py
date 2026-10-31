@@ -149,7 +149,7 @@ def test_fewa_restarts_epoch_once_a_single_survivor_remains() -> None:
     """
     s = FEWAScheduler(alpha=0.05, max_window=1024)
     epochs_seen = set()
-    for i in range(80):
+    for _ in range(80):
         op = s.select_op(["A", "B"])
         s.record(op, success=(op == "A"), weight=1.0)
         epochs_seen.add(s._epoch)

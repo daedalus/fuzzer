@@ -19,11 +19,11 @@ or call the target. Wiring is a later step.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class OrientationClass(str, Enum):
+class OrientationClass(StrEnum):
     """Sector role of a mutation relative to objective temporal orientation."""
 
     RO = "ro"

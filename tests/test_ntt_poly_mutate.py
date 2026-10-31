@@ -5,12 +5,14 @@ from __future__ import annotations
 from fuzzer_tool.core.mutations.ntt_poly import (
     _MOD_BE,
     _MOD_LE,
+    _ROOT_BE,
     ntt_poly_mutate,
     sniff_ntt_modulus,
 )
 from fuzzer_tool.core.ntt import DEFAULT_MOD
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.rand_pool import RandPool
+from tests.support.scripted_rng import ScriptedRng
 
 
 class TestSniffer:
@@ -54,6 +56,39 @@ class TestMutate:
         out = ntt_poly_mutate(data, rng)
         assert isinstance(out, (bytes, bytearray))
         assert len(out) >= 2
+
+
+class TestInjectPreservesLength:
+    """Inject used `_region(max_len=8)` as a cap; it rounds to multiples of 8.
+
+    A 4-7 byte draw rounded to 0, `_region` returned (0, 0), and the
+    short-buffer fallback appended the modulus to a 512-byte buffer.
+    """
+
+    def test_regression_ntt_inject_grew_long_buffer(self):
+        # Draws: slot length 5, offset 101 (aligned to 100), BE modulus.
+        rng = ScriptedRng(randints=[5, 101, 0])
+        out = ntt_poly_mutate(bytes(512), rng)
+
+        assert len(out) == 512
+        assert out[100:104] == _MOD_BE
+        assert out[:100] + out[104:] == bytes(508)
+
+    def test_falsification_wide_slot_still_carries_root(self):
+        # Slot draw 200 caps at 8: modulus, root coin 0, BE root.
+        rng = ScriptedRng(randints=[200, 64, 0, 0, 0])
+        out = ntt_poly_mutate(bytes(512), rng)
+
+        assert len(out) == 512
+        assert out[64:72] == _MOD_BE + _ROOT_BE
+
+    def test_adversarial_minimum_buffer(self):
+        # 5 bytes, slot 5 at offset 0: modulus fills 4, no growth.
+        rng = ScriptedRng(randints=[5, 0, 0])
+        out = ntt_poly_mutate(bytes(5), rng)
+
+        assert len(out) == 5
+        assert out[:4] == _MOD_BE
 
 
 class TestRegistryWiring:

@@ -8,7 +8,6 @@ instances (``colorization`` registered with no op-list entry,
 ``block_shuffle_variable`` categorized nowhere) from returning.
 """
 
-import os
 import types
 
 import pytest
@@ -420,12 +419,13 @@ class TestRegularityOperators:
         """
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rng = RandPool()
+        fuzzer._rng = RandPool(seed=1)
+        src = RandPool(seed=2)  # input bytes, apart from the operator stream
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         for name in sorted(self.REGULARITY_OPS - {"invariant_break"}):
             for _ in range(10):
-                buf = bytearray(os.urandom(512))
+                buf = bytearray(src.randbytes(512))
                 result = dispatch[name](buf, 0, bytes(buf))
                 assert result is not None, name
                 assert len(result) == 512, name
@@ -439,23 +439,25 @@ class TestRegularityOperators:
         """
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rng = RandPool()
+        fuzzer._rng = RandPool(seed=1)
+        src = RandPool(seed=2)  # input bytes, apart from the operator stream
         fuzzer.corpus = []
         engine = OperatorEngine(fuzzer)
-        buf = bytearray(os.urandom(128))
+        buf = bytearray(src.randbytes(128))
         assert engine._op_invariant_break(buf, 0, bytes(buf)) is None
 
     def test_invariant_cache_rebuilds_only_on_growth(self):
         """The corpus scan is O(samples x length); it must not run per call."""
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rng = RandPool()
-        fuzzer.corpus = [b"\x89MAGIC\x00\x01" + os.urandom(56) for _ in range(32)]
+        fuzzer._rng = RandPool(seed=1)
+        src = RandPool(seed=2)  # input bytes, apart from the operator stream
+        fuzzer.corpus = [b"\x89MAGIC\x00\x01" + src.randbytes(56) for _ in range(32)]
         engine = OperatorEngine(fuzzer)
         first = engine.corpus_invariants()
         assert first is not None
         assert engine.corpus_invariants() is first
-        fuzzer.corpus.append(b"\x89MAGIC\x00\x01" + os.urandom(56))
+        fuzzer.corpus.append(b"\x89MAGIC\x00\x01" + src.randbytes(56))
         assert engine.corpus_invariants() is not first
 
 
@@ -741,11 +743,12 @@ class TestGoFuzzPorts:
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
         fuzzer._rng = RandPool(seed=1)
+        src = RandPool(seed=2)  # input bytes, apart from the operator stream
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         for name in sorted(self.NEW_OPS - {"ascii_num_replace"}):
             for _ in range(10):
-                buf = bytearray(os.urandom(512))
+                buf = bytearray(src.randbytes(512))
                 result = dispatch[name](buf, 0, bytes(buf))
                 assert result is None or len(result) == 512, name
 
@@ -929,11 +932,12 @@ class TestGoFuzzPorts2:
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
         fuzzer._rng = RandPool(seed=1)
+        src = RandPool(seed=2)  # input bytes, apart from the operator stream
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         # digit_replace preserves length; insert_range_from_other does not.
         for _ in range(10):
-            buf = bytearray(os.urandom(512))
+            buf = bytearray(src.randbytes(512))
             result = dispatch["digit_replace"](buf, 0, bytes(buf))
             assert result is None or len(result) == 512
 
