@@ -1172,11 +1172,13 @@ class FuzzRound:
         # K-Scheduler bitmap sampling runs EVERY exec (beta needs R_i over
         # all mutations); per-seed mask attribution only for corpus-worthy
         # inputs, keyed like EdgeTracker.
+        # Only bound when something reads Katz (Fuzzer._bind_katz).
         f = self._f
-        if getattr(f, "_katz_channel", None) is None:
+        ch = getattr(f, "_katz_feed", None)
+        if ch is None:
             return
         katz_key = f._seed_key(self._data) if self._has_new_coverage else None
-        f._katz_channel.observe(seed_key=katz_key)
+        ch.observe(seed_key=katz_key)
 
     def _feed_entropic(self) -> None:
         # Every exec, crashes and timeouts included: each mutant spends the
@@ -2024,7 +2026,7 @@ class FuzzRound:
                 "asan": None,
                 "ubsan": None,
             }
-        f._record_fluctuation_observation("crash", f._get_current_edge_set())
+        f._record_fluctuation_observation("crash")
         f._maybe_periodic_minimize()
         return True
 
@@ -2112,7 +2114,7 @@ class FuzzRound:
             f.mc.maybe_refit()
         # Periodic minimization based on edge stats
         f._maybe_periodic_minimize(dedup=True)
-        f._record_fluctuation_observation("success", f._get_current_edge_set())
+        f._record_fluctuation_observation("success")
         return True
 
     def _note_novelty(self) -> None:
@@ -2171,7 +2173,7 @@ class FuzzRound:
         if f.qea:
             f.qea.on_fuzz_result(mutated, False, 0, f._edge_tracker)
 
-        f._record_fluctuation_observation("boring", f._get_current_edge_set())
+        f._record_fluctuation_observation("boring")
         return False
 
     def _metropolis(self) -> bool:

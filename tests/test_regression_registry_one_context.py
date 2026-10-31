@@ -27,9 +27,11 @@ def test_regression_registry_one_context():
 
 
 def test_same_answer_as_per_spec_predicates():
-    """Identically seeded fuzzers: the format bootstrap trickle draws rng per call."""
+    """Gating only (rng None: every unseen format offered on both sides); the
+    trickle's distribution is tested in test_available_cadence.py."""
     for seed, data in enumerate(
         (b"", b"plain text", b"\x89PNG\r\n\x1a\n" + b"\x00" * 40, b"PK\x03\x04" + b"a" * 30)
     ):
         a, b = make_fuzzer(seed=seed), make_fuzzer(seed=seed)
+        a._rng = b._rng = None
         assert REGISTRY.available(a, data) == _per_spec(b, data)

@@ -171,11 +171,12 @@ def _counting_registry():
 
 
 def test_shared_gate_runs_once_per_call():
-    """Falsification: four ops on one gate cost one call, not four."""
+    """Falsification: four ops on one gate cost one call, not four; an
+    input-free gate runs once per refresh window, not per call."""
     r, calls, _, _ = _counting_registry()
     f = make_minimal_fuzzer(pool=RandPool(1))
-    r.available(f, b"Yes")
-    r.available(f, b"No")
+    for i in range(reg.PRED_REFRESH_CALLS + 1):
+        r.available(f, b"Yes" if i % 2 else b"No")
     assert calls["shared"] == 2
 
 
