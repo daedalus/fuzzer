@@ -13,6 +13,7 @@ fuzzer, not just the target.
 | File | Open when |
 |------|-----------|
 | `docs/refs/bug-classes.md` | Touching process/signal handling, timeouts, ptrace, concurrency, resource cleanup, hashing/identity, caching, ELF/low-level parsing, numeric edge cases, state persistence, dispatch tables, error swallowing, .so symbol visibility, widely-used return-value APIs, or test mocks. Also carries the regression-testing rules. |
+| `docs/AB_LEDGER.md` | Before proposing, running or citing an A/B: every past result and its verdict. |
 | `docs/refs/architecture.md` | Working inside coverage/SHM internals, the AFL shim, `--no-shm`/`--deep-coverage`, the Elo meta-scheduler, or state persistence (`state.json` / `edge_tracker.json` / `markov.json`). |
 
 ## Hard Rules
@@ -92,6 +93,11 @@ fuzzer, not just the target.
     - **Cache safely:** a cache of state that can change must be revalidated cheaply or reset at a known boundary, for example `mutate()` clearing `_meta_strategy_cached`.
 58. **Optimization bar: never slower.** Ship a behavior-preserving speedup when it is never slower than the current code on the function it changes, at any realistic input size (interleaved min-of-N, not single shots; a loss within run-to-run noise is not slower — re-measure). Gains > 7.5% are meaningful; smaller never-slower gains still ship. Slower at any realistic size: don't ship; record the numbers in the handover or `docs/DEEP_DIVE.md`.
     - **In-run check for per-exec code:** a change to code that runs per exec or per mutation must also show its gain inside a real fuzz run (fuzzgoat built with clang, master vs branch alternated, wrapper timers). Warm microbenchmarks overstate memory-bound code: a 17-20% gain on the coverage-map walk measured 0-1% in-run.
+59. **Every A/B lands in `docs/AB_LEDGER.md`.** Add the row in the commit that records the result, whatever it is: win, loss, null, aborted, contaminated. A run not in the ledger did not happen.
+    - Append-only. Never edit a past row's numbers; a rerun is a new row that says `supersedes #N`.
+    - Each row carries W/L, test and p, median Δ, the A/A control (Hard Rule 46) or `none`, a verdict from the ledger's list, and the source doc. No control → no `WIN`/`LOSS`.
+    - Interim splits are not results (Boltzmann: 7W/2L at 10 grep seeds, 5W/5L for the next 10).
+    - Closing a `docs/AB_PENDING.md` row requires its ledger row. `tests/test_ab_ledger.py` enforces the format.
 
 ## Corpus Rules
 
