@@ -591,7 +591,12 @@ const uint32_t __AFL_CAT(__afl_shm_layout_, __AFL_SHM_LAYOUT) = __AFL_SHM_LAYOUT
  * edge table = 8192 × 8 = 65536 bytes, front region = 32 bytes. */
 static uint32_t __afl_map_size  = 8192;
 
-struct __afl_entry *__afl_area   = NULL;
+/* Exported (nm detection, ctypes in_dll) but not preemptible: default
+ * visibility made a .so linked without -Bsymbolic read these per-edge
+ * globals through the GOT, one extra load each. */
+#define __AFL_HOT_VIS __attribute__((visibility("protected")))
+
+__AFL_HOT_VIS struct __afl_entry *__afl_area = NULL;
 
 /* Guard path, chosen per edge by one flag instead of ~10 setting checks.
  * FAST holds when the default setup does: table and header attached, write
@@ -609,7 +614,7 @@ static int __afl_fast = 0;
  * mode-dependent branches would record shim edges that differ by setting. */
 __AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void);
 #if __AFL_NGRAM_K == 2
-uint32_t           __afl_prev_loc = 0;
+__AFL_HOT_VIS uint32_t __afl_prev_loc = 0;
 #else
 /* k−1 predecessor slots, FIFO via __afl_prev_idx (next-overwrite target =
  * oldest entry). The index is uint32_t on purpose: an 8-bit counter wraps
@@ -652,8 +657,8 @@ static uint64_t *__afl_touched     = NULL;
  * -D__AFL_TOUCHED_ATOMIC=0|1 sets the default (1: atomic). $__AFL_TOUCHED_ATOMIC
  * ("0" or "1", read once at attach by __afl_map_shm; fuzzer-tool
  * --touched-atomic / --no-touched-atomic) overrides it per run, so one
- * binary serves both a threaded target and a single-threaded one that
- * wants the ~30 ns/first-touch back. Read per first touch, never per hit. */
+ * binary serves both. Atomic mode is plain until a second thread exists
+ * (__afl_touch_atomic_now); 0 forces plain. Read per first touch, never per hit. */
 #ifndef __AFL_TOUCHED_ATOMIC
 #define __AFL_TOUCHED_ATOMIC 1
 #endif
@@ -1763,12 +1768,24 @@ static inline uint32_t __afl_home_slot(uint32_t edge_id) {
  * good), and the bitmap scan simply never sees the edge (lost coverage).
  * Measured cost: +16-24% on the shim's per-exec time at 500 first touches
  * per exec, about 1.2us, against 100us+ saved by the scan on large maps.
- * A single-threaded target can build with -D__AFL_TOUCHED_ATOMIC=0. */
+ * Paid only once a second thread exists (__afl_touch_atomic_now). */
+/* glibc >= 2.32 clears it before a second thread starts and never sets it
+ * back. Weak: absent (older glibc, musl) reads as "maybe threaded". */
+extern char __libc_single_threaded __attribute__((weak));
+
+/* Atomic mode pays the lock only once another writer can exist: with one
+ * thread a plain OR cannot lose a bit. Per first touch, never per hit. */
+__attribute__((always_inline))
+static inline int __afl_touch_atomic_now(void) {
+    if (!__afl_touched_atomic) return 0;
+    return !&__libc_single_threaded || !__libc_single_threaded;
+}
+
 __attribute__((always_inline))
 static inline void __afl_touch(uint32_t idx) {
     if (!__afl_touched) return;
     uint64_t bit = 1ull << (idx & 63);
-    if (__afl_touched_atomic)
+    if (__afl_touch_atomic_now())
         __atomic_fetch_or(&__afl_touched[idx >> 6], bit, __ATOMIC_RELAXED);
     else
         __afl_touched[idx >> 6] |= bit;
