@@ -72,3 +72,6 @@ Owed runs: `docs/AB_PENDING.md`. Mechanism detail: `docs/DEEP_DIVE.md`.
 | 47 | 2026-10-29 | `--novel-crash-reward` (abort) vs `abort-crash` | FFmpeg 8.0.3 seeded (`vpk_div0`) · 20 × 10k | unique 20 ties; edges 7/13 p=0.26 (Holm 0.53), med −726 | edges 8/12 p=0.50 | NULL | `docs/AB_PENDING.md` (Crash handling) |
 | 48 | 2026-10-29 | `--seed-branch-scheduler` vs `elo` | `fuzzgoat_katz` · 20 × 10k | 14/6, McNemar 0.115 (Holm 0.23), med +124; 9/60 early exits | 11/9, p=0.82 | LEAN+ | `docs/AB_PENDING.md` (Seed scheduling) |
 | 49 | 2026-10-29 | `--field-hmm` vs default | fuzzgoat noasan · 20 × 10k | 9/11, McNemar 0.82, med −21.5; eps 753 vs 845 | 9/11, p=0.82 | NULL | `docs/DEEP_DIVE.md` §Viterbi field segmentation |
+| 50 | 2026-10-31 | `elo-tang` vs `elo` | fuzzgoat noasan · 20 × 10k | 12/8, McNemar 0.503 (Holm 1.0), med +47.5; eps 3/17 (Holm 0.005), med −38 | none | NULL | `docs/TODO.md` (r1_tang) |
+| 51 | 2026-10-31 | `elo-tang-residual` vs `elo` | fuzzgoat noasan · 20 × 10k | 12/8, McNemar 0.503 (Holm 1.0), med +19.5; eps 5/15 (p 0.041), med −41 | none | NULL | `docs/TODO.md` (r1_tang) |
+| 52 | 2026-10-31 | `elo-tang-residual` vs `elo-tang` | fuzzgoat noasan · 20 × 10k | 9/11, McNemar 0.824, med −9 | none | NULL | `docs/TODO.md` (r1_tang) |
