@@ -340,6 +340,17 @@ NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcspn -fno-builtin-memrchr"
 # stack traces walkable for the crash reports (see build_c_targets).
 FRAME_POINTER="-fno-omit-frame-pointer"
 
+# ── Switch cases visible to coverage ─────────────────────────────────
+#
+# clang -O2's SimplifyCFG folds a value-returning switch into a range check
+# plus table load *before* SanitizerCoverage runs: the cases get no edges and
+# no trace_switch, and cmplog logs cmp(n, x-lo), an operand the input never
+# holds. -fno-jump-tables disables the fold. Measured on fuzzgoat.c (clang 18,
+# trace-pc-guard,trace-cmp): 277 -> 333 guards, 23 -> 27 trace_switch sites.
+# Not fixed: a one-target contiguous range still becomes `x-lo < n`.
+# Rides on every clang coverage flag (cov_flag_for_cc, sancov_trace_flags).
+NO_JUMP_TABLES="-fno-jump-tables"
+
 # Path-stable debug info. -g records absolute repo/vendor/build-root paths
 # in DWARF and __FILE__, so one source built under two roots differs. Remap
 # them to fixed placeholders; gdb: `set substitute-path /fuzz/vendor <root>`.
@@ -423,7 +434,7 @@ sancov_cmp_modes() { echo "trace-cmp trace-div trace-gep"; }
 
 # The -fsanitize-coverage= flag the --tracecmp / --vendor-tracecmp builds use.
 sancov_trace_flags() {
-    echo "-fsanitize-coverage=$(sancov_cmp_modes | tr ' ' ','),trace-pc-guard"
+    echo "-fsanitize-coverage=$(sancov_cmp_modes | tr ' ' ','),trace-pc-guard $NO_JUMP_TABLES"
 }
 
 # True when any mode in the comma list needs the shim's cmplog layer.
@@ -834,7 +845,7 @@ GCC_TRACE_PC="${GCC_TRACE_PC:-1}"
 cov_flag_for_cc() {
     local cc="$1" major first
     case "$cc" in
-        *clang*) echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"; return 0 ;;
+        *clang*) echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard} $NO_JUMP_TABLES"; return 0 ;;
     esac
     # zig cc is clang underneath, but (measured, zig 0.17) it turns UBSan on at
     # -O0: 134 coverage call sites instead of 31 on targets/compcov_gates.c, and
@@ -842,7 +853,7 @@ cov_flag_for_cc() {
     # -fno-sanitize=undefined puts it back at clang's behaviour.
     first="${cc%% *}"
     if [ "${first##*/}" = "zig" ]; then
-        echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard} -fno-sanitize=undefined"
+        echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard} $NO_JUMP_TABLES -fno-sanitize=undefined"
         return 0
     fi
     [ "$GCC_TRACE_PC" = "1" ] || return 0
