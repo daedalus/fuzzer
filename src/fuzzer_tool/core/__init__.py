@@ -1,5 +1,10 @@
 """Core domain logic for fuzzer-tool."""
 
+from fuzzer_tool.core.analyzers.analyzer_critical_slowing import (
+    CoverageHomogeneityDetector,
+    CriticalSlowingDown,
+)
+from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
 from fuzzer_tool.core.chi_squared import (
     ContingencyTable,
     chi_squared_goodness_of_fit,
@@ -14,10 +19,6 @@ from fuzzer_tool.core.count_class import (
     classify_counts,
     classify_single,
     new_bits,
-)
-from fuzzer_tool.core.analyzers.analyzer_critical_slowing import (
-    CoverageHomogeneityDetector,
-    CriticalSlowingDown,
 )
 from fuzzer_tool.core.markov import MarkovChain
 from fuzzer_tool.core.mi import MutualInformationTracker
@@ -50,7 +51,6 @@ from fuzzer_tool.core.schedulers import (
 )
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
-from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
 
 __all__ = [
     "ContingencyTable",

@@ -666,7 +666,7 @@ class PRNGStateLearner:
         families against an MT stream.
         """
         needed = _confident(MT19937_SPEC)
-        for site, hist in list(self._mt_pending.items()):
+        for _site, hist in list(self._mt_pending.items()):
             if len(hist) < needed:
                 continue
             # Use the most recent `needed` samples (aligned to the end of

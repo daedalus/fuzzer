@@ -176,7 +176,7 @@ def shortest_cover_length(s: bytes) -> int:
 
 def is_quasiperiodic(s: bytes) -> bool:
     """Whether *s* has a proper cover shorter than itself."""
-    return 0 < len(s) and shortest_cover_length(s) < len(s)
+    return len(s) > 0 and shortest_cover_length(s) < len(s)
 
 
 def cover_ratio(s: bytes) -> float:

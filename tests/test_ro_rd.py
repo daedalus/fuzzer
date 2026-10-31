@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from fuzzer_tool.core.ro_rd import (
     LineageRecord,
     MutationStep,
