@@ -299,8 +299,8 @@ class ShapleyAttribution:
         """Pure-Python fallback for spectral_embedding."""
         n = len(operators)
         laplacian = self._build_laplacian_py(kernel, operators, n)
-        _, vecs = eigh(laplacian)
-        return {op: vecs[idx][:k] for idx, op in enumerate(operators)}
+        _, vecs = eigh(laplacian, count=k)
+        return {op: vecs[idx] for idx, op in enumerate(operators)}
 
     def spectral_embedding(
         self, operators: list[str] | None = None, k: int = 2
