@@ -5641,8 +5641,8 @@ def main() -> int:
         const=True,
         default=None,
         help=(
-            "Set the touched-slot bitmap bit with an atomic OR (the shim's "
-            "default). Only matters with --calibrate-stability or "
+            "Set the touched-slot bitmap bit with an atomic OR once the target "
+            "has a second thread (the shim's default; plain while single-threaded). Only matters with --calibrate-stability or "
             "--touched-scan, which allocate the bitmap; passed to the shim "
             "as __AFL_TOUCHED_ATOMIC=1 at attach."
         ),
@@ -5654,10 +5654,10 @@ def main() -> int:
         const=False,
         default=None,
         help=(
-            "Set the touched-slot bitmap bit with a plain OR: saves roughly "
-            "30 ns per newly live edge (measured +16-24%% shim time per exec "
-            "at 500 first touches). Only safe for a single-threaded target: "
-            "a threaded one can lose a bit, i.e. a false unstable edge or a "
+            "Set the touched-slot bitmap bit with a plain OR even with threads. "
+            "The default is already plain while single-threaded; this only "
+            "helps without glibc's __libc_single_threaded (glibc < 2.32, musl). "
+            "Unsafe for a threaded target: a threaded one can lose a bit, i.e. a false unstable edge or a "
             "missed edge in --touched-scan. Passed to the shim as "
             "__AFL_TOUCHED_ATOMIC=0 at attach."
         ),
