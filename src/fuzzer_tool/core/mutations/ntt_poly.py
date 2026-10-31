@@ -29,6 +29,8 @@ _ROOT_LE = DEFAULT_ROOT.to_bytes(4, "little")
 _COEFF_BYTES = 4
 #: Smallest useful NTT length (must be a power of two).
 _MIN_NTT_LEN = 4
+#: Widest injected block: modulus + root.
+_SLOT_MAX = len(_MOD_BE) + len(_ROOT_BE)
 
 
 def sniff_ntt_modulus(data: bytes) -> bool:
@@ -38,7 +40,9 @@ def sniff_ntt_modulus(data: bytes) -> bool:
 
 def _inject_constants(data: bytes, rng) -> bytes:
     """Splice the NTT modulus (and optionally the root) into an aligned slot."""
-    offset, length = _region(len(data), rng, min_len=4, align=4, max_len=8)
+    # _region's max_len rounds down to a multiple, it is not a cap: clamp here.
+    offset, length = _region(len(data), rng, min_len=4, align=4)
+    length = min(length, _SLOT_MAX)
     if length < 4:
         # Buffer too short for an in-place splice: append the modulus.
         return data + _MOD_BE
