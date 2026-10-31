@@ -1435,10 +1435,16 @@ class FuzzRound:
 
     def _track_edges(self) -> None:
         f = self._f
-        # Update edge lifetime tracking for every execution
+        # Update edge lifetime tracking for every execution. A scanned round
+        # passes only the scan's first-time ids: an edge new to the tracker
+        # is new to the scan, and the superset test over every live edge cost
+        # ~106 us/exec on FFmpeg for the end-of-run lifetime statistic.
         if f._inprocess_runner or f.ptrace_cov or f.shm_cov:
             current_edges = self._edges_now()
             if current_edges:
+                scanned = self._scanned_shm
+                if scanned is not None and not self._is_timeout:
+                    current_edges = scanned.last_new_ids
                 f._edge_tracker.record_edge_lifetimes(current_edges, f.exec_count)
 
         # Track input-length → edge discovery correlation. The edges this
