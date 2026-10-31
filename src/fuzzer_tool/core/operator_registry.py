@@ -16,7 +16,9 @@ on ``OperatorEngine`` — nothing else.
 """
 
 import contextlib
+import dis
 import logging
+import math
 import re
 import struct
 from collections.abc import Callable
@@ -690,6 +692,12 @@ _SNIFF_CACHE_MAX = 4096
 
 # Fraction of selections on which a not-yet-seen format is still offered.
 _FORMAT_BOOTSTRAP_RATE = 0.02
+_LOG_MISS = math.log(1.0 - _FORMAT_BOOTSTRAP_RATE)
+
+# available() calls between re-checks of context gates that ignore the input
+# (per fuzzer). In-run they cost ~51 of ~128 us per mutate and change a few
+# times per campaign; an operator they enable shows up <= this many calls late.
+PRED_REFRESH_CALLS = 64
 
 
 def _live_formats(fuzzer) -> set:
@@ -703,22 +711,67 @@ def _live_formats(fuzzer) -> set:
 
 
 def _trickle(rng, k: int) -> list[bool]:
-    """*k* bootstrap coin flips, drawn as one batch.
+    """*k* independent bootstrap coin flips at ``_FORMAT_BOOTSTRAP_RATE``.
 
-    ``random_sequential`` yields exactly what *k* ``random()`` calls would,
-    so batching keeps seeded runs unchanged. Permissive (all True) without
-    an rng or with a mock that does not return floats.
+    Draws geometric gaps between hits, not one coin per format: successes + 1
+    draws (~2 for 54 formats) instead of *k*. Same distribution, different
+    stream than per-format coins. Permissive (all True) without an rng or
+    with a mock that does not return floats.
+
+        u -> gap = floor(log(1 - u) / log(1 - p))   failures before a hit
     """
     if rng is None:
         return [True] * k
+    keep = [False] * k
     try:
-        batch = getattr(rng, "random_sequential", None)
-        draws = batch(k) if batch is not None else [rng.random() for _ in range(k)]
-        return [float(r) < _FORMAT_BOOTSTRAP_RATE for r in draws]
-    except (TypeError, ValueError):
+        pos = -1
+        while True:
+            pos += int(math.log(1.0 - float(rng.random())) / _LOG_MISS) + 1
+            if pos >= k:
+                return keep
+            keep[pos] = True
+    except (TypeError, ValueError, AttributeError):
         # Mock/stub fuzzer in tests -- stay permissive rather than
         # silently hiding operators.
         return [True] * k
+
+
+def _reads_input(fn: Callable) -> bool:
+    """Whether a ``(fuzzer, data)`` gate can read *data* (True when unsure).
+
+    From the bytecode: the second parameter is loaded, or captured by a
+    nested function. Anything without a code object counts as reading it.
+    """
+    code = getattr(fn, "__code__", None)
+    if code is None or code.co_argcount < 2:
+        return code is None
+    name = code.co_varnames[1]
+    if name in code.co_cellvars:
+        return True
+    for ins in dis.get_instructions(code):
+        if not ins.opname.startswith("LOAD_FAST"):
+            continue
+        arg = ins.argval
+        if arg == name or (isinstance(arg, tuple) and name in arg):
+            return True
+    return False
+
+
+def _split_gates(groups) -> tuple[list, list]:
+    """``(fn, slots)`` gates split into (reads the input, input-free)."""
+    per_call, steady = [], []
+    for fn, slots in groups:
+        (per_call if _reads_input(fn) else steady).append((fn, tuple(slots)))
+    return per_call, steady
+
+
+@dataclass
+class _GateCache:
+    """Steady gate results for one fuzzer, valid for one plan and `left` calls."""
+
+    plan: "_Plan"
+    left: int
+    oks: list[bool]
 
 
 def _format_available(name: str) -> Callable[[object, bytes], bool]:
@@ -1046,7 +1099,8 @@ class _Plan:
 
     names: tuple[str, ...]
     always: list[bool]
-    # context gate -> its slots (one call per distinct gate)
+    # context gate -> its slots (one call per distinct gate); steady gates
+    # ignore the input and are re-checked every PRED_REFRESH_CALLS calls
     predicates: list[tuple[Callable, tuple[int, ...]]]
     formats: list[tuple[int, str, Callable[[bytes], bool]]]
     mutators: list[tuple[int, object]]
@@ -1057,6 +1111,7 @@ class _Plan:
     # input hash -> slots whose sniffer or input gate matched it (bounded,
     # _SNIFF_CACHE_MAX)
     sniffed: dict[int, frozenset[int]] = field(default_factory=dict)
+    steady: list[tuple[Callable, tuple[int, ...]]] = field(default_factory=list)
 
 
 def _input_hits(plan: _Plan, data: bytes) -> frozenset[int]:
@@ -1168,6 +1223,7 @@ class OperatorRegistry:
             ok = bool(fn(fuzzer, data))
             for i in slots:
                 mask[i] = ok
+        self._steady_gates(plan, mask, fuzzer, data)
 
         pending = self._sniff_formats(plan, mask, fuzzer, data)
 
@@ -1183,6 +1239,24 @@ class OperatorRegistry:
             for i, ok in zip(pending, keep, strict=True):
                 mask[i] = ok
         return list(compress(plan.names, mask))
+
+    @staticmethod
+    def _steady_gates(plan: "_Plan", mask: list, fuzzer, data: bytes) -> None:
+        """Input-free context gates, re-run every PRED_REFRESH_CALLS calls.
+
+        Cached on the fuzzer (like ``_live_formats``), so two fuzzers never
+        share results; a new plan or a fuzzer without attributes re-runs.
+        """
+        cache = getattr(fuzzer, "_gate_cache", None)
+        if cache is None or cache.plan is not plan or cache.left <= 0:
+            oks = [bool(fn(fuzzer, data)) for fn, _slots in plan.steady]
+            cache = _GateCache(plan, PRED_REFRESH_CALLS, oks)
+            with contextlib.suppress(AttributeError):
+                fuzzer._gate_cache = cache
+        cache.left -= 1
+        for (_fn, slots), ok in zip(plan.steady, cache.oks, strict=True):
+            for i in slots:
+                mask[i] = ok
 
     @staticmethod
     def _sniff_formats(plan: "_Plan", mask: list, fuzzer, data: bytes) -> list[int]:
@@ -1254,7 +1328,7 @@ class OperatorRegistry:
                 target = input_groups if pure else groups
                 target.setdefault(id(spec.available), (spec.available, []))[1].append(i)
 
-        plan.predicates = [(fn, tuple(slots)) for fn, slots in groups.values()]
+        plan.predicates, plan.steady = _split_gates(groups.values())
         plan.input_gates = [(fn, tuple(slots)) for fn, slots in input_groups.values()]
         plan.input_slots = tuple(
             [i for _fn, slots in plan.input_gates for i in slots]

@@ -404,12 +404,10 @@ class TestRegularityOperators:
         nearly every offset as structural and overwrite the whole file.
         """
         fuzzer = _MockFuzzer()
-        fuzzer.corpus = []
-        assert "invariant_break" not in REGISTRY.available(fuzzer, b"seed")
-        fuzzer.corpus = [b"x"] * 4
-        assert "invariant_break" not in REGISTRY.available(fuzzer, b"seed")
-        fuzzer.corpus = [b"x"] * 16
-        assert "invariant_break" in REGISTRY.available(fuzzer, b"seed")
+        for corpus, offered in (([], False), ([b"x"] * 4, False), ([b"x"] * 16, True)):
+            fuzzer.corpus = corpus
+            fuzzer._gate_cache = None  # input-free gates re-run on a cadence
+            assert ("invariant_break" in REGISTRY.available(fuzzer, b"seed")) is offered
 
     def test_handlers_preserve_length(self):
         """The band's contract: overwrite in place, never resize.
