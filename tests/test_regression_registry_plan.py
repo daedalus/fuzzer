@@ -1,9 +1,9 @@
-"""REGISTRY.available() runs a precomputed plan with one batched trickle draw.
+"""REGISTRY.available() runs a precomputed plan with a geometric trickle.
 
 Per exec it re-classified every spec and drew ``rng.random()`` once per
 never-seen format (~49 draws, ~87 us per build_ops on a default fuzzer).
-The plan is built once per registration change and the trickle is one
-``random_sequential(k)`` call: the same stream, so seeded runs match.
+The plan is built once per registration change; the trickle draws
+geometric gaps (hits + 1 scalar draws, same 2% odds, different stream).
 """
 
 import pytest
@@ -57,25 +57,29 @@ def _unseen_formats(fuzzer, data) -> int:
 @pytest.mark.parametrize("seed", range(12))
 @pytest.mark.parametrize("data", [b"", _PLAIN, _PNG, b"PK\x03\x04" + b"a" * 30])
 def test_matches_per_spec_oracle(seed, data):
-    """Falsification: same ops, same order, same rng stream as per-spec."""
+    """Falsification: same ops, same order as per-spec (gating; rng None so
+    the trickle, whose stream changed by design, offers every format)."""
     a, b = make_fuzzer(seed=seed), make_fuzzer(seed=seed)
+    a._rng = b._rng = None
     assert REGISTRY.available(a, data) == _per_spec(b, data)
-    assert a._rng.random() == b._rng.random()  # streams still aligned
 
 
 def test_control_oracle_matches_itself():
     """Rule 46: the per-spec oracle agrees with a second run of itself."""
     a, b = make_fuzzer(seed=3), make_fuzzer(seed=3)
+    a._rng = b._rng = None
     assert _per_spec(a, _PLAIN) == _per_spec(b, _PLAIN)
 
 
-def test_one_trickle_batch_per_call():
-    """Falsification: k unseen formats -> one random_sequential(k), no scalars."""
+def test_trickle_draws_hits_plus_one():
+    """Falsification: k unseen formats -> hits + 1 scalar draws, no batch of k."""
     f = make_fuzzer(seed=1)
     f._rng = _SpyRng(1)
     k = _unseen_formats(f, _PLAIN)
-    REGISTRY.available(f, _PLAIN)
-    assert (f._rng.scalar, f._rng.batches) == (0, [k])
+    ops = REGISTRY.available(f, _PLAIN)
+    hits = sum(1 for n, s in reg._FORMAT_SNIFFERS.items() if n in ops and not s(_PLAIN))
+    assert (f._rng.scalar, f._rng.batches) == (hits + 1, [])
+    assert f._rng.scalar < k
 
 
 def test_plan_built_once(monkeypatch):
@@ -109,12 +113,13 @@ def test_register_and_pop_invalidate_plan():
 
 @pytest.mark.parametrize("value, offered", [(0.0, True), (0.99, False)])
 def test_scalar_only_rng_falls_back(value, offered):
-    """Adversarial: a mock without random_sequential still gets the trickle."""
+    """Adversarial: u = 0 -> gap 0, every unseen format offered (k hits, k + 1
+    draws); u = 0.99 -> one gap past the end, none offered."""
     f = make_fuzzer(seed=1)
     f._rng = _ScalarOnlyRng(value)
     k = _unseen_formats(f, _PLAIN)
     ops = REGISTRY.available(f, _PLAIN)
-    assert f._rng.calls == k
+    assert f._rng.calls == (k + 1 if offered else 1)
     assert ("png_chunk_mutate" in ops) is offered
 
 

@@ -3194,6 +3194,7 @@ class Fuzzer:
             log.warning(
                 "--seed-branch-scheduler needs the Katz node channel (trace-pc, undirected)"
             )
+        self._bind_katz(schedule or "base", elo, seed_branch_scheduler)
 
         self._load_corpus()
         loaded = self.corpus
@@ -5903,11 +5904,19 @@ class Fuzzer:
             return {k: v / total for k, v in probs.items()}
         return None
 
-    def _record_fluctuation_observation(self, outcome: str, hit_edges: set[int]) -> None:
-        """Ingest the current round's operator trajectory into the fluctuation tracker."""
+    def _record_fluctuation_observation(
+        self, outcome: str, hit_edges: set[int] | None = None
+    ) -> None:
+        """Ingest the current round's operator trajectory into the fluctuation tracker.
+
+        *hit_edges* defaults to the live edge set, read only when the tracker
+        is on: built eagerly it cost a ~10k-id set per exec on FFmpeg.
+        """
         f = self._fluctuation
         if f is None or not self._last_ops_used:
             return
+        if hit_edges is None:
+            hit_edges = self._get_current_edge_set()
         # `self._operators._available` used to be consulted here. It is not an
         # attribute of the operators service and never was, so the hasattr
         # guard always fell through to the trajectory itself, every step got
@@ -5936,6 +5945,21 @@ class Fuzzer:
             probs_are_true=probs_are_true,
         )
         f.observe(record)
+
+    def _bind_katz(self, schedule: str, elo, branch_arm) -> None:
+        """Bind Katz work to its consumers, once (Hard Rule 57).
+
+        The channel stays built (resume contract, saved state), but a default
+        run never reads Katz: per-exec observe() feeds only the katz power
+        schedule and Elo's katz/branch seed arms; katz_energy only the
+        schedule. Unconsumed, they were ~9% of fuzz_one on fuzzgoat. Bound
+        before _load_corpus(), so consumers see the initial seeds too.
+        """
+        ch = self._katz_channel
+        katz_schedule = schedule == "katz"
+        fed = ch is not None and (katz_schedule or bool(elo) or bool(branch_arm))
+        self._katz_feed = ch if fed else None
+        self._katz_energy_of = ch.seed_energy if ch is not None and katz_schedule else None
 
     def _retain_katz(self) -> None:
         """Fold Katz masks of seeds no longer in the corpus into one union."""
@@ -10326,8 +10350,8 @@ class Fuzzer:
                         elapsed_sec=clock_of(self).time() - self.start_time,
                         t_x_minutes=self._seed_scorer.t_x_minutes,
                         katz_energy=(
-                            self._katz_channel.seed_energy(seed_key)
-                            if getattr(self, "_katz_channel", None) is not None
+                            self._katz_energy_of(seed_key)
+                            if getattr(self, "_katz_energy_of", None) is not None
                             else 0.0
                         ),
                         doppler_energy=(
