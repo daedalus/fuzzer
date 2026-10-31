@@ -88,3 +88,30 @@ def test_laplacian_diagonal_is_the_expected_one_minus_self_similarity():
     # Column 0 (eigenvalue 0) is constant-sign, column 1 alternates.
     assert vecs[0, 0] * vecs[1, 0] > 0
     assert vecs[0, 1] * vecs[1, 1] < 0
+
+
+@pytest.mark.parametrize("n", [3, 8, 30])
+def test_regression_py_laplacian_matches_numpy(n):
+    """Fallback set L_ii = 1, dropping the kernel's self-similarity term."""
+    rng = np.random.default_rng(100 + n)
+    K = np.abs(rng.standard_normal((n, n)))
+    K = (K + K.T) / 2.0
+    ops, kernel = _kernel(K)
+
+    got = np.array(ShapleyAttribution._build_laplacian_py(kernel, ops, n))
+    assert np.allclose(got, _dense_reference(K), rtol=0, atol=1e-12)
+
+
+def test_py_embedding_matches_numpy_up_to_sign():
+    """End to end: both paths embed the same matrix, so vectors agree up to sign."""
+    rng = np.random.default_rng(7)
+    K = np.abs(rng.standard_normal((10, 10)))
+    K = (K + K.T) / 2.0
+    ops, kernel = _kernel(K)
+
+    py = ShapleyAttribution()._spectral_embedding_py(ops, kernel, k=3)
+    ref = ShapleyAttribution()._spectral_embedding_numpy(ops, kernel, k=3)
+    for d in range(3):
+        a = np.array([py[op][d] for op in ops])
+        b = np.array([ref[op][d] for op in ops])
+        assert abs(abs(float(a @ b)) - 1.0) < 1e-9

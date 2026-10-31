@@ -144,7 +144,7 @@ def test_accepts_non_set_iterables():
 
 def test_unfuzzed_seed_scores_global_rate_not_one():
     s = _strategy()
-    for i in range(30):
+    for _ in range(30):
         s.observe(A, {1, 2, 3})  # saturated: nothing new after exec 1
     assert s.residual_risk() < 0.15
     assert s.discovery_probability(C) == pytest.approx(s.residual_risk())
@@ -154,7 +154,7 @@ def test_unfuzzed_seed_scores_global_rate_not_one():
 def test_single_exec_estimate_is_not_one():
     """T=1 makes every edge a singleton; shrinkage must stop that reading as 1.0."""
     s = _strategy()
-    for i in range(40):
+    for _ in range(40):
         s.observe(A, {1, 2, 3})
     s.observe(B, {10, 11, 12})
     assert s.discovery_probability(B) < 0.5

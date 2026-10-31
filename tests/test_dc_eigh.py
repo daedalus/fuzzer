@@ -104,3 +104,21 @@ def test_regression_py_spectral_distinct_vectors():
     # Eigenvectors are unique up to sign for a simple spectrum.
     for d in range(3):
         assert math.isclose(abs(float(g[:, d] @ r[:, d])), 1.0, abs_tol=1e-9)
+
+
+@pytest.mark.parametrize("count", [0, 1, 3, 9, 50])
+def test_count_is_prefix_of_full(count):
+    """count=k returns the k smallest pairs, identical to the full solve's prefix."""
+    a = _sym(9, 11).tolist()
+    w_all, v_all = eigh(a)
+    w, v = eigh(a, count=count)
+
+    k = min(count, 9)
+    assert w == w_all[:k]
+    assert len(v) == 9
+    assert v == [row[:k] for row in v_all]
+
+
+def test_count_negative_rejected():
+    with pytest.raises(ValueError):
+        eigh([[1.0]], count=-1)

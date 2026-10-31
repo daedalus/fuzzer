@@ -19,6 +19,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from fuzzer_tool.core.cadence import phase_of
+
 
 class TestCmplogStdinMissingReturn:
     """run_target must return (rc, stderr) on every backend path.
@@ -1400,7 +1402,8 @@ class TestEloDecayInitIndependentOfChi2:
         assert f._elo_decay_interval == 100, (
             "Elo decay interval must be initialized when elo=True regardless of chi2 interval"
         )
-        assert f._elo_decay_counter == 0
+        # Counter starts at the site's cadence phase, not 0 (core/cadence.py).
+        assert f._elo_decay_counter == phase_of("elo.decay", f._elo_decay_interval)
         # Strategy pre-registration must also run without chi2 (elo save/load
         # and arbitration depend on it)
         assert f._elo._strategy_match_count.get("bandit") == 0
@@ -1409,7 +1412,7 @@ class TestEloDecayInitIndependentOfChi2:
     def test_decay_attrs_set_with_elo_and_chi2(self):
         f = self._make_fuzzer(elo=True, chi2_operator_interval=500)
         assert f._elo_decay_interval == 100
-        assert f._elo_decay_counter == 0
+        assert f._elo_decay_counter == phase_of("elo.decay", f._elo_decay_interval)
 
     def test_decay_counter_increments_and_resets(self):
         f = self._make_fuzzer(elo=True)

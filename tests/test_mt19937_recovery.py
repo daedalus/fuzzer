@@ -8,7 +8,6 @@ import pytest
 
 from fuzzer_tool.core.mt19937_recovery import (
     MT19937,
-    MT19937_SPEC,
     confident_samples,
     min_samples,
     output_word,

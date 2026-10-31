@@ -69,7 +69,7 @@ class TestCoolingEnabledNoResetCycle:
         for gen in range(6):
             qea.generation = gen
             angles.append(qea._effective_rotation_angle())
-        assert all(a2 <= a1 for a1, a2 in zip(angles, angles[1:]))
+        assert all(a2 <= a1 for a1, a2 in zip(angles, angles[1:], strict=False))
         assert angles[-1] < angles[0]
 
     def test_matches_closed_form_decay(self):

@@ -76,10 +76,7 @@ class OccupationMeasure:
             normalised: If True, store µ_I as probabilities; else raw visits.
             drop_zero: If True, omit zero-count entries from the sparse maps.
         """
-        if isinstance(counts, Mapping):
-            items = counts.items()
-        else:
-            items = counts
+        items = counts.items() if isinstance(counts, Mapping) else counts
 
         raw: dict[int, int] = {}
         total = 0

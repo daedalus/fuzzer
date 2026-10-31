@@ -21,7 +21,6 @@ failing the subsequent bounds check and making ``_parse_element`` return
 from __future__ import annotations
 
 from fuzzer_tool.core.mutations.webm import (
-    CONTAINER_IDS,
     Element,
     _encode_size_vint,
     _parse_element,

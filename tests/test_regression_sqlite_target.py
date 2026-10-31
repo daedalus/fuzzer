@@ -139,4 +139,6 @@ class TestBuildWiring:
         target rather than a failed compile and a skipped build."""
         m = re.search(r"compile_sqlite_objects\(\)\s*\{(.*?)\n\}", build_src, re.S)
         body = m.group(1)
-        assert "*clang*" in body, "coverage flag must be gated on the compiler"
+        # Gating lives in cov_flag_for_cc (behaviour: tests/test_gcc_trace_pc.py).
+        assert 'cov_flag_for_cc "$cc"' in body, "coverage flag must be gated on the compiler"
+        assert "trace-pc-guard" not in body.split("cov_flag=")[-1], "guard flag hardcoded"

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from fuzzer_tool.core.mutations.montgomery import (
     SECP256K1_FIELD_P,
     SECP256K1_ORDER_N,

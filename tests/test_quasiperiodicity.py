@@ -9,8 +9,6 @@ return a wrong-but-plausible-looking cover length forever.
 
 import random
 
-import pytest
-
 from fuzzer_tool.core.analyzers.analyzer_quasiperiodicity import (
     QP_SAMPLE_BYTES,
     QuasiperiodicityAnalyzer,
