@@ -1827,6 +1827,25 @@ Constants from `cmplog_exercise.c` reaching the pair pool, seed
 | `-O2 $NOBUILTIN_CMP` | 10/10 | 24 |
 | `-O2 $NOBUILTIN_CMP` + trace-cmp, linked | **10/10** | **36** |
 
+**Switch folding (`-fno-jump-tables`, 2026-10-31).** clang -O2's SimplifyCFG
+turns a value-returning switch into a range check plus table load *before*
+SanitizerCoverage runs: the cases get no edges and no `trace_switch`, and
+trace-cmp logs `cmp(n, x-lo)`, an operand the input never holds.
+`$NO_JUMP_TABLES` (`tools/build_targets.sh`) disables the fold; it rides on
+`cov_flag_for_cc`, `sancov_trace_flags` and the FFmpeg library `COV_FLAGS`.
+gcc builds unchanged. Still folded: a one-target contiguous range
+(`case 42..45: f()` -> `x-42 < 4`).
+
+| fuzzgoat.c, clang 18, trace-pc-guard,trace-cmp | guards | `trace_switch` sites |
+|---|---|---|
+| `-O2` | 277 | 23 |
+| `-O2 -fno-jump-tables` | 333 | 27 |
+
+A/B (ledger #63): fuzzgoat clang ASAN `.so`, 10 seeds x 10k, oracle replay
+through both builds' nosan `.so`: null, inside the A/A spread; wall unchanged.
+Edge ids shift on rebuild: saved `edge_tracker` state from older builds does
+not match. Tests: `tests/test_regression_switch_lookup_table.py`.
+
 **The shim must be linked in, not LD_PRELOADed.** `-fsanitize-coverage` links
 compiler-rt's sancov runtime, which ships *weak no-op definitions* of
 `__sanitizer_cov_trace_{,const_}cmp{1,2,4,8}`. The executable is searched
