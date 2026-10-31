@@ -56,6 +56,21 @@ def _low_rank_tracker(n_seeds=24, n_edges=60, rank=3, seed=11):
     return _FakeTracker(seed_edges, hits), matrix
 
 
+def _sparse_tracker(n_seeds=30, n_edges=80, density=0.4, seed=7):
+    """Full-rank hit-count matrix with ~``1 - density`` zeros, so coverage masks bite."""
+    rng = np.random.default_rng(seed)
+    matrix = rng.integers(1, 50, size=(n_seeds, n_edges)).astype(float)
+    matrix *= rng.random((n_seeds, n_edges)) < density
+    matrix[:, 0] = 1.0  # every seed covers one edge: no empty rows
+    seed_edges, hits = {}, {}
+    for i in range(n_seeds):
+        key = f"seed{i:03d}"
+        cols = np.flatnonzero(matrix[i])
+        seed_edges[key] = {int(j) for j in cols}
+        hits[key] = {int(j): float(matrix[i, j]) for j in cols}
+    return _FakeTracker(seed_edges, hits), matrix
+
+
 # ------------------------------------------------------- ModFKV arithmetic
 
 
@@ -240,6 +255,62 @@ class TestTangScheduler:
         )
         assert b.mode == "frontier"
 
+    def test_residual_mode_scores_the_popularity_removed_matrix(self):
+        # Falsification: the oracle builds B = A - s1 u1 v1^T explicitly and
+        # takes B's own top-k SVD; the module only drops v1. The two agree
+        # only if the shortcut (B's right vectors are A's v2..v_{k+1}) holds.
+        rank = 4
+        tracker, matrix = _sparse_tracker()
+        sched = TangRecommendationScheduler(RandPool(seed=1), rank=rank, mode="residual")
+        assert sched.refit(tracker)
+
+        u, sv, vt = np.linalg.svd(matrix, full_matrices=False)
+        resid = matrix - sv[0] * np.outer(u[:, 0], vt[0])
+        _ub, _sb, vtb = np.linalg.svd(resid, full_matrices=False)
+        proj = (resid @ vtb[:rank].T) @ vtb[:rank]
+        mass = proj * proj
+        expected = (mass * (matrix > 0)).sum(1) / mass.sum(1)
+
+        got = np.array([sched.seed_energy(f"seed{i:03d}") for i in range(matrix.shape[0])])
+        np.testing.assert_allclose(got, expected, atol=1e-9)
+
+        plain = TangRecommendationScheduler(RandPool(seed=1), rank=rank, mode="tang")
+        assert plain.refit(tracker)
+        assert plain.seed_energy("seed000") != pytest.approx(got[0])
+
+    def test_residual_mode_refuses_a_pure_popularity_matrix(self):
+        # Adversarial: a rank-1 matrix is all popularity. Its residual is
+        # numerical noise; fitting it would score seeds on rounding error.
+        rng = np.random.default_rng(3)
+        matrix = np.outer(rng.integers(1, 9, 12), rng.integers(1, 9, 20)).astype(float)
+        seed_edges = {f"s{i}": set(range(20)) for i in range(12)}
+        hits = {f"s{i}": {j: float(matrix[i, j]) for j in range(20)} for i in range(12)}
+        tracker = _FakeTracker(seed_edges, hits)
+
+        residual = TangRecommendationScheduler(RandPool(seed=1), mode="residual")
+        assert residual.refit(tracker) is False
+        assert not residual.fitted
+        assert TangRecommendationScheduler(RandPool(seed=1), mode="tang").refit(tracker)
+
+    def test_residual_mode_matches_on_the_sketch_path(self, monkeypatch):
+        # Above the exact-SVD crossover the sketch must also drop v1 and keep
+        # k residual directions. On an exact rank-(k+1) matrix the range
+        # finder is exact, so both paths must span the same subspace.
+        from fuzzer_tool.core.schedulers import seed_tang
+
+        rank = 3
+        tracker, _ = _low_rank_tracker(rank=rank + 1)
+        exact = TangRecommendationScheduler(RandPool(seed=1), rank=rank, mode="residual")
+        assert exact.refit(tracker)
+        monkeypatch.setattr(seed_tang, "_EXACT_SVD_MAX_ENTRIES", 0)
+        sketch = TangRecommendationScheduler(RandPool(seed=1), rank=rank, mode="residual")
+        assert sketch.refit(tracker)
+
+        assert sketch.last_effective_rank == rank
+        p_exact = exact._basis @ exact._basis.T
+        p_sketch = sketch._basis @ sketch._basis.T
+        np.testing.assert_allclose(p_sketch, p_exact, atol=1e-8)
+
     def test_missing_hit_counts_fall_back_to_incidence(self):
         # Absent from seed_hit_counts means "covered, count unknown" -> 1.0.
         # The regression this guards: reading the raw to_dict payload gives
@@ -323,3 +394,20 @@ class TestSchedulerWiring:
         from fuzzer_tool.services.seed_picker import SeedPicker
 
         assert hasattr(SeedPicker, "_pick_tang_seed")
+
+    def test_tang_mode_reaches_the_scheduler(self, tmp_path):
+        from unittest.mock import patch
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        with patch("os.path.isfile", return_value=True), patch("os.access", return_value=True):
+            f = Fuzzer(
+                target="/bin/true",
+                corpus_dir=str(tmp_path / "corpus"),
+                crashes_dir=str(tmp_path / "crashes"),
+                max_len=64,
+                timeout=1,
+                tang=True,
+                tang_mode="residual",
+            )
+        assert f._tang.mode == "residual"

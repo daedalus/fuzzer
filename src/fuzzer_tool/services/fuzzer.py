@@ -1481,6 +1481,7 @@ class Fuzzer:
         tang=False,
         tang_rank=10,
         tang_refit_interval=2000,
+        tang_mode="tang",
         ecofuzz=False,
         ecofuzz_mc_penalty_multiplier=None,
         metropolis=False,
@@ -3342,7 +3343,7 @@ class Fuzzer:
             from fuzzer_tool.core.schedulers.seed_tang import TangRecommendationScheduler
 
             self._tang = TangRecommendationScheduler(
-                self._rng, rank=tang_rank, refit_interval=tang_refit_interval
+                self._rng, rank=tang_rank, refit_interval=tang_refit_interval, mode=tang_mode
             )
         self._kruskal_count = None
         if kruskal_count:
