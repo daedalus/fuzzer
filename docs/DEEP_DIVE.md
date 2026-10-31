@@ -1841,8 +1841,10 @@ gcc builds unchanged. Still folded: a one-target contiguous range
 | `-O2` | 277 | 23 |
 | `-O2 -fno-jump-tables` | 333 | 27 |
 
-A/B (ledger #63): fuzzgoat clang ASAN `.so`, 10 seeds x 10k, oracle replay
-through both builds' nosan `.so`: null, inside the A/A spread; wall unchanged.
+A/B, 10 seeds x 10k, oracle replay through both builds' `.so`:
+fuzzgoat clang ASAN (ledger #63) null, inside the A/A spread, wall unchanged.
+FFmpeg 9.0.2 noasan (#64; +465 guards, +109 `trace_switch`) LEAN-: med −316
+to −480 oracle edges (~2-3%) on every comparison, A/A spread ±500.
 Edge ids shift on rebuild: saved `edge_tracker` state from older builds does
 not match. Tests: `tests/test_regression_switch_lookup_table.py`.
 
