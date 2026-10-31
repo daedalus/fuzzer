@@ -11,8 +11,10 @@
 > close it in the same commit as the implementation.
 >
 > A/B-pending features are indexed in `docs/AB_PENDING.md`; update its row when an A/B lands.
+> Every A/B result goes in `docs/AB_LEDGER.md` (Hard Rule 59).
 
 ## Coverage & Instrumentation
+- [ ] **A/B ledger backfill** (2026-10-30) — `docs/AB_LEDGER.md` seeded with 49 rows (2026-08-30..10-29) from learnings, DEEP_DIVE, TODO, AB_PENDING. Open: (a) pre-08-30 results in `docs/handover/handover_done_2026-09-06.md` and git history not entered; (b) rows 7-8, 13, 25, 32-36 have no seed/exec counts in their source: fill from git history or mark unknown; (c) `bench_paired.py` could emit a ready ledger row.
 - [ ] **`edge-dump` extensions** (2026-10-30) — DEEP_DIVE §Edge dump. Open: (a) excluded dirs (`crashing/`, `irreplaceable/`) not exportable; (b) no hit counts (ids only); (c) adaptive batch measured only on a ~10k seeds/s toy `.so`: not on a real target (fuzzgoat/ffmpeg) where replay is ms/seed; (d) `.sqlite` `synchronous=NORMAL`/WAL per batch untested; (e) incremental skip keys on content hash only: a rebuilt target with new edge ids keeps stale entries (delete the output to re-measure); (f) `seeds.tar.gz` is read-only: no tombstones, so pruning cannot hide its members, and `minimize`/`root_cause` still read loose files only; (g) `edge-dump` progress has no ETA when `seeds.tar.gz` exists and `-n` is not given (gzip stream not countable without a decompress pass); (h) `-n` takes corpus order, not minimize's uniform sample.
 - [ ] **cmin 5 seeds/s on ffmpeg 9.0.2 noasan** (2026-10-30) — reporter's profile: 96% of wall in the target call (162 ms/seed; stream_info 52%). Python side ~3.6 s/500 seeds, mostly corpus discovery. Open: (a) reporter's `Timed out:` count at `-t 1` vs `-t 0.1`; (b) if slow seeds are not timeouts, cap input or `probesize`/`analyzeduration` in `ffmpeg_read.c`.
 - [ ] **Midstate reuse in-run gain** (2026-10-29) — DEEP_DIVE §Midstate reuse. fuzzgoat in-run null (inputs tiny). Open: larger-input target (per-op saving scales with size), e.g. png/ffmpeg with `--elo` + `--pos-*`.
