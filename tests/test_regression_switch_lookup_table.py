@@ -146,3 +146,11 @@ def test_gcc_opt_out_stays_empty():
 def test_tracecmp_flags_carry_flag():
     out = _run(_fn("sancov_cmp_modes") + "\n" + _fn("sancov_trace_flags"), "sancov_trace_flags")
     assert NO_JT in out.split()
+
+
+def test_ffmpeg_library_carries_flag():
+    """Regression: FFmpeg's objects take a hardcoded COV_FLAGS, not cov_flag_for_cc."""
+    body = _fn("build_vendored_ffmpeg_sancov")
+    m = re.search(r'local COV_FLAGS="(-fsanitize-coverage[^"]*)"', body)
+    assert m, "sancov COV_FLAGS not found"
+    assert "$NO_JUMP_TABLES" in m.group(1).split()

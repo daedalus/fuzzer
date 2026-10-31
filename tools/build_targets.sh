@@ -348,7 +348,8 @@ FRAME_POINTER="-fno-omit-frame-pointer"
 # holds. -fno-jump-tables disables the fold. Measured on fuzzgoat.c (clang 18,
 # trace-pc-guard,trace-cmp): 277 -> 333 guards, 23 -> 27 trace_switch sites.
 # Not fixed: a one-target contiguous range still becomes `x-lo < n`.
-# Rides on every clang coverage flag (cov_flag_for_cc, sancov_trace_flags).
+# Rides on every clang coverage flag: cov_flag_for_cc, sancov_trace_flags,
+# build_vendored_ffmpeg_sancov.
 NO_JUMP_TABLES="-fno-jump-tables"
 
 # Path-stable debug info. -g records absolute repo/vendor/build-root paths
@@ -1531,7 +1532,7 @@ void __sanitizer_cov_trace_switch(unsigned long long v, unsigned long long *r) {
 STUBEOF
     $cc -c -o "$stub_dir/sancov_stub.o" "$stub_dir/sancov_stub.c" 2>/dev/null
     ar rcs "$stub_dir/libsancov_stub.a" "$stub_dir/sancov_stub.o" 2>/dev/null
-    local COV_FLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp"
+    local COV_FLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp $NO_JUMP_TABLES"
     local LINK_FLAGS=""
     local EXTRA_LIBS="-lsancov_stub"
     if [ "$asan_suffix" = "_asan" ]; then
