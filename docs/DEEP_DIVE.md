@@ -370,6 +370,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Game Theory
 - **Shapley value** (`--shapley`): per-edge frequency-weighted operator attribution — credit distributed proportional to co-occurrence frequency, not naive full credit to all stacked operators
+  - **Divide-and-conquer eigensolver** (`core/dc_eigh.py`, 2026-10-31): pure-Python Cuppen D&C (`eigh(a)` → ascending `w`, `v[i][j]` like numpy): Householder tridiagonalization, bottom-up pairwise merges (no recursion), deflation (tiny z, near-equal poles via Givens), secular roots bisected as offsets from the nearest pole, Gu-Eisenstat z rebuild for orthogonal vectors. Serves `ShapleyAttribution._spectral_embedding_py`, whose power-iteration deflation (`L -= w wᵀ`) reconverged every dimension to the first eigenvector. numpy path unchanged (`np.linalg.eigh` is LAPACK `?syevd`, the same algorithm). Cost vs the old (wrong) fallback, k=2: n=16 5 vs 3 ms, n=64 102 vs 34 ms, n=128 631 vs 136 ms (O(n³) for all pairs). Tests: `tests/test_dc_eigh.py`.
 - **Replicator dynamics** (`--replicator`): evolutionary game theory scheduling — operators grow proportionally to fitness, converging to evolutionarily stable strategies
 - **MOpt PSO** (`--mopt`): particle swarm optimization over operator distributions (alternative to Thompson sampling)
 - **Minimax, Phases 2-5** (opt-in, on under `--hail-mary`, unmeasured; `docs/handover/handover_minimax_implementation_2026-09-01.md`):
