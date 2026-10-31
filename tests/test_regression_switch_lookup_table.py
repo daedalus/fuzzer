@@ -4,7 +4,9 @@ SimplifyCFG turns ``switch (x) { case 10: return 7; ... }`` into a range check
 plus a table load. SanitizerCoverage runs later, so the cases get no edges and
 no ``__sanitizer_cov_trace_switch``; cmplog sees only ``cmp(5, x-10)``, whose
 operand never appears in the input. ``-fno-jump-tables`` stops the fold.
-``cov_flag_for_cc`` / ``sancov_trace_flags`` must carry it.
+Opt-in (``--switch-cases`` / ``SWITCH_CASES=1``; ledger #63-#64): when on,
+``cov_flag_for_cc``, ``sancov_trace_flags`` and FFmpeg's ``COV_FLAGS`` carry it;
+when off, every flag string is byte-identical to the pre-feature build.
 """
 
 from __future__ import annotations
@@ -39,11 +41,18 @@ CALL_SRC = (
 )
 
 
-def _const_line(name: str) -> str:
-    """The script's own ``NAME=...`` line, so the test tracks its value."""
-    m = re.search(rf"^{name}=.*$", BUILD_SCRIPT.read_text(), re.M)
-    assert m, f"{name} not defined in build_targets.sh"
-    return m.group(0)
+def _gate() -> str:
+    """The script's opt-in block: flag constant, default, env/CLI switch."""
+    text = BUILD_SCRIPT.read_text()
+    parts = [
+        re.search(r"^SWITCH_CASES_FLAG=.*$", text, re.M),
+        re.search(r"^NO_JUMP_TABLES=.*$", text, re.M),
+        re.search(
+            r'^SWITCH_CASES=.*?^if \[ "\$SWITCH_CASES" = "1" \]; then.*?^fi$', text, re.M | re.S
+        ),
+    ]
+    assert all(parts), "switch-cases gate not found in build_targets.sh"
+    return "\n".join(m.group(0) for m in parts)
 
 
 def _fn(name: str) -> str:
@@ -54,15 +63,20 @@ def _fn(name: str) -> str:
     return m.group(0)
 
 
-def _run(body: str, call: str, env_prelude: str = "") -> str:
-    script = f"{env_prelude}{_const_line('NO_JUMP_TABLES')}\n{body}\n{call}"
-    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+def _run(body: str, call: str, env_prelude: str = "", *, on: bool = True) -> str:
+    """Run *call* with the gate evaluated; *on* sets SWITCH_CASES=1 in the env."""
+    script = f"{env_prelude}{_gate()}\n{body}\nprintf '%s' \"$({call})\""
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin"}
+    if on:
+        env["SWITCH_CASES"] = "1"
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
-    return r.stdout.strip()
+    return r.stdout
 
 
-def _cov_flag(cc: str, prelude: str = "") -> str:
-    return _run(_fn("cov_flag_for_cc"), f'cov_flag_for_cc "{cc}"', "WITH_CMPLOG=0\n" + prelude)
+def _cov_flag(cc: str, prelude: str = "", *, on: bool = True) -> str:
+    body = _fn("cov_flag_for_cc")
+    return _run(body, f'cov_flag_for_cc "{cc}"', "WITH_CMPLOG=0\n" + prelude, on=on).strip()
 
 
 def _ir(tmp_path: Path, src: str, flags: list[str]) -> str:
@@ -148,9 +162,53 @@ def test_tracecmp_flags_carry_flag():
     assert NO_JT in out.split()
 
 
-def test_ffmpeg_library_carries_flag():
-    """Regression: FFmpeg's objects take a hardcoded COV_FLAGS, not cov_flag_for_cc."""
+def _ffmpeg_cov_flags(*, on: bool) -> str:
+    """FFmpeg's sancov COV_FLAGS, expanded under the gate."""
     body = _fn("build_vendored_ffmpeg_sancov")
     m = re.search(r'local COV_FLAGS="(-fsanitize-coverage[^"]*)"', body)
     assert m, "sancov COV_FLAGS not found"
-    assert "$NO_JUMP_TABLES" in m.group(1).split()
+    return _run("", f'echo "{m.group(1)}"', on=on)
+
+
+def test_ffmpeg_library_carries_flag():
+    """Regression: FFmpeg's objects take a hardcoded COV_FLAGS, not cov_flag_for_cc."""
+    assert NO_JT in _ffmpeg_cov_flags(on=True).split()
+
+
+# Pre-feature strings: off must not move a byte, or FFmpeg's configure stamp
+# and every vendored object rebuild, and saved edge ids shift.
+MASTER_FFMPEG = "-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp"
+MASTER_TRACE = "-fsanitize-coverage=trace-cmp,trace-div,trace-gep,trace-pc-guard"
+
+
+def test_off_by_default_byte_identical():
+    assert _cov_flag("clang", on=False) == GUARD
+    assert _cov_flag("zig cc", on=False) == f"{GUARD} -fno-sanitize=undefined"
+    trace = _run(
+        _fn("sancov_cmp_modes") + "\n" + _fn("sancov_trace_flags"), "sancov_trace_flags", on=False
+    )
+    assert trace == MASTER_TRACE
+    assert _ffmpeg_cov_flags(on=False) == MASTER_FFMPEG
+
+
+@requires_clang
+def test_off_by_default_still_folds(tmp_path):
+    """Falsification: default flags must leave the fold (feature really gated)."""
+    flags = _cov_flag("clang", on=False).split() + [CMP]
+    assert _switch_cases(_ir(tmp_path, LUT_SRC, flags)) == []
+
+
+def test_env_other_than_one_stays_off():
+    """Adversarial: only SWITCH_CASES=1 enables; 'yes', '0', '' do not."""
+    for val in ("yes", "0", "", "true"):
+        out = _run("", "echo $NO_JUMP_TABLES", f"SWITCH_CASES={val!r}\n", on=False)
+        assert out == "", val
+
+
+def test_cli_flag_parsed_and_documented():
+    text = BUILD_SCRIPT.read_text()
+    assert '[ "$arg" = "--switch-cases" ] && SWITCH_CASES=1' in text
+    assert "--switch-cases" in text.split("set -e")[0], "documented in the usage header"
+    parse = text.index('[ "$arg" = "--switch-cases" ] && SWITCH_CASES=1')
+    gate = text.index('if [ "$SWITCH_CASES" = "1" ]; then')
+    assert parse < gate, "the gate must run after the argument loop"
