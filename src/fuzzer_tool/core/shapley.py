@@ -4,7 +4,7 @@ import collections
 import math
 from collections import defaultdict
 
-from fuzzer_tool.core.rand_pool import get_default_rand_pool
+from fuzzer_tool.core.dc_eigh import eigh
 
 try:
     import numpy as np
@@ -293,42 +293,14 @@ class ShapleyAttribution:
             laplacian[i][i] = 1.0
         return laplacian
 
-    @staticmethod
-    def _inverse_iteration_py(laplacian: list[list[float]], n: int) -> list[float]:
-        """Inverse power iteration for smallest eigenvector (pure-Python)."""
-        w = get_default_rand_pool().gauss_list(0.0, 1.0, n)
-        norm = math.sqrt(sum(x * x for x in w))
-        w = [x / norm for x in w]
-        for _ in range(100):
-            lw = [0.0] * n
-            for i in range(n):
-                for j in range(n):
-                    lw[i] += laplacian[i][j] * w[j]
-            new_w = [w[i] - 0.5 * lw[i] for i in range(n)]
-            norm = math.sqrt(sum(x * x for x in new_w))
-            if norm < 1e-12:
-                break
-            new_w = [x / norm for x in new_w]
-            diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(w, new_w, strict=False)))
-            w = new_w
-            if diff < 1e-8:
-                break
-        return w
-
     def _spectral_embedding_py(
         self, operators: list[str], kernel: dict, k: int
     ) -> dict[str, list[float]]:
         """Pure-Python fallback for spectral_embedding."""
         n = len(operators)
         laplacian = self._build_laplacian_py(kernel, operators, n)
-        eigenvectors: list[list[float]] = []
-        for _ in range(k):
-            w = self._inverse_iteration_py(laplacian, n)
-            eigenvectors.append(w)
-            for i in range(n):
-                for j in range(n):
-                    laplacian[i][j] -= w[i] * w[j]
-        return {op: [eigenvectors[d][idx] for d in range(k)] for idx, op in enumerate(operators)}
+        _, vecs = eigh(laplacian)
+        return {op: vecs[idx][:k] for idx, op in enumerate(operators)}
 
     def spectral_embedding(
         self, operators: list[str] | None = None, k: int = 2

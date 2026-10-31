@@ -111,11 +111,11 @@ def test_stall_reseed_moves_default_pool_deterministically():
 # ── Former global-random draw sites ─────────────────────────────────────
 
 
-def test_shapley_inverse_iteration_no_global():
+def test_shapley_spectral_py_no_global():
     from fuzzer_tool.core.shapley import ShapleyAttribution as Cls
 
-    lap = [[1.0, -0.5], [-0.5, 1.0]]
-    _global_draws_untouched(lambda: Cls._inverse_iteration_py(lap, 2))
+    kernel = {"a": {"a": 1.0, "b": 0.5}, "b": {"a": 0.5, "b": 1.0}}
+    _global_draws_untouched(lambda: Cls()._spectral_embedding_py(["a", "b"], kernel, 1))
 
 
 def test_tree_mutator_fallbacks_no_global():
