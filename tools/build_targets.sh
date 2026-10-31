@@ -17,6 +17,7 @@
 #   tools/build_targets.sh --distance                 # AFLGo distance .so targets (_dist / _dist_asan)
 #   tools/build_targets.sh --ngram                    # png_read k=2/k=3 n-gram flavors (_ng2 / _ng3)
 #   tools/build_targets.sh --frontier                 # clang branch-coverage exes (_cov) for tools/frontier.py
+#   tools/build_targets.sh --switch-cases             # add -fno-jump-tables: switch cases keep edges + trace_switch (SWITCH_CASES=1 too)
 #   tools/build_targets.sh --no-sibling-calls         # add -fno-optimize-sibling-calls: a wrapper's `return f()` stays a call, so
 #                                                     # call-site context (CTX) still tells its callers apart (NO_SIBLING_CALLS=1 too)
 #
@@ -340,6 +341,21 @@ NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcspn -fno-builtin-memrchr"
 # stack traces walkable for the crash reports (see build_c_targets).
 FRAME_POINTER="-fno-omit-frame-pointer"
 
+# ── Switch cases visible to coverage ─────────────────────────────────
+#
+# clang -O2's SimplifyCFG folds a value-returning switch into a range check
+# plus table load *before* SanitizerCoverage runs: the cases get no edges and
+# no trace_switch, and cmplog logs cmp(n, x-lo), an operand the input never
+# holds. -fno-jump-tables disables the fold. Measured on fuzzgoat.c (clang 18,
+# trace-pc-guard,trace-cmp): 277 -> 333 guards, 23 -> 27 trace_switch sites.
+# Not fixed: a one-target contiguous range still becomes `x-lo < n`.
+# Rides on every clang coverage flag: cov_flag_for_cc, sancov_trace_flags,
+# build_vendored_ffmpeg_sancov. Opt-in (--switch-cases): fuzzgoat A/B null,
+# FFmpeg LEAN- (~2-3% fewer edges; ledger #63-#64). Empty when off, so every
+# flag string stays byte-identical and nothing rebuilds.
+SWITCH_CASES_FLAG="-fno-jump-tables"
+NO_JUMP_TABLES=""
+
 # Path-stable debug info. -g records absolute repo/vendor/build-root paths
 # in DWARF and __FILE__, so one source built under two roots differs. Remap
 # them to fixed placeholders; gdb: `set substitute-path /fuzz/vendor <root>`.
@@ -382,6 +398,7 @@ for arg in "$@"; do
     [ "$arg" = "--msan" ] && WITH_MSAN=1
     [ "$arg" = "--tsan" ] && WITH_TSAN=1
     [ "$arg" = "--no-sibling-calls" ] && NO_SIBLING_CALLS=1
+    [ "$arg" = "--switch-cases" ] && SWITCH_CASES=1
     case "$arg" in
         --sancov=*) SANCOV_MODES="${arg#--sancov=}" && WITH_CLANG_SCOV=1 ;;
         --ffmpeg-opts=*) FFMPEG_OPTS="${arg#--ffmpeg-opts=}" ;;
@@ -397,6 +414,12 @@ done
 NO_SIBLING_CALLS="${NO_SIBLING_CALLS:-0}"
 if [ "$NO_SIBLING_CALLS" = "1" ]; then
     FRAME_POINTER="$FRAME_POINTER -fno-optimize-sibling-calls"
+fi
+
+# --switch-cases: see SWITCH_CASES_FLAG above.
+SWITCH_CASES="${SWITCH_CASES:-0}"
+if [ "$SWITCH_CASES" = "1" ]; then
+    NO_JUMP_TABLES="$SWITCH_CASES_FLAG"
 fi
 
 # --indir-cov extends whatever --sancov chose (flag order must not matter);
@@ -423,7 +446,7 @@ sancov_cmp_modes() { echo "trace-cmp trace-div trace-gep"; }
 
 # The -fsanitize-coverage= flag the --tracecmp / --vendor-tracecmp builds use.
 sancov_trace_flags() {
-    echo "-fsanitize-coverage=$(sancov_cmp_modes | tr ' ' ','),trace-pc-guard"
+    echo "-fsanitize-coverage=$(sancov_cmp_modes | tr ' ' ','),trace-pc-guard${NO_JUMP_TABLES:+ $NO_JUMP_TABLES}"
 }
 
 # True when any mode in the comma list needs the shim's cmplog layer.
@@ -834,7 +857,7 @@ GCC_TRACE_PC="${GCC_TRACE_PC:-1}"
 cov_flag_for_cc() {
     local cc="$1" major first
     case "$cc" in
-        *clang*) echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"; return 0 ;;
+        *clang*) echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}${NO_JUMP_TABLES:+ $NO_JUMP_TABLES}"; return 0 ;;
     esac
     # zig cc is clang underneath, but (measured, zig 0.17) it turns UBSan on at
     # -O0: 134 coverage call sites instead of 31 on targets/compcov_gates.c, and
@@ -842,7 +865,7 @@ cov_flag_for_cc() {
     # -fno-sanitize=undefined puts it back at clang's behaviour.
     first="${cc%% *}"
     if [ "${first##*/}" = "zig" ]; then
-        echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard} -fno-sanitize=undefined"
+        echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}${NO_JUMP_TABLES:+ $NO_JUMP_TABLES} -fno-sanitize=undefined"
         return 0
     fi
     [ "$GCC_TRACE_PC" = "1" ] || return 0
@@ -1520,7 +1543,7 @@ void __sanitizer_cov_trace_switch(unsigned long long v, unsigned long long *r) {
 STUBEOF
     $cc -c -o "$stub_dir/sancov_stub.o" "$stub_dir/sancov_stub.c" 2>/dev/null
     ar rcs "$stub_dir/libsancov_stub.a" "$stub_dir/sancov_stub.o" 2>/dev/null
-    local COV_FLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp"
+    local COV_FLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp${NO_JUMP_TABLES:+ $NO_JUMP_TABLES}"
     local LINK_FLAGS=""
     local EXTRA_LIBS="-lsancov_stub"
     if [ "$asan_suffix" = "_asan" ]; then
