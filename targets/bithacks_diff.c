@@ -78,6 +78,36 @@ static const unsigned short MortonTable256[256] = {
 
 static const unsigned int PowersOf10[] = {1,10,100,1000,10000,100000,1000000,10000000,100000000,1000000000};
 static int multipliers[33], divisors[33];
+
+// Signed 32-bit division without idiv (Lemire, 2026-10-31,
+// "Beating the compiler at signed 32-bit division"). |x| <= 2^31 leaves a free bit
+// in a 64-bit product, so the multiplier may be 33 bits with no correction step.
+
+// x / d for d > 2, not a power of two (constant d folds to imul/sar/add).
+// c = ceil(2^s / d), s = 31 + ceil(log2 d): c < 2^32, |x * c| < 2^63.
+static inline int32_t div32(int32_t x, int32_t d) {
+    const int s = 31 + (32 - __builtin_clz((uint32_t)(d - 1)));
+    const int64_t c = ((int64_t)1 << s) / d + 1;
+    return (int32_t)(((int64_t)x * c) >> s) - (x >> 31);
+}
+
+// fastmod 0.2.0 multiplier: ceil(2^64 / |d|), +1 for powers of two.
+// d not in {0, 1, -1, INT_MIN}.
+static inline uint64_t fastdiv_m(int32_t d) {
+    const uint64_t a = d < 0 ? -(uint64_t)d : (uint64_t)d;
+    return UINT64_MAX / a + 1 + ((a & (a - 1)) == 0);
+}
+
+// Branch-free a / d for a runtime d. Signed M < 2^63 unless |d| == 2; then add a back.
+static inline int32_t fastdiv_s32(int32_t a, uint64_t M, int32_t d) {
+    const int64_t sm = (int64_t)M;
+    const int64_t hi = (int64_t)(((__int128)a * sm) >> 64) + (a & (sm >> 63));
+    const int32_t q = (int32_t)hi + (a < 0);   // round toward zero
+    const int32_t sd = d >> 31;                // negate when d < 0
+    return (q ^ sd) - sd;
+}
+
+static uint64_t divM[33];   // fastdiv_m(divisors[b]); 0 where divisors[b] == 1
 static void init_tables(void) {
     for (int b = 0; b <= 32; b++) {
         unsigned M = b ? (1U << (32 - b)) : 0;
@@ -85,6 +115,7 @@ static void init_tables(void) {
         divisors[b] = (int)M;
     }
     multipliers[0] = 0; divisors[0] = 1; divisors[1] = (int)~(1U << 31);
+    for (int b = 0; b <= 32; b++) divM[b] = divisors[b] == 1 ? 0 : fastdiv_m(divisors[b]);
 }
 
 // mod (1<<s)-1 tables
@@ -177,7 +208,23 @@ static void check32(uint32_t v) {
         CHK("signext var: (x^m)-m after mask", (int)((x ^ m) - m) == ref, "v=%08x b=%u", v, b); }
       { unsigned m = 32 - b; CHK("signext var: (x<<m)>>m", ((int)(v << m) >> m) == ref, "v=%08x b=%u", v, b); }
       { int r = (int)((unsigned)sv * (unsigned)multipliers[b]) / divisors[b];
-        CHK("signext var: 3-op multipliers/divisors", r == ref, "v=%08x b=%u got=%d ref=%d", v, b, r, ref); } }
+        CHK("signext var: 3-op multipliers/divisors", r == ref, "v=%08x b=%u got=%d ref=%d", v, b, r, ref); }
+      if (b < 32) { int r = fastdiv_s32((int)((unsigned)sv * (unsigned)multipliers[b]), divM[b], divisors[b]);
+        CHK("signext var: 3-op via fastdiv_s32", r == ref, "v=%08x b=%u got=%d ref=%d", v, b, r, ref); } }
+
+    // Lemire signed division vs idiv: article constants (7/60/365 need the compiler's
+    // add-back, 1000 is the control), then runtime divisors drawn from p.
+    CHK("div32: x/7", div32(sv, 7) == sv / 7, "v=%08x", v);
+    CHK("div32: x/60", div32(sv, 60) == sv / 60, "v=%08x", v);
+    CHK("div32: x/365", div32(sv, 365) == sv / 365, "v=%08x", v);
+    CHK("div32: x/1000", div32(sv, 1000) == sv / 1000, "v=%08x", v);
+    { int32_t d = (int32_t)(3 + p % (uint32_t)(INT_MAX - 2));
+      if (d & (d - 1)) CHK("div32: runtime d>2 non-pow2", div32(sv, d) == sv / d, "v=%08x d=%d", v, d); }
+    { int32_t d = (int32_t)p;
+      if (d != 0 && d != 1 && d != -1 && d != INT_MIN)
+        CHK("fastdiv_s32: runtime d", fastdiv_s32(sv, fastdiv_m(d), d) == sv / d, "v=%08x d=%d", v, d);
+      int32_t d2 = (int32_t)(2 + (p >> 27)) * ((p & 1) ? -1 : 1);   // small |d| incl. +-2 add-back
+      CHK("fastdiv_s32: small d", fastdiv_s32(sv, fastdiv_m(d2), d2) == sv / d2, "v=%08x d=%d", v, d2); }
 
     { bool f = p & 1; unsigned m = h32(p), ww = v; unsigned ref = f ? (ww | m) : (ww & ~m);
       unsigned a = ww; a ^= (-(unsigned)f ^ a) & m; unsigned b2 = (ww & ~m) | (-(unsigned)f & m);
@@ -443,6 +490,9 @@ int main(int argc, char **argv) {
     for (unsigned b = 1; b <= 32; b++) for (unsigned x = 0; x < 65536; x++) {
         int ref = (int)((uint32_t)x << (32 - b)) >> (32 - b); int r = (int)((unsigned)x * (unsigned)multipliers[b]) / divisors[b];
         CHK("signext 3-op (exhaustive v16 x b)", r == ref, "x=%04x b=%u got=%d ref=%d", x, b, r, ref);
+        if (b < 32) CHK("signext 3-op via fastdiv_s32 (exhaustive v16 x b)",
+                        fastdiv_s32((int)((unsigned)x * (unsigned)multipliers[b]), divM[b], divisors[b]) == ref,
+                        "x=%04x b=%u", x, b);
     }
     edge_probes();
     report();

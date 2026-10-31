@@ -3,6 +3,9 @@
 Harness: `targets/bithacks_diff.c`, built by `tools/build_targets.sh` (executable target `bithacks_diff`).
 Coverage: 110 hacks vs reference; ~2^26 sequential/descending/hashed 32-bit inputs,
 ~2^26 random 64-bit, 8/16-bit generic popcount and 3-op sign-extend exhaustive.
+Also checks Lemire's signed 32-bit division (2026-10-31): `div32` (33-bit
+multiplier, constant d) and branch-free `fastdiv_s32` (runtime d) vs `/`; both pass.
+Clang, this host: d=7 latency 2.53 -> 2.00 ns; runtime d 3.50 -> 2.52 ns.
 Not a full 2^32 sweep.
 
 ## Logic bug
