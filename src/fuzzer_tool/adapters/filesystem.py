@@ -1421,6 +1421,28 @@ def save_crash(
     return base_name
 
 
+def crash_exists(crashes_dir: Path, base_name: str) -> bool:
+    """Whether the crash *base_name* is still saved (not evicted)."""
+    return (crashes_dir / f"{base_name}.bin").exists()
+
+
+def refresh_crash_report(crashes_dir: Path, base_name: str, metadata: CrashMetadata) -> bool:
+    """Rewrite a saved crash's ``.txt`` / ``.json`` from *metadata*.
+
+    For enrichment that lands after save_crash (the background GDB replay).
+    False, and nothing written, when the crash is gone (evicted by a smaller
+    trigger), so a late result cannot resurrect it.
+    """
+    if not crash_exists(crashes_dir, base_name):
+        return False
+    artifacts = (
+        (".txt", metadata.format_sidecar().encode(), _READONLY_MODE),
+        (".json", json.dumps(metadata.to_dict(), indent=2, default=str).encode(), _READONLY_MODE),
+    )
+    _publish_crash(crashes_dir, base_name, artifacts)
+    return True
+
+
 def _publish_crash(crashes_dir: Path, base_name: str, artifacts) -> None:
     """Write ``(ext, content, mode)`` artifacts to temps, then rename all into place.
 

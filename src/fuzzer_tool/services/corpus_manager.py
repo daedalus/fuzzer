@@ -929,6 +929,9 @@ class CorpusManager:
             shrinker = getattr(f, "_crash_shrinker", None)
             if shrinker is not None:
                 shrinker.enqueue(Path(f.crashes_dir) / f"{result}.bin", counted_sig)
+            gdb_queue = getattr(f, "_crash_gdb", None)
+            if gdb_queue is not None and meta is not None:
+                gdb_queue.enqueue(meta, data, returncode, str(result))
         else:
             f._last_crash_signature = None
         # A smaller trigger of a known bug is no news.
@@ -1128,7 +1131,9 @@ class CorpusManager:
                 meta.error_type = sig_name
 
         # Embed the GDB crash replay in the report sidecar (best-effort).
-        meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
+        # With a queue it runs beside the loop and lands after save_crash.
+        if getattr(f, "_crash_gdb", None) is None:
+            meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
         return meta
 
     def _mail_crash(self, result, returncode: int, stderr: str) -> None:
