@@ -225,6 +225,38 @@ def test_ctx_cache_miss_and_thread_recompute(cache_exe):
     assert out["thread"][0] == real
 
 
+# cfp-keyed hit: a frame validated on the main stack is not re-checked
+# against the bounds. Zeroing main_hi after caching sends the old walk down
+# the TLS path (fresh hash); the shortcut never reads it (sentinel).
+_CFP_DRIVER = (
+    _CACHE_DRIVER.split("int main(void)")[0]
+    + """
+int main(void) {
+    common(0);
+    common(0);
+    __afl_ctx_last_ctx = %SENTINEL%u;
+    uintptr_t hi = __afl_ctx_main_hi;
+    __afl_ctx_main_hi = 0;
+    uint32_t v = common(0);
+    __afl_ctx_main_hi = hi;
+    printf("hit %u\\n", v);
+    return 0;
+}
+""".replace("%SENTINEL%", str(SENTINEL))
+)
+
+
+@pytest.fixture(scope="module")
+def cfp_exe(tmp_path_factory):
+    return _build(tmp_path_factory.mktemp("cfp"), _CFP_DRIVER, CTX_FULL)
+
+
+@requires_clang
+def test_ctx_cache_cfp_hit_skips_bounds(cfp_exe):
+    """Same validated frame and return address: cached ctx without the bound loads."""
+    assert _cache_out(cfp_exe)["hit"] == [SENTINEL]
+
+
 # ── fused guard flag: one check selects the specialized fast path ──────
 # argv[1] == "slow" forces the generic path after attach, so one binary
 # compares both on the same edge sequence (ASLR off: ctx hashes addresses).
