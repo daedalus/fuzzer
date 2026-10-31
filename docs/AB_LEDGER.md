@@ -75,3 +75,6 @@ Owed runs: `docs/AB_PENDING.md`. Mechanism detail: `docs/DEEP_DIVE.md`.
 | 50 | 2026-10-31 | `elo-tang` vs `elo` | fuzzgoat noasan · 20 × 10k | 12/8, McNemar 0.503 (Holm 1.0), med +47.5; eps 3/17 (Holm 0.005), med −38 | none | NULL | `docs/TODO.md` (r1_tang) |
 | 51 | 2026-10-31 | `elo-tang-residual` vs `elo` | fuzzgoat noasan · 20 × 10k | 12/8, McNemar 0.503 (Holm 1.0), med +19.5; eps 5/15 (p 0.041), med −41 | none | NULL | `docs/TODO.md` (r1_tang) |
 | 52 | 2026-10-31 | `elo-tang-residual` vs `elo-tang` | fuzzgoat noasan · 20 × 10k | 9/11, McNemar 0.824, med −9 | none | NULL | `docs/TODO.md` (r1_tang) |
+| 53 | 2026-10-31 | `elo-tang` vs `elo` | FFmpeg 9.0.2 noasan · 10 × 10k, 4 arms in parallel | 7/3, McNemar 0.344 (Holm 1.0), med +676; eps med −1.6 | `elo-tang-ctl` vs `elo-tang` 3/7, p=0.344, med −981 | NULL | `docs/TODO.md` (r1_tang) |
+| 54 | 2026-10-31 | `elo-tang-residual` vs `elo` | FFmpeg 9.0.2 noasan · 10 × 10k | 5/5, McNemar 1.0, med +452.5; eps med −2.4 | as #53 | NULL | `docs/TODO.md` (r1_tang) |
+| 55 | 2026-10-31 | `elo-tang-residual` vs `elo-tang` | FFmpeg 9.0.2 noasan · 10 × 10k | 6/4, McNemar 0.754 (Holm 1.0), med +437.5; eps 2/8, p=0.109, med −2.2 | as #53 | NULL | `docs/TODO.md` (r1_tang) |
