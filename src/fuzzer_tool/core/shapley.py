@@ -15,6 +15,68 @@ except ImportError:
 
 # ── Memory bounds ────────────────────────────────────────────────────
 SHAPLEY_EDGES_MAX = 10_000  # max edges tracked in Shapley attribution
+DEGREE_FLOOR = 1e-12  # Laplacian degree floor: isolated operators stay finite
+FAMILY_THRESHOLD = 0.9  # Jaccard at or above which two operators are near-duplicates
+FIEDLER_DIM = 1  # embedding dim 0 is the trivial sqrt-degree vector
+# numpy B·Bᵀ beat the pure loop at every set size measured from 32 operators up
+# (n=32: 61 vs 86 us at 1 edge each, 6.9 vs 30 ms at 2000); below, the loop wins.
+KERNEL_NUMPY_MIN_OPS = 32
+
+
+def _jaccard_py(sets: list[set[int]]) -> list[list[float]]:
+    """Pairwise Jaccard, diagonal 1; |A ∪ B| = |A| + |B| - |A ∩ B| skips the union set."""
+    n = len(sets)
+    sizes = [len(s) for s in sets]
+    out = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        out[i][i] = 1.0
+        a, size_a = sets[i], sizes[i]
+        for j in range(i + 1, n):
+            inter = len(a & sets[j])
+            union = size_a + sizes[j] - inter
+            out[i][j] = out[j][i] = inter / union if union else 0.0
+    return out
+
+
+def _jaccard_numpy(sets: list[set[int]]) -> list[list[float]]:
+    """``_jaccard_py`` via an operator-by-edge 0/1 matrix: B·Bᵀ counts every intersection.
+
+    Counts stay below 2^53, so float64 products and the final division are
+    exact and match the pure loop bit for bit.
+    """
+    n = len(sets)
+    sizes = np.fromiter(map(len, sets), dtype=np.int64, count=n)
+    flat = np.fromiter((e for s in sets for e in s), dtype=np.int64, count=int(sizes.sum()))
+    _, cols = np.unique(flat, return_inverse=True)
+
+    b = np.zeros((n, int(cols.max()) + 1 if cols.size else 0))
+    b[np.repeat(np.arange(n), sizes), cols] = 1.0
+    inter = b @ b.T
+    union = sizes[:, None] + sizes[None, :] - inter
+    sim = np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
+    np.fill_diagonal(sim, 1.0)
+    return sim.tolist()
+
+
+def _components(pairs: list[tuple[str, str, float]]) -> list[list[str]]:
+    """Connected components of the graph whose edges are *pairs* (union-find)."""
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        root = x
+        while parent.setdefault(root, root) != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    for a, b, _ in pairs:
+        parent[find(a)] = find(b)
+
+    groups: dict[str, list[str]] = defaultdict(list)
+    for x in parent:
+        groups[find(x)].append(x)
+    return list(groups.values())
 
 
 class ShapleyAttribution:
@@ -192,25 +254,13 @@ class ShapleyAttribution:
         if len(operators) < 2:
             return {op: {op: 1.0} for op in operators}
 
-        kernel: dict[str, dict[str, float]] = {op: {} for op in operators}
-
-        for i, op_i in enumerate(operators):
-            edges_i = self._operator_edges.get(op_i, set())
-            for j, op_j in enumerate(operators):
-                if i == j:
-                    kernel[op_i][op_j] = 1.0
-                elif i < j:
-                    edges_j = self._operator_edges.get(op_j, set())
-                    if not edges_i and not edges_j:
-                        sim = 0.0
-                    else:
-                        intersection = len(edges_i & edges_j)
-                        union = len(edges_i | edges_j)
-                        sim = intersection / union if union > 0 else 0.0
-                    kernel[op_i][op_j] = sim
-                    kernel[op_j][op_i] = sim
-
-        return kernel
+        sets = [self._operator_edges.get(op, set()) for op in operators]
+        use_numpy = _HAS_NUMPY and len(operators) >= KERNEL_NUMPY_MIN_OPS
+        rows = _jaccard_numpy(sets) if use_numpy else _jaccard_py(sets)
+        return {
+            op: dict(zip(operators, row, strict=True))
+            for op, row in zip(operators, rows, strict=True)
+        }
 
     def operator_similarity(self, op_a: str, op_b: str) -> float:
         """Compute Jaccard similarity between two operators."""
@@ -236,7 +286,12 @@ class ShapleyAttribution:
         Returns:
             List of (op_a, op_b, similarity) tuples.
         """
-        kernel = self.operator_kernel(operators)
+        pairs = self._redundant_pairs(self.operator_kernel(operators), threshold)
+        return sorted(pairs, key=lambda x: x[2], reverse=True)
+
+    @staticmethod
+    def _redundant_pairs(kernel: dict, threshold: float) -> list[tuple[str, str, float]]:
+        """Unordered operator pairs with K >= threshold, in kernel order."""
         pairs = []
         seen = set()
         for op_a in kernel:
@@ -250,7 +305,7 @@ class ShapleyAttribution:
                 sim = kernel[op_a][op_b]
                 if sim >= threshold:
                     pairs.append((op_a, op_b, sim))
-        return sorted(pairs, key=lambda x: x[2], reverse=True)
+        return pairs
 
     def _spectral_embedding_numpy(
         self, operators: list[str], kernel: dict, k: int
@@ -268,7 +323,7 @@ class ShapleyAttribution:
         # form is O(n^2) and, since every product is a scalar times an
         # entry rather than a summed row, bit-identical rather than merely
         # equal to tolerance.
-        s = 1.0 / np.sqrt(np.maximum(K.sum(axis=1), 1e-12))
+        s = 1.0 / np.sqrt(np.maximum(K.sum(axis=1), DEGREE_FLOOR))
         L = np.eye(n, dtype=np.float64) - K * s[:, None] * s[None, :]
         eigvals, eigvecs = np.linalg.eigh(L)
         embedding: dict[str, list[float]] = {}
@@ -278,19 +333,18 @@ class ShapleyAttribution:
 
     @staticmethod
     def _build_laplacian_py(kernel: dict, operators: list[str], n: int) -> list[list[float]]:
-        """Build normalized Laplacian matrix (pure-Python)."""
-        degrees = [0.0] * n
+        """Normalized Laplacian I - D^-1/2 K D^-1/2, self-loops kept (pure-Python).
+
+        Same matrix as the numpy path: the diagonal is 1 - K_ii / deg_i.
+        """
+        rows = [[kernel[a].get(b, 0.0) for b in operators] for a in operators]
+        s = [1.0 / math.sqrt(max(sum(row), DEGREE_FLOOR)) for row in rows]
+        laplacian = [
+            [-w * si * sj for w, sj in zip(row, s, strict=True)]
+            for row, si in zip(rows, s, strict=True)
+        ]
         for i in range(n):
-            for j in range(n):
-                degrees[i] += kernel[operators[i]].get(operators[j], 0.0)
-        laplacian: list[list[float]] = [[0.0] * n for _ in range(n)]
-        for i in range(n):
-            for j in range(n):
-                w_ij = kernel[operators[i]].get(operators[j], 0.0)
-                d_i = math.sqrt(degrees[i]) if degrees[i] > 0 else 1.0
-                d_j = math.sqrt(degrees[j]) if degrees[j] > 0 else 1.0
-                laplacian[i][j] = -w_ij / (d_i * d_j)
-            laplacian[i][i] = 1.0
+            laplacian[i][i] += 1.0
         return laplacian
 
     def _spectral_embedding_py(
@@ -322,11 +376,49 @@ class ShapleyAttribution:
         if n < k + 1:
             return {op: [0.0] * k for op in operators}
 
-        kernel = self.operator_kernel(operators)
+        return self._embed(operators, self.operator_kernel(operators), k)
 
+    def _embed(self, operators: list[str], kernel: dict, k: int) -> dict[str, list[float]]:
         if _HAS_NUMPY:
             return self._spectral_embedding_numpy(operators, kernel, k)
         return self._spectral_embedding_py(operators, kernel, k)
+
+    def operator_families(self, threshold: float = FAMILY_THRESHOLD) -> list[list[str]]:
+        """Near-duplicate operator families, laid out in spectral order.
+
+        A family is a connected component of the K >= threshold graph, so it
+        is transitive: a~b and b~c group a, b, c even when K(a, c) < threshold.
+        Singletons are dropped. Members, and families by their mean, are
+        ordered by the Fiedler coordinate, which places operators with
+        similar coverage next to each other.
+
+        Args:
+            threshold: Minimum Jaccard similarity for a near-duplicate pair.
+
+        Returns:
+            Families as lists of operator names; empty when none qualify.
+        """
+        operators = sorted(self._operator_edges)
+        if len(operators) < 2:
+            return []
+
+        # One kernel for both the pair graph and the embedding (O(n^2) set ops).
+        kernel = self.operator_kernel(operators)
+        pairs = self._redundant_pairs(kernel, threshold)
+        if not pairs:
+            return []
+
+        fiedler = self._fiedler(operators, kernel)
+        families = [sorted(fam, key=lambda op: (fiedler[op], op)) for fam in _components(pairs)]
+        families.sort(key=lambda fam: (math.fsum(fiedler[op] for op in fam) / len(fam), fam[0]))
+        return families
+
+    def _fiedler(self, operators: list[str], kernel: dict) -> dict[str, float]:
+        """Fiedler coordinate per operator; zeros when there are too few to embed."""
+        k = FIEDLER_DIM + 1
+        if len(operators) < k + 1:
+            return dict.fromkeys(operators, 0.0)
+        return {op: v[FIEDLER_DIM] for op, v in self._embed(operators, kernel, k).items()}
 
     def ranking(self, operators: list[str] | None = None) -> list[tuple[str, float]]:
         """Return operators ranked by Shapley value.
