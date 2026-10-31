@@ -5904,11 +5904,19 @@ class Fuzzer:
             return {k: v / total for k, v in probs.items()}
         return None
 
-    def _record_fluctuation_observation(self, outcome: str, hit_edges: set[int]) -> None:
-        """Ingest the current round's operator trajectory into the fluctuation tracker."""
+    def _record_fluctuation_observation(
+        self, outcome: str, hit_edges: set[int] | None = None
+    ) -> None:
+        """Ingest the current round's operator trajectory into the fluctuation tracker.
+
+        *hit_edges* defaults to the live edge set, read only when the tracker
+        is on: built eagerly it cost a ~10k-id set per exec on FFmpeg.
+        """
         f = self._fluctuation
         if f is None or not self._last_ops_used:
             return
+        if hit_edges is None:
+            hit_edges = self._get_current_edge_set()
         # `self._operators._available` used to be consulted here. It is not an
         # attribute of the operators service and never was, so the hasattr
         # guard always fell through to the trajectory itself, every step got

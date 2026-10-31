@@ -2026,7 +2026,7 @@ class FuzzRound:
                 "asan": None,
                 "ubsan": None,
             }
-        f._record_fluctuation_observation("crash", f._get_current_edge_set())
+        f._record_fluctuation_observation("crash")
         f._maybe_periodic_minimize()
         return True
 
@@ -2114,7 +2114,7 @@ class FuzzRound:
             f.mc.maybe_refit()
         # Periodic minimization based on edge stats
         f._maybe_periodic_minimize(dedup=True)
-        f._record_fluctuation_observation("success", f._get_current_edge_set())
+        f._record_fluctuation_observation("success")
         return True
 
     def _note_novelty(self) -> None:
@@ -2173,7 +2173,7 @@ class FuzzRound:
         if f.qea:
             f.qea.on_fuzz_result(mutated, False, 0, f._edge_tracker)
 
-        f._record_fluctuation_observation("boring", f._get_current_edge_set())
+        f._record_fluctuation_observation("boring")
         return False
 
     def _metropolis(self) -> bool:
