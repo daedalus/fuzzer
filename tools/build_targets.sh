@@ -2458,7 +2458,8 @@ build_ngram_so_targets() {
             ok "vendor/zlib (trace-pc)" || warn "vendor/zlib build failed"
         (cd "$VENDOR_LIBPNG_DIR" && \
             make -s clean >/dev/null 2>&1; \
-            CC=clang CFLAGS="-O2 $DEBUG_CFLAGS -fPIC $FRAME_POINTER -fsanitize-coverage=trace-pc -I../zlib" \
+            CC=clang CPPFLAGS="-I../zlib" \
+            CFLAGS="-O2 $DEBUG_CFLAGS -fPIC $FRAME_POINTER -fsanitize-coverage=trace-pc -I../zlib" \
             LDFLAGS="-L../zlib" \
             ./configure --enable-shared=no --quiet 2>/dev/null && \
             make -j$(nproc) -s 2>/dev/null) && \
@@ -2625,7 +2626,8 @@ build_vendored_tracecmp_targets() {
     if [ -f "$VENDOR_LIBPNG_DIR/configure" ]; then
         echo "  [2/3] Compiling vendor/libpng with trace-cmp..."
         (cd "$VENDOR_LIBPNG_DIR" && \
-            CC=clang CFLAGS="-O2 $DEBUG_CFLAGS -fPIC $CTX_FLAGS $TRACE_FLAGS -I../zlib" \
+            CC=clang CPPFLAGS="-I../zlib" \
+            CFLAGS="-O2 $DEBUG_CFLAGS -fPIC $CTX_FLAGS $TRACE_FLAGS -I../zlib" \
             LDFLAGS="-L../zlib" \
             ./configure --enable-shared=no --quiet 2>/dev/null && \
             make -j$(nproc) -s 2>/dev/null) && \
