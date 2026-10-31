@@ -191,6 +191,7 @@ from fuzzer_tool.core.validity import ValidityChannel
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
 from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.crash_gdb import CrashGdbQueue
 from fuzzer_tool.services.crash_shrink import CrashShrinker
 from fuzzer_tool.services.favored_cover import favored_cover
 from fuzzer_tool.services.fuzz_round import FuzzRound
@@ -474,6 +475,9 @@ def _cleanup_tmp_dir(path: Path) -> None:
 
 
 # ── Entropy rate tracking constants ─────────────────────────────────
+# Execs between polls of the background GDB crash replay (a poll is one
+# waitpid; a replay takes ~1-2 s, i.e. hundreds of execs).
+CRASH_GDB_TICK_EXECS = 100
 ENTROPY_HISTORY_MAX = 200  # max samples before trimming
 ENTROPY_HISTORY_TRIM = 100  # keep this many after trim
 ENTROPY_WINDOW = 4  # samples for rate-of-change computation
@@ -2289,6 +2293,12 @@ class Fuzzer:
                     active=lambda: self.replay_n > 0,
                 ),
                 MaintenanceJob(
+                    "crash_gdb",
+                    interval_execs=CRASH_GDB_TICK_EXECS,
+                    action=self._run_crash_gdb,
+                    active=lambda: self._crash_gdb.pending > 0,
+                ),
+                MaintenanceJob(
                     "crash_tmin",
                     interval_execs=500,
                     action=self._run_crash_tmin,
@@ -2898,6 +2908,8 @@ class Fuzzer:
                 lambda rc, err: self._corpus_manager.run_signature(rc, err),
                 max_execs=crash_tmin_execs,
             )
+        # Novel-crash GDB replays run beside the loop (were ~2 s inline each).
+        self._crash_gdb = CrashGdbQueue(target, self.crashes_dir, max(5, int(timeout or 0)))
         self.asan_target: str | None = asan_target  # --asan-target: ASAN-instrumented variant
         self.ubsan_target: str | None = ubsan_target  # --ubsan-target: UBSAN-instrumented variant
         self._crash_sanitizer_replays: dict[str, dict] = {}  # sig -> {data, asan, ubsan}
@@ -7648,6 +7660,9 @@ class Fuzzer:
     def _run_crash_tmin(self) -> None:
         self._crash_shrinker.tick()
 
+    def _run_crash_gdb(self) -> None:
+        self._crash_gdb.tick()
+
     def _run_sanitizer_replays(self, budget_ms: float = 200):
         """Replay crashes on ASAN/UBSAN targets for sanitizer reports.
 
@@ -10512,6 +10527,8 @@ class Fuzzer:
                         self._run_crash_replays()
                     if i % 500 == 0 and self._crash_shrinker is not None:
                         self._run_crash_tmin()
+                    if i % CRASH_GDB_TICK_EXECS == 0 and self._crash_gdb.pending:
+                        self._run_crash_gdb()
                     if i % 500 == 0 and (self.asan_target or self.ubsan_target):
                         self._run_sanitizer_replays()
         except (KeyboardInterrupt, SystemExit):
@@ -10545,6 +10562,7 @@ class Fuzzer:
         self._state_store.set("crash_mi", self._crash_mi.save())
         self._state_store.set("length_tracker", self._length_tracker.save())
         self._flush_pending_minimize()
+        self._crash_gdb.close()
         if self.ga:
             self._state_store.set("ga", self.ga.to_dict())
             print(f"[*] GA: saved state (gen={self.ga.generation})")

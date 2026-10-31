@@ -1993,10 +1993,15 @@ class FuzzRound:
         self._triage_crash()
         crash_name = f.save_crash(mutated, self._returncode, self._stderr)
         f._prune_crash_data()
-        # Generate GDB/strace trace report if enabled
+        # Generate GDB/strace trace report if enabled; with the background
+        # queue it shares the sidecar's gdb run instead of blocking here.
         if f._tracer and crash_name:
-            report = f._tracer.trace(mutated, self._returncode)
-            f._tracer.save_report(report, str(f.crashes_dir), crash_name)
+            gdb_queue = getattr(f, "_crash_gdb", None)
+            if gdb_queue is not None:
+                gdb_queue.want_trace(mutated, self._returncode, crash_name)
+            else:
+                report = f._tracer.trace(mutated, self._returncode)
+                f._tracer.save_report(report, str(f.crashes_dir), crash_name)
         if f.mc and f.mc_cem:
             f.mc.add_elite(mutated, 3, temperature=f._temperature)
             f.mc.maybe_refit()

@@ -14,12 +14,17 @@ import contextlib
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
+
+# GdbJob.wait() poll interval: gdb runs take ~1-2 s.
+GDB_POLL_S = 0.02
 
 
 def _get_exported_functions(target: str, max_funcs: int = 20) -> list[str]:
@@ -367,8 +372,10 @@ class CrashTracer:
         Returns:
             Populated TraceReport.
         """
-        report = self.gdb_replay(data, returncode)
+        return self.finish_trace(data, self.gdb_replay(data, returncode))
 
+    def finish_trace(self, data: bytes, report: TraceReport) -> TraceReport:
+        """Add strace and the reproducer to a GDB *report* (the rest of trace())."""
         if self._has_strace:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
                 f.write(data)
@@ -403,7 +410,47 @@ class CrashTracer:
         return report
 
     def _run_gdb(self, input_path: str, report: TraceReport):
-        """Run GDB in batch mode to extract backtrace, registers, disassembly.
+        """Run GDB in batch mode to extract backtrace, registers, disassembly."""
+        launch = self._gdb_argv(input_path)
+        if launch is None:
+            return
+        gdb_args, so_stdin, harness_path = launch
+        try:
+            with contextlib.ExitStack() as stack:
+                stdin_file = stack.enter_context(open(so_stdin, "rb")) if so_stdin else None
+                result = subprocess.run(
+                    gdb_args,
+                    capture_output=True,
+                    timeout=self.timeout,
+                    stdin=stdin_file,
+                )
+            output = result.stdout.decode(errors="replace")
+            self._parse_gdb_output(output, report)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            log.debug("GDB failed: %s", e)
+        finally:
+            if harness_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(harness_path)
+
+    def gdb_start(self, data: bytes, returncode: int = 0) -> "GdbJob | None":
+        """Start the GDB replay without waiting; None when gdb cannot run it."""
+        if not self._has_gdb:
+            return None
+        report = TraceReport(target=self.target_path, input_size=len(data))
+        if returncode in _SIGNAL_FROM_RETURNCODE:
+            report.signal, report.signal_num = _SIGNAL_FROM_RETURNCODE[returncode]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
+            f.write(data)
+            input_path = f.name
+        launch = self._gdb_argv(input_path)
+        if launch is None:
+            os.unlink(input_path)
+            return None
+        return GdbJob(self, report, input_path, *launch)
+
+    def _gdb_argv(self, input_path: str) -> tuple[list[str], str | None, str | None] | None:
+        """``(gdb argv, stdin path, harness path)`` for one replay; None if untraceable.
 
         Executables run with the crash input as argv[1] (legacy behavior).
         Shared objects cannot be exec'd, so they are driven through a ctypes
@@ -417,7 +464,7 @@ class CrashTracer:
             func = _probe_so_function(self.target_path)
             if func is None:
                 log.debug("No fuzz entry point found in %s — skipping GDB", self.target_path)
-                return
+                return None
             harness_path = self._write_so_harness()
             program_args = [sys.executable, harness_path, self.target_path, func]
             # The harness reads the crash input from stdin; gdb has no `run <`
@@ -448,24 +495,7 @@ class CrashTracer:
         for cmd in cmds:
             gdb_args.extend(["-ex", cmd])
         gdb_args.extend(["--args", *program_args])
-
-        try:
-            with contextlib.ExitStack() as stack:
-                stdin_file = stack.enter_context(open(so_stdin, "rb")) if so_stdin else None
-                result = subprocess.run(
-                    gdb_args,
-                    capture_output=True,
-                    timeout=self.timeout,
-                    stdin=stdin_file,
-                )
-            output = result.stdout.decode(errors="replace")
-            self._parse_gdb_output(output, report)
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            log.debug("GDB failed: %s", e)
-        finally:
-            if harness_path:
-                with contextlib.suppress(OSError):
-                    os.unlink(harness_path)
+        return gdb_args, so_stdin, harness_path
 
     def _write_so_harness(self) -> str:
         """Write the ctypes harness that drives a .so target under GDB."""
@@ -556,3 +586,65 @@ class CrashTracer:
             log.info("Trace report saved: %s", trace_path)
         except OSError as e:
             log.debug("Failed to save trace report: %s", e)
+
+
+class GdbJob:
+    """One GDB replay running in the background (see ``CrashTracer.gdb_start``).
+
+    Output goes to a temp file, not a pipe: a long disassembly would fill a
+    pipe and stall gdb until the deadline.
+    """
+
+    def __init__(self, tracer: CrashTracer, report: TraceReport, input_path: str,
+                 argv: list[str], stdin_path: str | None, harness: str | None) -> None:  # fmt: skip
+        self._tracer = tracer
+        self._report = report
+        self._temps = [p for p in (input_path, harness) if p]
+        self._out = tempfile.TemporaryFile()  # noqa: SIM115  (closed in _cleanup)
+        self._deadline = time.monotonic() + tracer.timeout
+        with contextlib.ExitStack() as stack:
+            stdin = (
+                stack.enter_context(open(stdin_path, "rb")) if stdin_path else subprocess.DEVNULL
+            )
+            # Own session: a kill reaches the inferior gdb started, too.
+            self._proc = subprocess.Popen(
+                argv,
+                stdin=stdin,
+                stdout=self._out,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+    def poll(self) -> TraceReport | None:
+        """The parsed report once gdb exits (empty past the deadline), else None."""
+        if self._proc.poll() is None:
+            if time.monotonic() < self._deadline:
+                return None
+            self.kill()
+            return self._report
+
+        self._out.seek(0)
+        self._tracer._parse_gdb_output(self._out.read().decode(errors="replace"), self._report)
+        self._cleanup()
+        return self._report
+
+    def wait(self) -> TraceReport:
+        """Block until poll() has a report."""
+        while (report := self.poll()) is None:
+            time.sleep(GDB_POLL_S)
+        return report
+
+    def kill(self) -> None:
+        """Stop gdb and drop its temps; the report stays as started."""
+        if self._proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self._proc.pid, signal.SIGKILL)
+            self._proc.wait()
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        self._out.close()
+        for p in self._temps:
+            with contextlib.suppress(OSError):
+                os.unlink(p)
+        self._temps = []
