@@ -129,6 +129,8 @@ ARMS: dict[str, list[str]] = {
     # Tang seed arm, paper score vs popularity-removed (docs/TODO.md r1_tang).
     "elo-tang": ["--elo", "--mc-bandit", "--tang"],
     "elo-tang-residual": ["--elo", "--mc-bandit", "--tang", "--tang-mode", "residual"],
+    # A/A control for the pair above (Rule 46).
+    "elo-tang-ctl": ["--elo", "--mc-bandit", "--tang"],
     "elo-op-credit": ["--elo", "--mc-bandit", "--op-credit"],
     # Reactive gradient (core/schedulers/op_reactive.py) vs its static parent.
     # Both pair against "elo"; read reactive with `analyse --baseline elo-gradient`.
@@ -359,6 +361,7 @@ ARM_BASELINES: dict[str, str] = {
     "seed-branch": "elo",
     "elo-tang": "elo",
     "elo-tang-residual": "elo-tang",
+    "elo-tang-ctl": "elo-tang",
     "seed-branch-ctl": "elo",
     "elo-good-turing-seed": "elo",
     "elo-op-good-turing": "elo",
