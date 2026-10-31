@@ -49,9 +49,8 @@ import textwrap
 
 import pytest
 
-from tests.support.shim_ids import edge_chain
-
 from fuzzer_tool.adapters.shm import ShmCoverage
+from tests.support.shim_ids import edge_chain
 
 SHIM = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

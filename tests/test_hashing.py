@@ -189,7 +189,6 @@ def test_length_keyed_table_no_merge_on_collision(monkeypatch):
     """A colliding digest must not hand a seed another length's bins."""
     import fuzzer_tool.core.hashing as h
     from fuzzer_tool.core.schedulers._bin_rates import BinRates
-
     from tests.test_pos_bin_rates import ScriptedRng
 
     monkeypatch.setattr(h, "hash64", lambda data: 7)

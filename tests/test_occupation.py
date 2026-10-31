@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from fuzzer_tool.core.analyzers.analyzer_occupation import LongitudinalRarity, OccupationMeasure

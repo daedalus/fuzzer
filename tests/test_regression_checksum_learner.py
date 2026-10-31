@@ -13,8 +13,8 @@ from __future__ import annotations
 import struct
 import zlib
 
-from fuzzer_tool.core.berlekamp_massey import compute_checksum
 from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner
+from fuzzer_tool.core.berlekamp_massey import compute_checksum
 
 # ---------------------------------------------------------------------------
 # Fixtures
