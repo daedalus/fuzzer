@@ -2,7 +2,8 @@
 
 Every shipped feature still owed an A/B, or whose A/B was inconclusive. Source:
 open items in `docs/TODO.md` (2026-10-22); mechanism detail in `docs/DEEP_DIVE.md`.
-Close a row in the commit that records the result (DEEP_DIVE + TODO).
+Close a row in the commit that records the result: a row in `docs/AB_LEDGER.md`
+(Hard Rule 59), plus DEEP_DIVE + TODO.
 
 ## Protocol (applies to every row)
 
