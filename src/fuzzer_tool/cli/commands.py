@@ -676,6 +676,7 @@ def cmd_fuzz(args):
         tang=getattr(args, "tang", False),
         tang_rank=getattr(args, "tang_rank", 10),
         tang_refit_interval=getattr(args, "tang_refit_interval", 2000),
+        tang_mode=getattr(args, "tang_mode", "tang"),
         ecofuzz=getattr(args, "ecofuzz", False),
         ecofuzz_mc_penalty_multiplier=getattr(args, "ecofuzz_mc_penalty_multiplier", None),
         metropolis=getattr(args, "metropolis", False),
@@ -5233,6 +5234,14 @@ def main() -> int:
         type=int,
         default=2000,
         help="Executions between Tang low-rank refits (default: 2000).",
+    )
+    fuzz_parser.add_argument(
+        "--tang-mode",
+        choices=("tang", "frontier", "residual"),
+        default="tang",
+        help="Tang seed score: 'tang' (paper), 'frontier' (inverted, anti-predictive), or "
+        "'residual' (paper's score with the popularity direction v1 removed; "
+        "docs/TODO.md r1_tang). Default: tang.",
     )
     fuzz_parser.add_argument(
         "--kruskal-count",

@@ -182,13 +182,14 @@ class TangRecommendationScheduler:
         rank: Rank of the approximation (Tang's ``k``).
         refit_interval: Executions between refits.
         mode: ``"tang"`` for the paper's score (l2 mass on the seed's own
-            covered edges) or ``"frontier"`` for the inverted variant. See the
+            covered edges), ``"frontier"`` for the inverted variant, or
+            ``"residual"`` for the paper's score on ``A - s1 u1 v1^T``. See the
             module docstring for why ``"frontier"`` is not a candidate.
         rng: A ``RandPool``. Required -- Hard Rule 16, and passing ``None``
             would silently move recommendations off the ``--seed`` stream.
     """
 
-    MODES = ("tang", "frontier")
+    MODES = ("tang", "frontier", "residual")
 
     def __init__(
         self,
@@ -293,8 +294,12 @@ class TangRecommendationScheduler:
         14 in reverse: the vectorized form is kept, and the slower-but-exact
         one is kept too, for the range where it wins.
         """
-        rank = min(self.rank, *matrix.shape)
-        if rank < 1:
+        # Residual mode drops v1, the popularity direction: A - s1 u1 v1^T has
+        # right singular vectors v2..v_{k+1}, all orthogonal to v1, so
+        # projecting a raw row onto them equals projecting its residual.
+        skip = 1 if self.mode == "residual" else 0
+        rank = min(self.rank + skip, *matrix.shape)
+        if rank - skip < 1:
             return None
         if matrix.size <= _EXACT_SVD_MAX_ENTRIES:
             _u, sv, vt = np.linalg.svd(matrix, full_matrices=False)
@@ -310,9 +315,9 @@ class TangRecommendationScheduler:
         # targets, so it would admit numerical-noise directions on a large
         # matrix and reject real ones on a small.
         keep = min(rank, int((sv > 1e-12 * sv[0]).sum())) if sv.size else 0
-        if keep < 1:
+        if keep - skip < 1:
             return None
-        return vt[:keep].T
+        return vt[skip:keep].T
 
     # --------------------------------------------------------------- scoring
 
