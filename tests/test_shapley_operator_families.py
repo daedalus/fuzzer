@@ -99,3 +99,19 @@ def test_report_wired_into_generate_report():
     from fuzzer_tool.services import report
 
     assert "_operator_redundancy(fuzzer)" in inspect.getsource(report.generate_report)
+
+
+def test_report_caps_members_per_family():
+    """A tiny target makes most operators duplicates: one row must stay readable."""
+    from fuzzer_tool.services.report import _FAMILY_MEMBERS_MAX
+
+    n = _FAMILY_MEMBERS_MAX + 5
+    sa = _attribution({f"op{i:02d}": set(range(10)) for i in range(n)})
+    rows = [
+        line for line in _operator_redundancy(_fuzzer(sa)).splitlines() if line.startswith("    ")
+    ]
+
+    assert len(rows) == 1
+    assert rows[0].count(",") == _FAMILY_MEMBERS_MAX - 1
+    assert rows[0].lstrip().startswith(f"[{n}]")
+    assert rows[0].endswith(f"+{n - _FAMILY_MEMBERS_MAX} more")

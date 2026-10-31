@@ -1893,6 +1893,7 @@ def _operator_diversity(f) -> str:
 
 
 _FAMILY_LINES_MAX = 10  # report rows before "... N more"
+_FAMILY_MEMBERS_MAX = 8  # names per row; tiny targets make families of hundreds
 
 
 def _operator_redundancy(f) -> str:
@@ -1913,10 +1914,17 @@ def _operator_redundancy(f) -> str:
         "--- Operator Redundancy (Shapley) ---",
         f"  {len(families)} near-duplicate families (edge Jaccard >= 0.9), {n_ops} operators:",
     ]
-    lines.extend(f"    {', '.join(fam)}" for fam in families[:_FAMILY_LINES_MAX])
+    lines.extend(_family_row(fam) for fam in families[:_FAMILY_LINES_MAX])
     if len(families) > _FAMILY_LINES_MAX:
         lines.append(f"    ... {len(families) - _FAMILY_LINES_MAX} more")
     return "\n".join(lines)
+
+
+def _family_row(fam: list[str]) -> str:
+    """``[size] a, b, ... +N more`` for one family."""
+    row = f"    [{len(fam)}] {', '.join(fam[:_FAMILY_MEMBERS_MAX])}"
+    extra = len(fam) - _FAMILY_MEMBERS_MAX
+    return f"{row} +{extra} more" if extra > 0 else row
 
 
 def _edge_entropy_lines(f, lines: list[str]) -> None:
