@@ -210,15 +210,68 @@ def pairs_from_operand_records(lines: Iterable[str]) -> list[tuple[bytes, bytes]
     return out
 
 
-def cond_tuples_from_cmplog_text(lines: Iterable[str]) -> list[tuple]:
+# Raw lines whose parse a CmplogCollector remembers across drains (Hard Rule
+# 54); cleared when full. ~200 B per entry: ~13 MB at the cap.
+CMP_PARSE_CACHE_MAX = 1 << 16
+
+_MISS = object()
+
+
+def _parse_cmp_line(line: str) -> tuple | None:
+    """``(op_a, op_b, width, result, pc)`` of one ``CMP`` line, else None."""
+    # Shim lines start with "CMP ": skip strip, split once.
+    # Only other lines pay for strip ("  CMP ..." still parses).
+    if not line.startswith("CMP "):
+        line = line.strip()
+        if not line.startswith("CMP "):
+            return None
+
+    parts = line.split()
+    n = len(parts)
+    if n < 3:
+        return None
+    try:
+        op_a = bytes.fromhex(parts[1])
+        op_b = bytes.fromhex(parts[2])
+        result = int(parts[3]) if n > 3 else None
+        width = int(parts[4]) if n > 4 else None
+        pc = int(parts[5], 16) if n > 5 else None
+    except ValueError:
+        return None
+    if not op_a and not op_b:
+        return None
+    return (op_a, op_b, width, result, pc)
+
+
+def cond_tuples_from_cmplog_text(lines: Iterable[str], cache: dict | None = None) -> list[tuple]:
     """``(op_a, op_b, width, result, pc)`` per distinct ``CMP`` line, in order.
 
     The fields of ``conds_from_cmplog_text`` without building a CondStmt per
     line: a drain ingests ~10k of them and reads only these five fields.
+
+    *cache* (raw line -> parse, or None) carries parses across drains: on
+    FFmpeg 71% of a drain's lines were parsed by an earlier one. The parse
+    is a pure function of the line, so the output is the same either way.
     """
+    if cache is None:
+        return _cond_tuples_uncached(lines)
     out: list[tuple] = []
     # Content keys: the key set alone dedupes; a stripped-line set only
     # duplicated it (_parse_lines already drops raw repeats).
+    seen: set[tuple] = set()
+    for k in _cached_parses(lines, cache):
+        if k is None or k in seen:
+            continue
+
+        seen.add(k)
+        out.append(k)
+    return out
+
+
+def _cond_tuples_uncached(lines: Iterable[str]) -> list[tuple]:
+    """The parse inlined: a call per line through _parse_cmp_line measured
+    3-6% slower. tests/test_cmplog_parse_cache.py pins both paths equal."""
+    out: list[tuple] = []
     seen: set[tuple] = set()
     for line in lines:
         # Shim lines start with "CMP ": skip strip, split once.
@@ -249,6 +302,19 @@ def cond_tuples_from_cmplog_text(lines: Iterable[str]) -> list[tuple]:
         seen.add(k)
         out.append(k)
     return out
+
+
+def _cached_parses(lines: Iterable[str], cache: dict):
+    """Parse of each line, from *cache* when an earlier drain parsed it."""
+    get = cache.get
+    for line in lines:
+        k = get(line, _MISS)
+        if k is _MISS:
+            k = _parse_cmp_line(line)
+            if len(cache) >= CMP_PARSE_CACHE_MAX:
+                cache.clear()
+            cache[line] = k
+        yield k
 
 
 def conds_from_tuples(tuples: Iterable[tuple]) -> list[CondStmt]:

@@ -160,7 +160,9 @@ def test_parsers_see_each_line_once(monkeypatch):
     seen = []
     real_c, real_p = cmplog_mod.cond_tuples_from_cmplog_text, cmplog_mod.pairs_from_operand_records
     monkeypatch.setattr(
-        cmplog_mod, "cond_tuples_from_cmplog_text", lambda ls: (seen.append(len(ls)), real_c(ls))[1]
+        cmplog_mod,
+        "cond_tuples_from_cmplog_text",
+        lambda ls, cache=None: (seen.append(len(ls)), real_c(ls, cache=cache))[1],
     )
     monkeypatch.setattr(
         cmplog_mod, "pairs_from_operand_records", lambda ls: (seen.append(len(ls)), real_p(ls))[1]

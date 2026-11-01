@@ -730,6 +730,8 @@ class CmplogCollector:
         # runs. Higher counts = more reliable comparison signals. Pruned with
         # _pair_set at the eviction site, so it stays bounded by _max_pairs.
         self._pair_occurrence: dict[tuple[bytes, bytes], int] = {}
+        # Raw CMP line -> parse, across drains (track_parser.CMP_PARSE_CACHE_MAX).
+        self._cond_cache: dict[str, tuple | None] = {}
         self._pair_set: set[tuple[bytes, bytes]] = set()
         # Pairs discovered but not yet handed to the redqueen input-to-state
         # scan. A queue rather than a high-water index into self.pairs: that
@@ -1363,7 +1365,7 @@ class CmplogCollector:
         # on FFmpeg). Both parsers dedupe downstream, so drop repeats once at
         # C level (order kept) instead of stripping and probing each copy.
         new_lines = list(dict.fromkeys(new_lines))
-        cond_tuples = cond_tuples_from_cmplog_text(new_lines)
+        cond_tuples = cond_tuples_from_cmplog_text(new_lines, cache=self._cond_cache)
         self._last_cond_tuples = cond_tuples
         self._last_conds = None
         self._ingest_conds(cond_tuples, tokens, new_pairs, batch_pairs)
