@@ -805,6 +805,7 @@ def cmd_fuzz(args):
         field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
         prune_cost=getattr(args, "prune_cost", False),
+        packed_edges=getattr(args, "packed_edges", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
         pos_pca=getattr(args, "pos_pca", False),
@@ -3766,6 +3767,12 @@ def main() -> int:
         action="store_true",
         help="Edge-tracker eviction: among seeds losing equal unique coverage, drop the most "
         "expensive exec first instead of the oldest (core/edge_tracker.py EvictTie). Unmeasured.",
+    )
+    fuzz_parser.add_argument(
+        "--packed-edges",
+        action="store_true",
+        help="Store surviving per-seed edge sets as sorted uint32 (core/edge_set.py EdgeSet): "
+        "~10x less seed_edges memory on large targets (ffmpeg: 131 -> 13.5 MB). A/B pending.",
     )
     fuzz_parser.add_argument(
         "--seed-consolidated-scheduler",

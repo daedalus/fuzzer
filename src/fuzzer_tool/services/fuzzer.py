@@ -69,7 +69,7 @@ from fuzzer_tool.core.coverage_noise import (
 )
 from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
-from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK, EvictTie
+from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK, EdgeStore, EvictTie
 from fuzzer_tool.core.elf import (
     SHM_LAYOUT_CURRENT,
     detect_elf_type,
@@ -2066,6 +2066,9 @@ class Fuzzer:
         # Edge-tracker eviction ties by exec cost, not age (backlog D5).
         # Off by default; unmeasured. Appended.
         prune_cost=False,
+        # Pack surviving per-seed edge sets into sorted uint32 (EdgeStore).
+        # Off by default; A/B pending. Appended.
+        packed_edges=False,
         # Novel-crash push targets (services/push.py); None disables. Appended.
         push_on_crash=None,
         # Direct in-process input placement (--input-placement). Appended.
@@ -3234,6 +3237,7 @@ class Fuzzer:
             self._corpus_manager.rebuild_entropy()
         self._init_seed_metadata()
         self._edge_tracker.evict_tie = EvictTie.COST if prune_cost else EvictTie.AGE
+        self._edge_tracker.set_edge_store(EdgeStore.PACKED if packed_edges else EdgeStore.BUILTIN)
 
         # Rebuild the lineage tree from persisted seed_meta (single source
         # of truth; never re-derived from runs to avoid double-counting).

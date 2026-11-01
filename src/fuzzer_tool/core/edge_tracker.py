@@ -88,6 +88,17 @@ class EvictTie(enum.Enum):
     COST = "cost"  # most expensive exec first (--prune-cost, backlog D5)
 
 
+class EdgeStore(enum.Enum):
+    """How seed_edges stores each tracked seed's edges (--packed-edges)."""
+
+    BUILTIN = "builtin"  # one builtin set per seed
+    PACKED = "packed"  # survivors packed into EdgeSet (sorted uint32, 4 B/edge)
+
+
+def _noop(*_args: object) -> None:
+    """Stand-in for a gated hook that is off."""
+
+
 # Seed calibration lets the tracked-seed count overshoot max_tracked_seeds by
 # this factor before pruning, so a wide corpus pays the prune pass once per
 # (slack - 1) * max_tracked_seeds insertions instead of once per batch, while
@@ -999,11 +1010,13 @@ class EdgeTracker:
             self._f0_plateau_window = f0_plateau_window
             self._f0_plateau_threshold = f0_plateau_threshold
             self._f0_history: list[tuple[int, float]] = []  # (exec_count, estimate)
-        # Per-seed edge sets: seed_key -> edge indices. New keys start as a
-        # builtin set; _compact packs survivors into EdgeSet (4 B/edge).
+        # Per-seed edge sets: seed_key -> edge indices. Under
+        # EdgeStore.PACKED new keys start as a builtin set and _compact packs
+        # survivors into EdgeSet (4 B/edge).
         self.seed_edges: dict[str, set[int] | EdgeSet] = {}
-        # Keys still holding a builtin set, oldest first (see _compact).
+        # Keys still holding a builtin set, oldest first (see _pack_loose).
         self._loose: list[str] = []
+        self.set_edge_store(EdgeStore.BUILTIN)
         # Per-seed hit counts: seed_key -> {edge_index: hit_count} (sparse)
         self.seed_hit_counts: dict[str, dict[int, int]] = {}
         # seed_key -> (hit-count dict, its length, entropy); see shannon_entropy_seed.
@@ -1156,7 +1169,7 @@ class EdgeTracker:
         new_edges = set()
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
-            self._loose.append(seed_key)
+            self._note_loose(seed_key)
             # A seed that runs again is tracked again, so its ledger entry is
             # superseded: the same input reproduces the same edges, which
             # seed_edges then holds in full, and a stale partial copy would
@@ -1360,7 +1373,22 @@ class EdgeTracker:
         finally:
             self._prune_slack = slack
 
-    def _compact(self) -> None:
+    def set_edge_store(self, store: EdgeStore) -> None:
+        """Bind the per-seed edge storage once, not per record (Hard Rule 57).
+
+        BUILTIN binds both hooks to no-ops: no loose list, no packing.
+        """
+        self._edge_store = store
+        packed = store is EdgeStore.PACKED
+        self._note_loose = self._add_loose if packed else _noop
+        self._compact = self._pack_loose if packed else _noop
+        self._edge_cls = EdgeSet if packed else set
+
+    def _add_loose(self, seed_key: str) -> None:
+        """Queue a new key's builtin set for _pack_loose."""
+        self._loose.append(seed_key)
+
+    def _pack_loose(self) -> None:
         """Pack loose builtin sets into EdgeSet once a prune batch piles up.
 
         Runs after _maybe_prune, so seeds evicted while still loose (most
@@ -3952,8 +3980,9 @@ class EdgeTracker:
         self.map_size = data.get("map_size", self.map_size)
         self._morris_mode = data.get("morris_mode", self._morris_mode)
         self.cumulative_edges = set(data.get("cumulative_edges", []))
-        self.seed_edges = {k: EdgeSet(v) for k, v in data.get("seed_edges", {}).items()}
-        self._loose = []
+        edge_cls = self._edge_cls
+        self.seed_edges = {k: edge_cls(v) for k, v in data.get("seed_edges", {}).items()}
+        self._loose.clear()
         self.evicted_sole = {
             k: np.asarray(v, dtype=np.uint32) for k, v in data.get("evicted_sole", {}).items()
         }
