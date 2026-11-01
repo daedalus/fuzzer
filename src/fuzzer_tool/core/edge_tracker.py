@@ -111,11 +111,19 @@ except ImportError:
 from fuzzer_tool.core import edge_stats  # noqa: E402
 from fuzzer_tool.core.count_class import classify_counts  # noqa: E402
 from fuzzer_tool.core.edge_clusters import count_distinct  # noqa: E402
+from fuzzer_tool.core.edge_set import EdgeSet  # noqa: E402
 from fuzzer_tool.core.elf import (  # noqa: E402
     MAP_SIZE_DEFAULT,
     _map_size_max,
 )
 from fuzzer_tool.core.zipf import HeapsFit, ZipfFit, fit_heaps, fit_zipf  # noqa: E402
+
+
+def _edges_np(edges: set[int] | EdgeSet) -> np.ndarray:
+    """One seed's edges as an array; an EdgeSet is a zero-copy view."""
+    if isinstance(edges, EdgeSet):
+        return edges.as_numpy()
+    return np.fromiter(edges, dtype=np.int64, count=len(edges))
 
 
 def _hit_count_entropy(hc: dict[int, int]) -> float:
@@ -991,8 +999,11 @@ class EdgeTracker:
             self._f0_plateau_window = f0_plateau_window
             self._f0_plateau_threshold = f0_plateau_threshold
             self._f0_history: list[tuple[int, float]] = []  # (exec_count, estimate)
-        # Per-seed edge sets: seed_key -> set of edge indices
-        self.seed_edges: dict[str, set[int]] = {}
+        # Per-seed edge sets: seed_key -> edge indices. New keys start as a
+        # builtin set; _compact packs survivors into EdgeSet (4 B/edge).
+        self.seed_edges: dict[str, set[int] | EdgeSet] = {}
+        # Keys still holding a builtin set, oldest first (see _compact).
+        self._loose: list[str] = []
         # Per-seed hit counts: seed_key -> {edge_index: hit_count} (sparse)
         self.seed_hit_counts: dict[str, dict[int, int]] = {}
         # seed_key -> (hit-count dict, its length, entropy); see shannon_entropy_seed.
@@ -1145,6 +1156,7 @@ class EdgeTracker:
         new_edges = set()
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
+            self._loose.append(seed_key)
             # A seed that runs again is tracked again, so its ledger entry is
             # superseded: the same input reproduces the same edges, which
             # seed_edges then holds in full, and a stale partial copy would
@@ -1191,7 +1203,8 @@ class EdgeTracker:
         if new_owners:
             self._log_owners(new_owners)
 
-        self.seed_edges[seed_key].update(new_edges)
+        if new_owners:  # same result as update(new_edges); EdgeSet re-packs per call
+            already_owned.update(new_owners)
 
         # Per-target tracking
         if target_name:
@@ -1219,8 +1232,9 @@ class EdgeTracker:
         self._note_first_seen(new_edges, len(self.cumulative_edges))
         self.update_correlation(new_edges)
 
-        # Prune old seeds if over limit
+        # Prune old seeds if over limit, then pack the survivors.
         self._maybe_prune()
+        self._compact()
 
         # F0 plateau history: one sample per record_edges() call, keyed on
         # the current cumulative edge count so the plateau test can be
@@ -1345,6 +1359,23 @@ class EdgeTracker:
             self._maybe_prune()
         finally:
             self._prune_slack = slack
+
+    def _compact(self) -> None:
+        """Pack loose builtin sets into EdgeSet once a prune batch piles up.
+
+        Runs after _maybe_prune, so seeds evicted while still loose (most
+        mutated inputs: subsumed on arrival) are never sorted. Packing per
+        record would sort ~3k edges per exec on ffmpeg (~80 us).
+        """
+        if len(self._loose) < max(1, int(self.max_tracked_seeds * PRUNE_BATCH_FRAC)):
+            return
+
+        seed_edges = self.seed_edges
+        for key in self._loose:
+            edges = seed_edges.get(key)
+            if type(edges) is set:
+                seed_edges[key] = EdgeSet(edges)
+        self._loose.clear()
 
     def tracked_edge_entries(self) -> int:
         """Total (seed, edge) pairs held by the per-seed edge sets."""
@@ -1769,8 +1800,8 @@ class EdgeTracker:
         lens = np.fromiter((len(s) for s in sets), dtype=np.int64, count=len(sets))
         ends = np.cumsum(lens)
         starts = ends - lens
-        flat = np.concatenate(
-            [np.fromiter(s, dtype=np.int64, count=len(s)) for s in sets] or [np.empty(0, np.int64)]
+        flat = np.concatenate([_edges_np(s) for s in sets] or [np.empty(0, np.int64)]).astype(
+            np.int64, copy=False
         )
         ids = np.unique(flat)
         slot = np.searchsorted(ids, flat)  # ~2x faster than return_inverse
@@ -3921,7 +3952,8 @@ class EdgeTracker:
         self.map_size = data.get("map_size", self.map_size)
         self._morris_mode = data.get("morris_mode", self._morris_mode)
         self.cumulative_edges = set(data.get("cumulative_edges", []))
-        self.seed_edges = {k: set(v) for k, v in data.get("seed_edges", {}).items()}
+        self.seed_edges = {k: EdgeSet(v) for k, v in data.get("seed_edges", {}).items()}
+        self._loose = []
         self.evicted_sole = {
             k: np.asarray(v, dtype=np.uint32) for k, v in data.get("evicted_sole", {}).items()
         }
