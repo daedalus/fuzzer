@@ -1848,6 +1848,8 @@ class Fuzzer:
         formatfuzzer=False,
         ff_bin_dir=None,
         ff_templates=None,
+        # libFuzzer-style custom mutator/crossover plugin (--custom-mutator SO).
+        custom_mutator=None,
         # Successive-elimination / racing bandit for operator scheduling.
         successive_elim=False,
         successive_elim_delta=0.1,
@@ -2380,6 +2382,13 @@ class Fuzzer:
                 import logging
 
                 logging.getLogger(__name__).warning("FormatFuzzer registration failed: %s", exc)
+        # --custom-mutator: explicit path, so a bad plugin raises rather than
+        # warns (unlike the best-effort FormatFuzzer registration above).
+        self.custom_mutator = custom_mutator
+        if custom_mutator:
+            from fuzzer_tool.core.mutations.custom_mutator import register_custom_mutator
+
+            register_custom_mutator(custom_mutator)
         # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate

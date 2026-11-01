@@ -1071,6 +1071,7 @@ def cmd_fuzz(args):
         formatfuzzer=getattr(args, "formatfuzzer", False),
         ff_bin_dir=getattr(args, "ff_bin_dir", None),
         ff_templates=getattr(args, "ff_templates", None),
+        custom_mutator=getattr(args, "custom_mutator", None),
         email_on_crash=_mail_config_from_args(args),
         push_on_crash=_push_targets_from_args(args),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
@@ -6668,6 +6669,19 @@ def main() -> int:
         help=(
             "Comma-separated FormatFuzzer templates to enable, using "
             "upstream's template names (default: png,zip,mp4,jpg)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--custom-mutator",
+        metavar="SO",
+        default=None,
+        help=(
+            "Shared object exporting libFuzzer's LLVMFuzzerCustomMutator "
+            "and/or LLVMFuzzerCustomCrossOver; each becomes an operator "
+            "(custom_mutator, custom_crossover). The plugin may call "
+            "LLVMFuzzerMutate, served by the fuzzer's own byte havoc. Runs "
+            "in-process, so a crash in the plugin ends the fuzzer. Needs a "
+            "C compiler on first use. See core/mutations/custom_mutator.py"
         ),
     )
     fuzz_parser.add_argument(
