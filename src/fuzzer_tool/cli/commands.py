@@ -1072,6 +1072,8 @@ def cmd_fuzz(args):
         ff_bin_dir=getattr(args, "ff_bin_dir", None),
         ff_templates=getattr(args, "ff_templates", None),
         custom_mutator=getattr(args, "custom_mutator", None),
+        custom_mutator_isolation=getattr(args, "custom_mutator_isolation", "guard"),
+        custom_mutator_timeout_ms=getattr(args, "custom_mutator_timeout", 1000),
         email_on_crash=_mail_config_from_args(args),
         push_on_crash=_push_targets_from_args(args),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
@@ -6683,6 +6685,24 @@ def main() -> int:
             "in-process, so a crash in the plugin ends the fuzzer. Needs a "
             "C compiler on first use. See core/mutations/custom_mutator.py"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--custom-mutator-isolation",
+        choices=("guard", "none"),
+        default="guard",
+        help=(
+            "guard (default): plugin calls run under a SIGSEGV/SIGBUS/SIGFPE/"
+            "SIGILL/SIGABRT/SIGTRAP guard (sigsetjmp/siglongjmp on an alternate "
+            "stack) and a timer; a faulting call is skipped and counted. none: "
+            "call the plugin directly (a fault ends the fuzzer)."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--custom-mutator-timeout",
+        type=int,
+        default=1000,
+        metavar="MS",
+        help="Per-call wall-clock budget for a --custom-mutator call under the guard; 0 disables it (default: 1000).",
     )
     fuzz_parser.add_argument(
         "--enable-regex-bomb-mutations",

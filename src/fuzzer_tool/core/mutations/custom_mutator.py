@@ -42,8 +42,24 @@ so runs stay reproducible under ``--seed``.
 Limits
 ------
 
-* Not crash-isolated.  The plugin runs inside the fuzzer process; a
-  segfault in it ends the fuzzer.  Test a plugin standalone first.
+* Crash isolation is a guard, not a process boundary.  The plugin still
+  runs inside the fuzzer; its calls are wrapped in C by ``run_guarded``:
+  fault handlers for SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGABRT/SIGTRAP on an
+  alternate stack (so stack overflow is caught too) plus a POSIX timer
+  (``--custom-mutator-timeout``, default 1000 ms) for hangs, with
+  ``siglongjmp`` back to the call.  Handlers and the timer exist only for
+  the duration of a call, and the previous dispositions are restored, so
+  the fuzzer's own handlers are untouched.  A faulting call returns
+  ``None`` and is counted in ``CustomMutatorPlugin.failures``, with the
+  offending input in ``last_failure_input``.  What a guard cannot undo:
+  memory the plugin corrupted before faulting, and a fault inside glibc
+  malloc/free, which leaves the arena lock held and can deadlock the next
+  allocation (the hazard noted for persistent mode).  Both are bugs in the
+  plugin; ``--custom-mutator-isolation none`` removes the guard.
+  ``LLVMFuzzerMutate`` copies the plugin's buffer into host memory before
+  Python sees it, so a wild pointer passed to it faults in C, where the
+  guard recovers, never inside a Python frame.  A fault inside the Python
+  callback itself is not recoverable and ends the process.
 * One plugin per process: the ``LLVMFuzzerMutate`` forwarder is a single
   global symbol.  A second ``register_custom_mutator`` call rebinds the
   existing operators to the new plugin.
@@ -60,6 +76,7 @@ import logging
 import os
 import random
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -74,17 +91,175 @@ log = logging.getLogger(__name__)
 #: capacity grows with the input so a long seed is never truncated first.
 DEFAULT_CAP = 4096
 
+#: Per-call wall-clock budget for a plugin call under the guard.
+DEFAULT_TIMEOUT_MS = 1000
+
+#: Status the C guard returns for a timeout (any other non-zero is a signal number).
+_FZ_TIMEOUT = 1000
+
 MUTATOR_SYMBOL = "LLVMFuzzerCustomMutator"
 CROSSOVER_SYMBOL = "LLVMFuzzerCustomCrossOver"
 
 _HOST_SRC = r"""
+#define _GNU_SOURCE
+#include <setjmp.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
+
+#ifndef sigev_notify_thread_id
+#define sigev_notify_thread_id _sigev_un._tid
+#endif
+
+#define FZ_TIMEOUT 1000
+#define FZ_SCRATCH_MAX (16u << 20)
+#define FZ_ALTSTK (64 * 1024)
+
 typedef size_t (*fz_mutate_cb)(uint8_t *, size_t, size_t);
+typedef size_t (*fz_mut_fn)(uint8_t *, size_t, size_t, unsigned);
+typedef size_t (*fz_cross_fn)(const uint8_t *, size_t, const uint8_t *, size_t,
+                              uint8_t *, size_t, unsigned);
+
 static fz_mutate_cb g_cb;
+static __thread sigjmp_buf tl_env;
+static __thread volatile sig_atomic_t tl_guarded, tl_in_cb, tl_pending_timeout;
+static __thread uint8_t *tl_scratch;
+static __thread size_t tl_scratch_cap;
+static __thread char *tl_altstk;
+
 void fz_set_mutate_cb(fz_mutate_cb cb) { g_cb = cb; }
-size_t LLVMFuzzerMutate(uint8_t *data, size_t size, size_t max_size) {
-    return g_cb ? g_cb(data, size, max_size) : size;
+
+/* LLVMFuzzerMutate. The plugin's buffer is never handed to Python: it is
+ * copied into host memory first, so a wild pointer from the plugin faults
+ * here, in C, where the guard can recover, not inside a Python frame. */
+size_t LLVMFuzzerMutate(uint8_t *d, size_t n, size_t max_size) {
+    if (!g_cb || max_size > FZ_SCRATCH_MAX || n > max_size) return n;
+    size_t cap = max_size ? max_size : 1;
+    if (tl_scratch_cap < cap) {
+        uint8_t *p = realloc(tl_scratch, cap);
+        if (!p) return n;
+        tl_scratch = p;
+        tl_scratch_cap = cap;
+    }
+    memcpy(tl_scratch, d, n);
+    tl_in_cb = 1;
+    size_t m = g_cb(tl_scratch, n, max_size);
+    tl_in_cb = 0;
+    if (tl_pending_timeout) {
+        tl_pending_timeout = 0;
+        if (tl_guarded) siglongjmp(tl_env, FZ_TIMEOUT);
+    }
+    if (m > max_size) m = max_size;
+    memcpy(d, tl_scratch, m);
+    return m;
+}
+
+static void on_fault(int sig, siginfo_t *si, void *uc) {
+    (void)si; (void)uc;
+    if (tl_guarded && !tl_in_cb) siglongjmp(tl_env, sig);
+    /* Fault inside the Python callback (or unguarded): not recoverable.
+     * Restore the default action; returning re-raises it and ends the process. */
+    signal(sig, SIG_DFL);
+}
+
+static void on_timeout(int sig, siginfo_t *si, void *uc) {
+    (void)sig; (void)si; (void)uc;
+    if (!tl_guarded) return;
+    if (tl_in_cb) { tl_pending_timeout = 1; return; }
+    siglongjmp(tl_env, FZ_TIMEOUT);
+}
+
+static const int k_sigs[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT, SIGTRAP};
+#define N_SIGS 6
+
+/* Runs thunk(arg) with fault handlers (and an optional timer) installed for
+ * its duration only, and the previous dispositions restored afterwards.
+ * Returns 0, a signal number, or FZ_TIMEOUT. */
+static int run_guarded(void (*thunk)(void *), void *arg, int timeout_ms) {
+    struct sigaction sa, old[N_SIGS], old_rt;
+    stack_t ss, old_ss;
+    timer_t tm;
+    int have_timer = 0, have_rt = 0, rc, i;
+
+    if (!tl_altstk) tl_altstk = malloc(FZ_ALTSTK);
+    if (tl_altstk) {
+        ss.ss_sp = tl_altstk; ss.ss_size = FZ_ALTSTK; ss.ss_flags = 0;
+        if (sigaltstack(&ss, &old_ss) != 0) old_ss.ss_flags = SS_DISABLE;
+    }
+    memset(&sa, 0, sizeof sa);
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER | (tl_altstk ? SA_ONSTACK : 0);
+    sa.sa_sigaction = on_fault;
+    for (i = 0; i < N_SIGS; i++) sigaction(k_sigs[i], &sa, &old[i]);
+
+    if (timeout_ms > 0) {
+        struct sigaction st = sa;
+        st.sa_sigaction = on_timeout;
+        if (sigaction(SIGRTMIN, &st, &old_rt) == 0) {
+            struct sigevent ev;
+            memset(&ev, 0, sizeof ev);
+            ev.sigev_notify = SIGEV_THREAD_ID;
+            ev.sigev_signo = SIGRTMIN;
+            ev.sigev_notify_thread_id = (pid_t)syscall(SYS_gettid);
+            have_rt = 1;
+            if (timer_create(CLOCK_MONOTONIC, &ev, &tm) == 0) {
+                struct itimerspec its;
+                memset(&its, 0, sizeof its);
+                its.it_value.tv_sec = timeout_ms / 1000;
+                its.it_value.tv_nsec = (long)(timeout_ms % 1000) * 1000000L;
+                if (timer_settime(tm, 0, &its, NULL) == 0) have_timer = 1;
+                else timer_delete(tm);
+            }
+        }
+    }
+
+    tl_in_cb = 0;
+    tl_pending_timeout = 0;
+    rc = sigsetjmp(tl_env, 1);
+    if (rc == 0) {
+        tl_guarded = 1;
+        thunk(arg);
+    }
+    tl_guarded = 0;
+    tl_in_cb = 0;
+
+    if (have_timer) timer_delete(tm);
+    if (have_rt) sigaction(SIGRTMIN, &old_rt, NULL);
+    for (i = 0; i < N_SIGS; i++) sigaction(k_sigs[i], &old[i], NULL);
+    if (tl_altstk) sigaltstack(&old_ss, NULL);
+    return rc;
+}
+
+struct mut_args { fz_mut_fn f; uint8_t *d; size_t n, max; unsigned seed; size_t ret; };
+static void mut_thunk(void *p) {
+    struct mut_args *a = p;
+    a->ret = a->f(a->d, a->n, a->max, a->seed);
+}
+int fz_guard_mutate(fz_mut_fn f, uint8_t *d, size_t n, size_t max, unsigned seed,
+                    int timeout_ms, size_t *ret) {
+    struct mut_args a = {f, d, n, max, seed, 0};
+    int rc = run_guarded(mut_thunk, &a, timeout_ms);
+    *ret = rc ? 0 : a.ret;
+    return rc;
+}
+
+struct cross_args { fz_cross_fn f; const uint8_t *a; size_t na; const uint8_t *b;
+                    size_t nb; uint8_t *out; size_t max; unsigned seed; size_t ret; };
+static void cross_thunk(void *p) {
+    struct cross_args *a = p;
+    a->ret = a->f(a->a, a->na, a->b, a->nb, a->out, a->max, a->seed);
+}
+int fz_guard_cross(fz_cross_fn f, const uint8_t *a, size_t na, const uint8_t *b, size_t nb,
+                   uint8_t *out, size_t max, unsigned seed, int timeout_ms, size_t *ret) {
+    struct cross_args x = {f, a, na, b, nb, out, max, seed, 0};
+    int rc = run_guarded(cross_thunk, &x, timeout_ms);
+    *ret = rc ? 0 : x.ret;
+    return rc;
 }
 """
 
@@ -176,6 +351,13 @@ def havoc(data: bytes, max_size: int, rng=None) -> bytes:
 # Host shim: exports LLVMFuzzerMutate and forwards it into Python
 # ---------------------------------------------------------------------------
 
+def _signal_name(num: int) -> str:
+    try:
+        return signal.Signals(num).name
+    except ValueError:
+        return f"signal {num}"
+
+
 _MUTATE_CB = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t)
 
 #: rng for the plugin call in flight; read by the LLVMFuzzerMutate callback.
@@ -219,7 +401,7 @@ def _load_host() -> ctypes.CDLL:
     so = Path(tmp) / "libfzhost.so"
     src.write_text(_HOST_SRC)
     proc = subprocess.run(
-        [cc, "-shared", "-fPIC", "-O2", "-o", str(so), str(src)],
+        [cc, "-shared", "-fPIC", "-O2", "-o", str(so), str(src), "-lrt"],
         capture_output=True,
         text=True,
         check=False,
@@ -232,6 +414,29 @@ def _load_host() -> ctypes.CDLL:
     host = ctypes.CDLL(str(so), mode=ctypes.RTLD_GLOBAL)
     host.fz_set_mutate_cb.argtypes = [ctypes.c_void_p]
     host.fz_set_mutate_cb.restype = None
+    host.fz_guard_mutate.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+        ctypes.c_uint,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    host.fz_guard_mutate.restype = ctypes.c_int
+    host.fz_guard_cross.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_uint,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    host.fz_guard_cross.restype = ctypes.c_int
     _host_cb = _MUTATE_CB(_on_mutate)
     host.fz_set_mutate_cb(ctypes.cast(_host_cb, ctypes.c_void_p))
     _host = host
@@ -246,11 +451,26 @@ def _load_host() -> ctypes.CDLL:
 class CustomMutatorPlugin:
     """A loaded plugin ``.so`` with whichever of the two entry points it exports."""
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        isolate: bool = True,
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    ) -> None:
         self.path = str(path)
+        #: Run plugin calls under the C-side fault/timeout guard.
+        self.isolate = isolate
+        #: Wall-clock budget per plugin call; 0 disables the timer.
+        self.timeout_ms = max(0, int(timeout_ms))
+        #: Plugin calls that crashed or hung, keyed by signal name / "timeout".
+        self.failures: dict[str, int] = {}
+        #: The input that provoked the most recent failure (for reproduction).
+        self.last_failure_input: bytes | None = None
+        self.calls = 0
         if not os.path.isfile(self.path):
             raise FileNotFoundError(f"--custom-mutator: no such file: {self.path}")
-        _load_host()  # first: the plugin's undefined LLVMFuzzerMutate must resolve at dlopen
+        self._host = _load_host()  # first: the plugin's undefined LLVMFuzzerMutate must resolve at dlopen
         try:
             self._lib = ctypes.CDLL(os.path.abspath(self.path))
         except OSError as exc:
@@ -298,8 +518,29 @@ class CustomMutatorPlugin:
     def _capacity(max_len: int, *lengths: int) -> int:
         return max_len or max(DEFAULT_CAP, 2 * max(lengths))
 
+    def _record_failure(self, status: int, data: bytes) -> None:
+        name = "timeout" if status == _FZ_TIMEOUT else _signal_name(status)
+        self.failures[name] = self.failures.get(name, 0) + 1
+        self.last_failure_input = bytes(data)
+        total = sum(self.failures.values())
+        # First few, then one in a hundred: a plugin that dies on every call
+        # would otherwise drown the log.
+        if total <= 5 or total % 100 == 0:
+            log.warning(
+                "custom mutator plugin %s: %s on a %d-byte input (failure #%d, head %s); call skipped",
+                self.path,
+                name,
+                len(data),
+                total,
+                data[:16].hex(),
+            )
+
     def mutate(self, data: bytes, max_len: int, rng) -> bytes | None:
-        """Call ``LLVMFuzzerCustomMutator``; ``None`` for a size of 0 or above ``MaxSize``."""
+        """Call ``LLVMFuzzerCustomMutator``.
+
+        ``None`` for a size of 0 or above ``MaxSize`` and for a call the
+        guard had to abandon (fault or timeout; see :attr:`failures`).
+        """
         global _current_rng
         if self._mutate is None:
             return None
@@ -307,9 +548,27 @@ class CustomMutatorPlugin:
         data = data[:cap]
         buf = (ctypes.c_uint8 * cap)()
         ctypes.memmove(buf, data, len(data))
+        seed = rng.randint(0, 0xFFFFFFFF)
+        self.calls += 1
         _current_rng = rng
         try:
-            n = self._mutate(buf, len(data), cap, rng.randint(0, 0xFFFFFFFF))
+            if self.isolate:
+                ret = ctypes.c_size_t(0)
+                status = self._host.fz_guard_mutate(
+                    ctypes.cast(self._mutate, ctypes.c_void_p),
+                    buf,
+                    len(data),
+                    cap,
+                    seed,
+                    self.timeout_ms,
+                    ctypes.byref(ret),
+                )
+                if status:
+                    self._record_failure(status, data)
+                    return None
+                n = ret.value
+            else:
+                n = self._mutate(buf, len(data), cap, seed)
         finally:
             _current_rng = None
         if n == 0 or n > cap:
@@ -317,15 +576,36 @@ class CustomMutatorPlugin:
         return ctypes.string_at(buf, n)
 
     def crossover(self, a: bytes, b: bytes, max_len: int, rng) -> bytes | None:
-        """Call ``LLVMFuzzerCustomCrossOver``; same decline rule as :meth:`mutate`."""
+        """Call ``LLVMFuzzerCustomCrossOver``; same decline rules as :meth:`mutate`."""
         global _current_rng
         if self._cross is None:
             return None
         cap = self._capacity(max_len, len(a), len(b))
         out = (ctypes.c_uint8 * cap)()
+        seed = rng.randint(0, 0xFFFFFFFF)
+        self.calls += 1
         _current_rng = rng
         try:
-            n = self._cross(a, len(a), b, len(b), out, cap, rng.randint(0, 0xFFFFFFFF))
+            if self.isolate:
+                ret = ctypes.c_size_t(0)
+                status = self._host.fz_guard_cross(
+                    ctypes.cast(self._cross, ctypes.c_void_p),
+                    a,
+                    len(a),
+                    b,
+                    len(b),
+                    out,
+                    cap,
+                    seed,
+                    self.timeout_ms,
+                    ctypes.byref(ret),
+                )
+                if status:
+                    self._record_failure(status, a)
+                    return None
+                n = ret.value
+            else:
+                n = self._cross(a, len(a), b, len(b), out, cap, seed)
         finally:
             _current_rng = None
         if n == 0 or n > cap:
@@ -398,7 +678,12 @@ class CustomCrossoverOp(_PluginOp):
 _OP_NAMES = (CustomMutatorOp.name, CustomCrossoverOp.name)
 
 
-def register_custom_mutator(path: str | os.PathLike[str]) -> list[MutatorBase]:
+def register_custom_mutator(
+    path: str | os.PathLike[str],
+    *,
+    isolate: bool = True,
+    timeout_ms: int = DEFAULT_TIMEOUT_MS,
+) -> list[MutatorBase]:
     """Load *path* and register one operator per exported entry point.
 
     Safe to call again: an operator that already exists is rebound to the
@@ -409,7 +694,7 @@ def register_custom_mutator(path: str | os.PathLike[str]) -> list[MutatorBase]:
     from fuzzer_tool.core import operator_categories
     from fuzzer_tool.core.operator_registry import REGISTRY
 
-    plugin = CustomMutatorPlugin(path)
+    plugin = CustomMutatorPlugin(path, isolate=isolate, timeout_ms=timeout_ms)
     existing = {getattr(m, "name", None): m for m in REGISTRY.mutators()}
     wanted: list[tuple[type[_PluginOp], bool]] = [
         (CustomMutatorOp, plugin.has_mutator),

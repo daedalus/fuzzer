@@ -81,6 +81,57 @@ size_t LLVMFuzzerCustomMutator(uint8_t *d, size_t n, size_t max, unsigned seed) 
 
 _NO_SYMBOL_PLUGIN = "int unrelated(void) { return 1; }\n"
 
+# Crashes (or hangs) only when the first input byte is the trigger, so a plain
+# input afterwards shows the process, handlers and plugin are still usable.
+_FAULT_TMPL = r"""
+#include <signal.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+size_t LLVMFuzzerMutate(uint8_t *, size_t, size_t);
+unsigned long fz_test_handler(int sig) {
+    struct sigaction sa;
+    sigaction(sig, NULL, &sa);
+    return (unsigned long)sa.sa_handler;
+}
+static size_t rec(volatile uint8_t *p, size_t n) {
+    volatile uint8_t pad[4096];
+    pad[0] = p[0];
+    return rec(pad, n + 1) + pad[1];
+}
+size_t LLVMFuzzerCustomMutator(uint8_t *d, size_t n, size_t max, unsigned seed) {
+    (void)seed;
+    if (n && d[0] == 0xFF) { FAULT; }
+    if (n > 1) { d[1] ^= 1; }
+    (void)max;
+    return n;
+}
+"""
+
+_FAULTS = {
+    "segv": "*(volatile int *)0 = 1",
+    "abort": "abort()",
+    "fpe": "raise(SIGFPE)",
+    "ill": "__builtin_trap()",
+    "stack": "d[0] = (uint8_t)rec(d, 0)",
+    "hang": "for (;;) { __asm__ volatile(\"\"); }",
+    "wild_mutate": "LLVMFuzzerMutate((uint8_t *)16, 8, 64)",
+}
+
+_CROSS_SEGV = r"""
+#include <stddef.h>
+#include <stdint.h>
+size_t LLVMFuzzerCustomCrossOver(const uint8_t *a, size_t na, const uint8_t *b,
+                                 size_t nb, uint8_t *out, size_t max, unsigned seed) {
+    (void)b; (void)nb; (void)seed;
+    if (na && a[0] == 0xFF) *(volatile int *)0 = 1;
+    out[0] = a[0]; (void)max;
+    return 1;
+}
+"""
+
+
 
 def _build(tmp_path, name: str, src: str) -> str:
     c = tmp_path / f"{name}.c"
@@ -229,6 +280,92 @@ class TestRegistration:
         assert outs == {None, b"AAAADDDD"}  # None when it drew itself as the partner
 
 
+class TestIsolation:
+    TRIGGER = b"\xff" + b"abcdefgh"
+    OK = b"\x01" + b"abcdefgh"
+
+    def _plugin(self, tmp_path, kind, **kw):
+        src = _FAULT_TMPL.replace("FAULT", _FAULTS[kind])
+        return cm.CustomMutatorPlugin(_build(tmp_path, kind, src), **kw)
+
+    @pytest.mark.parametrize("kind,name", [
+        ("segv", "SIGSEGV"),
+        ("abort", "SIGABRT"),
+        ("fpe", "SIGFPE"),
+        ("ill", "SIGILL"),
+        ("stack", "SIGSEGV"),
+        ("wild_mutate", "SIGSEGV"),
+    ])
+    def test_fault_is_contained(self, tmp_path, rng, kind, name):
+        plugin = self._plugin(tmp_path, kind)
+        assert plugin.mutate(self.TRIGGER, 64, rng) is None
+        assert plugin.failures == {name: 1}
+        assert plugin.last_failure_input == self.TRIGGER
+        # The plugin and the guard are both still usable afterwards.
+        out = plugin.mutate(self.OK, 64, rng)
+        assert out is not None and out[1] == self.OK[1] ^ 1
+
+    def test_hang_times_out(self, tmp_path, rng):
+        import time
+
+        plugin = self._plugin(tmp_path, "hang", timeout_ms=100)
+        t0 = time.monotonic()
+        assert plugin.mutate(self.TRIGGER, 64, rng) is None
+        assert time.monotonic() - t0 < 2.0
+        assert plugin.failures == {"timeout": 1}
+        assert plugin.mutate(self.OK, 64, rng) is not None
+
+    def test_timer_does_not_fire_after_a_fast_call(self, tmp_path, rng):
+        import time
+
+        plugin = self._plugin(tmp_path, "hang", timeout_ms=50)
+        for _ in range(20):
+            assert plugin.mutate(self.OK, 64, rng) is not None
+        time.sleep(0.2)  # a leaked timer would kill the process (default SIGRTMIN action)
+        assert plugin.failures == {}
+
+    def test_repeated_faults_do_not_degrade(self, tmp_path, rng):
+        plugin = self._plugin(tmp_path, "segv")
+        for i in range(300):
+            if i % 2:
+                assert plugin.mutate(self.TRIGGER, 64, rng) is None
+            else:
+                assert plugin.mutate(self.OK, 64, rng) is not None
+        assert plugin.failures == {"SIGSEGV": 150}
+
+    def test_signal_dispositions_are_restored(self, tmp_path, rng):
+        import ctypes
+        import signal
+
+        plugin = self._plugin(tmp_path, "segv")
+        probe = plugin._lib.fz_test_handler
+        probe.argtypes = [ctypes.c_int]
+        probe.restype = ctypes.c_ulong
+        sigs = (signal.SIGSEGV, signal.SIGBUS, signal.SIGFPE, signal.SIGILL, signal.SIGABRT)
+        before = [probe(int(g)) for g in sigs]
+        plugin.mutate(self.TRIGGER, 64, rng)
+        plugin.mutate(self.OK, 64, rng)
+        assert [probe(int(g)) for g in sigs] == before
+
+    def test_unisolated_mode_still_calls_through(self, tmp_path, rng):
+        plugin = self._plugin(tmp_path, "segv", isolate=False)
+        out = plugin.mutate(self.OK, 64, rng)
+        assert out is not None and out[1] == self.OK[1] ^ 1
+        assert plugin.failures == {}
+
+    def test_crossover_fault_is_contained(self, tmp_path, rng):
+        plugin = cm.CustomMutatorPlugin(_build(tmp_path, "xsegv", _CROSS_SEGV))
+        assert plugin.crossover(self.TRIGGER, b"zz", 64, rng) is None
+        assert plugin.failures == {"SIGSEGV": 1}
+        assert plugin.crossover(self.OK, b"zz", 64, rng) == b"\x01"
+
+    def test_registered_operator_survives_a_fault(self, tmp_path, rng):
+        src = _FAULT_TMPL.replace("FAULT", _FAULTS["segv"])
+        op = cm.register_custom_mutator(_build(tmp_path, "segv", src))[0]
+        assert op.mutate(self.TRIGGER, rng, 64) is None
+        assert op.mutate(self.OK, rng, 64) is not None
+
+
 class TestCli:
     def test_flag_is_declared_and_forwarded(self):
         from pathlib import Path
@@ -238,3 +375,7 @@ class TestCli:
         src = Path(commands.__file__).read_text()
         assert '"--custom-mutator"' in src
         assert 'custom_mutator=getattr(args, "custom_mutator", None)' in src
+        for flag in ("--custom-mutator-isolation", "--custom-mutator-timeout"):
+            assert f'"{flag}"' in src
+        assert 'custom_mutator_isolation=getattr(args, "custom_mutator_isolation", "guard")' in src
+        assert 'custom_mutator_timeout_ms=getattr(args, "custom_mutator_timeout", 1000)' in src

@@ -1850,6 +1850,8 @@ class Fuzzer:
         ff_templates=None,
         # libFuzzer-style custom mutator/crossover plugin (--custom-mutator SO).
         custom_mutator=None,
+        custom_mutator_isolation="guard",
+        custom_mutator_timeout_ms=1000,
         # Successive-elimination / racing bandit for operator scheduling.
         successive_elim=False,
         successive_elim_delta=0.1,
@@ -2388,7 +2390,11 @@ class Fuzzer:
         if custom_mutator:
             from fuzzer_tool.core.mutations.custom_mutator import register_custom_mutator
 
-            register_custom_mutator(custom_mutator)
+            register_custom_mutator(
+                custom_mutator,
+                isolate=custom_mutator_isolation != "none",
+                timeout_ms=custom_mutator_timeout_ms,
+            )
         # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
