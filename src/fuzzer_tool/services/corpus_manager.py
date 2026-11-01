@@ -126,7 +126,7 @@ class PoissonDiskAdmission:
             return False
         neighbor_edges: set[int] = set()
         for nk in neighbor_keys:
-            neighbor_edges |= edge_tracker.seed_edges.get(nk, set())
+            neighbor_edges.update(edge_tracker.seed_edges.get(nk, ()))  # EdgeSet: no rebind
         return bool(seed_edges - neighbor_edges)
 
     def _track_occupancy(self, seed_key: str, minhash) -> None:
