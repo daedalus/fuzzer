@@ -45,6 +45,11 @@ log = logging.getLogger(__name__)
 # WEIGHT_FILL_PER_PASS of them; the rest use neutral multipliers until a later
 # pass reaches them, so the first pick no longer stalls for the whole corpus.
 LAZY_WEIGHT_MIN_CORPUS = 512
+# Corpus change that forces a weight pass before the 200-exec interval:
+# max(WEIGHT_GROWTH_MIN, WEIGHT_GROWTH_FRAC x corpus). A fixed +20 ran the
+# O(corpus) pass every ~77 execs on a growing FFmpeg corpus (6% of fuzz_one).
+WEIGHT_GROWTH_MIN = 20
+WEIGHT_GROWTH_FRAC = 0.05
 WEIGHT_FILL_PER_PASS = 32
 _NEUTRAL_WEIGHTS = (1.0, 1.0, 1.0, 0.5)
 RARE_EDGE_OWNERS = 3
@@ -312,6 +317,14 @@ def _rank_by_flux(
             best_op, best = op, value
 
     return best_op
+
+
+def weight_growth_due(last: int, now: int) -> bool:
+    """Whether the corpus moved enough since the last weight pass (either way).
+
+    e.g. last=1000: 20 new seeds wait for the interval, 50 recompute.
+    """
+    return abs(now - last) >= max(WEIGHT_GROWTH_MIN, int(last * WEIGHT_GROWTH_FRAC))
 
 
 class _EdgeVectors:
@@ -2750,8 +2763,7 @@ class SeedPicker:
         # every new seed, turning weight computation into an O(corpus_size)
         # tax on each accepted seed during growth phases.
         recompute_interval = 200
-        corpus_growth = corpus_version - getattr(f, "_last_weight_corpus_size", 0)
-        if abs(corpus_growth) >= 20:
+        if weight_growth_due(getattr(f, "_last_weight_corpus_size", 0), corpus_version):
             f._weight_cache = None
             f._last_weight_corpus_size = corpus_version
         cache_key = bucket(f.exec_count, recompute_interval, "seed_picker.weights")
