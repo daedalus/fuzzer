@@ -180,9 +180,11 @@
  * -fsanitize-coverage=trace-pc every shim function that the -include drags into
  * the target TU gets a call to __sanitizer_cov_trace_pc -- including that
  * callback itself, which recurses until the stack is gone. __AFL_GCC_NO_COV
- * marks shim code gcc must leave alone. It is empty under clang on purpose:
- * clang's guard numbering (and so every edge id) must not move. Needs gcc >= 12
- * (no_sanitize_coverage); build_targets.sh refuses trace-pc on older gcc. */
+ * marks shim code gcc must leave alone. It is empty under clang because the
+ * pragma at the top of this file already exempts the whole shim there (before
+ * that pragma it was empty to keep clang's guard numbering and edge ids still).
+ * Needs gcc >= 12 (no_sanitize_coverage); build_targets.sh refuses trace-pc on
+ * older gcc. */
 #if !defined(__clang__)
 #  define __AFL_GCC_NO_COV __AFL_NO_COV
 #else
@@ -206,6 +208,17 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+/* Shim code is never instrumented under clang. The shim is -include'd into
+ * the target's translation unit, so without this every shim function got
+ * coverage guards (510-552 sites) that numbered ahead of the target's own,
+ * fed shim-internal edges into the map, and inflated the `blocks:`
+ * denominator. Pushed after the system headers (their inlines are not ours);
+ * popped on the last line of the file. Moves every clang guard index and so
+ * every edge id: scheme 4, __afl_shim_uncovered below. */
+#if defined(__clang__)
+#  pragma clang attribute push(__attribute__((no_sanitize("coverage"))), apply_to = function)
+#endif
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
@@ -475,6 +488,12 @@ const uint32_t __afl_edge_ids_v2 = 2;
 #if defined(__clang__)
 __attribute__((visibility("default"), used))
 const uint32_t __afl_tracepc_ids_mixed = 3;
+
+/* Presence-only: clang builds whose shim carries no coverage instrumentation
+ * (scheme 4). Guard indices and trace-pc call addresses both moved, so ids of
+ * guard and trace-pc builds changed. elf.detect_edge_id_scheme checks it first. */
+__attribute__((visibility("default"), used))
+const uint32_t __afl_shim_uncovered = 4;
 #endif
 
 /* Crash-handler scope marker. Present means the crash handler only jumps
@@ -7130,3 +7149,7 @@ __AFL_NO_COV static void __afl_preload_init(void) {
 
 /* The target's sigaction() calls bind to the interposer, not the macro. */
 #undef sigaction
+
+#if defined(__clang__)
+#  pragma clang attribute pop
+#endif

@@ -129,15 +129,16 @@ def test_clang_tracepc_ids_fit_dense_map(ids):
 
 
 @requires_clang
-def test_clang_tracepc_reports_scheme_3(builds):
-    """Old state from raw-PC ids must be refused, not silently mixed."""
-    assert detect_edge_id_scheme(builds["trace_pc"]) == 3
+def test_clang_tracepc_reports_scheme_4(builds):
+    """Old state from raw-PC ids (1/2) or the instrumented-shim ids (3) must be
+    refused, not silently mixed: the shim no longer carries coverage of its own."""
+    assert detect_edge_id_scheme(builds["trace_pc"]) == 4
 
 
 @requires_clang
-def test_clang_guard_scheme_unchanged(builds):
-    """Falsification: guard ids did not change, so their scheme must not."""
-    assert detect_edge_id_scheme(builds["guard"]) == 2
+def test_clang_guard_reports_scheme_4(builds):
+    """Guard builds moved with the shim's own guards gone (was 2)."""
+    assert detect_edge_id_scheme(builds["guard"]) == 4
 
 
 @requires_gcc12

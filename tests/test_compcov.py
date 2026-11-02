@@ -329,6 +329,42 @@ int main(int argc, char **argv) {
         if (buf[i] > 'M') acc += 1; else if (buf[i] == 'X') acc += 2; else acc += 3;
         if (argc > 5) acc ^= i;
     }
+    /* The shim no longer carries coverage of its own, so this target has to
+     * supply the census itself: data-dependent branches the optimiser keeps. */
+    volatile unsigned char v[32];
+    for (int i = 0; i < 32; i++) v[i] = (unsigned char)(argc * 7 + i * 13);
+    if (v[0] & 1) { acc += 0; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 1; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[1] & 1) { acc += 1; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 4; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[2] & 1) { acc += 2; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 7; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[3] & 1) { acc += 3; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 10; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[4] & 1) { acc += 4; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 13; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[5] & 1) { acc += 5; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 16; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[6] & 1) { acc += 6; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 19; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[7] & 1) { acc += 7; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 22; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[8] & 1) { acc += 8; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 25; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[9] & 1) { acc += 9; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 28; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[10] & 1) { acc += 10; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 31; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[11] & 1) { acc += 11; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 34; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[12] & 1) { acc += 12; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 37; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[13] & 1) { acc += 13; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 40; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[14] & 1) { acc += 14; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 43; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[15] & 1) { acc += 15; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 46; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[16] & 1) { acc += 16; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 49; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[17] & 1) { acc += 17; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 52; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[18] & 1) { acc += 18; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 55; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[19] & 1) { acc += 19; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 58; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[20] & 1) { acc += 20; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 61; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[21] & 1) { acc += 21; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 64; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[22] & 1) { acc += 22; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 67; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[23] & 1) { acc += 23; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 70; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[24] & 1) { acc += 24; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 73; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[25] & 1) { acc += 25; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 76; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[26] & 1) { acc += 26; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 79; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[27] & 1) { acc += 27; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 82; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[28] & 1) { acc += 28; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 85; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[29] & 1) { acc += 29; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 88; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[30] & 1) { acc += 30; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 91; __asm__ volatile("nop; nop" ::: "memory"); }
+    if (v[31] & 1) { acc += 31; __asm__ volatile("nop" ::: "memory"); } else { acc ^= 94; __asm__ volatile("nop; nop" ::: "memory"); }
     volatile int r = memcmp(buf, "MAGICHDR", 8);
     return (r == 12345) + (acc == -1);
 }

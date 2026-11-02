@@ -1733,7 +1733,12 @@ def detect_edge_id_scheme(target: str) -> int | None:
     mixed id. ``__afl_tracepc_ids_mixed`` marks the shim; only a binary that
     calls the trace-pc callback has ids it changes.
 
+    Clang builds moved once more (scheme 4): the shim stopped carrying its own
+    coverage guards, so every guard index and trace-pc call address shifted.
+    ``__afl_shim_uncovered`` marks it, for guard and trace-pc builds alike.
+
     Returns:
+        4 for a clang build with ``__afl_shim_uncovered``;
         3 for a clang trace-pc build with ``__afl_tracepc_ids_mixed``;
         2 when ``__afl_edge_ids_v2`` is present; 1 when the symbol table was
         read and the marker is absent (an older shim, or no shim -- ptrace
@@ -1750,6 +1755,8 @@ def detect_edge_id_scheme(target: str) -> int | None:
         return None
     if "__afl_edge_ids_v2" not in names:
         return 1
+    if "__afl_shim_uncovered" in names:
+        return 4
     if "__afl_tracepc_ids_mixed" in names and trace_pc_call_sites(target):
         return 3
     return 2
