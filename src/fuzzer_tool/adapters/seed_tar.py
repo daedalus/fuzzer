@@ -19,10 +19,11 @@ import gzip
 import logging
 import tarfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from pathlib import Path
 
 from fuzzer_tool.adapters.seed_zip import SeedTree
+from fuzzer_tool.core.hashing import key16
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,52 @@ def _members(corpus_dir: Path) -> Iterator[tuple[tarfile.TarFile, tarfile.TarInf
                 yield tf, info, tree
     except _READ_ERRORS as e:
         log.warning("%s: unreadable past this point (%s); kept seeds read so far", path, e)
+
+
+def _from_leaf(name: str) -> str | None:
+    """Content key from a member leaf ``id_<16 hex>``; None when unnamed."""
+    leaf = name.rsplit("/", 1)[-1]
+    if not leaf.startswith("id_") or len(leaf) != 19:
+        return None
+    try:
+        int(leaf[3:], 16)
+    except ValueError:
+        return None
+    return leaf[3:]
+
+
+def named(corpus_dir: str | Path) -> Iterator[tuple[str, int, bool, str]]:
+    """Yield (seed id, size, protected, hh) for every live member.
+
+    hh is the two-character shard (e.g. ``ab``) from the member path ``seeds/ab/id_...``.
+    """
+    for _tf, info, tree in _members(Path(corpus_dir)):
+        sid = _from_leaf(info.name)
+        if sid is not None:
+            hh = info.name.split("/")[1] if "/" in info.name else ""
+            yield sid, info.size, bool(tree), hh
+        # skip non-seed members (tree is not None)
+
+
+def pick(corpus_dir: str | Path, wanted: Collection[str]) -> Iterator[tuple[str, bytes, str]]:
+    """Yield (seed id, data, hh) for the wanted live members, in one streaming pass."""
+    for _tf, info, _tree in _members(Path(corpus_dir)):
+        sid = _from_leaf(info.name)
+        if sid is not None and sid not in wanted:
+            continue
+
+        f = _tf.extractfile(info)
+        if f is None:
+            continue
+        try:
+            data = f.read()
+        except _READ_ERRORS as e:
+            log.warning("%s: member %r torn (%s); stopping", TAR_NAME, info.name, e)
+            return
+        sid = sid or key16(data)
+        if sid in wanted:
+            hh = info.name.split("/")[1] if "/" in info.name else info.name
+            yield sid, data, hh
 
 
 def live(corpus_dir: str | Path) -> Iterator[tuple[bytes, bool]]:

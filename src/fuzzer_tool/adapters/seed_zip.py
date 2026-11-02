@@ -40,7 +40,7 @@ import struct
 import warnings
 import zipfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 from pathlib import Path
@@ -420,6 +420,35 @@ class SeedZip:
         self._index()
         protected = {h for _, h in self._protected}
         return len(self._main_live - protected) + len(self._foreign)
+
+    def named(self) -> Iterator[tuple[str, int, bool, str]]:
+        """``(hash, size, protected, hh)`` for live members; nothing inflated."""
+        self._index()
+        protected = {h for _, h in self._protected}
+        live = self._main_live | protected
+        if not live:
+            return
+
+        with zipfile.ZipFile(self._path) as zf:
+            sizes = {info.filename: info.file_size for info in zf.infolist()}
+        for h in sorted(live):
+            name = self._where.get(h, "")
+            hh = name.split("/")[0] if "/" in name else ""
+            yield h, sizes.get(name, 0), h in protected, hh
+
+    def pick(self, wanted: Collection[str]) -> Iterator[tuple[str, bytes, str]]:
+        """``(hash, data, hh)`` for the live members in *wanted*, one at a time."""
+        self._index()
+        protected = {h for _, h in self._protected}
+        live = self._main_live | protected
+        if not live:
+            return
+        with zipfile.ZipFile(self._path) as zf:
+            for h in sorted(live):
+                name = self._where.get(h)
+                if h in wanted and name is not None:
+                    hh = name.split("/")[0] if "/" in name else ""
+                    yield h, zf.read(name), hh
 
     def _read_foreign(self) -> dict[str, bytes]:
         """``{content hash: data}`` of foreign members not already canonical."""

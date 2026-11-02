@@ -1603,6 +1603,44 @@ def cmd_minimize(args):
     return 0
 
 
+def cmd_full_cover(args):
+    """Corpus minimized against the edge dump's full coverage."""
+    from fuzzer_tool.services.full_cover import (
+        ArchiveReadOnly,
+        IncompleteCover,
+        UnreachableEdges,
+        full_cover,
+    )
+
+    try:
+        rep = full_cover(
+            args.edges,
+            args.corpus,
+            output_dir=args.output,
+            allow_unreachable=args.allow_unreachable,
+        )
+    except UnreachableEdges as e:
+        print(f"[-] {e}", file=sys.stderr)
+        if e.partial is not None:
+            print(
+                f"[+] Corpus reaches {e.partial.reachable_edges} union edges "
+                f"of {e.partial.union_edges} in dump "
+                f"({e.partial.unreachable_edges} unreachable, {e.partial.unmeasured} unmeasured)"
+            )
+        return 2
+    except (IncompleteCover, ArchiveReadOnly) as e:
+        print(f"[-] {e}", file=sys.stderr)
+        return 2
+
+    print(
+        f"[+] Kept {rep.kept}/{rep.on_disk} seeds covering "
+        f"{rep.reachable_edges} union edges "
+        f"of {rep.union_edges} in dump "
+        f"({rep.unreachable_edges} unreachable, {rep.unmeasured} unmeasured)"
+    )
+    return 0
+
+
 def cmd_edge_dump(args):
     """Replay a corpus and write each seed's edge ids; no pruning."""
     if not (args.inprocess and ":" in args.target):
@@ -7191,6 +7229,28 @@ def main() -> int:
         "Bounds replay time on corpora with a few huge inputs",
     )
     min_parser.set_defaults(func=cmd_minimize)
+
+    # --- full-cover ---
+    fc_parser = subparsers.add_parser(
+        "full-cover",
+        help="Minimal corpus that still reaches every edge in an edge-dump pickle",
+    )
+    fc_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
+    fc_parser.add_argument(
+        "-e", "--edges", required=True, help="edge-dump pickle: {seed_id: edge ids}"
+    )
+    fc_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output directory (default: move redundant seeds to corpus/pruned/)",
+    )
+    fc_parser.add_argument(
+        "--allow-unreachable",
+        action="store_true",
+        help="Cover the reachable edges when the dump holds edges no seed on disk reaches",
+    )
+    fc_parser.set_defaults(func=cmd_full_cover)
 
     # --- edge-dump ---
     ed_parser = subparsers.add_parser(

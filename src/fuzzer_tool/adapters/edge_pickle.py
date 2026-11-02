@@ -32,6 +32,7 @@ import logging
 import os
 import pickle
 import pickletools
+from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO
 
@@ -114,6 +115,57 @@ def read_edges_pickle(path: str | Path) -> dict[str, np.ndarray]:
             if not _valid(batch):
                 return merged
             merged.update(batch)
+
+
+def _batch_spans(f: BinaryIO) -> Iterator[tuple[int, int]]:
+    """Byte span of every top-level set-items batch in *f*.
+
+    The batch MARK is the last MARK before its SETITEMS: array payloads carry
+    no MARK of their own (1-D reduce is a tuple), and a nested one is consumed
+    before the batch's own.
+    """
+    mark = None
+    try:
+        for op, _, pos in pickletools.genops(f):
+            if op.name == "MARK":
+                mark = pos + len(pickle.MARK)
+            elif op.name in _BATCH_END and mark is not None:
+                yield mark, pos + 1
+    except _TORN:
+        return
+
+
+def iter_edges_pickle(path: str | Path) -> Iterator[dict[str, np.ndarray]]:
+    """Yield one batch at a time, so a multi-GB export is never fully resident.
+
+    Each batch re-memoizes what it uses (fresh pickler per write), so a batch
+    unpickles standalone from its MARK to its SETITEMS.
+    """
+    path = Path(path)
+    with open(path, "rb") as f:
+        head = f.read(len(_HEAD))
+    if head != _HEAD:  # old layout: back-to-back dict pickles, one at a time
+        with open(path, "rb") as f:
+            while True:
+                try:
+                    batch = pickle.load(f)
+                except _TORN:
+                    return
+                if not _valid(batch):
+                    return
+                yield batch
+        return
+
+    with open(path, "rb") as scan, open(path, "rb") as data:
+        for start, end in _batch_spans(scan):
+            data.seek(start)
+            try:
+                batch = pickle.loads(_HEAD + data.read(end - start) + _STOP)
+            except _TORN:
+                return
+            if not _valid(batch):
+                return
+            yield batch
 
 
 class EdgePickleWriter:
