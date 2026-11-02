@@ -7772,7 +7772,12 @@ class Fuzzer:
     @staticmethod
     def _setup_asan_env(env: dict) -> None:
         """Set LD_PRELOAD and ASAN_OPTIONS for an ASAN-instrumented target."""
-        from fuzzer_tool.cli.ldpreload_wrapper import ASAN_RELEASE_TO_OS, _resolve_asan
+        from fuzzer_tool.cli.ldpreload_wrapper import (
+            ASAN_RELEASE_TO_OS,
+            ASAN_STRICT_DEFAULTS,
+            _resolve_asan,
+            asan_strict_enabled,
+        )
 
         libasan = _resolve_asan()
         if libasan:
@@ -7789,6 +7794,7 @@ class Fuzzer:
             "detect_leaks=0",
             "detect_odr_violation=0",
             ASAN_RELEASE_TO_OS,
+            *(ASAN_STRICT_DEFAULTS if asan_strict_enabled() else ()),
         ):
             key = opt.split("=")[0]
             if key not in seen:

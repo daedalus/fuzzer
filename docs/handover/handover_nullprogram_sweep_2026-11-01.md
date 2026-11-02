@@ -76,18 +76,46 @@ Per-target status (every file in `targets/`):
 Remaining real gap: none for persistent targets. The only open item is whether
 to make the fixed-buffer fixtures exact-size, which has low value.
 
-### F2. ASan options lack fill and use-after-return settings (MEDIUM)
+### F2. ASan fill size and use-after-return: IMPLEMENTED as opt-in (2026-11-02)
 
 Source: AFL++ tips, tip (1).
 
-A grep of `src/`, `tools/` and `targets/` found no
-`max_malloc_fill_size` and no `detect_stack_use_after_return`. The options
-the fuzzer does set (`halt_on_error=0`, `abort_on_error=0`,
-`suppress_equal_pcs=0`, in `fuzzer.py` near line 7783) exist for the
-in-process recover mode (see `docs/ASAN-LIMITATION.md`, Layer 3). Raising the
-fill size could interact with that mode, so test before enabling by default.
-The default ASan fill covers only the first 4 KiB of an allocation, so a large
-uninitialized read can go undetected.
+Corrections to the original finding: `uninit_probe.py` already sets
+`max_malloc_fill_size=1<<28` for its own differential runs (my first grep was
+cut off by `head`), and gcc 13 libasan already defaults
+`detect_stack_use_after_return` to on. What was missing is a **global** setting
+for fuzzing runs, in both places that build ASan options:
+`cli/ldpreload_wrapper.py` (`_ASAN_DEFAULTS`) and `Fuzzer._setup_asan_env`.
+
+Measured (gcc 13 libasan, malloc+free per call, default fill 4096 vs full fill):
+1 KiB 0.88 -> 0.88 us; 64 KiB 85 -> 325 us; 1 MiB 91 -> 2753 us;
+16 MiB 756 -> 8425 us. That cost is why this is **opt-in**, not a default:
+targets that allocate large buffers per input (ffmpeg) would slow down.
+
+What it buys (reproduced): `malloc(8192)` never initialized, then `strlen`:
+default fill gives `strlen=4096` with no report (fresh pages are zero past
+4 KiB); with the full fill ASan reports a heap-buffer-overflow.
+Stack-use-after-return: returning `&local` prints `42` with
+`detect_stack_use_after_return=0` and is reported with `=1`.
+
+Implementation: `FUZZER_ASAN_STRICT=1` (exactly `1`; same style as
+`FUZZER_KEEP_ASLR`) adds `max_malloc_fill_size=268435456` and
+`detect_stack_use_after_return=1` after the existing recover-mode options
+(`halt_on_error=0`, `abort_on_error=0`, ...), which are unchanged. User-set
+keys win in both places. `uninit_probe` appends its own fill after, so it
+still wins. Tests: `tests/test_asan_strict_options.py` (12, including a
+compiled uninitialized-read program that is skipped without a compiler).
+
+Not done / not verified:
+- No CLI flag; env var only. A flag would need plumbing through
+  `commands.py` into the wrapper's argv scan.
+- gcc 13 has no `-fsanitize-address-use-after-return` compile flag; with
+  clang the runtime option also needs that flag at build time (not checked,
+  no clang in the sweep container).
+- Not run against the real in-process recover-mode path
+  (`docs/ASAN-LIMITATION.md`, Layer 3) or any ffmpeg target; only a small
+  persistent harness with the shim ran cleanly under the strict options.
+- No exec/s measurement on a real target. Do that before ever making it a default.
 
 ### F3. No state isolation between persistent-mode iterations (MEDIUM, unaudited)
 
@@ -171,6 +199,6 @@ today was not checked).
 
 1. F1 withdrawn (see F1); the static guard test is the only change.
 2. F4 after confirming tugz builds.
-3. F2 behind a flag, tested against the recover-mode path.
+3. F2 done as opt-in; remaining: measure exec/s on `ffmpeg_read_asan.so` and run the recover-mode path with `FUZZER_ASAN_STRICT=1`.
 4. F5 simulation only; implement only if the hybrid beats the 0.40%/32 baseline.
 5. F3 audit, F7 check of `validity.py`.

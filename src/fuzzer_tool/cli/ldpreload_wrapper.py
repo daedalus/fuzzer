@@ -146,6 +146,30 @@ _ASAN_DEFAULTS = (
     "suppress_equal_pcs=0",
     ASAN_RELEASE_TO_OS,
 )
+# Opt-in (FUZZER_ASAN_STRICT=1), not a default: the ASan allocator fills only the
+# first 4 KiB of a fresh allocation, so an uninitialized read past 4 KiB sees
+# zeros from the OS and goes unreported, and persistent-mode iterations leak
+# heap contents into each other. Filling whole allocations fixes both, at a
+# cost measured with gcc 13 libasan (malloc+free, per call): 1 KiB unchanged,
+# 64 KiB 85 -> 325 us, 1 MiB 91 -> 2753 us, 16 MiB 756 -> 8425 us. Targets that
+# allocate large buffers per input (ffmpeg) will slow down noticeably.
+# detect_stack_use_after_return is pinned on: libasan from gcc 13 already
+# defaults it on, older runtimes default it off, and it also needs a build with
+# -fsanitize-address-use-after-return (runtime mode).
+# 1 << 28 matches uninit_probe._ASAN_FILL_MAX, whose per-run options come later
+# in ASAN_OPTIONS and therefore still win.
+ASAN_STRICT_FILL_MAX = 1 << 28
+ASAN_STRICT_DEFAULTS = (
+    f"max_malloc_fill_size={ASAN_STRICT_FILL_MAX}",
+    "detect_stack_use_after_return=1",
+)
+
+
+def asan_strict_enabled() -> bool:
+    """True when FUZZER_ASAN_STRICT=1 asks for the strict ASan option set."""
+    return os.environ.get("FUZZER_ASAN_STRICT") == "1"
+
+
 _UBSAN_DEFAULTS = ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1")
 # MSan aborts via exit(), not abort(): a distinct exit code (OSS-Fuzz uses 86)
 # separates a use-of-uninitialized-value report from a normal target exit.
@@ -185,7 +209,10 @@ def main() -> None:
             libasan = _resolve_asan()
             if libasan:
                 _preload(libasan, "libasan")
-            _merge_opts("ASAN_OPTIONS", _ASAN_DEFAULTS)
+            _merge_opts(
+                "ASAN_OPTIONS",
+                _ASAN_DEFAULTS + (ASAN_STRICT_DEFAULTS if asan_strict_enabled() else ()),
+            )
 
         if _detect_ubsan(target):
             libubsan = _resolve_ubsan()
