@@ -267,3 +267,21 @@ Shipped as `minimize -c --count-aware {bucket,thermo}`, off by default. Bucket m
 ## 13. First paired run of the Gram seed arm (2026-11-01)
 
 `--seed-gram-scheduler` (`core/schedulers/seed_gram.py`): tickets from the top eigenvector of B over the core-stripped incidence, via `gram_matrixfree`. `bench_paired.py --set ffmpeg --seeds 0-9 --reps 3 --iters 5000`, arms `seed-gram` (peripheral) and `seed-gram-central` vs `baseline`: peripheral W2/L8 (McNemar p=0.109), central W1/L9 (p=0.0215, Holm 0.043), median edge delta about -1000 against within-arm noise of 1200-1450. Neither arm beats the default picker, and both direction choices lose, so the eigenvector loading is not a useful seed signal here, consistent with §8 (readouts track coverage size). Caveats: 1-core sandbox, audio-only FFmpeg component set (not the full build the `ffmpeg` set assumes), 10 cells, no A/A control, sole-arm vs `baseline` (not as an Elo arm vs `elo`). At 1k execs outcomes were bimodal (~800-1000 or ~2100-2800 edges) for every arm including `baseline`, so smaller budgets cannot separate arms. Next: swap-randomized null before any further Gram scheduler; do not field this arm in `--hail-mary`.
+
+## 14. Why the Gram seed arm does not win (2026-11-01)
+
+Same cells as §13 (`--set ffmpeg`, seeds 0-9 x 3 reps x 5k execs), adding a uniform control `seed-round-robin`:
+
+| vs `seed-round-robin` | W/L | McNemar | median edge delta |
+|---|---|---|---|
+| `baseline` | 8/2 | 0.109 | +951 |
+| `seed-gram` | 4/6 | 0.754 | -389 |
+| `seed-gram-central` | 6/4 | 0.754 | +154 |
+
+1. **The §13 "loss" is the setup, not the arm.** A neutral round-robin picker loses to `baseline` by the same ~1000 edges (W2/L8); both Gram arms are indistinguishable from round-robin. Any sole seed picker pays that gap against the default weighted picker here; compare Elo-arm vs `elo` before reading anything into it.
+2. **Gram tickets are nearly uniform.** On a 5k-exec ffmpeg corpus (393 seeds, `tools/edge_diagnostic.py collect`): peripheral ESS/N = 0.962 (top 10% of seeds hold 11.4% of the mass; uniform is 10%), central ESS/N = 0.740 (25%). With the 0.1 floor the arm is round-robin with a small tilt, so it cannot beat it by much.
+3. **The loading is coverage size.** Spearman(v, coverage size) = 0.81, (v, rarity sum) = 0.66, and size vs rarity sum = 0.96: the eigenvector adds little beyond size, as §8 found on fuzzgoat and png_read.
+4. **Core stripping is a no-op here.** No edge is owned by 90% of seeds (the ids are context-hashed: max id 16.7M, 113k distinct), so `core_stripped` equals `binary`.
+5. **Defect found and fixed:** `Incidence` sized arrays by the largest edge id, so one refit on that corpus took 4.7 s and ~520 MB. `compact_columns` relabels columns first: 0.07 s, 90 MB, same eigenvalue. The §13 cells are unaffected (they are fixed-exec, and eps matched across arms), but any longer run would have paid for it.
+
+Not tested: whether loading predicts a seed's later finds (needs per-seed find counts), and an Elo-arm vs `elo` run. Next if pursued: a ticket map that is not near-uniform (e.g. rank-based, no floor) and the swap-randomized null.

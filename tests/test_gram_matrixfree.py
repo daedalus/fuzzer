@@ -6,6 +6,7 @@ import pytest
 from fuzzer_tool.core.gram_matrixfree import (
     Incidence,
     column_weights,
+    compact_columns,
     hub_scores,
     participation_ratio,
     top_eigenpair,
@@ -136,3 +137,17 @@ def test_no_dense_gram_allocated_at_scale():
     inc = Incidence(rows, 2100)
     lam, v, _ = top_eigenpair(inc)
     assert lam > 0 and v.shape == (n,)
+
+
+def test_compact_columns_keeps_the_matrix_and_shrinks_the_arrays():
+    sparse = [np.array([5, 10**7, 16_700_000]), np.array([5, 99]), np.array([], dtype=np.int64)]
+    rows, k = compact_columns(sparse)
+    assert k == 4 and max(int(r.max()) for r in rows if len(r)) == 3
+    assert [len(r) for r in rows] == [3, 2, 0]
+    big = Incidence(sparse, weighting="rarity")
+    small = Incidence(rows, n_edges=k, weighting="rarity")
+    u = np.array([1.0, 2.0, 3.0])
+    assert np.allclose(big.matvec_b(u), small.matvec_b(u))
+    assert big.n_edges > 10**7 > small.n_edges
+    empty, k0 = compact_columns([np.array([], dtype=np.int64)])
+    assert k0 == 0 and len(empty[0]) == 0

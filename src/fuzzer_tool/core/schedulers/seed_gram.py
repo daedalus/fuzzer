@@ -27,7 +27,7 @@ from __future__ import annotations
 import numpy as np
 
 from fuzzer_tool.core.cadence import phase_of
-from fuzzer_tool.core.gram_matrixfree import Incidence, top_eigenpair
+from fuzzer_tool.core.gram_matrixfree import Incidence, compact_columns, top_eigenpair
 from fuzzer_tool.core.schedulers._arm_counts import ArmCounts
 from fuzzer_tool.core.schedulers.seed_dpp import _cdf_index, _edge_array
 
@@ -85,7 +85,8 @@ class SeedGramScheduler(ArmCounts):
         rows = [_edge_array(seed_edges[k]) for k in keys]
         if not any(len(r) for r in rows):
             return False
-        inc = Incidence(rows, weighting="core_stripped")
+        rows, n_cols = compact_columns(rows)
+        inc = Incidence(rows, n_edges=n_cols, weighting="core_stripped")
         lam, v, _ = top_eigenpair(inc)
         top = float(v.max()) if lam > 0.0 else 0.0
         scaled = v / top if top > 0.0 else np.zeros(len(keys))

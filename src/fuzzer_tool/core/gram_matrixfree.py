@@ -32,6 +32,24 @@ DEFAULT_TOL = 1e-10
 DEFAULT_MAX_ITER = 1000
 
 
+def compact_columns(rows: Sequence[np.ndarray]) -> tuple[list[np.ndarray], int]:
+    """Renumber edge ids to ``0..k-1`` over the ids actually present.
+
+    ``Incidence`` sizes its column arrays by the largest id. Hashed or
+    context-sensitive edge ids are sparse in a huge range (measured on an
+    ffmpeg corpus: max id 16.7M, 113k distinct), so uncompacted a refit took
+    4.7 s and ~520 MB against 0.05 s compacted, with the same eigenvalue. The
+    matrix is unchanged: columns are only relabelled.
+    """
+    lens = [len(r) for r in rows]
+    if not sum(lens):
+        return [np.zeros(0, dtype=np.int64) for _ in rows], 0
+    flat = np.concatenate([np.asarray(r, dtype=np.int64) for r in rows])
+    uniq, inv = np.unique(flat, return_inverse=True)
+    off = np.concatenate(([0], np.cumsum(lens)))
+    return [inv[off[i] : off[i + 1]] for i in range(len(rows))], int(uniq.shape[0])
+
+
 class Incidence:
     """Sparse seed x edge incidence in CSR form with a column scale.
 
