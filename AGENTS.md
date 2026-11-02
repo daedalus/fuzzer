@@ -98,6 +98,7 @@ fuzzer, not just the target.
     - Each row carries W/L, test and p, median Δ, the A/A control (Hard Rule 46) or `none`, a verdict from the ledger's list, and the source doc. No control → no `WIN`/`LOSS`.
     - Interim splits are not results (Boltzmann: 7W/2L at 10 grep seeds, 5W/5L for the next 10).
     - Closing a `docs/AB_PENDING.md` row requires its ledger row. `tests/test_ab_ledger.py` enforces the format.
+60. **Evidence over assumptions. Verification over confidence.**
 
 ## Corpus Rules
 
