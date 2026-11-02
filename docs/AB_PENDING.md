@@ -32,6 +32,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Entropic seed (`--entropic-seed`) | libFuzzer Entropic energy | N | fuzzgoat null (9W/7L); png/grep, `--elo` vs weighted |
 | Good-Turing seed/op/pos (`--good-turing-seed`, `--op-good-turing`, `--pos-good-turing`, `--good-turing-estimator`) | Unseen-edge mass per seed / op / bin | U | `elo-good-turing-seed`, `elo-op-good-turing` vs `elo`, `pos-arena-good-turing`; prior sweep; add `elo-good-toulmin-seed` |
 | DPP seed arm (`--seed-dpp-scheduler`) | DPP over hashed edge sets | N | 5W/15L p=0.041 (Holm 0.083); `--reps 3`; as Elo arm vs `elo` |
+| Gram eigenvector seed arm (`--seed-gram-scheduler`, `--seed-gram-mode {peripheral,central}`) | Tickets from the top eigenvector of B = A Aᵀ (core-stripped incidence), matrix-free | N | `--set ffmpeg` (9.0.2 noasan, audio-only component set, 1 core), 10 seeds x 3 reps x 5k execs, sole arm vs `baseline`. peripheral W2 L8 (McNemar p=0.109), central W1 L9 (p=0.0215, Holm 0.043); med Δ edges -1043 / -983, noise 1216 / 1451. No A/A control, 10 cells; read as "no gain", not as a measured loss |
 | Doppler energy (`--schedule doppler`) | Power-Doppler seed energy | U | vs `fast` |
 | Consolidated seed arm | Merged seed-arm features | U | vs `p2c`/`drr` |
 | OS/net ports (`mlfq`, `stride`, `eevdf`, `bfq`, `sfq`, `codel`, `aimd`, `p2c`, `op_stride`, `op_p2c`) | Kernel/network schedulers as seed/op arms | U | each vs `seed_round_robin`/`drr` |
