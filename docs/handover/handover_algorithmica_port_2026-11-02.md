@@ -1,0 +1,73 @@
+# Handover: what ports from en.algorithmica.org (Algorithms for Modern Hardware)
+
+**Date:** 2026-11-02. **Verified against:** `7c1de57d`. **Status:** analysis only, no code changed.
+**Source:** https://en.algorithmica.org/hpc/ (Sergey Slotin, 2021-22 draft; the English site hosts nothing else useful).
+
+## 1. Verdict
+
+Little ports directly. Two reasons, both verified in the repo:
+
+- The C side already applies most of the book (see section 2).
+- Time is spent in Python. `handover_shm_hugepages_ab_2026-10-28.md` section 4: target time is ~0.15 ms of a 1.5-5 ms cycle; `handover_unapplied_optimizations_2026-10-24.md` budgets ~6.8 ms/exec fuzzer-side vs ~1.8 ms in the target. Cache-line and SIMD tricks in the shim cannot move that.
+
+## 2. Already covered (do not port)
+
+| Book topic | Where it is in the repo |
+|---|---|
+| SIMD, masking, movemask+ctz | `afl_shim.c` `__afl_probe_vec` (AVX2 / SSE2 paths), `__afl_probe_insert` |
+| Cold paths, no-instrument attributes | `afl_shim.c`: `cold`, `noinline`, `__AFL_NO_COV`, 7 uses of `__builtin_expect`/`__AFL_LIKELY` |
+| Direct-mapped caches | `afl_shim.c` `__afl_ctx_base_cache` (keyed by return address) |
+| AoS vs SoA / scan layout | **Already implemented**: `--touched-scan`, see section 3 |
+| Hugepages / paging | Measured, no gain, not shipped: `handover_shm_hugepages_ab_2026-10-28.md` |
+| Blocked Bloom filters | Evaluated and rejected: `handover_sbbf_vs_flat_bloom_folding_2026-10-21.md` |
+| Pointer alternatives | `handover_tiny_pointers_shim_probe_2026-10-13.md` |
+| Fenwick / prefix-sum sampler | `core/fenwick_sampler.py` |
+| Eviction policies | `core/lru.py`, adaptive LRU in `smt_solver` |
+| NTT, Montgomery (secp256k1 only), number theory | `core/ntt.py`, `core/mutations/montgomery.py`, `core/numtheory.py` |
+| Binary search | `bisect` is C in CPython; `core/edge_set.py` bisects a sorted `array('I')` |
+
+Not found in the shim: `__builtin_prefetch` (0 matches). No port is proposed: the table is probed within a bounded window and the shim is not the bottleneck.
+
+## 3. Correction: item "#2 AoS/SoA scan layout" was already done
+
+An earlier version of this analysis proposed wiring the touched-slot bitmap into `ShmCoverage._scan`, relying on `handover_touched_bitmap_2026-10-07.md` ("not wired into `_scan`"). That handover is stale. In `7c1de57d`:
+
+- `adapters/shm.py` `_scan`: when `touched_scan` and `touched_supported`, live slots come from `_touched_slots()` (bitmap), then the same generation and non-zero-id filter.
+- `services/fuzzer.py:1023` `resolve_touched_scan`: `None` means auto, on from `TOUCHED_SCAN_MIN_ENTRIES = 65536`; `--touched-scan` forces on, `--no-touched-scan` forces off. Falls back to the table walk if the shim has no bitmap.
+- Measurements are in `docs/DEEP_DIVE.md` ("Touched-slot bitmap"): 2.5x/1.3x at 65536, 7.2x/3.3x at 262144, 21x/9x at 1M, no gain at 8192. Folding the bitmap was measured and rejected there.
+- The non-bitmap path (`_live_entries`) tests the generation byte with a stride-8 `uint8` compare, which touches every cache line of the table. For maps under 65536 entries that is the faster option (measured), so no layout change is proposed.
+
+Action: the stale statement in `handover_touched_bitmap_2026-10-07.md` can be updated to point at `DEEP_DIVE.md`. Not done here.
+
+## 4. Open candidates, highest value first
+
+### 4.1 Low-noise benchmark metric (book: Benchmarking, Getting Accurate Results)
+
+Evidence: `tools/lib/bench_paired.py`, `bench_replicated.py` and `noise_probe.py` contain no instruction-count, CPU-time or `perf` metric (grep for `perf_counter|process_time|instructions|perf stat|cycles|rusage|ru_utime|taskset|governor` over `bench_paired.py`, `benchmark.py`, `profile_hotpath.py` returned nothing; `bench_replicated.py` times with `time.time()`). Paired cells compare edge counts, and `noise_probe.py` documents that a cell is not reproducible under the same arm because of wall-clock state. The hugepages A/B had an A/A control drifting -1.0% to -3.7%, the size of every effect measured.
+
+Proposal for throughput A/Bs (T1-T11 of the optimizations handover): add an optional metric of user-mode instructions retired (`perf stat -e instructions:u`) or `resource.getrusage(RUSAGE_CHILDREN).ru_utime`, reported next to wall time, with the A/A control (Hard Rule 46) on the same metric. Instruction counts are insensitive to frequency scaling and neighbours; they do not capture cache or branch effects, so state that in any verdict.
+
+Not verified: `perf` and `valgrind` are not installed in the sandbox used for this analysis, and whether `perf` works in the target VM (hardware counters are often blocked in VMs) is unknown. `ru_utime` needs nothing extra and is the safe first step.
+
+### 4.2 Generic Montgomery constants (book: Montgomery Multiplication)
+
+`core/mutations/montgomery.py` only sniffs the secp256k1 field prime and curve order (`sniff_secp_modulus`, `_modulus_from_seed`). Proposal: a second sniffer/mutator for odd 32- and 64-bit moduli found in the seed, injecting `n' = -n^-1 mod 2^w` (Newton iteration `x *= 2 - n*x`, as in the book), `R mod n`, `R^2 mod n`. Helpers `_redc_n0_prime`, `_montgomery_r`, `_montgomery_r2`, `_barrett_mu` already exist; check they are width-parameterised before reuse (not verified, they are written for the 256-bit/64-limb case). Gate like the existing operator (registry `_AVAILABLE` predicate) so it is silent on seeds without a plausible modulus. Value is speculative: it only helps targets with word-size Montgomery code.
+
+### 4.3 Fast inverse square root constants (book: Fast Inverse Square Root)
+
+`core/mutations/structured.py` ~line 998 has float bit-pattern pairs (denormals, ulp neighbours, NaN payloads). Grep for `0x5f3759df`, `0x5fe6eb50` and `rsqrt` over `src/` and `dictionaries/` found no such constants (only the word `rsqrt` in `ruby.dict` and `x86.dict`). Adding `0x5f3759df` (f32) and `0x5fe6eb50c7b537a9` (f64) to the interesting-values set is a few lines. These are integers, not float patterns, so they probably belong with the integer interesting values rather than the `(f64_bits, f32_bits)` table; check which table the call sites read. Benefit is speculative.
+
+### 4.4 Sampling profiler for the Python hot path (book: Statistical Profiling)
+
+T4-T11 savings are 1-10 us per exec, below the overhead of a deterministic profiler like cProfile. Python 3.12 (sandbox: 3.12.3) supports `perf` with `PYTHONPERFSUPPORT=1` / `-X perf`; `pyproject.toml` has `requires-python >=3.11`, and 3.11 lacks it. `tools/profile_hotpath.py` exists; what profiler it uses was not checked.
+
+## 5. Rejected
+
+- Eytzinger layout, S-trees, SIMD binary search, wide segment trees: in CPython the lookups are C `bisect` calls or numpy; no interpreter-level gain.
+- Binary GCD, integer factorization: `math.gcd` is C; `numtheory.factorint` is documented instant at 64 bits.
+- Prefetching, cache associativity, alignment/packing in the shim: not measurable from Python.
+- Branchless programming in the shim: edges are counted, not branched on, in the hot path.
+
+## 6. Not done
+
+Nothing implemented. No benchmark run. Sandbox lacks `perf`/`valgrind`, so none of section 4 was measured. Suggested order: 4.1 first, since without a stable metric the throughput items cannot be shown to help.
