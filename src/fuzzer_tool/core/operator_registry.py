@@ -240,6 +240,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "shorten_chunk_mutate",
         "flac_chunk_mutate",
         "montgomery_mutate",
+        "montgomery_word_mutate",
         "lz4_chunk_mutate",
         "rar_chunk_mutate",
         "json_mutate",
@@ -559,6 +560,13 @@ def _sniff_bit_packed_samples(d: bytes) -> bool:
     )
 
 
+def _sniff_word_modulus(d: bytes) -> bool:
+    # Imported on first use: montgomery.py pulls in mutations.structured.
+    from fuzzer_tool.core.mutations.montgomery import sniff_word_modulus
+
+    return sniff_word_modulus(d)
+
+
 _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "png_chunk_mutate": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
     "png_crc_fix": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
@@ -674,6 +682,8 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "json_mutate": _sniff_json,
     "sql_mutate": _sniff_sql,
     "ecdsa_field_mutate": _sniff_secp_payload,
+    # known 32/64-bit modulus literal (NTT primes, 2^31-1, Goldilocks, ...), either endianness.
+    "montgomery_word_mutate": _sniff_word_modulus,
     # secp256k1 field prime or curve order as a BE 32-byte literal.
     "montgomery_mutate": lambda d: (
         b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"

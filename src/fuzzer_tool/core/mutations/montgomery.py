@@ -130,3 +130,112 @@ def montgomery_mutate(data: bytes, rng) -> bytes:
     if length < FIELD_BYTES:
         return data
     return _splice(data, offset, block)
+
+
+# ---------------------------------------------------------------------------
+# Word-size moduli (32 / 64 bit)
+# ---------------------------------------------------------------------------
+#
+# ``montgomery_mutate`` above only fires on the secp256k1 field prime and
+# curve order.  Word-size Montgomery code (NTT butterflies, Dilithium/Kyber-
+# style reductions, 64-bit modular multiplication) uses one-limb moduli
+# instead.  The same REDC branch -- the conditional subtraction ``t >= n``
+# -- sits behind every one of them, and flat-byte mutation reaches its edge
+# (operands at ``n - 1``, ``n``, ``2n - 1``) only by luck.
+#
+# Source: Slotin, *Algorithms for Modern Hardware*, "Montgomery
+# Multiplication" (n' by Newton iteration ``x *= 2 - n*x``, R mod n, R^2 mod
+# n).  Plan: ``docs/handover/handover_algorithmica_port_2026-11-02.md`` 4.2.
+
+#: Odd word-size moduli seen in practice, as ``(value, width in bytes)``.
+#: Recognition is by exact literal, so a modulus not listed here is not found:
+#: an arbitrary odd word would match almost every seed.
+WORD_MODULI: tuple[tuple[int, int], ...] = (
+    (998244353, 4),  # NTT prime 119 * 2^23 + 1
+    (469762049, 4),  # NTT prime 7 * 2^26 + 1
+    (167772161, 4),  # NTT prime 5 * 2^25 + 1
+    (754974721, 4),  # NTT prime 45 * 2^24 + 1
+    (1000000007, 4),  # 10^9 + 7
+    (2013265921, 4),  # BabyBear, 15 * 2^27 + 1
+    (2147483647, 4),  # Mersenne 2^31 - 1
+    (8380417, 4),  # Dilithium q, 2^23 - 2^13 + 1
+    (4294967291, 4),  # largest 32-bit prime, 2^32 - 5
+    ((1 << 61) - 1, 8),  # Mersenne 2^61 - 1
+    ((1 << 64) - 59, 8),  # largest 64-bit prime
+    (0xFFFFFFFF00000001, 8),  # Goldilocks, 2^64 - 2^32 + 1
+)
+
+#: ``literal bytes -> (modulus, width, byteorder)`` for both endiannesses.
+_WORD_LITERALS: dict[bytes, tuple[int, int, str]] = {
+    n.to_bytes(w, order): (n, w, order) for n, w in WORD_MODULI for order in ("little", "big")
+}
+
+
+def find_word_modulus(data: bytes) -> tuple[int, int, str, int] | None:
+    """Earliest known word-size modulus literal in *data*.
+
+    Returns ``(modulus, width_bytes, byteorder, offset)`` or ``None``.
+    """
+    best: tuple[int, int, str, int] | None = None
+    for literal, (n, w, order) in _WORD_LITERALS.items():
+        pos = data.find(literal)
+        if pos >= 0 and (best is None or pos < best[3]):
+            best = (n, w, order, pos)
+    return best
+
+
+def sniff_word_modulus(data: bytes) -> bool:
+    """True when the seed embeds a modulus from :data:`WORD_MODULI`."""
+    return find_word_modulus(data) is not None
+
+
+def _neg_inverse_pow2(n: int, bits: int) -> int:
+    """``n^-1 mod 2^bits`` for odd *n*, by Newton/Hensel lifting."""
+    mask = (1 << bits) - 1
+    inv = n & mask  # n * n == 1 (mod 8): 3 correct bits, doubled per step
+    for _ in range(5):  # 3 -> 6 -> 12 -> 24 -> 48 -> 96 >= 64
+        inv = (inv * (2 - n * inv)) & mask
+    return inv
+
+
+def word_constants(n: int, bits: int) -> tuple[int, ...]:
+    """Constants a word-size REDC/Barrett implementation reads or compares.
+
+    In order: ``R mod n``, ``R^2 mod n``, ``n' = -n^-1 mod R``, ``n^-1 mod R``,
+    the Barrett factor ``floor(R^2 / n)`` truncated to *bits*, and the REDC
+    boundary operands ``n - 1``, ``n + 1``, ``2n - 1`` (mod ``R = 2^bits``),
+    which sit either side of the conditional subtraction.
+    """
+    mask = (1 << bits) - 1
+    r = (1 << bits) % n
+    inv = _neg_inverse_pow2(n, bits)
+    return (
+        r,
+        (r * r) % n,
+        (-inv) & mask,
+        inv,
+        ((1 << (2 * bits)) // n) & mask,
+        (n - 1) & mask,
+        (n + 1) & mask,
+        (2 * n - 1) & mask,
+    )
+
+
+def montgomery_word_mutate(data: bytes, rng) -> bytes:
+    """Overwrite one word with a REDC/Barrett constant of the modulus in *data*.
+
+    The slot keeps the alignment of the modulus literal and the constant is
+    written in the literal's byte order, so the target reads it through the
+    same field layout it reads the modulus through.  Length is preserved.
+    Returns *data* unchanged when no known modulus is present.
+    """
+    hit = find_word_modulus(data)
+    if hit is None:
+        return data
+    n, width, order, pos = hit
+    consts = word_constants(n, width * 8)
+    val = consts[rng.randint(0, len(consts) - 1)]
+    first = pos % width
+    slots = (len(data) - first) // width  # >= 1: the literal itself fits
+    offset = first + width * rng.randint(0, slots - 1)
+    return _splice(data, offset, val.to_bytes(width, order))

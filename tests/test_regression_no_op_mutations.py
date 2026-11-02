@@ -406,6 +406,8 @@ def _battery() -> list[bytes]:
         b"II*\x00\x08\x00\x00\x00" + bytes(40),
         b"ajkg" + bytes(40),
         bytes(8) + SECP256K1_FIELD_P + bytes(24),
+        # montgomery_word_mutate: a known 32-bit modulus (NTT prime) literal.
+        bytes(8) + (998244353).to_bytes(4, "little") + bytes(24),
         b"12345 6789 -3 0.5 abcdef ghij",
         _minimal_elf64(),
         _binary_stl(),

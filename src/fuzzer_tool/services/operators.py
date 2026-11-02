@@ -5482,6 +5482,11 @@ class OperatorEngine:
 
         return self._regularity(montgomery_mutate, buf)
 
+    def _op_montgomery_word_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.montgomery import montgomery_word_mutate
+
+        return self._regularity(montgomery_word_mutate, buf)
+
     def _op_ntt_poly_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.ntt_poly import ntt_poly_mutate
 

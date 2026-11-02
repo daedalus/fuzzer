@@ -51,9 +51,13 @@ Not verified: `perf` and `valgrind` are not installed in the sandbox used for th
 
 ### 4.2 Generic Montgomery constants (book: Montgomery Multiplication)
 
+**Status (2026-11-02): implemented** as `montgomery_word_mutate` (see CHANGELOG). Recognition is by exact literal from `WORD_MODULI`, not by shape; the helpers above are fixed at 256/64 bits, so the new code has its own width-parameterised `word_constants`. Unmeasured on a target.
+
 `core/mutations/montgomery.py` only sniffs the secp256k1 field prime and curve order (`sniff_secp_modulus`, `_modulus_from_seed`). Proposal: a second sniffer/mutator for odd 32- and 64-bit moduli found in the seed, injecting `n' = -n^-1 mod 2^w` (Newton iteration `x *= 2 - n*x`, as in the book), `R mod n`, `R^2 mod n`. Helpers `_redc_n0_prime`, `_montgomery_r`, `_montgomery_r2`, `_barrett_mu` already exist; check they are width-parameterised before reuse (not verified, they are written for the 256-bit/64-limb case). Gate like the existing operator (registry `_AVAILABLE` predicate) so it is silent on seeds without a plausible modulus. Value is speculative: it only helps targets with word-size Montgomery code.
 
 ### 4.3 Fast inverse square root constants (book: Fast Inverse Square Root)
+
+**Status (2026-11-02): not implemented, on purpose.** (a) The constant lives in the target's code, not in its input, so injecting it feeds the target nothing it reads; the input-side edge cases of `i = MAGIC - (i >> 1)` (negative floats, NaN, denormals) are already in `structured.py`'s float patterns. Fast rsqrt is also straight-line, so there is no branch to reach. (b) The only table where a 32-bit value would land, `INTERESTING_UNSIGNED_32`, feeds `_op_interesting_32`, a hot random operator: one more entry shifts every seeded `rng.choice` index. `INTERESTING_32` is the AFL table the deterministic stage sweeps (`len(INTERESTING_32)` per byte), so it must not grow. (c) No 64-bit interesting table exists for `0x5fe6eb50c7b537a9`. Revisit only for a target that reads such a constant from its input.
 
 `core/mutations/structured.py` ~line 998 has float bit-pattern pairs (denormals, ulp neighbours, NaN payloads). Grep for `0x5f3759df`, `0x5fe6eb50` and `rsqrt` over `src/` and `dictionaries/` found no such constants (only the word `rsqrt` in `ruby.dict` and `x86.dict`). Adding `0x5f3759df` (f32) and `0x5fe6eb50c7b537a9` (f64) to the interesting-values set is a few lines. These are integers, not float patterns, so they probably belong with the integer interesting values rather than the `(f64_bits, f32_bits)` table; check which table the call sites read. Benefit is speculative.
 
