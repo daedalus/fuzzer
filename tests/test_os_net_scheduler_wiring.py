@@ -16,6 +16,7 @@ from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
+from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
 from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
@@ -43,6 +44,7 @@ SEED_ARMS = {
     "p2c": ("seed_p2c_scheduler", "_seed_p2c", SeedP2CScheduler),
     "newest": ("seed_newest_scheduler", "_seed_newest", SeedNewestScheduler),
     "dpp": ("seed_dpp_scheduler", "_seed_dpp", SeedDPPScheduler),
+    "gram": ("seed_gram_scheduler", "_seed_gram", SeedGramScheduler),
     "lottery": ("seed_lottery_scheduler", "_seed_lottery", SeedLotteryScheduler),
     "consolidated": (
         "seed_consolidated_scheduler",
@@ -52,7 +54,12 @@ SEED_ARMS = {
 }
 # Out of --hail-mary until each wins its own A/B (same criterion as gate_bonus).
 UNMEASURED_ARMS = frozenset(
-    {"seed_newest_scheduler", "seed_dpp_scheduler", "seed_lottery_scheduler"}
+    {
+        "seed_newest_scheduler",
+        "seed_dpp_scheduler",
+        "seed_gram_scheduler",
+        "seed_lottery_scheduler",
+    }
 )
 OP_ARMS = {
     "op_stride": OpStrideScheduler,

@@ -107,6 +107,8 @@ _EXCLUDED_OPT_IN = frozenset(
         # Unmeasured: the DPP seed arm (core/schedulers/seed_dpp.py) stays out
         # until it wins its bench_paired seed-dpp A/B.
         "seed_dpp_scheduler",
+        # Unmeasured: the Gram eigenvector seed arm (core/schedulers/seed_gram.py).
+        "seed_gram_scheduler",
         # Unmeasured: the Kadane window position arm (core/schedulers/pos_kadane.py)
         # stays out until it wins its own A/B (docs/TODO.md), same criterion as
         # seed_newest_scheduler above.

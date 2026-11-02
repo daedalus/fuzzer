@@ -217,6 +217,10 @@ ARMS: dict[str, list[str]] = {
     # DPP seed arm (docs/handover/handover_dpp_seed_selector_2026-10-22.md):
     # sole seed strategy without --elo, same single-knob pairing as above.
     "seed-dpp": ["--seed-dpp-scheduler"],
+    # Gram eigenvector seed arm (core/schedulers/seed_gram.py): sole seed strategy
+    # without --elo, one knob against `baseline`.
+    "seed-gram": ["--seed-gram-scheduler"],
+    "seed-gram-central": ["--seed-gram-scheduler", "--seed-gram-mode", "central"],
     **{
         f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
         for pct in SEED_NEWEST_PCTS
@@ -356,6 +360,8 @@ ARM_BASELINES: dict[str, str] = {
     "pos-fibonacci": "baseline",
     **{arm: "baseline" for arm in GROWING_TREE_ARMS},
     "seed-dpp": "baseline",
+    "seed-gram": "baseline",
+    "seed-gram-central": "baseline",
     "novel-crash-reward-abort": "abort-crash",
     "abort-crash-ctl": "abort-crash",
     "seed-branch": "elo",

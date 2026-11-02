@@ -794,6 +794,8 @@ def cmd_fuzz(args):
         seed_p2c_scheduler=getattr(args, "seed_p2c_scheduler", False),
         seed_branch_scheduler=getattr(args, "seed_branch_scheduler", False),
         seed_dpp_scheduler=getattr(args, "seed_dpp_scheduler", False),
+        seed_gram_scheduler=getattr(args, "seed_gram_scheduler", False),
+        seed_gram_mode=getattr(args, "seed_gram_mode", "peripheral"),
         seed_consolidated_scheduler=getattr(args, "seed_consolidated_scheduler", False),
         pos_consolidated=getattr(args, "pos_consolidated", False),
         pos_good_turing=getattr(args, "pos_good_turing", False),
@@ -2545,6 +2547,9 @@ def cmd_sweep(args):
 # seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
 #
+# seed_gram_scheduler (--seed-gram-scheduler) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md).
+#
 # seed_lottery_scheduler (--seed-lottery-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
@@ -3724,6 +3729,21 @@ def main() -> int:
         help="Seed-arena arm 'dpp': determinantal point process over hashed edge sets; favours "
         "rare-edge seeds unlike the last 8 picks. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_dpp.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-gram-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'gram': tickets from the top eigenvector of B = A Aᵀ over the "
+        "core-stripped seed x edge incidence, computed matrix-free. Elo arm; also the no-elo "
+        "pick when enabled (core/schedulers/seed_gram.py). Not in --hail-mary until it wins "
+        "its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-gram-mode",
+        choices=("peripheral", "central"),
+        default="peripheral",
+        help="With --seed-gram-scheduler: favour seeds off (peripheral) or inside (central) the "
+        "dominant overlap mode.",
     )
     fuzz_parser.add_argument(
         "--seed-newest-scheduler",

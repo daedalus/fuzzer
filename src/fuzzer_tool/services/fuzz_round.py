@@ -1146,6 +1146,8 @@ class FuzzRound:
         if f._tang is not None:
             f._tang.maybe_refit(f._edge_tracker, f.exec_count)
         self._refit_dpp()
+        if f._seed_gram is not None:
+            f._seed_gram.maybe_refit(f._edge_tracker, f.exec_count)
 
     def _refit_dpp(self) -> None:
         # DPP kernel rebuild: off the pick path like Tang's; interval gated inside.

@@ -126,6 +126,7 @@ _OS_SEED_ARMS = {
     "newest": "_seed_newest",
     "frontier": "_seed_frontier",
     "dpp": "_seed_dpp",
+    "gram": "_seed_gram",
     "lottery": "_seed_lottery",
 }
 _OS_SEED_SIGNALS = {

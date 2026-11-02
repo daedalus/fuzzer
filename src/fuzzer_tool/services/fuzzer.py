@@ -155,6 +155,7 @@ from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedSchedu
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
+from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST, SeedNewestScheduler
@@ -301,6 +302,7 @@ _SEED_STRATEGY_NAMES = (
     "consolidated",
     "frontier",
     "dpp",
+    "gram",
     "lottery",
 )
 
@@ -2087,6 +2089,10 @@ class Fuzzer:
         # Position-arena LearnAFL arm (core/schedulers/pos_learn.py): opt-in,
         # not implied by position_arena or --hail-mary. Appended.
         pos_learn=False,
+        # Seed-arena Gram arm (core/schedulers/seed_gram.py): top eigenvector of
+        # B = A Aᵀ, matrix-free. Off by default. Appended.
+        seed_gram_scheduler=False,
+        seed_gram_mode="peripheral",
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3537,6 +3543,9 @@ class Fuzzer:
             SeedConsolidatedScheduler(rng=self._rng) if seed_consolidated_scheduler else None
         )
         self._seed_dpp = SeedDPPScheduler(rng=self._rng) if seed_dpp_scheduler else None
+        self._seed_gram = (
+            SeedGramScheduler(rng=self._rng, mode=seed_gram_mode) if seed_gram_scheduler else None
+        )
         self._seed_lottery = (
             SeedLotteryScheduler(
                 rng=self._rng,
@@ -3565,6 +3574,7 @@ class Fuzzer:
                 self._seed_newest,
                 self._seed_frontier,
                 self._seed_dpp,
+                self._seed_gram,
                 self._seed_lottery,
             )
             if arm is not None
