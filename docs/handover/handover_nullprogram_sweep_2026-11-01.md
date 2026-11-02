@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-01
 **Repo state:** `master` @ `2d5faaaf` (fresh clone, so `git pull` was a no-op).
-**Scope:** Analysis only. No production code changed, nothing built, nothing measured.
+**Scope:** Analysis. No production code changed; the only code-side change is a static test (see F1, corrected 2026-11-02).
 
 ---
 
@@ -28,21 +28,53 @@ leads to?
 
 ## 3. Findings, ranked
 
-### F1. Targets pass the AFL buffer straight into the code under test (HIGH, cheap)
+### F1. Exact-size input copy: ALREADY COVERED by the shim (CORRECTED 2026-11-02)
 
 Source: AFL++ tips, tip (5).
 
-`targets/fuzzgoat_read.c` and `targets/gzip_read.c` call
-`fuzz_shm_run(buf, len)` / `fuzz_gzip(buf, len)` on
-`__AFL_FUZZ_TEST_CASE_BUF` directly. That buffer is larger than `len`, so
-ASan cannot flag reads past the end of the input. Fix: copy into a
-`realloc`'d buffer of exactly `len` bytes per iteration.
+**The original F1 was wrong for this repo.** It assumed the stock AFL++ buffer,
+where ASan cannot see reads past `len`. In this tree the macros come from
+`afl_shim.c` (`__afl_fuzz_len`), which calls
+`__asan_poison_memory_region(data + len, cap - len)` on every iteration, so a
+read past the input is reported without a copy. Checked with gcc
+`-fsanitize=address -include afl_shim.c` on a harness:
 
-Not yet checked: the other persistent targets (`ffmpeg_read.c`,
-`ffmpeg_canary_read.c`, `fgrep_read.c`, `grep_read.c`, `jpeg_read.c`,
-`png_read.c`) use the same `__AFL_LOOP(1000)` shape; the same pattern was
-seen only in the first two. Suggested first measurement: `fuzzgoat_read`
-under ASan, since its heap overread is already documented.
+- read of `buf[len]`: `use-after-poison` (caught);
+- read of `buf[-1]`: `heap-buffer-overflow` (caught, the buffer is a malloc'd
+  region with a redzone before it); same result with an exact-size `malloc` copy.
+
+So the copy would add cost and no coverage. In-process `.so` mode is also
+exact-size: `inprocess.py` builds `(c_uint8 * len(data)).from_buffer_copy(data)`
+(lines 94, 178). The dynamic test is `tests/test_shm_testcase.py::
+test_read_past_input_is_reported` (skipped in the container used for this
+sweep, so the check above was done by hand).
+
+Per-target status (every file in `targets/`):
+
+- **11 persistent targets use the macros** (`ffmpeg_canary_read`, `ffmpeg_read`,
+  `fgrep_read`, `fuzzgoat_read`, `grep_read`, `gzip_read`, `jpeg_read`,
+  `png_read`, `tracecmp_target`, `unrar_read`, `zlib_read`): covered.
+  `tests/test_targets_testcase_delivery.py` (new) fails if one stops using
+  `__AFL_FUZZ_TEST_CASE_BUF/LEN` or reads input inside `__AFL_LOOP`
+  (negative control: patching `zlib_read.c` makes 2 tests fail).
+- **Non-persistent fixtures with their own `main()` and a fixed buffer**
+  (`proto_target`, `test_target`, `rust_target`, `order_sensitivity`): not
+  covered, and reading `buf[n]` there is not ASan-visible. They are small
+  fixtures, not fuzz targets of real code; left unchanged.
+- **`#else` fallback `main()`s** in the persistent targets use
+  `unsigned char buf[65536]` (`gzip_read`, `fuzz_shm`, and similar). Dead
+  code in shim builds (`__AFL_HAVE_MANUAL_CONTROL` is always defined), live
+  only in a plain build without the shim.
+- **Targets with only `fuzz_shm_run` and no `main`** (`sqlite_read`,
+  `secp256k1_read`, `lz4_read`, `nop_target`, and others) are driven through
+  `inprocess.py` or a loader that supplies the buffer: exact-size in-process.
+  Not individually verified under ASan, which `docs/ASAN-LIMITATION.md` says
+  needs the recover-mode builds.
+- Not verified: `tailslayer_read.cpp`, `prng_token_read`, `order_sensitivity`
+  entry shapes beyond the grep above.
+
+Remaining real gap: none for persistent targets. The only open item is whether
+to make the fixed-buffer fixtures exact-size, which has low value.
 
 ### F2. ASan options lack fill and use-after-return settings (MEDIUM)
 
@@ -137,7 +169,7 @@ today was not checked).
 
 ## 5. Suggested order
 
-1. F1 on `fuzzgoat_read`, compare crash counts under ASan, then roll out.
+1. F1 withdrawn (see F1); the static guard test is the only change.
 2. F4 after confirming tugz builds.
 3. F2 behind a flag, tested against the recover-mode path.
 4. F5 simulation only; implement only if the hybrid beats the 0.40%/32 baseline.
