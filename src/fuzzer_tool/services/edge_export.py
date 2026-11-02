@@ -334,14 +334,18 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
                 _trim_heap()
 
             if (i + 1) % _PROGRESS_EVERY == 0:
-                _print_progress(done_of(i), n, start_time, len(unique), peak_rss_kb)
+                processed = done_of(i)
+                est = int(len(unique) * n / max(processed, 1)) if n > 0 and processed > 0 else None
+                _print_progress(processed, n, start_time, len(unique), peak_rss_kb, est)
 
             # Leaving a streamed archive here closes it (GeneratorExit), no read error.
             if limit and len(done) >= limit:
                 break
 
         # Final line: archive members over the size cap never reach i + 1 == n.
-        _print_progress(done_of(i), n, start_time, len(unique), peak_rss_kb)
+        processed = done_of(i)
+        est = int(len(unique) * n / max(processed, 1)) if n > 0 and processed > 0 else None
+        _print_progress(processed, n, start_time, len(unique), peak_rss_kb, est)
     finally:
         if runner is not None:
             runner.stop()
