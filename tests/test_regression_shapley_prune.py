@@ -1,5 +1,7 @@
 """Regression for P0-5: shapley prune discarded the numerically low half of edge ids."""
 
+import pytest
+
 from fuzzer_tool.core.shapley import SHAPLEY_EDGES_MAX, ShapleyAttribution
 
 
@@ -49,3 +51,40 @@ def test_prune_keeps_operator_sets_consistent_with_edge_index():
     held = {(op, e) for op, edges in s._operator_edges.items() for e in edges}
     indexed = {(op, e) for e, per_op in s._edge_op_count.items() for op in per_op}
     assert held == indexed
+
+
+def test_edge_view_tracks_records_and_prunes():
+    """The edge-major view is cached, so record() and prune must invalidate it."""
+    s = ShapleyAttribution(n_samples=50, window_size=100)
+    s.record({"a", "b"}, 2, {1, 2})
+    assert s._edge_op_count == {1: {"a": 1, "b": 1}, 2: {"a": 1, "b": 1}}
+    s.record({"a"}, 1, {2, 3})
+    assert s._edge_op_count[2] == {"a": 2, "b": 1}
+    assert s._edge_op_count[3] == {"a": 1}
+
+    for i in range(SHAPLEY_EDGES_MAX):
+        s.record({"c"}, 1, {100 + i})
+    assert len(s._all_edges) <= SHAPLEY_EDGES_MAX
+    view = s._edge_op_count
+    assert set(view) == set(s._edge_total)
+    assert all(
+        op in s._operator_edges and e in s._operator_edges[op] for e, d in view.items() for op in d
+    )
+
+
+def test_shapley_values_match_per_edge_formula_after_prune():
+    """Vectorised credit equals the per-edge definition on the pruned state."""
+    s = ShapleyAttribution(n_samples=50, window_size=500)
+    ops = [f"op{i}" for i in range(6)]
+    for i in range(SHAPLEY_EDGES_MAX // 3):
+        edges = {(i * 5 + k) % 20000 for k in range(6)}
+        s.record({ops[i % 6], ops[(i + 2) % 6]}, len(edges), edges)
+
+    expected = dict.fromkeys(ops, 0.0)
+    for per_op in s._edge_op_count.values():
+        total, k = sum(per_op.values()), len(per_op)
+        for op, c in per_op.items():
+            expected[op] += c / total / k
+    norm = sum(expected.values())
+    got = s.shapley_values(ops)
+    assert got == {op: pytest.approx(v / norm, abs=1e-12) for op, v in expected.items()}

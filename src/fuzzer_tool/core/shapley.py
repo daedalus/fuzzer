@@ -3,9 +3,10 @@
 import collections
 import math
 from collections import defaultdict
+from itertools import repeat
 
 from fuzzer_tool.core.dc_eigh import eigh
-from fuzzer_tool.core.marginal_coverage import MarginalRow, marginal_table
+from fuzzer_tool.core.marginal_coverage import DIRECT_MAX_ID, MarginalRow, marginal_table
 
 try:
     import numpy as np
@@ -110,9 +111,12 @@ class ShapleyAttribution:
         # Per-operator: set of edges this operator has co-occurred with
         self._operator_edges: dict[str, set[int]] = defaultdict(set)
         # Per-edge: total number of executions where this edge was observed
-        self._edge_total: dict[int, int] = defaultdict(int)
-        # Per-edge: per-operator count of executions where both co-occurred
-        self._edge_op_count: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._edge_total: collections.Counter = collections.Counter()
+        # Per-operator: per-edge count of executions where both co-occurred. Kept
+        # operator-major so record() updates it with one C-level Counter.update
+        # per operator; ``_edge_op_count`` is the edge-major view, built on read.
+        self._op_edge_count: dict[str, collections.Counter] = defaultdict(collections.Counter)
+        self._edge_view: dict[int, dict[str, int]] | None = None
         # Global edge set
         self._all_edges: set[int] = set()
 
@@ -130,13 +134,23 @@ class ShapleyAttribution:
         if edge_indices:
             for op in operators:
                 self._operator_edges[op].update(edge_indices)
-            for edge in edge_indices:
-                self._edge_total[edge] += 1
-                for op in operators:
-                    self._edge_op_count[edge][op] += 1
+                self._op_edge_count[op].update(edge_indices)
+            self._edge_total.update(edge_indices)
+            self._edge_view = None
             self._all_edges.update(edge_indices)
             if len(self._all_edges) > SHAPLEY_EDGES_MAX:
                 self._prune_edges()
+
+    @property
+    def _edge_op_count(self) -> dict[int, dict[str, int]]:
+        """Edge-major view ``{edge: {op: count}}``, in first-seen edge order; cached."""
+        if self._edge_view is None:
+            view: dict[int, dict[str, int]] = {edge: {} for edge in self._edge_total}
+            for op, counts in self._op_edge_count.items():
+                for edge, n in counts.items():
+                    view[edge][op] = n
+            self._edge_view = {edge: per_op for edge, per_op in view.items() if per_op}
+        return self._edge_view
 
     def _prune_edges(self):
         """Drop the least-frequent half of tracked edges to bound memory.
@@ -150,15 +164,24 @@ class ShapleyAttribution:
         """
         # Sort by observed frequency (ascending); ties broken by edge id for
         # determinism.
-        ranked = sorted(self._all_edges, key=lambda e: (self._edge_total.get(e, 0), e))
-        drop = ranked[: len(ranked) // 2]
-        operator_edges = self._operator_edges
+        ids = np.fromiter(self._all_edges, dtype=np.int64, count=len(self._all_edges))
+        totals = np.fromiter(
+            map(self._edge_total.get, ids.tolist(), repeat(0)), dtype=np.int64, count=len(ids)
+        )
+        drop = ids[np.lexsort((ids, totals))[: len(ids) // 2]].tolist()
+        dropped = set(drop)
+        self._all_edges -= dropped
         for edge in drop:
-            self._all_edges.discard(edge)
             self._edge_total.pop(edge, None)
-            # Only the operators that saw the edge hold it: skip the scan of all.
-            for op in self._edge_op_count.pop(edge, ()):
-                operator_edges[op].discard(edge)
+        for op, counts in self._op_edge_count.items():
+            held = self._operator_edges[op]
+            # C-level intersection; the Python loop only visits edges the operator holds.
+            hit = held & dropped
+            if hit:
+                held -= hit
+                for edge in hit:
+                    del counts[edge]
+        self._edge_view = None
 
     def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
         """Compute exact Shapley values for the per-edge frequency-weighted game.
@@ -208,17 +231,32 @@ class ShapleyAttribution:
         return {op: 1.0 / n_ops for op in operators}
 
     def _add_edge_credit(self, op_set: set[str], shapley: dict[str, float]) -> None:
-        """Add credit(e, op) / |T_e| per edge to *shapley* in place."""
-        for _edge, op_counts in self._edge_op_count.items():
-            touching = [op for op in op_counts if op in op_set]
-            k = len(touching)
-            if k == 0:
-                continue
-            total = sum(op_counts[op] for op in touching)
-            if total == 0:
-                continue
-            for op in touching:
-                shapley[op] += op_counts[op] / total / k
+        """Add credit(e, op) / |T_e| per edge to *shapley* in place.
+
+        Works on the operator-major counts: one dense pass over every
+        (operator, edge) pair, grouped by edge with ``np.unique``.
+        """
+        ops = sorted(op for op in op_set if self._op_edge_count.get(op))
+        if not ops:
+            return
+        keys, vals, owner = [], [], []
+        for i, op in enumerate(ops):
+            counts = self._op_edge_count[op]
+            n = len(counts)
+            keys.append(np.fromiter(counts.keys(), dtype=np.int64, count=n))
+            vals.append(np.fromiter(counts.values(), dtype=np.int64, count=n))
+            owner.append(np.full(n, i, dtype=np.int64))
+        ids, count, who = np.concatenate(keys), np.concatenate(vals), np.concatenate(owner)
+
+        edge = ids
+        if ids.min() < 0 or ids.max() >= DIRECT_MAX_ID:
+            _, edge = np.unique(ids, return_inverse=True)
+        total = np.bincount(edge, weights=count)
+        touching = np.bincount(edge)
+        credit = count / total[edge] / touching[edge]
+        per_op = np.bincount(who, weights=credit, minlength=len(ops))
+        for op, value in zip(ops, per_op.tolist(), strict=True):
+            shapley[op] += value
 
     def operator_edge_sets(self) -> dict[str, set[int]]:
         """Copy of the per-operator edge sets."""
