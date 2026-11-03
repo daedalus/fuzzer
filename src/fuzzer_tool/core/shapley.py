@@ -152,12 +152,13 @@ class ShapleyAttribution:
         # determinism.
         ranked = sorted(self._all_edges, key=lambda e: (self._edge_total.get(e, 0), e))
         drop = ranked[: len(ranked) // 2]
+        operator_edges = self._operator_edges
         for edge in drop:
             self._all_edges.discard(edge)
             self._edge_total.pop(edge, None)
-            self._edge_op_count.pop(edge, None)
-            for op_edges in self._operator_edges.values():
-                op_edges.discard(edge)
+            # Only the operators that saw the edge hold it: skip the scan of all.
+            for op in self._edge_op_count.pop(edge, ()):
+                operator_edges[op].discard(edge)
 
     def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
         """Compute exact Shapley values for the per-edge frequency-weighted game.
