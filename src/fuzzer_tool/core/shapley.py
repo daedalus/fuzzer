@@ -1,6 +1,7 @@
 """ShapleyAttribution: game-theoretic attribution of operators to edge coverage."""
 
 import collections
+from collections.abc import Mapping
 import math
 from collections import defaultdict
 from itertools import repeat
@@ -81,6 +82,29 @@ def _components(pairs: list[tuple[str, str, float]]) -> list[list[str]]:
     return list(groups.values())
 
 
+class _KeyViews(Mapping):
+    """``{op: set-like of edges}`` read from ``{op: Counter}`` without copying or creating keys."""
+
+    __slots__ = ("_counts",)
+
+    def __init__(self, counts):
+        self._counts = counts
+
+    def __getitem__(self, op):
+        if op not in self._counts:
+            raise KeyError(op)
+        return self._counts[op].keys()
+
+    def __iter__(self):
+        return iter(self._counts)
+
+    def __len__(self):
+        return len(self._counts)
+
+    def __contains__(self, op):
+        return op in self._counts
+
+
 class ShapleyAttribution:
     """Compute Shapley values for mutation operator contribution.
 
@@ -108,14 +132,15 @@ class ShapleyAttribution:
         self.window_size = window_size
         # Recent outcomes: list of (operators_used_set, discovered_edges_count)
         self._outcomes: collections.deque = collections.deque(maxlen=window_size)
-        # Per-operator: set of edges this operator has co-occurred with
-        self._operator_edges: dict[str, set[int]] = defaultdict(set)
         # Per-edge: total number of executions where this edge was observed
         self._edge_total: collections.Counter = collections.Counter()
         # Per-operator: per-edge count of executions where both co-occurred. Kept
         # operator-major so record() updates it with one C-level Counter.update
         # per operator; ``_edge_op_count`` is the edge-major view, built on read.
         self._op_edge_count: dict[str, collections.Counter] = defaultdict(collections.Counter)
+        # Per-operator: edges this operator has co-occurred with. A live key view of
+        # ``_op_edge_count`` (the two always held identical sets), so nothing is stored twice.
+        self._operator_edges = _KeyViews(self._op_edge_count)
         self._edge_view: dict[int, dict[str, int]] | None = None
         # Global edge set
         self._all_edges: set[int] = set()
@@ -133,7 +158,6 @@ class ShapleyAttribution:
         self._outcomes.append((operators, new_edges))
         if edge_indices:
             for op in operators:
-                self._operator_edges[op].update(edge_indices)
                 self._op_edge_count[op].update(edge_indices)
             self._edge_total.update(edge_indices)
             self._edge_view = None
@@ -173,11 +197,9 @@ class ShapleyAttribution:
         self._all_edges -= dropped
         collections.deque(map(self._edge_total.pop, drop, repeat(None)), maxlen=0)
         for op, counts in self._op_edge_count.items():
-            held = self._operator_edges[op]
             # C-level intersection; the Python loop only visits edges the operator holds.
-            hit = held & dropped
+            hit = counts.keys() & dropped
             if hit:
-                held -= hit
                 # dict.pop is C-level; Counter.__delitem__ is a Python-level override.
                 collections.deque(map(counts.pop, hit), maxlen=0)
         self._edge_view = None

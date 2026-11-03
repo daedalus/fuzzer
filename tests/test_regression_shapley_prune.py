@@ -88,3 +88,16 @@ def test_shapley_values_match_per_edge_formula_after_prune():
     norm = sum(expected.values())
     got = s.shapley_values(ops)
     assert got == {op: pytest.approx(v / norm, abs=1e-12) for op, v in expected.items()}
+
+
+def test_operator_edges_is_a_live_view_of_op_edge_count():
+    """One store: _operator_edges mirrors _op_edge_count, never creates keys on read."""
+    s = ShapleyAttribution()
+    s.record({"a", "b"}, 2, {1, 2})
+    assert set(s._operator_edges["a"]) == {1, 2}
+    assert s._operator_edges.get("zzz", set()) == set()
+    assert "zzz" not in s._operator_edges and "zzz" not in s._op_edge_count
+    s.record({"a"}, 1, {3})
+    assert s._operator_edges["a"] == {1, 2, 3}
+    with pytest.raises(KeyError):
+        s._operator_edges["zzz"]
