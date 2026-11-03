@@ -1934,6 +1934,24 @@ static inline int __afl_probe_slot(struct __afl_entry *area, uint32_t idx,
 #  error "__AFL_PROBE_ISA must be 0 (scalar), 1 (SSE2) or 2 (AVX2)"
 #endif
 
+/* -D__AFL_PROBE_MSI=1: walk the window with a per-edge odd step instead of
+ * +1 (mask-step-index, nullprogram.com 2022-08-08). In a power-of-two table an
+ * odd step visits every slot, and displaced edges stop piling onto the same
+ * run, so the window fills later. Simulated at 2^18 entries, window 64: load
+ * 0.77 drops 0.051% -> 0.000%, load 0.90 0.99% -> 0.0015%; no difference at
+ * load 0.13. Off by default: a step gives up the contiguous run the SIMD probe
+ * loads, and each extra probe lands on its own cache line. A table whose size
+ * is not a power of two keeps step 1. Placement differs from the default, so
+ * readers that re-derive slots (shm.py record_edge) mirror only the default. */
+#ifndef __AFL_PROBE_MSI
+#  define __AFL_PROBE_MSI 0
+#endif
+#if __AFL_PROBE_MSI && __AFL_PROBE_ISA != __AFL_PROBE_SCALAR
+#  error "__AFL_PROBE_MSI needs __AFL_PROBE_ISA=0: a stepped probe has no contiguous run to vectorize"
+#endif
+#define __AFL_STEP_MUL   0x85EBCA6Bu
+#define __AFL_STEP_SHIFT 16
+
 #if __AFL_PROBE_ISA == __AFL_PROBE_AVX2 && defined(__AVX2__)
 #  define __AFL_PROBE_MODE __AFL_PROBE_AVX2
 #  define __AFL_PROBE_LANES 4u
@@ -2018,6 +2036,33 @@ static inline int __afl_probe_run(struct __afl_entry *area, uint32_t start,
  * -7% at load 0.13, -11% at load 0.77 (min ns per edge).
  * Cache-line bucket homes were measured and rejected; SIMD runs are
  * opt-in (__AFL_PROBE_ISA); see docs/DEEP_DIVE.md "Edge-table probe". */
+#if __AFL_PROBE_MSI
+/* Odd step for edge_id: any odd step generates a power-of-two table. */
+__attribute__((always_inline))
+static inline uint32_t __afl_probe_step(uint32_t edge_id) {
+    uint32_t mask = __afl_map_size - 1;
+    if (__afl_map_size & mask) return 1;
+    return (((edge_id * __AFL_STEP_MUL) >> __AFL_STEP_SHIFT) | 1u) & mask;
+}
+
+/* Stepped counterpart of the linear version below: settles edge_id in the
+ * first of `window` slots pos, pos+step, ... that is empty or holds it. */
+__attribute__((always_inline))
+static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
+                                      uint32_t window, uint32_t gen) {
+    struct __afl_entry *area = __afl_area;
+    uint32_t size = __afl_map_size;
+    uint32_t step = __afl_probe_step(edge_id);
+    uint32_t tag  = gen << 24;
+
+    for (uint32_t i = 0; i < window; i++) {
+        if (__afl_probe_slot(area, pos, edge_id, tag)) return;
+        pos += step;
+        if (pos >= size) pos -= size;
+    }
+    __afl_note_drop();
+}
+#else
 __attribute__((always_inline))
 static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
                                       uint32_t window, uint32_t gen) {
@@ -2036,6 +2081,7 @@ static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
      * cost is meant to be observed. */
     __afl_note_drop();
 }
+#endif /* __AFL_PROBE_MSI */
 
 /* Shift cur_loc into the previous-location state for the next edge. */
 __attribute__((always_inline))
@@ -2102,7 +2148,12 @@ static inline void __afl_map_from_home(uint32_t edge_id, uint32_t pos, uint32_t 
     if (window > __afl_map_size) window = __afl_map_size;
     if (window < 2) { __afl_note_drop(); return; }
 
+#if __AFL_PROBE_MSI
+    uint32_t next = pos + __afl_probe_step(edge_id);
+    if (next >= __afl_map_size) next -= __afl_map_size;
+#else
     uint32_t next = pos + 1 == __afl_map_size ? 0 : pos + 1;
+#endif
     __afl_probe_insert(edge_id, next, window - 1, gen);
 }
 

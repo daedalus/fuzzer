@@ -136,22 +136,106 @@ fit: `targets/gzip_read.c`, `targets/zlib_read.c`,
 tugz, zlib and libdeflate and flag any disagreement. Open: does tugz build
 with clang sancov; is libdeflate available offline.
 
-### F5. MSI probing versus the shim's linear probe (MEDIUM, needs simulation)
+### F5. MSI probing versus the shim's linear probe: IMPLEMENTED AS OPT-IN, NOT ADOPTED (2026-11-03)
 
 Source: MSI post (2022), concurrent MSI post (2026).
 
-Construction (from the excerpts): `step = (hash >> (64 - exp)) | 1`, index
-advances by `step` and is masked; the odd step visits every slot once.
+Construction: `step = (hash >> (64 - exp)) | 1`; the index advances by `step`,
+masked to the table size; the odd step visits every slot once.
 
-The shim (`__afl_map_edge`) probes linearly from `edge_id % map_size` with a
-bounded window. Its own comment gives simulated drop rates on ffmpeg at load
-0.77: 4.43% at window 8, 1.60% at 16, 0.40% at 32, 0.04% at 64. A stepped probe
-avoids primary clustering and should drop less at equal window.
+Simulation (262144 entries, splitmix64 keys, start `(h32*size)>>32` as in the
+shim, window W, 20 seeds, source below). **Control (Hard Rule 46):** the linear
+column reproduces the shim's documented ffmpeg figures at load 0.77:
+4.32 / 1.58 / 0.39 / 0.051 % against the documented 4.43 / 1.60 / 0.40 / 0.04 %
+for W = 8 / 16 / 32 / 64.
 
-Costs: `__afl_probe_run` vectorizes over contiguous slots (SSE/AVX), and the
-Python side maps position to id assuming the linear layout (`ShmCoverage`,
-`_scan_with_positions`). Possible hybrid: one contiguous SIMD run, then a
-stepped fallback for overflow. Run the existing drop simulation first.
+| load | W | linear drop % (avg probes) | MSI drop % (avg probes) |
+|---|---|---|---|
+| 0.77 | 8  | 4.318 (1.82) | 1.305 (1.77) |
+| 0.77 | 16 | 1.579 (2.17) | 0.086 (1.89) |
+| 0.77 | 32 | 0.390 (2.46) | 0.0005 (1.91) |
+| 0.77 | **64 (current)** | **0.051 (2.62)** | **0.000 (1.91)** |
+| 0.13 | 8-64 | 0.000 (1.08) | 0.000 (1.07) |
+| 0.39 | 64 | 0.000 (1.31) | 0.000 (1.26) |
+| 0.90 | 64 | 0.988 (4.00) | 0.0015 (2.56) |
+
+What the simulation says: at the shipped W=64, MSI recovers 0.05 % of edges,
+and only on ffmpeg_read (load 0.77); at the load of every other target (0.13)
+the two are identical; doubling the map already gives 0 drops with linear
+probing, which is what `recommended_map_size()` does. MSI pays off at load
+0.90 (0.99 % -> 0.0015 %), which no target reaches.
+
+**Implementation** (`afl_shim.c`, `-D__AFL_PROBE_MSI=1`, default 0): the
+second and later probes use `step = ((id * 0x85EBCA6B) >> 16 | 1) & (size - 1)`
+instead of +1. Non-power-of-two tables keep step 1. `#error` with a vector
+`__AFL_PROBE_ISA` (a step has no contiguous run). The default build is the
+old code path. `tests/test_shim_msi_probe.py` (20 tests): an independent
+Python model of the stepped probe (placement, counts and drops match on dense
+streams at load 0.3/0.8/0.95), the default build equals the linear model
+(control), the macro changes placement (not inert), fewer drops at load 0.95,
+non-power-of-two fallback, same-home clusters past the window, tiny tables, a
+re-fire never duplicates, and the ISA clash is rejected. The shim, SIMD-probe,
+map-slot and audit tests still pass (117 in the three files re-run after rebasing on upstream).
+
+**A/B** (clang 18.1.3 installed for this; ledger rows 86-92):
+
+| design | MSI vs linear | A/A (lin vs lin copy) | verdict |
+|---|---|---|---|
+| microbench `probe` load 0.77 | +11.2 % ns, 1/8, p=0.039 | -0.4 %, p=0.508 | LOSS |
+| microbench `probe` load 0.13 | +6.5 %, 4/5, p=1.0 | -0.2 % | NULL |
+| microbench `full` load 0.13 | -3.7 %, 6/3, p=0.51 | -9.0 % | NULL |
+| microbench `full` load 0.77 | +6.4 %, 3/6, p=0.51 | -7.8 % | NULL |
+| fuzzgoat in-run, default map | eps +22.6, edges -5.0, tgt +0.015 ms; p 0.73 / 1.0 / 0.29 | eps -31.2, edges -12.5 | NULL |
+| fuzzgoat in-run, `--map-size 1024` (load ~0.7) | eps +11.3, edges +34, tgt 0; p 1.0 / 0.73 | eps -51.8, edges -14.5 | NULL |
+| new default vs pre-change HEAD (control) | min ns equal within 1.5 % in all four cells | n/a | NULL |
+
+MSI is slower per edge exactly where it should help (load 0.77, mean probe
+length 2.62 -> 1.91 in the simulation but every extra probe is its own cache
+line). In the real fuzzer it moves nothing: fuzzgoat's per-exec target time is
+~0.1 ms of a ~0.9 ms cycle.
+
+Limits: 8 rounds x 20k execs per design on one shared core (host speed drifted
+between the two microbench passes, 22.6 -> 28.6 ns on `full` 0.77); `tgt_ms`
+has 0.01 ms resolution; drops were not read in-run (only edges found), so the
+"edges recovered" claim rests on the simulation; fuzzgoat is the only target
+(no ffmpeg build here); the microbenchmark crashes at exit on a free of its own
+buffer (`__afl_write_distance_tail_exit`, unmodified tree, output survives with
+`stdbuf -o0`), which is a separate bug. Not changed: `Hard Rule 53` layout
+version (header and table layout identical; placement differs only under the
+macro).
+
+Simulation source (`gcc -O2 -o sim sim.c && ./sim 0.77`):
+
+```c
+// Drop-rate simulation: linear probe vs MSI (stepped) probe, bounded window W.
+// Keys are splitmix64-hashed (shim's guard mix is splitmix64), start = (h32*size)>>32 as in the shim.
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+static uint64_t sm(uint64_t *s){uint64_t z=(*s+=0x9e3779b97f4a7c15ull);z=(z^(z>>30))*0xbf58476d1ce4e5b9ull;z=(z^(z>>27))*0x94d049bb133111ebull;return z^(z>>31);}
+// mode 0 linear, 1 MSI (step from high hash bits, odd, masked), returns dropped count; avg probes of successful inserts via *avg
+static uint64_t run(uint32_t size,uint32_t n,uint32_t W,int mode,uint64_t seed,double*avg){
+  uint8_t*occ=calloc(size,1); uint64_t s=seed,drops=0,probes=0,ins=0; uint32_t mask=size-1;
+  for(uint32_t k=0;k<n;k++){
+    uint64_t h=sm(&s); uint32_t start=(uint32_t)(((uint64_t)(uint32_t)h*size)>>32);
+    uint32_t step= mode? ((uint32_t)(h>>32)|1u) : 1u;
+    uint32_t pos=start; int placed=0;
+    for(uint32_t i=0;i<W;i++){ if(!occ[pos]){occ[pos]=1;placed=1;probes+=i+1;ins++;break;} pos=(pos+step)&mask; }
+    if(!placed) drops++;
+  }
+  free(occ); *avg=ins?(double)probes/ins:0; return drops;
+}
+int main(int argc,char**argv){
+  uint32_t size=1u<<18; double load=argc>1?atof(argv[1]):0.77; uint32_t n=(uint32_t)(size*load);
+  int seeds=20; uint32_t Ws[]={8,16,32,64};
+  printf("size=%u load=%.2f keys=%u seeds=%d\n",size,load,n,seeds);
+  printf("%4s | %-22s | %-22s\n","W","linear drop% (avgprobe)","MSI drop% (avgprobe)");
+  for(int w=0;w<4;w++){ double d[2]={0,0},a[2]={0,0};
+    for(int m=0;m<2;m++){ for(int s=1;s<=seeds;s++){ double av; d[m]+= (double)run(size,n,Ws[w],m,s*7919,&av)/n; a[m]+=av; } d[m]=100*d[m]/seeds; a[m]/=seeds; }
+    printf("%4u | %8.4f (%5.2f)      | %8.4f (%5.2f)\n",Ws[w],d[0],a[0],d[1],a[1]); }
+  return 0; }
+```
 
 ### F6. Concurrent atomic MSI (LOW)
 
@@ -200,5 +284,5 @@ today was not checked).
 1. F1 withdrawn (see F1); the static guard test is the only change.
 2. F4 after confirming tugz builds.
 3. F2 done as opt-in; remaining: measure exec/s on `ffmpeg_read_asan.so` and run the recover-mode path with `FUZZER_ASAN_STRICT=1`.
-4. F5 simulation only; implement only if the hybrid beats the 0.40%/32 baseline.
+4. F5 done as opt-in and not adopted (see F5); revisit only for a target above load ~0.85 with the map at its cap.
 5. F3 audit, F7 check of `validity.py`.

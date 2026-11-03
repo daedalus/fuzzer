@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in stepped edge-table probe** (`afl_shim.c`, `-D__AFL_PROBE_MSI=1`, off by default; `tests/test_shim_msi_probe.py`): walks the probe window with a per-edge odd step (mask-step-index) instead of +1; non-power-of-two tables keep step 1; needs `__AFL_PROBE_ISA=0`. Simulated drops at 2^18 entries, window 64: load 0.77 0.051% -> 0.000%, load 0.90 0.99% -> 0.0015%. Measured cost: shim microbenchmark load 0.77 `probe` mode +11.2% ns/call (1/8, p=0.039, A/A -0.4%); fuzzgoat in-run null at load 0.005 and ~0.7 (ledger 86-92). Not adopted as a default. The default build is unchanged.
+
 ### Changed
 
 - **Shim guard loads use a memory operand on x86-64** (`afl_shim.c`): `__afl_raw_load` took its address in a register, so every global load was `lea` + `mov`. With `"m"` it is one rip-relative `mov`. Wall vs HEAD (clang, min of 40 interleaved rounds, A/A ≤1.6%): hit-heavy const -6.8%, junk -6.6%, healthy -3.6%; all-miss chain Ir -5.6% healthy, -5.0% const. Numbers: `docs/handover/handover_shim_ab_perf_2026-11-02.md`.
