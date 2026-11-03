@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Shim guard loads use a memory operand on x86-64** (`afl_shim.c`): `__afl_raw_load` took its address in a register, so every global load was `lea` + `mov`. With `"m"` it is one rip-relative `mov`. Wall vs HEAD (clang, min of 40 interleaved rounds, A/A ≤1.6%): hit-heavy const -6.8%, junk -6.6%, healthy -3.6%; all-miss chain Ir -5.6% healthy, -5.0% const. Numbers: `docs/handover/handover_shim_ab_perf_2026-11-02.md`.
+
 ### Fixed
 
 - **Base64 Redqueen write no longer clobbers the next decoded byte** (`core/rq_encodings.py`): `Base64Encoder.pattern` searches only the chars an operand fully determines, but the replacement wrote the whole encoding, and for an operand of length % 3 != 0 the last char's spare low bits (4 for length % 3 == 1, 2 for length % 3 == 2) were written as zero although in the input they hold the top bits of the following decoded byte. The existing test compared only the first `len(op_b)` decoded bytes, so it never saw it. New `Encoder.fit` hook (off unless `fits_input`; one attribute test per mutation otherwise) lets `generate_mutations` merge those bits from the input at the offset where the replacement lands; the per-pair replacement cache is untouched, since the merge depends on the input. A last char that is not in the alphabet (`=`, junk, end of input) is written as before. Found by reading the bit layout in mcyoung's SIMD base64 write-up. Tests: `test_b64_write_keeps_following_decoded_bytes` (lengths 9-13, three trailers, both alphabets; 18 of 30 failed before), `test_b64_write_leaves_a_non_alphabet_neighbour_alone`.
