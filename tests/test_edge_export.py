@@ -16,7 +16,10 @@ class _Shm:
 
     current: bytes = b""
 
-    def __init__(self):
+    ctor_calls: list = []
+
+    def __init__(self, num_entries=16, **kwargs):
+        type(self).ctor_calls.append((num_entries, kwargs))
         self.env_id = "0"
         self.num_entries = 16
 
@@ -137,3 +140,19 @@ def test_running_stats(tmp_path, monkeypatch, capsys):
     assert f"edges: {len(union)}" in line
     for field in ("seeds/s", "ETA:", "elapsed:", "rss:"):
         assert field in line
+
+
+def test_table_sized_by_target_and_touched_scan_past_crossover(tmp_path, monkeypatch):
+    """Perf regression: a target-sized table makes the per-seed full-table walk
+    the dominant cost (edge-dump 1647 -> 864 seeds/s at 524288 entries), so past
+    TOUCHED_SCAN_MIN_ENTRIES the replay reads the touched bitmap instead."""
+    from fuzzer_tool.adapters.shm import TOUCHED_SCAN_MIN_ENTRIES
+
+    for entries, want in ((8192, False), (TOUCHED_SCAN_MIN_ENTRIES, True), (524288, True)):
+        _Shm.ctor_calls.clear()
+        corpus, out = _setup(tmp_path / str(entries), monkeypatch, {"a": b"ab"})
+        monkeypatch.setattr(edge_export, "estimate_map_size", lambda target, e=entries: e)
+
+        edge_export.export_edges("t", str(corpus), [str(out)])
+
+        assert _Shm.ctor_calls == [(entries, {"touched_scan": want})]

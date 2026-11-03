@@ -25,7 +25,7 @@ from fuzzer_tool.adapters.edge_pickle import EdgePickleWriter
 from fuzzer_tool.adapters.edge_sqlite import EdgeSqliteWriter
 from fuzzer_tool.adapters.filesystem import count_archive_seeds, hash_data, iter_archive_seeds
 from fuzzer_tool.adapters.process import disable_aslr
-from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.adapters.shm import TOUCHED_SCAN_MIN_ENTRIES, ShmCoverage
 from fuzzer_tool.core.adaptive_batch import AdaptiveBatch
 from fuzzer_tool.core.elf import estimate_map_size
 from fuzzer_tool.services.minimize import (
@@ -291,7 +291,11 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
     # Caller-context edge ids hash a return address; ASLR makes them noise.
     disable_aslr()
 
-    shm = ShmCoverage(estimate_map_size(target))
+    entries = estimate_map_size(target)
+    # Per-seed live-edge read: walk the whole table, or only the touched slots.
+    # The walk is O(table) and the table is now sized for the target (up to
+    # 524288 entries), so past the measured crossover read the touched bitmap.
+    shm = ShmCoverage(entries, touched_scan=entries >= TOUCHED_SCAN_MIN_ENTRIES)
     env = os.environ.copy()
     env["__AFL_SHM_ID"] = shm.env_id
     env["AFL_MAP_SIZE"] = str(shm.num_entries)
