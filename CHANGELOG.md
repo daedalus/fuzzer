@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`ffmpeg_read` stream_info window 1 MiB -> 64 KiB** (`targets/ffmpeg_read.c`, `FFMPEG_PROBESIZE`, `-D` overridable, below 1 is a build error): FFmpeg's wav demuxer probes every PCM_S16LE stream by rescanning up to 128 KB with every demuxer's probe, and the MP3 probe tries each byte offset, so a wav seed spent 8.4 of 8.7 ms per call in `avformat_find_stream_info` (vendored 9.0.2, sancov; reporter's cmin profile: stream_info 52% of wall). The probe ends once `probesize` bytes are buffered: wav 9.9 -> 3.0 ms (64 KiB), 1.3 ms (32 KiB); mp4/mkv/avi/flv/ogv/webm/flac unchanged within noise. `format_probesize` (container detection) is untouched. Edges found not measured. `tests/test_regression_ffmpeg_probesize.py`.
+
 ### Added
 
 - **Opt-in stepped edge-table probe** (`afl_shim.c`, `-D__AFL_PROBE_MSI=1`, off by default; `tests/test_shim_msi_probe.py`): walks the probe window with a per-edge odd step (mask-step-index) instead of +1; non-power-of-two tables keep step 1; needs `__AFL_PROBE_ISA=0`. Simulated drops at 2^18 entries, window 64: load 0.77 0.051% -> 0.000%, load 0.90 0.99% -> 0.0015%. Measured cost: shim microbenchmark load 0.77 `probe` mode +11.2% ns/call (1/8, p=0.039, A/A -0.4%); fuzzgoat in-run null at load 0.005 and ~0.7 (ledger 86-92). Not adopted as a default. The default build is unchanged.

@@ -100,6 +100,19 @@ static int fuzz_read_packet(void *opaque, unsigned char *buf, int buf_size) {
 #error "FUZZ_TRIM_EVERY must be >= 1"
 #endif
 
+/* find_stream_info byte window. FFmpeg probes every PCM_S16LE wav stream for
+ * MP3/AC3/DTS-in-WAV by buffering up to 32 packets (128 KB) and rescanning
+ * them at each power-of-two size; the MP3 probe tries every byte offset.
+ * That was 8.4 of 8.7 ms per wav call (9.0.2 sancov). The probe also ends
+ * once this many bytes are buffered: 64 KiB gave 3.0 ms, 32 KiB 1.3 ms.
+ * Container detection uses format_probesize, left at its default. */
+#ifndef FFMPEG_PROBESIZE
+#define FFMPEG_PROBESIZE (64 * 1024)
+#endif
+#if FFMPEG_PROBESIZE < 1
+#error "FFMPEG_PROBESIZE must be >= 1"
+#endif
+
 /* Pixels one frame adds to the budget; 0 for audio and bad sizes. */
 static inline int64_t fuzz_frame_pixels(int w, int h) {
     if (w <= 0 || h <= 0) return 0;
@@ -342,7 +355,7 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
         return NULL;
     }
     fmt_ctx->max_analyze_duration = 300000; /* 300 ms probe cap */
-    fmt_ctx->probesize = 1 * 1024 * 1024;  /* 1 MB probe window */
+    fmt_ctx->probesize = FFMPEG_PROBESIZE; /* stream_info byte window */
     fmt_ctx->pb = avio_ctx;
 
     fuzz_interrupt_budget = FUZZ_INTERRUPT_BUDGET;
