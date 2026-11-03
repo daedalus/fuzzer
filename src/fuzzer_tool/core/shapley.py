@@ -171,16 +171,15 @@ class ShapleyAttribution:
         drop = ids[np.lexsort((ids, totals))[: len(ids) // 2]].tolist()
         dropped = set(drop)
         self._all_edges -= dropped
-        for edge in drop:
-            self._edge_total.pop(edge, None)
+        collections.deque(map(self._edge_total.pop, drop, repeat(None)), maxlen=0)
         for op, counts in self._op_edge_count.items():
             held = self._operator_edges[op]
             # C-level intersection; the Python loop only visits edges the operator holds.
             hit = held & dropped
             if hit:
                 held -= hit
-                for edge in hit:
-                    del counts[edge]
+                # dict.pop is C-level; Counter.__delitem__ is a Python-level override.
+                collections.deque(map(counts.pop, hit), maxlen=0)
         self._edge_view = None
 
     def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
