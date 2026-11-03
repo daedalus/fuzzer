@@ -182,3 +182,26 @@ def test_dense_index_paths_agree(shift):
     base = _skewed(12)
     moved = {op: {e + shift for e in edges} for op, edges in base.items()}
     assert marginal_table(moved) == marginal_table(base)
+
+
+def _brute_greedy(sets):
+    left, covered, out = dict(sets), set(), []
+    while left:
+        op = min(left, key=lambda o: (-len(left[o] - covered), o))
+        out.append((op, len(left[op] - covered)))
+        covered |= left.pop(op)
+    return out
+
+
+@pytest.mark.parametrize("space", [6, 60, 5000, 1 << 40])
+def test_falsify_incremental_greedy_matches_brute_force(space):
+    """Gain order must equal the full-scan greedy, ties by name, in any id space."""
+    import random
+
+    rng = random.Random(space)
+    for _ in range(40):
+        sets = {
+            f"op{rng.randrange(50)}_{i}": {rng.randrange(space) for _ in range(rng.randint(0, 30))}
+            for i in range(rng.randint(0, 25))
+        }
+        assert [(r.op, r.gain) for r in marginal_table(sets)] == _brute_greedy(sets)

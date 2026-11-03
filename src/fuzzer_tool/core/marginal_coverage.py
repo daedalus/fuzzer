@@ -12,7 +12,6 @@ Game: ``v(S) = |union of edge sets of the operators in S|``. Per operator:
 ``shapley`` each sum to the union size.
 """
 
-import heapq
 import itertools
 from typing import NamedTuple
 
@@ -45,24 +44,40 @@ def _dense(flat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return col, holders
 
 
-def _greedy(masks: dict[str, int]) -> list[tuple[str, int]]:
+def _greedy(
+    ops: list[str], sizes: np.ndarray, col: np.ndarray, holders: np.ndarray, owner: np.ndarray
+) -> list[tuple[str, int]]:
     """Greedy cover order: largest marginal gain first, ties by name.
 
-    Lazy: gains only shrink, so a stale heap key bounds the true one and an
-    entry whose fresh key still leads the heap is exactly the full-scan pick.
+    Incremental and exact: picking an operator marks its newly covered edges,
+    and each such edge costs one gain from every operator holding it, so the
+    total work is one pass over the (operator, edge) entries.
     """
-    heap = [(-m.bit_count(), op) for op, m in masks.items()]
-    heapq.heapify(heap)
-    covered = 0
+    n = len(ops)
+    rank = np.argsort(np.array(ops, dtype=object), kind="stable")  # name order
+    gains = sizes[rank].astype(np.int64)
+    # Edge -> holders (CSR by dense column); entries are grouped by operator.
+    # Stable sort on 16-bit keys is a radix sort (much faster than on int64).
+    key = col.astype(np.uint16) if len(holders) <= 1 << 16 else col
+    by_col = np.argsort(key, kind="stable")
+    holder_ops = np.argsort(rank, kind="stable")[owner[by_col]]  # operator -> name rank
+    starts = np.concatenate(([0], np.cumsum(holders)))
+    offs = np.concatenate(([0], np.cumsum(sizes)))
+    cols_of = [col[offs[i] : offs[i + 1]] for i in rank.tolist()]
+    covered = np.zeros(len(holders), dtype=bool)
     order = []
-    while heap:
-        _, op = heapq.heappop(heap)
-        fresh = (-(masks[op] & ~covered).bit_count(), op)
-        if heap and fresh > heap[0]:
-            heapq.heappush(heap, fresh)
-            continue
-        covered |= masks[op]
-        order.append((op, -fresh[0]))
+    for _ in range(n):
+        p = int(gains.argmax())  # first max == smallest name
+        order.append((ops[rank[p]], int(gains[p])))
+        gains[p] = -1
+        cols = cols_of[p]
+        new = cols[~covered[cols]]
+        if new.size:
+            covered[new] = True
+            lens = holders[new]
+            idx = np.repeat(starts[new] - (np.cumsum(lens) - lens), lens) + np.arange(int(lens.sum()))
+            gains -= np.bincount(holder_ops[idx], minlength=n)
+            gains[p] = -1
     return order
 
 
@@ -83,14 +98,8 @@ def marginal_table(sets: dict[str, set[int]]) -> list[MarginalRow]:
     share = np.bincount(owner, weights=1.0 / held, minlength=len(ops))
     sole = np.bincount(owner, weights=held == 1, minlength=len(ops)).astype(np.int64)
 
-    # One bit per edge per operator, packed into a Python int for popcount.
-    grid = np.zeros((len(ops), max(len(holders), 1)), dtype=bool)
-    grid[owner, col] = True
-    packed = np.packbits(grid, axis=1, bitorder="little")
-    masks = {op: int.from_bytes(packed[i].tobytes(), "little") for i, op in enumerate(ops)}
-
     at = {op: i for i, op in enumerate(ops)}
     return [
         MarginalRow(op, int(sizes[at[op]]), gain, int(sole[at[op]]), float(share[at[op]]))
-        for op, gain in _greedy(masks)
+        for op, gain in _greedy(ops, sizes, col, holders, owner)
     ]
