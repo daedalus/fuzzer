@@ -147,6 +147,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_reject_report(fuzzer))
     sections.append(_operator_diversity(fuzzer))
     sections.append(_operator_redundancy(fuzzer))
+    sections.append(_marginal_coverage(fuzzer))
     sections.append(_entropy_metrics(fuzzer))
     sections.append(_format_learning(fuzzer))
     sections.append(_elo_ratings(fuzzer))
@@ -1917,6 +1918,44 @@ def _operator_redundancy(f) -> str:
     lines.extend(_family_row(fam) for fam in families[:_FAMILY_LINES_MAX])
     if len(families) > _FAMILY_LINES_MAX:
         lines.append(f"    ... {len(families) - _FAMILY_LINES_MAX} more")
+    return "\n".join(lines)
+
+
+_MARGINAL_ROWS_MAX = 10  # report rows before "... N more"
+_ZERO_GAIN_NAMES_MAX = 8  # names listed for operators adding nothing
+
+
+def _marginal_coverage(f) -> str:
+    """Operator contribution to union edge coverage (--shapley), greedy cover order.
+
+    ``gain`` is what an operator adds after the rows above it; ``sole`` is
+    what is lost if it alone is dropped. Zero-gain operators are prune candidates.
+    """
+    if not (getattr(f, "_use_shapley", False) and f._shapley):
+        return ""
+    rows = f._shapley.marginal_coverage()
+    union = sum(r.gain for r in rows)
+    if not union:
+        return ""
+
+    lines = [
+        "",
+        "--- Operator Marginal Coverage (Shapley) ---",
+        f"  {len(rows)} operators, union {union} edges:",
+        f"    {'operator':<24} {'gain':>6} {'sole':>6} {'shapley':>8} {'edges':>6}",
+    ]
+    lines.extend(
+        f"    {r.op:<24} {r.gain:>6} {r.sole:>6} {r.shapley:>8.1f} {r.size:>6}"
+        for r in rows[:_MARGINAL_ROWS_MAX]
+    )
+    if len(rows) > _MARGINAL_ROWS_MAX:
+        lines.append(f"    ... {len(rows) - _MARGINAL_ROWS_MAX} more")
+
+    zero = [r.op for r in rows if not r.gain]
+    if zero:
+        extra = len(zero) - _ZERO_GAIN_NAMES_MAX
+        names = ", ".join(zero[:_ZERO_GAIN_NAMES_MAX]) + (f" +{extra} more" if extra > 0 else "")
+        lines.append(f"  {len(zero)} zero gain: {names}")
     return "\n".join(lines)
 
 

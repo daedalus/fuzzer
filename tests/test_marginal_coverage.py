@@ -1,0 +1,176 @@
+"""Marginal contribution of operators to union edge coverage, and its report wiring."""
+
+import types
+
+import pytest
+
+from fuzzer_tool.core.marginal_coverage import marginal_table
+from fuzzer_tool.core.shapley import ShapleyAttribution
+from fuzzer_tool.services.report import _marginal_coverage
+
+
+def _rows(sets):
+    return {r.op: r for r in marginal_table(sets)}
+
+
+def test_disjoint_sets_each_keep_everything():
+    rows = _rows({"a": {1, 2, 3}, "b": {4, 5}})
+    assert (rows["a"].gain, rows["a"].sole, rows["a"].shapley) == (3, 3, 3.0)
+    assert (rows["b"].gain, rows["b"].sole, rows["b"].shapley) == (2, 2, 2.0)
+
+
+def test_falsify_duplicates_are_not_ranked_equal():
+    """Raw size ties a and b; marginal gain must not: the second copy adds nothing."""
+    rows = marginal_table({"a": {1, 2, 3}, "b": {1, 2, 3}})
+    assert [r.gain for r in rows] == [3, 0]
+    assert all(r.sole == 0 for r in rows)
+    assert all(r.shapley == 1.5 for r in rows)
+
+
+def test_greedy_order_and_gain_over_union():
+    rows = marginal_table({"big": set(range(10)), "sub": {1, 2}, "new": {50, 51, 52}})
+    assert [(r.op, r.gain) for r in rows] == [("big", 10), ("new", 3), ("sub", 0)]
+
+
+def test_invariants_on_overlapping_sets():
+    sets = {"a": {1, 2, 3, 4}, "b": {3, 4, 5}, "c": {4, 5, 6, 7}, "d": set()}
+    rows = marginal_table(sets)
+    union = set().union(*sets.values())
+
+    assert sum(r.gain for r in rows) == len(union)
+    assert sum(r.shapley for r in rows) == pytest.approx(len(union))
+    for r in rows:
+        assert r.sole <= r.gain <= r.size
+        assert r.sole <= r.shapley <= r.size
+
+
+def test_sole_counts_only_unshared_edges():
+    rows = _rows({"a": {1, 2, 3}, "b": {3, 4}})
+    assert (rows["a"].sole, rows["b"].sole) == (2, 1)
+    assert (rows["a"].shapley, rows["b"].shapley) == (2.5, 1.5)
+
+
+def test_ties_break_by_name_deterministically():
+    sets = {"z": {1}, "a": {2}, "m": {3}}
+    assert [r.op for r in marginal_table(sets)] == ["a", "m", "z"]
+
+
+@pytest.mark.parametrize("sets", [{}, {"a": set()}, {"a": set(), "b": set()}])
+def test_adversarial_empty_inputs(sets):
+    rows = marginal_table(sets)
+    assert all(r.gain == r.sole == r.size == 0 and r.shapley == 0.0 for r in rows)
+    assert len(rows) == len(sets)
+
+
+def test_adversarial_sparse_and_negative_edge_ids():
+    """Ids are hashes, not dense indices: huge and negative values must not blow up."""
+    rows = _rows({"a": {2**62, -5}, "b": {-5, 7}})
+    assert rows["a"].sole == 1 and rows["b"].sole == 1
+    assert rows["a"].gain + rows["b"].gain == 3
+
+
+def test_adversarial_input_not_mutated():
+    sets = {"a": {1, 2}, "b": {2, 3}}
+    marginal_table(sets)
+    assert sets == {"a": {1, 2}, "b": {2, 3}}
+
+
+def test_adversarial_many_operators_one_shared_edge():
+    sets = {f"op{i}": {0} for i in range(200)}
+    rows = marginal_table(sets)
+    assert sum(r.gain for r in rows) == 1
+    assert all(r.shapley == pytest.approx(1 / 200) for r in rows)
+
+
+def test_shapley_attribution_exposes_table():
+    sa = ShapleyAttribution()
+    sa.record({"a"}, 2, {1, 2})
+    sa.record({"b"}, 2, {2, 3})
+    rows = {r.op: r for r in sa.marginal_coverage()}
+    assert (rows["a"].sole, rows["b"].sole) == (1, 1)
+    assert rows["a"].gain + rows["b"].gain == 3
+
+
+def test_attribution_edge_sets_are_copies():
+    sa = ShapleyAttribution()
+    sa.record({"a"}, 1, {1})
+    sa.operator_edge_sets()["a"].add(99)
+    assert sa.operator_edge_sets()["a"] == {1}
+
+
+def _fuzzer(sa):
+    return types.SimpleNamespace(_use_shapley=sa is not None, _shapley=sa)
+
+
+def test_report_lists_rows_and_zero_gain_operators():
+    sa = ShapleyAttribution()
+    sa.record({"a"}, 3, {1, 2, 3})
+    sa.record({"b"}, 3, {1, 2, 3})
+    out = _marginal_coverage(_fuzzer(sa))
+
+    assert "Marginal Coverage" in out
+    assert "union 3 edges" in out
+    assert "zero gain" in out and "b" in out.split("zero gain", 1)[1]
+
+
+@pytest.mark.parametrize("fz", [_fuzzer(None), _fuzzer(ShapleyAttribution())])
+def test_report_empty_when_disabled_or_no_data(fz):
+    assert _marginal_coverage(fz) == ""
+
+
+def test_report_truncates_long_tables():
+    sa = ShapleyAttribution()
+    for i in range(40):
+        sa.record({f"op{i:02d}"}, 1, {i})
+    out = _marginal_coverage(_fuzzer(sa))
+    assert "more" in out
+    assert out.count("\n") < 30
+
+
+def _naive(sets):
+    """Reference: full-scan greedy and per-edge loops over plain sets."""
+    left, covered, order = dict(sets), set(), []
+    while left:
+        op = min(left, key=lambda o: (-len(left[o] - covered), o))
+        order.append((op, len(left[op] - covered)))
+        covered |= left.pop(op)
+    holders = {}
+    for edges in sets.values():
+        for e in edges:
+            holders[e] = holders.get(e, 0) + 1
+    return {
+        op: (
+            gain,
+            sum(1 for e in sets[op] if holders[e] == 1),
+            sum(1 / holders[e] for e in sets[op]),
+        )
+        for op, gain in order
+    }, [op for op, _ in order]
+
+
+def _skewed(n_ops):
+    """Deterministic overlapping sets with many gain ties."""
+    return {
+        f"op{i:02d}": {(i * 7 + j * 13) % 211 for j in range(5 + (i * 3) % 40)}
+        for i in range(n_ops)
+    }
+
+
+@pytest.mark.parametrize("n_ops", [2, 9, 40])
+def test_matches_naive_reference(n_ops):
+    sets = _skewed(n_ops)
+    want, want_order = _naive(sets)
+    got = marginal_table(sets)
+
+    assert [r.op for r in got] == want_order
+    for r in got:
+        gain, sole, shapley = want[r.op]
+        assert (r.gain, r.sole) == (gain, sole)
+        assert r.shapley == pytest.approx(shapley)
+
+
+def test_control_reference_equals_itself():
+    """The oracle agrees with a second run of itself, so a mismatch above is the code."""
+    sets = _skewed(40)
+    assert _naive(sets) == _naive(sets)
+    assert marginal_table(sets) == marginal_table(sets)

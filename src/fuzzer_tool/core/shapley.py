@@ -5,6 +5,7 @@ import math
 from collections import defaultdict
 
 from fuzzer_tool.core.dc_eigh import eigh
+from fuzzer_tool.core.marginal_coverage import MarginalRow, marginal_table
 
 try:
     import numpy as np
@@ -217,6 +218,14 @@ class ShapleyAttribution:
                 continue
             for op in touching:
                 shapley[op] += op_counts[op] / total / k
+
+    def operator_edge_sets(self) -> dict[str, set[int]]:
+        """Copy of the per-operator edge sets."""
+        return {op: set(edges) for op, edges in self._operator_edges.items()}
+
+    def marginal_coverage(self) -> list[MarginalRow]:
+        """Per-operator contribution to union coverage, in greedy cover order."""
+        return marginal_table(self.operator_edge_sets())
 
     def operator_synergy(self, op_a: str, op_b: str) -> float:
         """Compute synergy between two operators.
