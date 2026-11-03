@@ -13,9 +13,14 @@ Game: ``v(S) = |union of edge sets of the operators in S|``. Per operator:
 """
 
 import heapq
+import itertools
 from typing import NamedTuple
 
 import numpy as np
+
+# Edge ids below this index a count table directly (no sort); 2**22 ids = 32 MB
+# of int64 counts at worst. Ids are prev^cur hashes bounded by the map size.
+DIRECT_MAX_ID = 1 << 22
 
 
 class MarginalRow(NamedTuple):
@@ -24,6 +29,20 @@ class MarginalRow(NamedTuple):
     gain: int
     sole: int
     shapley: float
+
+
+def _dense(flat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Dense column per entry, and how many entries share each column's edge.
+
+    Small non-negative ids skip the sort: count ids, then rank the present ones.
+    """
+    if flat.size and flat.min() >= 0 and flat.max() < DIRECT_MAX_ID:
+        counts = np.bincount(flat)
+        present = counts > 0
+        return (np.cumsum(present) - 1)[flat], counts[present]
+
+    _, col, holders = np.unique(flat, return_inverse=True, return_counts=True)
+    return col, holders
 
 
 def _greedy(masks: dict[str, int]) -> list[tuple[str, int]]:
@@ -51,11 +70,15 @@ def marginal_table(sets: dict[str, set[int]]) -> list[MarginalRow]:
     """Rows in greedy cover order for ``{operator: edge set}``."""
     ops = list(sets)
     sizes = np.fromiter((len(sets[op]) for op in ops), dtype=np.int64, count=len(ops))
-    flat = np.fromiter((e for op in ops for e in sets[op]), dtype=np.int64, count=int(sizes.sum()))
+    flat = np.fromiter(
+        itertools.chain.from_iterable(sets[op] for op in ops),
+        dtype=np.int64,
+        count=int(sizes.sum()),
+    )
     owner = np.repeat(np.arange(len(ops)), sizes)
 
     # Dense edge index, and how many operators hold each edge.
-    _, col, holders = np.unique(flat, return_inverse=True, return_counts=True)
+    col, holders = _dense(flat)
     held = holders[col]
     share = np.bincount(owner, weights=1.0 / held, minlength=len(ops))
     sole = np.bincount(owner, weights=held == 1, minlength=len(ops)).astype(np.int64)

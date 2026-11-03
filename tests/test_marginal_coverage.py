@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from fuzzer_tool.core.marginal_coverage import marginal_table
+from fuzzer_tool.core.marginal_coverage import DIRECT_MAX_ID, marginal_table
 from fuzzer_tool.core.shapley import ShapleyAttribution
 from fuzzer_tool.services.report import _marginal_coverage
 
@@ -174,3 +174,11 @@ def test_control_reference_equals_itself():
     sets = _skewed(40)
     assert _naive(sets) == _naive(sets)
     assert marginal_table(sets) == marginal_table(sets)
+
+
+@pytest.mark.parametrize("shift", [0, DIRECT_MAX_ID - 100, DIRECT_MAX_ID - 1, DIRECT_MAX_ID, -300])
+def test_dense_index_paths_agree(shift):
+    """Direct-index and sort paths give the same table; ids straddle the limit."""
+    base = _skewed(12)
+    moved = {op: {e + shift for e in edges} for op, edges in base.items()}
+    assert marginal_table(moved) == marginal_table(base)
