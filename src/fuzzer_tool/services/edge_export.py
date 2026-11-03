@@ -27,6 +27,7 @@ from fuzzer_tool.adapters.filesystem import count_archive_seeds, hash_data, iter
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.adaptive_batch import AdaptiveBatch
+from fuzzer_tool.core.elf import estimate_map_size
 from fuzzer_tool.services.minimize import (
     _TIMEOUT_RC,
     _TRIM_EVERY,
@@ -290,7 +291,7 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
     # Caller-context edge ids hash a return address; ASLR makes them noise.
     disable_aslr()
 
-    shm = ShmCoverage()
+    shm = ShmCoverage(estimate_map_size(target))
     env = os.environ.copy()
     env["__AFL_SHM_ID"] = shm.env_id
     env["AFL_MAP_SIZE"] = str(shm.num_entries)
