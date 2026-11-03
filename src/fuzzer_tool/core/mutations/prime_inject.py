@@ -11,6 +11,10 @@ overwrites an aligned 1/2/4/8-byte slot with one of:
 - Mersenne and Fermat primes,
 - the square and a semiprime of the largest primes below 2^(bits/2)
   (composites a trial-division bound or rho step must still catch).
+- the fast-inverse-square-root magic constants (``0x5F3759DF`` for float32,
+  ``0x5FE6EB50C7B537A9`` for float64): not number-theoretic, but they are
+  word-size magic numbers a target that parses one from its input compares
+  against, and this table is where aligned 4/8-byte constants live.
 
 The table is built once from :mod:`fuzzer_tool.core.numtheory` (Hard Rule 51).
 """
@@ -36,6 +40,8 @@ _STRONG_PSEUDOPRIMES = (2047, 3215031751, 3825123056546413051)
 #: Mersenne exponents (2^k - 1 prime) and Fermat primes.
 _MERSENNE_EXPONENTS = (3, 5, 7, 13, 17, 19, 31, 61)
 _FERMAT_PRIMES = (3, 5, 17, 257, 65537)
+#: Quake III fast inverse square root: ``i = MAGIC - (i >> 1)`` on the float's bits.
+_RSQRT_MAGIC = (0x5F3759DF, 0x5FE6EB50C7B537A9)
 
 
 def _boundary(bits: int) -> list[int]:
@@ -62,6 +68,7 @@ def values_for(width: int) -> tuple[int, ...]:
     vals = _boundary(bits) + _composites(bits)
     vals += [(1 << k) - 1 for k in _MERSENNE_EXPONENTS]
     vals += list(_FERMAT_PRIMES) + list(_CARMICHAEL) + list(_STRONG_PSEUDOPRIMES)
+    vals += list(_RSQRT_MAGIC)
     return tuple(dict.fromkeys(v for v in vals if 0 < v < limit))
 
 

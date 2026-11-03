@@ -120,3 +120,29 @@ class TestWiring:
         data = bytes(range(256))
         out = dispatch["prime_inject"](bytearray(data), 0, data)
         assert out is not None and len(out) == len(data) and out != data
+
+
+class TestRsqrtMagic:
+    def test_float32_constant_in_the_4_and_8_byte_tables_only(self):
+        assert 0x5F3759DF in values_for(4)
+        assert 0x5F3759DF in values_for(8)
+        assert 0x5F3759DF not in values_for(2)
+
+    def test_float64_constant_only_where_it_fits(self):
+        assert 0x5FE6EB50C7B537A9 in values_for(8)
+        assert 0x5FE6EB50C7B537A9 not in values_for(4)
+
+    def test_appended_so_the_empty_input_constant_is_unchanged(self):
+        # prime_inject(b"") writes values_for(4)[0]; appending must not move it.
+        assert values_for(4)[0] == 4294967291
+        assert values_for(4).index(0x5F3759DF) > 0
+
+    def test_injectable(self):
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        lit = {(0x5F3759DF).to_bytes(4, o) for o in ("big", "little")}
+        seen = False
+        for seed in range(3000):
+            out = prime_inject(bytes(16), RandPool(seed=seed))
+            seen |= any(out[i : i + 4] in lit for i in range(0, 13, 4))
+        assert seen
