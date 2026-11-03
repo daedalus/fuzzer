@@ -512,7 +512,7 @@ class IsobmffMutator:
                 data = bytearray(target.data)
                 # First entry: sample_offset at offset 12
                 new_sample_offset = self._rng.choice(
-                    [-1, -2, -100, 1, 2, 100, 0x7FFFFFFF, 0x80000000]
+                    [-1, -2, -100, 1, 2, 100, 0x7FFFFFFF, -0x80000000]
                 )
                 struct.pack_into(">i", data, 12, new_sample_offset)
                 target.data = bytes(data)

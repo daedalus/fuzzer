@@ -163,6 +163,41 @@ class TestIsobmffMutations:
         # Payload starts at offset 16 (4 marker + 8 ext_size + 4 box_type)
         assert result[16:] == b"data", "Payload must be preserved"
 
+    def test_ctts_sample_offset_negative_extreme(self):
+        """Regression: signed 32-bit pack must accept -2147483648, not 2147483648.
+        The old choice list contained 0x80000000 (positive, out of range for '>i')."""
+        from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
+
+        class ForceNegMin:
+            """First choice picks the target box, second forces -0x80000000."""
+
+            def __init__(self, target_box):
+                self._target_box = target_box
+                self._call_n = 0
+
+            def choice(self, seq):
+                self._call_n += 1
+                if self._call_n == 1:
+                    return self._target_box
+                return -0x80000000
+
+            def randint(self, a, b):
+                return 0
+
+        box = Box(
+            box_type=b"ctts",
+            size_orig=28,
+            data=b"\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01" + b"\xff" * 12,
+        )
+        mut = IsobmffMutator()
+        mut._rng = ForceNegMin(box)
+        # Should not raise struct.error
+        result = mut._mutate_ctts_sample_offset([box], max_len=4096)
+        assert len(result) == 1
+        # Verify the offset was written (offset 12 in data)
+        written = struct.unpack_from(">i", result[0].data, 12)[0]
+        assert written == -0x80000000, f"Expected -2147483648, got {written}"
+
 
 class TestMagicLock:
     """Magic-lock prefix detection consistency."""
