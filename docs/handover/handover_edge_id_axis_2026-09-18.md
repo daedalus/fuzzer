@@ -1000,9 +1000,9 @@ the tool) continues or closes, and nothing else on the list has that leverage.
 | 1 | ~~P0-1~~ DONE, F2 does not reproduce | -- | first-execution numbers usable |
 | 2 | ~~P1-2~~ DONE, negative (F17) | -- | closed P3-3 derived half; [6] diagnostic only |
 | 3 | ~~P2-4~~ DONE (`2c8dc1d8`, `9f351c58`) | -- | `matrix`/`phantom` run from any clone |
-| 4 | **P1-1 + P1-3** png, zlib, ffmpeg (absorbs E6) | machine time, a table | P3-1, P3-4, E6 |
+| 4 | **P1-1 + P1-3** png, zlib, ffmpeg (absorbs E6) | P1-1 rows recorded 2026-11-03 (synthetic ffmpeg corpus, see P1-1); P1-3 and a real-corpus ffmpeg row open | P3-1 now has three ratios to write against; P3-4, E6 |
 | 5 | ~~P2-1~~ DONE (`caffd071`), over sampled executions, not the tracker | -- | nothing |
-| 6 | **P3-1** `__AFL_CTX_BITS` feedback | paper first | blocked on 4; its best input is gone (see item) |
+| 6 | **P3-1** `__AFL_CTX_BITS` feedback | paper first | inputs exist: ratio 1.11x/1.36x/1.68x vs `ctx_inflation_factor(8)`=16.0 (see P1-1) |
 | 7 | **P3-4** `seed_residual` A/B | bench_paired run | unblocked by F18: run without PC2/PC3 |
 | 8 | **P3-3** `op_credit` derived-edge credit | -- | closed by F17 (P1-2 negative) |
 | 9 | **P3-2** column leverage | bench design first | nothing; lowest expected value |
@@ -1218,6 +1218,53 @@ ffmpeg is the one that matters -- 8189 edges, genuinely multimodal, and the
 target §14's measurements never reached because it would not build in that
 container. This gates P3-1 and feeds E6.
 
+**Run 2026-11-03 at `62a1910c` (png, zlib, ffmpeg; one clean clone, no code
+change).** `tools/edge_diagnostic.py matrix`, `--ctx-bits 8` against a
+`-D__AFL_CTX_SENSITIVE=0` build of the same source on the same corpus
+(`--ctx-bits 0`), clang `trace-pc-guard` + `-fno-jump-tables`, system
+libpng/zlib, vendored ffmpeg 9.0.2 `--nosan --minimal`. 5 repeats each.
+
+| | png_read | zlib_read | ffmpeg_read |
+|---|---|---|---|
+| inputs | 156 | 250 | 250 |
+| ids, ctx / context-free | 725 / 655 | 120 / 88 | 5180 / 3090 |
+| **ctx / context-free ratio** | **1.11x** | **1.36x** | **1.68x** |
+| cross-process jaccard (5 runs) | 1.000 | 1.000 | 1.000 |
+| ICC (family, log2(1+count)) | 0.900 | 0.998 | 0.829 |
+| Shannon bits of y / effective edges | 6.58 / 96 | 6.70 / 104 | 7.13 / 140 |
+| Gini, top-1% share | 0.823, 37.7% | 0.270, 1.4% | 0.934, 74.0% |
+| [4] binary spectrum: dominance / eff. rank | 0.689 / 2.0 | 0.819 / 1.4 | 0.638 / 2.3 |
+| [7] distinct profiles / edges (exact copies) | 49 / 725 (676) | 13 / 120 (107) | 721 / 5180 (4459) |
+| [7] within-family duplicates | 0 | 0 | 2 edges in 2 classes |
+
+What this does and does not settle:
+
+- **The ratio rises with how multimodal the target is** (1.11 -> 1.36 -> 1.68;
+  fuzzgoat's 1.19 sits between png and zlib). It is the first evidence on a
+  target with real fan-in, and it is nowhere near
+  `elf.ctx_inflation_factor(8)` = 16.0. That function is what map sizing uses
+  today, so it over-sizes by 10-14x on all four measured targets (16.0 against
+  1.11-1.68). This is
+  the number P3-1's rule has to be written against; no code was changed here.
+- Not the 8189-edge ffmpeg run the item asks for. The corpus is a synthetic 250-seed
+  multi-demuxer set (WAV/AIFF/AU/FLAC/MP3/ADTS/Ogg/Matroska/MOV/FLV/TS/AMR plus
+  point mutations; `corpus_ffmpeg_issues.py` needs the issue tracker, which this
+  container cannot reach) on the audio-focused `--minimal` build, so the
+  5180-id union is a lower bound on a real corpus and the ratio may move.
+  png's corpus is `corpus_png.py` (156 seeds); zlib's is 250 synthetic
+  gzip/raw-deflate/truncated streams.
+- The drop counter is not reported by `matrix` mode. The ffmpeg union is 5180
+  ids in a 262144-entry table (~2% load), so saturation is not in play for
+  these rows, but that is arithmetic, not a measurement.
+- E6's standing precondition (ASLR off, probe clean) was not separately
+  checked; the 1.000 jaccard over 5 processes is consistent with it, not proof.
+- P1-3 (PC2 vs validity) was **not** run. png and zlib carry the label but the
+  corpora above were not labelled valid/invalid.
+- The png/zlib rows were first measured at the pre-`735ea314` shim and then
+  redone after pulling it (edge-id scheme 4); the table is the second set. The
+  first set (png 751/682 = 1.10x, zlib 146/114 = 1.28x) agrees to within the
+  scheme change.
+
 ### P1-3. Does PC2 separate valid from invalid on other targets? -- run with P1-1
 
 F13 found the second principal component of the seed Gram matrix tracking
@@ -1271,6 +1318,11 @@ classes at `c26f0a1`, 5 just before the fix): they were the aliasing. The ICC is
 left to build the rule on: the ctx / context-free id ratio (1.19x here), the
 drop counter, and [9]'s (edge, site) triples against ids. Write the rule
 against those, on paper, after P1-1 has a multimodal target in the table.
+
+**2026-11-03:** P1-1 has a multimodal row now (ffmpeg 1.68x; png 1.11x, zlib
+1.36x). `elf.ctx_inflation_factor(8)` returns 16.0 against all of them. The rule
+is still unwritten; a real-corpus ffmpeg row would firm up the top of the range
+first.
 
 Blocked on P1-1, and on paper first: write the decision rule before touching
 code. The inputs exist (ICC, family occupancy against the 2^(bits-1)
