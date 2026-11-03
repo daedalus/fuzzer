@@ -205,3 +205,14 @@ def test_falsify_incremental_greedy_matches_brute_force(space):
             for i in range(rng.randint(0, 25))
         }
         assert [(r.op, r.gain) for r in marginal_table(sets)] == _brute_greedy(sets)
+
+
+def test_marginal_coverage_does_not_mutate_or_copy_state():
+    """Report reads the live per-operator sets; it must leave them untouched."""
+    sa = ShapleyAttribution()
+    sa.record({"a"}, 3, {1, 2, 3})
+    sa.record({"b"}, 2, {3, 4})
+    before = {k: set(v) for k, v in sa._operator_edges.items()}
+    rows = sa.marginal_coverage()
+    assert {k: set(v) for k, v in sa._operator_edges.items()} == before
+    assert sum(r.gain for r in rows) == 4

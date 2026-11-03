@@ -264,7 +264,8 @@ class ShapleyAttribution:
 
     def marginal_coverage(self) -> list[MarginalRow]:
         """Per-operator contribution to union coverage, in greedy cover order."""
-        return marginal_table(self.operator_edge_sets())
+        # marginal_table only reads; skip the per-set copy (~as costly as the table).
+        return marginal_table(self._operator_edges)
 
     def operator_synergy(self, op_a: str, op_b: str) -> float:
         """Compute synergy between two operators.

@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Operator marginal coverage report** (`--shapley`, `core/marginal_coverage.py`): per-operator `gain` (greedy cover order), `sole` edges and exact `shapley` on the union-coverage game, with zero-gain operators listed as prune candidates. Report only; not fed to Elo. 264 ops x 2000 edges: greedy cover is incremental numpy (one pass over entries, 16-bit radix CSR), 112 -> 62 ms on an overlapping synthetic. `tests/test_marginal_coverage.py`.
+- **Operator marginal coverage report** (`--shapley`, `core/marginal_coverage.py`): per-operator `gain` (greedy cover order), `sole` edges and exact `shapley` on the union-coverage game, with zero-gain operators listed as prune candidates. Report only; not fed to Elo. 264 ops x 2000 edges: greedy cover is incremental numpy (one pass over entries, 16-bit radix CSR), 112 -> 62 ms on an overlapping synthetic; `ShapleyAttribution.marginal_coverage` no longer copies the per-operator sets (~28 ms at that size). `tests/test_marginal_coverage.py`.
 - **Opt-in stepped edge-table probe** (`afl_shim.c`, `-D__AFL_PROBE_MSI=1`, off by default; `tests/test_shim_msi_probe.py`): walks the probe window with a per-edge odd step (mask-step-index) instead of +1; non-power-of-two tables keep step 1; needs `__AFL_PROBE_ISA=0`. Simulated drops at 2^18 entries, window 64: load 0.77 0.051% -> 0.000%, load 0.90 0.99% -> 0.0015%. Measured cost: shim microbenchmark load 0.77 `probe` mode +11.2% ns/call (1/8, p=0.039, A/A -0.4%); fuzzgoat in-run null at load 0.005 and ~0.7 (ledger 86-92). Not adopted as a default. The default build is unchanged.
 
 ### Changed
