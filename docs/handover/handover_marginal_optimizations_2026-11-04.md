@@ -16,6 +16,7 @@ differences under ~15% are not evidence.
 | `f6ecfcc4` | `_prune_edges` removes via C-level `dict.pop` (`deque(map(counts.pop, hit), maxlen=0)`); `Counter.__delitem__` is a Python-level override (2.2M calls in the stress run). | 5.4 -> 4.7 ms/record under constant churn |
 | `c3921fac` | Per-operator edges stored once: `_operator_edges` is a read-only `Mapping` (`_KeyViews`) of live key views of `_op_edge_count` (the two always held identical sets). Reads never create keys. | `record` 1353 -> 720 us steady; 55 -> 28 MB at 264 ops x 400 records |
 | `297998a0` | Gap fixes (below). | see below |
+| this branch | `_all_edges` is a property (key view of `_edge_total`), not a second set updated per exec; prune reads `_edge_total` keys/values directly. | `record` -10 to -20% (3.5 -> 2.8 us at 10 edges, 54 -> 49 at 200, 818 -> 761 at 2000) |
 
 ## Gaps found by re-reading, and fixed (`297998a0`)
 
@@ -39,6 +40,7 @@ flatten sets to numpy ~24 ms; greedy ~16-20 ms (of which the radix argsort ~8 ms
 | Early exit once every edge is covered (rest are zero-gain, by name) | Saves ~1 ms of ~11 ms: the cost is building the edge->holders index, not the pick loop. |
 | Lazy-scan greedy without CSR (gather over all entries per positive pick) | 8.9 vs 11.2 ms with 4 positive picks, 2x slower at 14 picks, 4x at 51. Real runs have a handful to ~50 positive picks; switching on the pick count would save a few ms in one corner. |
 | Holder counts from the cached edge-major view (`_edge_op_count`) | 17.6 vs 12.0 ms; the view costs ~86 ms cold and the marginal report never builds it. |
+| Dense (operator x edge slot) int64 count matrix replacing the per-operator Counters in `record()` (fused numpy scatter per exec; small execs buffered in Counters and flushed on read) | Wins only on wide execs: `record` 810 -> 326 us at 2000 edges x <=8 ops, 4360 -> 2090 us on a 30k-edge pool. Loses where fuzzgoat lives (<75 edges/exec, 56% single-op, measured): 3.3 -> 10 us at 10 edges, 10 -> 20 us at 25 x 4; `shapley_values` 2-3x slower at small sizes, report 332 -> 595 ms at 2000 (materializing sets). Edge-major layout was worse (each edge row = one 4 KB page). Nothing beats C-level `Counter.update` below ~250 increments/exec. Code kept out of tree; numbers from ad hoc harnesses (300 records, min of 7). |
 | Per-operator bitmaps maintained in `record()` | `record` +23% (729 -> 894 us), +17 MB at a 2^16 id space (~1 MB/operator at 2^20), and flatten from bitmaps is slower (30.7 vs 22.2 ms: scanning 264 x 65,536 bytes beats nothing). Compact slot ids need a dict lookup per edge, costlier still. |
 
 ## Open items

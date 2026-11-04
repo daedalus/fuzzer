@@ -1,9 +1,9 @@
 """ShapleyAttribution: game-theoretic attribution of operators to edge coverage."""
 
 import collections
-from collections.abc import Mapping
 import math
 from collections import defaultdict
+from collections.abc import Mapping
 from itertools import repeat
 
 from fuzzer_tool.core.dc_eigh import eigh
@@ -142,8 +142,6 @@ class ShapleyAttribution:
         # ``_op_edge_count`` (the two always held identical sets), so nothing is stored twice.
         self._operator_edges = _KeyViews(self._op_edge_count)
         self._edge_view: dict[int, dict[str, int]] | None = None
-        # Global edge set
-        self._all_edges: set[int] = set()
         # How often the edge cap evicted the rarest half (marginal tables are then partial).
         self.prune_count = 0
 
@@ -163,9 +161,13 @@ class ShapleyAttribution:
                 self._op_edge_count[op].update(edge_indices)
             self._edge_total.update(edge_indices)
             self._edge_view = None
-            self._all_edges.update(edge_indices)
-            if len(self._all_edges) > SHAPLEY_EDGES_MAX:
+            if len(self._edge_total) > SHAPLEY_EDGES_MAX:
                 self._prune_edges()
+
+    @property
+    def _all_edges(self):
+        """Tracked edges: the key view of ``_edge_total`` (one store, no per-exec set update)."""
+        return self._edge_total.keys()
 
     @property
     def _edge_op_count(self) -> dict[int, dict[str, int]]:
@@ -190,15 +192,13 @@ class ShapleyAttribution:
         """
         # Sort by observed frequency (ascending); ties broken by edge id for
         # determinism.
-        ids = np.fromiter(self._all_edges, dtype=np.int64, count=len(self._all_edges))
-        totals = np.fromiter(
-            map(self._edge_total.get, ids.tolist(), repeat(0)), dtype=np.int64, count=len(ids)
-        )
-        drop = ids[np.lexsort((ids, totals))[: len(ids) // 2]].tolist()
+        n = len(self._edge_total)
+        ids = np.fromiter(self._edge_total.keys(), dtype=np.int64, count=n)
+        totals = np.fromiter(self._edge_total.values(), dtype=np.int64, count=n)
+        drop = ids[np.lexsort((ids, totals))[: n // 2]].tolist()
         dropped = set(drop)
-        self._all_edges -= dropped
         collections.deque(map(self._edge_total.pop, drop, repeat(None)), maxlen=0)
-        for op, counts in self._op_edge_count.items():
+        for counts in self._op_edge_count.values():
             # C-level intersection; the Python loop only visits edges the operator holds.
             hit = counts.keys() & dropped
             if hit:

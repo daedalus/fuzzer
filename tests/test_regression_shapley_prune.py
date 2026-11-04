@@ -101,3 +101,42 @@ def test_operator_edges_is_a_live_view_of_op_edge_count():
     assert s._operator_edges["a"] == {1, 2, 3}
     with pytest.raises(KeyError):
         s._operator_edges["zzz"]
+
+
+def _expected_kept(totals: dict[int, int]) -> set[int]:
+    """Independent prune oracle: drop the rarest half by (total, id)."""
+    ranked = sorted(totals, key=lambda e: (totals[e], e))
+    return set(ranked[len(ranked) // 2 :])
+
+
+def test_regression_all_edges_is_a_view_of_edge_total():
+    """One store: _all_edges is the key view of _edge_total, not a second set updated per exec."""
+    s = ShapleyAttribution()
+    s.record({"a"}, 2, {1, 2})
+    assert isinstance(s._all_edges, type({}.keys()))
+    s.record({"b"}, 1, {3})
+    assert s._all_edges == {1, 2, 3} == s._edge_total.keys()
+
+
+def test_falsify_prune_keeps_oracle_half():
+    """Kept edges equal the oracle's; a wrong tie-break or direction would differ."""
+    s = ShapleyAttribution()
+    hot = set(range(SHAPLEY_EDGES_MAX // 2))
+    s.record({"a"}, len(hot), hot)  # every hot edge seen twice, the rest once
+    s.record({"b"}, len(hot), hot)
+    totals = dict(s._edge_total)
+    cold = set(range(-(SHAPLEY_EDGES_MAX // 2) - 1, 0))  # pushes past the cap
+    totals.update(dict.fromkeys(cold, 1))
+    s.record({"c"}, len(cold), cold)
+    assert s.prune_count == 1
+    assert set(s._all_edges) == _expected_kept(totals) == set(s._edge_total)
+
+
+def test_adversarial_prune_all_ties_break_by_id():
+    """All totals equal: the numerically lower half (negative ids included) goes."""
+    s = ShapleyAttribution()
+    edges = set(range(-SHAPLEY_EDGES_MAX // 2, SHAPLEY_EDGES_MAX // 2 + 1))
+    s.record({"a"}, len(edges), edges)
+    assert s.prune_count == 1
+    assert set(s._all_edges) == _expected_kept(dict.fromkeys(edges, 1))
+    assert set(s._operator_edges["a"]) == set(s._all_edges)
