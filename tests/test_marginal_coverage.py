@@ -245,13 +245,10 @@ def test_tiny_input_with_huge_ids_skips_the_direct_table():
     assert (time.perf_counter() - t) / 20 < 0.010
 
 
-def test_report_flags_pruned_edge_cap():
-    from fuzzer_tool.core.shapley import SHAPLEY_EDGES_MAX
-
+def test_report_has_no_edge_cap_note():
+    """No edge is ever evicted, so the report never warns about a cap."""
     sa = ShapleyAttribution()
-    sa.record({"a"}, 1, {1, 2})
-    assert "edge cap evicted" not in _marginal_coverage(_fuzzer(sa))
-    for i in range(SHAPLEY_EDGES_MAX + 10):
+    for i in range(20_000):
         sa.record({"b"}, 1, {100 + i})
-    assert sa.prune_count >= 1
-    assert "edge cap evicted" in _marginal_coverage(_fuzzer(sa))
+    assert len(sa._all_edges) == 20_000
+    assert "edge cap" not in _marginal_coverage(_fuzzer(sa))
