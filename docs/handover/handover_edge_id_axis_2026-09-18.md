@@ -1264,6 +1264,17 @@ What this does and does not settle:
   redone after pulling it (edge-id scheme 4); the table is the second set. The
   first set (png 751/682 = 1.10x, zlib 146/114 = 1.28x) agrees to within the
   scheme change.
+- **Re-run at `1169498f`.** `9c5cc20c` changed `targets/ffmpeg_read.c` (64 KiB
+  `stream_info` window) after the ffmpeg row was recorded. Rebuilt both
+  variants and re-ran: 5180 / 3090 ids, jaccard 1.000, ICC 0.829, 721 profiles,
+  identical to the table. Expected: the window only matters for inputs past
+  4 KiB and this corpus is capped there, so the row says nothing about that
+  change either way.
+- **Fuzzer smoke on the same clang build** (pre-`9c5cc20c` target, 250 seeds,
+  `-m 4096 -t 2`, two 20000-exec runs, the second from the first's saved corpus):
+  no crashes or timeouts, ~280-300 execs/s, 10185 edges found by the first run
+  (Chao2 10896-11154), table load ~1.9%. One run each, one core; a smoke test,
+  not a throughput benchmark.
 
 ### P1-3. Does PC2 separate valid from invalid on other targets? -- run with P1-1
 
