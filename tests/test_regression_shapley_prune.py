@@ -1,7 +1,10 @@
 """Regression for P0-5: shapley prune discarded the numerically low half of edge ids."""
 
+import collections
+
 import pytest
 
+from fuzzer_tool.core import shapley
 from fuzzer_tool.core.shapley import SHAPLEY_EDGES_MAX, ShapleyAttribution
 
 
@@ -103,12 +106,6 @@ def test_operator_edges_is_a_live_view_of_op_edge_count():
         s._operator_edges["zzz"]
 
 
-def _expected_kept(totals: dict[int, int]) -> set[int]:
-    """Independent prune oracle: drop the rarest half by (total, id)."""
-    ranked = sorted(totals, key=lambda e: (totals[e], e))
-    return set(ranked[len(ranked) // 2 :])
-
-
 def test_regression_all_edges_is_a_view_of_edge_total():
     """One store: _all_edges is the key view of _edge_total, not a second set updated per exec."""
     s = ShapleyAttribution()
@@ -118,8 +115,16 @@ def test_regression_all_edges_is_a_view_of_edge_total():
     assert s._all_edges == {1, 2, 3} == s._edge_total.keys()
 
 
-def test_falsify_prune_keeps_oracle_half():
-    """Kept edges equal the oracle's; a wrong tie-break or direction would differ."""
+def _mg_oracle(totals: dict[int, int], k: int) -> dict[int, int]:
+    """Batch Misra-Gries by hand: subtract the (k+1)-th largest count, keep positives."""
+    if len(totals) <= k:
+        return dict(totals)
+    c = sorted(totals.values(), reverse=True)[k]
+    return {e: v - c for e, v in totals.items() if v > c}
+
+
+def test_falsify_prune_matches_misra_gries_oracle():
+    """Kept edges and their reduced totals equal the oracle's; halving would differ."""
     s = ShapleyAttribution()
     hot = set(range(SHAPLEY_EDGES_MAX // 2))
     s.record({"a"}, len(hot), hot)  # every hot edge seen twice, the rest once
@@ -129,14 +134,50 @@ def test_falsify_prune_keeps_oracle_half():
     totals.update(dict.fromkeys(cold, 1))
     s.record({"c"}, len(cold), cold)
     assert s.prune_count == 1
-    assert set(s._all_edges) == _expected_kept(totals) == set(s._edge_total)
+    assert dict(s._edge_total) == _mg_oracle(totals, SHAPLEY_EDGES_MAX)
+    assert "c" in s._operator_edges and not s._operator_edges["c"]  # every cold edge evicted
 
 
-def test_adversarial_prune_all_ties_break_by_id():
-    """All totals equal: the numerically lower half (negative ids included) goes."""
+def test_regression_heavy_hitters_survive_cap(monkeypatch):
+    """Any edge seen more than n/(k+1) times survives; drop-rarest-half lost some.
+
+    8 edges seen 3 times each, then 3 newcomers in one exec, cap 10: halving
+    dropped 5 of 11 (2 heavy); Misra-Gries subtracts the 11th count (1) and keeps
+    all 8 (3 > n/(k+1) = 27/11).
+    """
+    monkeypatch.setattr(shapley, "SHAPLEY_EDGES_MAX", 10)
+    s = ShapleyAttribution()
+    heavy = set(range(8))
+    for _ in range(3):
+        s.record({"a"}, len(heavy), heavy)
+    s.record({"b"}, 3, {100, 101, 102})
+    assert set(s._all_edges) == heavy
+    assert set(s._operator_edges["a"]) == heavy
+
+
+def test_counts_within_misra_gries_error_bound(monkeypatch):
+    """Stored totals underestimate the true count by at most n/(k+1), never over."""
+    k = 50
+    monkeypatch.setattr(shapley, "SHAPLEY_EDGES_MAX", k)
+    s, true = ShapleyAttribution(), collections.Counter()
+    for i in range(400):
+        edges = {i % 7, i % 11 + 10, i % 13 + 30} | {1000 + i * 3 + j for j in range(3)}
+        s.record({"a"}, len(edges), edges)
+        true.update(edges)
+    n = sum(true.values())
+    assert s.prune_count >= 1
+    for e, c in true.items():
+        got = s._edge_total.get(e, 0)
+        assert c - n / (k + 1) <= got <= c
+        if c > n / (k + 1):
+            assert e in s._all_edges
+
+
+def test_adversarial_all_ties_evict_together():
+    """All totals equal at overflow: no id order decides; every tied edge goes."""
     s = ShapleyAttribution()
     edges = set(range(-SHAPLEY_EDGES_MAX // 2, SHAPLEY_EDGES_MAX // 2 + 1))
     s.record({"a"}, len(edges), edges)
     assert s.prune_count == 1
-    assert set(s._all_edges) == _expected_kept(dict.fromkeys(edges, 1))
-    assert set(s._operator_edges["a"]) == set(s._all_edges)
+    assert len(s._all_edges) == 0
+    assert "a" in s._operator_edges and not s._operator_edges["a"]
