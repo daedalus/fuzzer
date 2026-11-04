@@ -35,7 +35,8 @@ def _dense(flat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     Small non-negative ids skip the sort: count ids, then rank the present ones.
     """
-    if flat.size and flat.min() >= 0 and flat.max() < DIRECT_MAX_ID:
+    # bincount costs O(max id), unique O(n log n): few entries with big ids sort instead.
+    if flat.size and flat.min() >= 0 and flat.max() < min(DIRECT_MAX_ID, 64 * flat.size + 4096):
         counts = np.bincount(flat)
         present = counts > 0
         return (np.cumsum(present) - 1)[flat], counts[present]
@@ -75,7 +76,9 @@ def _greedy(
         if new.size:
             covered[new] = True
             lens = holders[new]
-            idx = np.repeat(starts[new] - (np.cumsum(lens) - lens), lens) + np.arange(int(lens.sum()))
+            idx = np.repeat(starts[new] - (np.cumsum(lens) - lens), lens) + np.arange(
+                int(lens.sum())
+            )
             gains -= np.bincount(holder_ops[idx], minlength=n)
             gains[p] = -1
     return order
@@ -85,11 +88,20 @@ def marginal_table(sets: dict[str, set[int]]) -> list[MarginalRow]:
     """Rows in greedy cover order for ``{operator: edge set}``."""
     ops = list(sets)
     sizes = np.fromiter((len(sets[op]) for op in ops), dtype=np.int64, count=len(ops))
-    flat = np.fromiter(
-        itertools.chain.from_iterable(sets[op] for op in ops),
-        dtype=np.int64,
-        count=int(sizes.sum()),
-    )
+    chained = itertools.chain.from_iterable(sets[op] for op in ops)
+    try:
+        flat = np.fromiter(chained, dtype=np.int64, count=int(sizes.sum()))
+    except OverflowError:
+        # Ids outside int64: only identity matters, so factorize them.
+        index: dict[int, int] = {}
+        flat = np.fromiter(
+            (
+                index.setdefault(e, len(index))
+                for e in itertools.chain.from_iterable(sets[op] for op in ops)
+            ),
+            dtype=np.int64,
+            count=int(sizes.sum()),
+        )
     owner = np.repeat(np.arange(len(ops)), sizes)
 
     # Dense edge index, and how many operators hold each edge.

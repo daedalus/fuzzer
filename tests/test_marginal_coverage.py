@@ -216,3 +216,42 @@ def test_marginal_coverage_does_not_mutate_or_copy_state():
     rows = sa.marginal_coverage()
     assert {k: set(v) for k, v in sa._operator_edges.items()} == before
     assert sum(r.gain for r in rows) == 4
+
+
+@pytest.mark.parametrize("big", [1 << 63, (1 << 64) + 7, 1 << 200])
+def test_ids_outside_int64_are_ranked_by_identity(big):
+    """Hash-sized ids must not crash the report; only equality matters."""
+    rows = {r.op: r for r in marginal_table({"a": {big, 1}, "b": {big}, "c": {big + 1}})}
+    assert (rows["a"].gain, rows["a"].sole) == (2, 1)
+    assert (rows["b"].gain, rows["b"].sole) == (0, 0)
+    assert rows["c"].sole == 1
+
+
+@pytest.mark.parametrize("n", [1 << 16, (1 << 16) + 1])
+def test_radix_key_boundary_matches_brute_force(n):
+    """65536 columns use the 16-bit radix key, 65537 fall back to int64: same answer."""
+    sets = {"a": set(range(n)), "b": set(range(n // 2, n + 10)), "c": {0, n + 5}}
+    assert [(r.op, r.gain) for r in marginal_table(sets)] == _brute_greedy(sets)
+
+
+def test_tiny_input_with_huge_ids_skips_the_direct_table():
+    """Three entries must not allocate a 4M-slot count table (was ~25 ms, now sort path)."""
+    import time
+
+    sets = {"a": {DIRECT_MAX_ID - 1}, "b": {DIRECT_MAX_ID - 2, 3}}
+    t = time.perf_counter()
+    for _ in range(20):
+        marginal_table(sets)
+    assert (time.perf_counter() - t) / 20 < 0.010
+
+
+def test_report_flags_pruned_edge_cap():
+    from fuzzer_tool.core.shapley import SHAPLEY_EDGES_MAX
+
+    sa = ShapleyAttribution()
+    sa.record({"a"}, 1, {1, 2})
+    assert "edge cap evicted" not in _marginal_coverage(_fuzzer(sa))
+    for i in range(SHAPLEY_EDGES_MAX + 10):
+        sa.record({"b"}, 1, {100 + i})
+    assert sa.prune_count >= 1
+    assert "edge cap evicted" in _marginal_coverage(_fuzzer(sa))

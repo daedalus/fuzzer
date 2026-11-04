@@ -1951,6 +1951,13 @@ def _marginal_coverage(f) -> str:
     if len(rows) > _MARGINAL_ROWS_MAX:
         lines.append(f"    ... {len(rows) - _MARGINAL_ROWS_MAX} more")
 
+    pruned = getattr(f._shapley, "prune_count", 0)
+    if pruned:
+        lines.append(
+            f"  note: edge cap evicted the rarest edges {pruned}x; gain/sole undercount "
+            "operators that find rare edges, so zero-gain is a weak prune signal"
+        )
+
     zero = [r.op for r in rows if not r.gain]
     if zero:
         extra = len(zero) - _ZERO_GAIN_NAMES_MAX

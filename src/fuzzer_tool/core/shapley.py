@@ -144,6 +144,8 @@ class ShapleyAttribution:
         self._edge_view: dict[int, dict[str, int]] | None = None
         # Global edge set
         self._all_edges: set[int] = set()
+        # How often the edge cap evicted the rarest half (marginal tables are then partial).
+        self.prune_count = 0
 
     def record(
         self, operators: set[str], new_edges: int, edge_indices: set[int] | None = None
@@ -203,6 +205,7 @@ class ShapleyAttribution:
                 # dict.pop is C-level; Counter.__delitem__ is a Python-level override.
                 collections.deque(map(counts.pop, hit), maxlen=0)
         self._edge_view = None
+        self.prune_count += 1
 
     def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
         """Compute exact Shapley values for the per-edge frequency-weighted game.
