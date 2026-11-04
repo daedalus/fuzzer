@@ -1954,7 +1954,7 @@ def _marginal_coverage(f) -> str:
     pruned = getattr(f._shapley, "prune_count", 0)
     if pruned:
         lines.append(
-            f"  note: edge cap evicted the rarest edges {pruned}x; gain/sole undercount "
+            f"  note: edge cap evicted low-count edges {pruned}x (Misra-Gries); gain/sole undercount "
             "operators that find rare edges, so zero-gain is a weak prune signal"
         )
 

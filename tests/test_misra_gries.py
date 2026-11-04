@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from fuzzer_tool.core.misra_gries import MisraGries
+from fuzzer_tool.core.misra_gries import MisraGries, reduce_counts
 
 K = 4
 
@@ -81,3 +81,51 @@ def test_most_common_orders_by_count():
         mg.add(s)
 
     assert [k for k, _ in mg.most_common(2)] == ["c", "b"]
+
+
+def _reduce_reference(counts: dict, k: int) -> dict:
+    """Batch (mergeable) Misra-Gries by hand: subtract the (k+1)-th largest count."""
+    if len(counts) <= k:
+        return dict(counts)
+    c = sorted(counts.values(), reverse=True)[k]
+    return {key: v - c for key, v in counts.items() if v > c}
+
+
+def test_reduce_matches_reference_and_returns_evicted():
+    counts = {"a": 5, "b": 1, "c": 3, "d": 1, "e": 2}
+    want = _reduce_reference(counts, 2)
+    assert want == _reduce_reference(dict(counts), 2)  # control
+    evicted = reduce_counts(counts, 2)
+    assert counts == want == {"a": 3, "c": 1}
+    assert sorted(evicted) == ["b", "d", "e"]
+    assert list(counts) == ["a", "c"]  # insertion order kept
+
+
+def test_reduce_under_capacity_is_noop():
+    counts = Counter({"a": 1, "b": 1})
+    assert reduce_counts(counts, 2) == []
+    assert counts == {"a": 1, "b": 1}
+
+
+def test_reduce_batched_stream_keeps_error_bound():
+    """Fed in batches, any key above n/(k+1) survives and stored <= true <= stored + n/(k+1)."""
+    k, counts, true = 5, Counter(), Counter()
+    for i in range(300):
+        batch = [i % 3, i % 4 + 10, 100 + i, 200 + i]
+        counts.update(batch)
+        true.update(batch)
+        reduce_counts(counts, k)
+        assert len(counts) <= k
+    n = sum(true.values())
+    for key, c in true.items():
+        assert c - n / (k + 1) <= counts.get(key, 0) <= c
+        if c > n / (k + 1):
+            assert key in counts
+
+
+def test_reduce_adversarial_ties_and_huge_keys():
+    """All tied: everything goes. Keys need only hash (ids beyond int64)."""
+    big = 1 << 80
+    counts = {big + i: 1 for i in range(4)}
+    assert sorted(reduce_counts(counts, 3)) == [big + i for i in range(4)]
+    assert counts == {}
