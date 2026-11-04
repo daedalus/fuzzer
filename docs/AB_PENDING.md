@@ -25,6 +25,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
+| Packed edge sets (`--packed-edges`) | Survivors' `seed_edges` as sorted uint32 (`EdgeSet`) | N | fuzzgoat + FFmpeg 10k null (ledger 94-95); owed: FFmpeg >= 60k execs at the 1,000-seed cap, live RSS + wall, A/A |
 | Prune cost tie (`--prune-cost`) | Evict the costliest of equally redundant tracked seeds first | U | needs > 1,000 tracked seeds (FFmpeg, or a long fuzzgoat run); vs default, A/A control |
 | Seed stage (`--stage-execs K`) | One pick serves up to K execs, sized by perf score | S | fuzzgoat exe K=8 vs 1, 8 paired reps: wall -5% (8/8, p=0.008; A/A 4/8), edges unchanged (p=0.73). Open: K in {4, 16}, FFmpeg, edges at fixed wall time; default flip |
 | Branch seed arm (`--seed-branch-scheduler`) | Seeds near least-tried frontier branches, line-graph hops over the Katz ICFG | N | `--set fuzzgoat_katz`, 20 seeds x 10k, vs `elo` (Katz on in both). Edges W14 L6, McNemar p=0.115 (Holm 0.23), med +124; eps W7 L13 p=0.26, med -2.8; unique W7 L8. A/A (`seed-branch-ctl`) W11 L9 p=0.82, med +38: clean. 9 of 60 campaigns ended early (< 50 s, rc 0; elo 5, branch 3, ctl 1), not reproducible solo or 3-parallel; without them W9 L3 p=0.15, A/A W7 L7. Leans positive, unresolved: `--reps 3` or 40+ seeds |
