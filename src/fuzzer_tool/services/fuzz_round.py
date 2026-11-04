@@ -1951,30 +1951,38 @@ class FuzzRound:
 
     def _record_attribution(self) -> None:
         f = self._f
+        # One SHM scan -> set per exec, shared by every consumer below (each
+        # call used to build its own ~thousand-element set; all only read it).
+        edges = None
+        if (
+            (f._use_shapley and f._shapley)
+            or (f._use_mi and f._mi)
+            or (f._use_transfer_entropy and f._te)
+        ):
+            edges = f._get_current_edge_set()
+
         if f._use_shapley and f._shapley:
-            new_edges = f._get_current_edge_set()
             effective = self._effective
-            if new_edges:
+            if edges:
                 f._shapley.record(
                     set(effective) if effective is not None else set(f._last_ops_used),
-                    len(new_edges),
-                    new_edges,
+                    len(edges),
+                    edges,
                 )
             elif f.exec_count > 0 and f._last_ops_used:
                 # Even with no edges, record a zero to track operator impact
                 f._shapley.record(set(f._last_ops_used), 0, set())
 
-        if f._use_mi and f._mi:
-            current_edges = f._get_current_edge_set()
-            if current_edges:
-                f._mi.record(self._data, current_edges, f.map_size)
+        if f._use_mi and f._mi and edges:
+            f._mi.record(self._data, edges, f.map_size)
 
         if f._use_transfer_entropy and f._te:
-            self._record_te()
+            self._record_te(edges)
 
-    def _record_te(self) -> None:
+    def _record_te(self, current_edges: set[int] | None = None) -> None:
         f = self._f
-        current_edges = f._get_current_edge_set()
+        if current_edges is None:
+            current_edges = f._get_current_edge_set()
         if not current_edges:
             return
         data = self._data
