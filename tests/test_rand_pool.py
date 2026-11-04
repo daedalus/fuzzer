@@ -654,6 +654,24 @@ class TestRandrangeList:
         assert len(result) == 50
         assert all(0 <= v < 10 for v in result)
 
+    def test_count_beyond_pool_is_not_truncated(self):
+        # A bare pool slice returned short for count > pool size.
+        from fuzzer_tool.core import rand_pool
+
+        count = rand_pool._POOL_ENTRIES * 3 + 17
+        result = RandPool(seed=5).randrange_list(7, count)
+        assert len(result) == count
+        assert all(0 <= v < 7 for v in result)
+
+    def test_count_beyond_pool_matches_scalar_draws(self):
+        from fuzzer_tool.core import rand_pool
+
+        count = rand_pool._POOL_ENTRIES + 123
+        bulk = RandPool(seed=9).randrange_list(10, count)
+        scalar = RandPool(seed=9)
+        # Oversized batches consume the tail first, so they equal count scalar draws.
+        assert bulk == [scalar.randrange(10) for _ in range(count)]
+
     def test_zero_n(self):
         assert RandPool().randrange_list(0, 10) == []
 

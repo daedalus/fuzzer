@@ -1863,11 +1863,22 @@ def position_marginal(a: bytes, donors: list[bytes], rng) -> bytes:
         return a
     length = 1 + rng.randrange(n)
     start = rng.randrange(n - length + 1)
-    parents = np.stack([np.frombuffer(x, np.uint8) for x in (a, *(_padded(d, a) for d in donors))])
-    pick = np.array([rng.randrange(len(parents)) for _ in range(length)])
-    out = np.frombuffer(a, np.uint8).copy()
-    out[start : start + length] = parents[pick, np.arange(start, start + length)]
-    return out.tobytes()
+    end = start + length
+    k = len(donors) + 1
+    # One parent index per byte.  A pool-backed rng slices them in one C-level
+    # operation (same one-word-per-draw, ``% k`` semantics as ``randrange``);
+    # anything else keeps the scalar loop, so scripted draw sequences hold.
+    bulk = getattr(rng, "randrange_list", None)
+    pick = np.array(bulk(k, length) if bulk else [rng.randrange(k) for _ in range(length)])
+    # Only the window is gathered: stacking whole parents copied (k * n) bytes
+    # to read ``length`` of them.
+    parents = np.stack(
+        [np.frombuffer(a, np.uint8, length, start)]
+        + [np.frombuffer(_padded(d, a), np.uint8, length, start) for d in donors]
+    )
+    out = bytearray(a)
+    out[start:end] = parents[pick, np.arange(length)].tobytes()
+    return bytes(out)
 
 
 DICT_MUTATIONS = [

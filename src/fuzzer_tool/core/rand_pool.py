@@ -245,11 +245,9 @@ class RandPool:
             return []
         if n > 1 << 32:
             return [self.randrange(n) for _ in range(count)]
-        if self._idx + count > _POOL_ENTRIES:
-            self._refill()
-        raw = self._pool[self._idx : self._idx + count]
-        self._idx += count
-        return (raw % n).tolist()
+        # _take spans refills; a bare slice truncated for count > _POOL_ENTRIES
+        # (and still advanced _idx by the full count).
+        return (self._take(count) % n).tolist()
 
     def random(self) -> float:
         """Return a random float in [0.0, 1.0).  ``random.random()`` equivalent."""
