@@ -1442,6 +1442,24 @@ Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(see
 
 Tests: `tests/test_edge_export.py`, `test_edge_sqlite.py`, `test_edge_export_incremental.py`, `test_edge_export_inprocess.py`, `test_edge_export_streaming.py`, `test_adaptive_batch.py`, `test_edge_dump_push.py`.
 
+### Full cover (`services/full_cover.py`)
+
+```bash
+fuzzer-tool full-cover -d corpus -e ~/edges.pkl -o ~/corpus_min            # copy the cover out
+fuzzer-tool full-cover -d corpus -e ~/edges.pkl                            # in place: prune -> corpus/pruned/
+fuzzer-tool full-cover -d corpus -e ~/edges.pkl --allow-unreachable        # dump has edges no seed reaches
+```
+
+A corpus minimized twice shrinks to the edges its own survivors reach: the second run's universe is the first run's output. The dump is the record of everything reached, so `full-cover` takes *that* as the universe: one streaming pass over `edges.pkl` (per-batch greedy picks, so memory holds a batch), `reach` = union of the seeds still on disk, `min_cover` over the picks, then the cover is **verified** against `reach` — a cover that misses a reachable edge raises `IncompleteCover` and nothing is written.
+
+Seeds absent from the dump (`unmeasured`) are kept: never prune on a guess. Dump-only seeds are reported (`gone_seeds`); their edges are `unreachable` and abort with exit 2 unless `--allow-unreachable`. A dump with no seed edges raises `EmptyDump` — with an empty universe every seed "covers" it and the run looks like a success that changed nothing.
+
+Batches are read as spans of the one spliced pickle (`adapters/edge_pickle.py::_batch_spans`): a one-item batch is `k v SETITEM`, more is `MARK k v ... SETITEMS`, so a span starts at the batch's own MARK — dropping it made every batch fail to load and every run a no-op copy (tests/test_full_cover.py::test_regression_spliced_dump_minimizes). Ids are content keys, so a seed stored twice (shard and `timeouts/`) is written once.
+
+FFmpeg 9.0.2 dump (585,046 seeds, 202,942 edges): 585,241 on disk -> 11,897 kept, 0.26 GB of 11.11 GB, 195 unmeasured; 3.7 min scan + 46 s cover.
+
+Tests: `tests/test_full_cover.py`.
+
 ### Set cover (`core/set_cover.py`)
 
 `minimize -c` and `auto_minimize_corpus` (`_greedy_cover`) share `min_cover`: collapse identical edge sets, force seeds that are the sole holder of an edge, drop dominated seeds, lazy greedy, then drop redundant picks. Greedy alone can keep a seed that later picks made redundant (`A={1,2,3,4} B={1,2,5} C={3,4,6}`: greedy A,B,C; forced B,C).

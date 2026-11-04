@@ -50,6 +50,10 @@ class IncompleteCover(RuntimeError):
     """The chosen seeds miss edges the pool could reach; refuse to prune."""
 
 
+class EmptyDump(RuntimeError):
+    """The dump yields no seed edges, so it defines no coverage; refuse to prune."""
+
+
 class ArchiveReadOnly(RuntimeError):
     """The corpus lives in an archive, which cannot be pruned in place."""
 
@@ -210,10 +214,13 @@ def _write_cover(
 ) -> None:
     """Copy the kept seeds out of every backend into *output_dir*.
 
-    Layout preserved: ``min_corpus/seeds/<hh>/id_<hash>``.
+    Layout preserved: ``min_corpus/seeds/<hh>/id_<hash>``. Seeds are keyed by
+    content, so an id stored under more than one path (a shard and a protected
+    tree, or an archive beside loose files) is written once.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    written = set(corpus.loose)
 
     for sid in kept:
         path = corpus.loose.get(sid)
@@ -228,6 +235,9 @@ def _write_cover(
 
     if corpus.tarred:
         for sid, data, hh in seed_tar.pick(corpus_path, kept):
+            if sid in written:
+                continue
+            written.add(sid)
             dest_dir = out / "seeds" / hh
             dest_dir.mkdir(parents=True, exist_ok=True)
             (dest_dir / f"id_{sid}").write_bytes(data)
@@ -236,6 +246,9 @@ def _write_cover(
         store = seed_zip.peek(corpus_path)
         if store is not None:
             for sid, data, hh in store.pick(kept):
+                if sid in written:
+                    continue
+                written.add(sid)
                 dest_dir = out / "seeds" / hh
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 (dest_dir / f"id_{sid}").write_bytes(data)
@@ -254,11 +267,16 @@ def full_cover(
             and *allow_unreachable* is off.
         IncompleteCover: the cover misses reachable edges (never written).
         ArchiveReadOnly: pruning in place was asked of an archived corpus.
+        EmptyDump: the dump holds no seed edges.
     """
     corpus_path = Path(corpus_dir)
     corpus = load_corpus(corpus_path)
 
     pool, dump, reach, unmeasured, gone, dump_seeds = _scan(dump_path, corpus.sizes)
+
+    # No dump, no coverage claim: keeping everything would look like success.
+    if not dump_seeds:
+        raise EmptyDump(f"{dump_path} holds no seed edges; nothing to cover")
 
     top = max(dump.size, reach.size)
     dump, reach = _grow(dump, top - 1), _grow(reach, top - 1)

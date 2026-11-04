@@ -120,17 +120,25 @@ def read_edges_pickle(path: str | Path) -> dict[str, np.ndarray]:
 def _batch_spans(f: BinaryIO) -> Iterator[tuple[int, int]]:
     """Byte span of every top-level set-items batch in *f*.
 
-    The batch MARK is the last MARK before its SETITEMS: array payloads carry
-    no MARK of their own (1-D reduce is a tuple), and a nested one is consumed
-    before the batch's own.
+    A batch runs from just after the head (or the previous batch) to the end
+    of its SETITEMS. One item pickles as ``k v SETITEM`` with no MARK; more
+    items open with ``MARK k v ... SETITEMS``, so the MARK is part of the span
+    and ``_HEAD + span`` is loadable as-is.
+
+    Only the MARK that opens a batch counts: a MARK anywhere else starts a
+    nested container (an array reduce's args tuple), never a boundary. A
+    missed boundary merely merges two batches, which still unpickles.
     """
+    start = len(_HEAD)
     mark = None
     try:
         for op, _, pos in pickletools.genops(f):
             if op.name == "MARK":
-                mark = pos + len(pickle.MARK)
-            elif op.name in _BATCH_END and mark is not None:
-                yield mark, pos + 1
+                mark = pos
+            elif op.name in _BATCH_END and mark in (None, start):
+                yield start, pos + 1
+                start = pos + 1
+                mark = None
     except _TORN:
         return
 

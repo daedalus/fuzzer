@@ -1607,6 +1607,7 @@ def cmd_full_cover(args):
     """Corpus minimized against the edge dump's full coverage."""
     from fuzzer_tool.services.full_cover import (
         ArchiveReadOnly,
+        EmptyDump,
         IncompleteCover,
         UnreachableEdges,
         full_cover,
@@ -1628,7 +1629,7 @@ def cmd_full_cover(args):
                 f"({e.partial.unreachable_edges} unreachable, {e.partial.unmeasured} unmeasured)"
             )
         return 2
-    except (IncompleteCover, ArchiveReadOnly) as e:
+    except (IncompleteCover, ArchiveReadOnly, EmptyDump) as e:
         print(f"[-] {e}", file=sys.stderr)
         return 2
 

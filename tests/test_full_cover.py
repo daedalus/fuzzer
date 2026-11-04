@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from fuzzer_tool.adapters.edge_pickle import EdgePickleWriter, iter_edges_pickle
 from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.cli import commands
 from fuzzer_tool.services import full_cover
@@ -31,7 +32,17 @@ def _seed(corpus: Path, data: bytes) -> Path:
 
 
 def _dump(path: Path, batches: list[dict[bytes, list[int]]]) -> Path:
-    """Write *batches* the way EdgePickleWriter does: pickles back to back."""
+    """Write *batches* the way ``edge-dump`` does: one pickle, spliced per batch."""
+    writer = EdgePickleWriter(path)
+    writer.open()
+    for batch in batches:
+        writer.write([(hash_data(k), np.array(v, dtype=np.uint32)) for k, v in batch.items()])
+    writer.close()
+    return path
+
+
+def _dump_legacy(path: Path, batches: list[dict[bytes, list[int]]]) -> Path:
+    """Write *batches* the pre-splice layout: one dict pickle back to back per batch."""
     with open(path, "wb") as f:
         for batch in batches:
             pickle.dump({hash_data(k): np.array(v, dtype=np.uint32) for k, v in batch.items()}, f)
@@ -263,3 +274,121 @@ def test_cli_unreachable_exits_nonzero(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 2
     assert "unreachable" in err
+
+
+def test_regression_iter_reads_spliced_batches(tmp_path):
+    """Falsification: the spliced layout lost its batch MARK and read back empty."""
+    path = EdgePickleWriter(tmp_path / "e.pkl").path
+    writer = EdgePickleWriter(path)
+    writer.open()
+    writer.write([("a" * 16, np.array([1, 2], dtype=np.uint32))])
+    writer.write(
+        [
+            ("b" * 16, np.array([3], dtype=np.uint32)),
+            ("c" * 16, np.array([4, 5], dtype=np.uint32)),
+        ]
+    )
+    writer.write([("d" * 16, np.array([6], dtype=np.uint32))])  # one item, no MARK
+    writer.close()
+
+    got = [{k: v.tolist() for k, v in batch.items()} for batch in iter_edges_pickle(path)]
+
+    assert got == [
+        {"a" * 16: [1, 2]},
+        {"b" * 16: [3], "c" * 16: [4, 5]},
+        {"d" * 16: [6]},
+    ]
+
+
+def test_legacy_back_to_back_dump_still_read(tmp_path):
+    """Old exports (one dict pickle per batch) keep working."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, b"aaaa")  # {1,2}
+    _seed(corpus, b"a")  # {1} redundant
+    dump = _dump_legacy(tmp_path / "e.pkl", [{b"aaaa": [1, 2]}, {b"a": [1]}])
+
+    rep = full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+
+    assert rep.dump_seeds == 2
+    assert rep.kept == 1
+
+
+def test_regression_spliced_dump_minimizes(tmp_path):
+    """The regression: a real ``edge-dump`` file was read as empty, so nothing shrank."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, b"aaaa")  # {1,2}
+    _seed(corpus, b"a")  # {1} redundant
+    _seed(corpus, b"bb")  # {2,3}
+    dump = _dump(tmp_path / "e.pkl", [{b"aaaa": [1, 2], b"a": [1]}, {b"bb": [2, 3]}])
+    out = tmp_path / "out"
+
+    rep = full_cover.full_cover(dump, corpus, output_dir=out)
+
+    assert rep.dump_seeds == 3
+    assert rep.reachable_edges == 3
+    assert rep.kept == 2
+    assert _written_hashes(out) == {hash_data(b"aaaa"), hash_data(b"bb")}
+
+
+@pytest.mark.parametrize("payload", [b"", b"\x80\x03}."])
+def test_dump_without_seeds_refused(tmp_path, payload):
+    """An empty dump defines no coverage; keeping every seed hides the failure."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, b"aaaa")
+    dump = tmp_path / "e.pkl"
+    dump.write_bytes(payload)
+    out = tmp_path / "out"
+
+    with pytest.raises(full_cover.EmptyDump):
+        full_cover.full_cover(dump, corpus, output_dir=out)
+
+    assert not out.exists()
+
+
+def test_cli_empty_dump_exits_nonzero(tmp_path, monkeypatch, capsys):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, b"aaaa")
+    dump = tmp_path / "e.pkl"
+    dump.write_bytes(b"\x80\x03}.")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fuzzer-tool",
+            "full-cover",
+            "-d",
+            str(corpus),
+            "-e",
+            str(dump),
+            "-o",
+            str(tmp_path / "o"),
+        ],
+    )
+    rc = commands.main()
+
+    assert rc == 2
+    assert "no seed" in capsys.readouterr().err
+
+
+def test_duplicate_id_written_once(tmp_path):
+    """Adversarial: one content id under a shard and a protected tree is one seed."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    sid = hash_data(b"aaaa")
+    path = corpus / "seeds.tar.gz"
+    with tarfile.open(path, "w:gz") as tf:
+        for name in (f"seeds/{sid[:2]}/id_{sid}", f"seeds/irreplaceable/id_{sid}"):
+            info = tarfile.TarInfo(name)
+            info.size = len(b"aaaa")
+            tf.addfile(info, io.BytesIO(b"aaaa"))
+    dump = _dump(tmp_path / "e.pkl", [{b"aaaa": [1, 2]}])
+
+    rep = full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+
+    assert rep.kept == 1
+    assert len(list((tmp_path / "out").rglob("id_*"))) == 1
