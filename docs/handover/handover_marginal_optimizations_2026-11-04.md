@@ -47,6 +47,25 @@ Harness: 300 records, min of 7, 264 ops; `steady` = 200 paths from an 8k-edge po
 
 No prune: unchanged. Prune-heavy: faster partly because ties at the cut evict together, so fewer edges stay tracked (fewer for the report too). Skewed workload (half of each exec from a 3k hot core, 3000 execs): both 94 prunes, ~7.5k tracked, 2937/2937 heavy edges kept (old: 2999/3000 hot core, new: 3000/3000).
 
+## Keep every edge (supersedes the Misra-Gries cap)
+
+Misra-Gries batch reduction evicts every edge tied at the cut, so one exec wider than the cap (19,000 edges, all count 1) left 0 edges; repeated wide execs also drained hot counts. Cap removed. Store: `_CounterCounts` (master's Counters, exact) until, after 1000 records, mean edges x (ops + 1) >= 250 or pairs >= 1M; then one migration to `_EdgeCounts` (uint32 lanes x slots + int64 totals, pending Counters for small execs, folded with numpy before reads).
+
+Warm harness (1300 records warm, 2000 timed + one read, min of 5), us/exec record+read, Misra-Gries master vs keep-all:
+
+| Workload | master | keep-all | mem MB master / keep-all |
+|---|---|---|---|
+| steady 10 x 1 | 3.5 | 3.9 | 1.2 / 1.2 |
+| steady 25 x <=4 | 16.8 | 16.2 | 7.3 / 7.3 |
+| steady 60 x <=8 | 56.6 | 37.5 | 21 / 40 |
+| steady 200 x <=4 | 98.9 | 61.4 | 37 / 41 |
+| steady 500 x <=2 | 165.0 | 99.9 | 56 / 49 |
+| steady 2000 x <=8 (always-dense run) | 952 | 330 | 75 / 65 |
+| 30k pool 500 x <=4 (always-dense run) | 453, keeps 8,077 edges | 146, keeps 28,950 | 10 / 119 |
+| 30k pool 2000 x <=8 (always-dense run) | 2653, keeps 3,656 | 1665, keeps 30,000 | 25 / 226 |
+
+End-of-run report slower on the dense store (sets materialised for `operator_families`): 2000-wide 485 -> 900 ms, 30k pool 51 -> 3177 ms (8x more edges kept). Not measured in-run.
+
 ## Tried and rejected (no code change; do not re-litigate without new evidence)
 
 | Idea | Result |

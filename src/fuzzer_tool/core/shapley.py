@@ -4,10 +4,15 @@ import collections
 import math
 from collections import defaultdict
 from collections.abc import Mapping
+from operator import itemgetter
 
 from fuzzer_tool.core.dc_eigh import eigh
-from fuzzer_tool.core.marginal_coverage import DIRECT_MAX_ID, MarginalRow, marginal_table
-from fuzzer_tool.core.misra_gries import reduce_counts
+from fuzzer_tool.core.marginal_coverage import (
+    DIRECT_MAX_ID,
+    MarginalRow,
+    marginal_rows,
+    marginal_table,
+)
 
 try:
     import numpy as np
@@ -17,7 +22,24 @@ except ImportError:
     _HAS_NUMPY = False
 
 # ── Memory bounds ────────────────────────────────────────────────────
-SHAPLEY_EDGES_MAX = 10_000  # max edges tracked in Shapley attribution
+# Execs with at least this many increments (edges x (ops + 1)) take one fused
+# numpy scatter; below, C-level Counter.update wins (record() per exec: 25 edges
+# x 1 op 3.2 vs 7.1 us; 25 x 10 16.9 vs 9.6; 2000 x 4 740 vs 350).
+FUSED_MIN_WORK = 250
+# Pending small-exec increments folded into the matrix past this (~20 MB of Counters).
+PENDING_MAX = 200_000
+# Initial count matrix (operator lanes x edge slots); each axis doubles on demand.
+COUNTS_EDGES0 = 1024
+COUNTS_OPS0 = 64
+TOTAL_LANE = 0  # pending-buffer index of the per-edge totals
+UINT32_WIDEN_AT = 1 << 31  # widen the uint32 matrix to int64 once a total reaches this
+# Counter store -> dense store, decided once: after DENSE_WARMUP records when the
+# mean work per exec reaches FUSED_MIN_WORK (measured crossover: 25 edges x <=4 ops
+# Counters 12.9 vs 19.8 us/exec; 60 x <=8 53.7 vs 35.9), or whenever the Counters
+# hold COUNTER_PAIRS_MAX (op, edge) pairs (~100 B each, so ~100 MB).
+DENSE_WARMUP = 1000
+COUNTER_PAIRS_MAX = 1_000_000
+PAIRS_CHECK_EVERY = 1024  # records between exact pair counts once the bound is near
 DEGREE_FLOOR = 1e-12  # Laplacian degree floor: isolated operators stay finite
 FAMILY_THRESHOLD = 0.9  # Jaccard at or above which two operators are near-duplicates
 FIEDLER_DIM = 1  # embedding dim 0 is the trivial sqrt-degree vector
@@ -105,6 +127,273 @@ class _KeyViews(Mapping):
         return op in self._counts
 
 
+class _CounterCounts:
+    """Exact counts in one Counter per operator: fastest for narrow execs, ~100 B per pair.
+
+    ``record()`` is one C-level ``Counter.update`` per operator. Nothing is
+    evicted; ``wants_dense()`` tells the owner when to migrate to
+    ``_EdgeCounts`` (wide execs, or too many pairs for Counters).
+    """
+
+    __slots__ = ("op", "total", "records", "work", "check_at")
+
+    def __init__(self):
+        self.op: dict[str, collections.Counter] = defaultdict(collections.Counter)
+        self.total: collections.Counter = collections.Counter()
+        self.records = 0
+        self.work = 0  # increments recorded: edges x (ops + 1) per exec
+        self.check_at = 1  # records at which the owner next asks wants_dense()
+
+    def add(self, ops, edges: set[int]) -> None:
+        for op in ops:
+            self.op[op].update(edges)
+        self.total.update(edges)
+        self.records += 1
+        self.work += len(edges) * (len(ops) + 1)
+
+    def wants_dense(self) -> bool:
+        """Wide execs on average past warmup, or the pair count past the memory budget.
+
+        Called only when ``records >= check_at``, so record() pays one int compare.
+        """
+        r = self.records
+        step = r + PAIRS_CHECK_EVERY
+        self.check_at = step if r >= DENSE_WARMUP else min(step, DENSE_WARMUP)
+        if r >= DENSE_WARMUP and self.work >= FUSED_MIN_WORK * r:
+            return True
+        # len(total) x len(op) bounds the pairs; count exactly only when it could be over.
+        if len(self.total) * len(self.op) < COUNTER_PAIRS_MAX:
+            return False
+        return sum(map(len, self.op.values())) >= COUNTER_PAIRS_MAX
+
+    def op_counts(self) -> dict[str, collections.Counter]:
+        return self.op
+
+    def edge_sets(self) -> Mapping:
+        return _KeyViews(self.op)
+
+    def totals(self) -> collections.Counter:
+        return self.total
+
+    def edge_keys(self):
+        return self.total.keys()
+
+    def edge_order(self):
+        return self.total
+
+    def entries(self) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, int]:
+        """``(ops, op index, edge index, count, n edges)`` over every nonzero pair."""
+        ops = [op for op, c in self.op.items() if c]
+        if not ops:
+            empty = np.zeros(0, dtype=np.int64)
+            return ops, empty, empty, empty, 0
+        keys, vals, owner = [], [], []
+        for i, op in enumerate(ops):
+            counts = self.op[op]
+            n = len(counts)
+            keys.append(np.fromiter(counts.keys(), dtype=np.int64, count=n))
+            vals.append(np.fromiter(counts.values(), dtype=np.int64, count=n))
+            owner.append(np.full(n, i, dtype=np.int64))
+        ids, count, who = np.concatenate(keys), np.concatenate(vals), np.concatenate(owner)
+        if ids.min() < 0 or ids.max() >= DIRECT_MAX_ID:
+            _, edge = np.unique(ids, return_inverse=True)
+            return ops, who, edge, count, int(edge.max()) + 1
+        return ops, who, ids, count, int(ids.max()) + 1
+
+    def marginal(self) -> list[MarginalRow]:
+        # marginal_table only reads; skip the per-set copy (~as costly as the table).
+        return marginal_table(_KeyViews(self.op))
+
+
+class _EdgeCounts:
+    """Exact (operator, edge) and per-edge co-occurrence counts; never evicts.
+
+    Every edge seen keeps a slot (a matrix column) for the life of the run, so
+    memory is ``4 B x lanes x edges`` (264 ops x 30k edges ~ 32 MB) instead of
+    ~100 B per pair in per-operator Counters, which is what forced the old
+    edge cap. Wide execs write the matrix with one fused numpy scatter; small
+    execs keep C-level ``Counter.update`` into a pending buffer, folded into
+    the matrix before any read or once it holds ``PENDING_MAX`` entries.
+
+        mat (uint32):   slot 0   slot 1   slot 2      ids[slot] = edge id
+        lane 1 "flip"   3        0        1           lanes["flip"] = 1
+        lane 2 "splice" 0        2        1
+        total (int64)   3        2        2           execs that saw the edge
+        + pending[lane] Counters (lane 0 = total), not yet folded
+    """
+
+    __slots__ = ("lanes", "slot", "ids", "mat", "total", "pending", "pending_work", "_entries")
+
+    def __init__(self):
+        self.lanes: dict[str, int] = {}  # op -> mat row (row 0 unused: TOTAL_LANE)
+        self.slot: dict[int, int] = {}  # edge id -> mat column
+        self.ids: list[int] = []  # mat column -> edge id
+        self.mat = np.zeros((1 + COUNTS_OPS0, COUNTS_EDGES0), dtype=np.uint32)
+        self.total = np.zeros(COUNTS_EDGES0, dtype=np.int64)
+        self.pending: list[collections.Counter] = [collections.Counter()]  # by lane
+        self.pending_work = 0  # increments buffered since the last fold (>= entries)
+        self._entries: tuple | None = None
+
+    def add(self, ops, edges: set[int]) -> None:
+        """Count one exec: each op in *ops* co-occurred once with each edge in *edges*."""
+        self._entries = None
+        new = edges.difference(self.slot)  # exact-dict fast path; usually empty
+        if new:
+            self._add_slots(list(new))
+
+        lanes = self.lanes
+        idx = [lanes.get(op) or self._add_lane(op) for op in ops]  # lanes start at 1
+        work = len(edges) * (len(idx) + 1)
+        if work >= FUSED_MIN_WORK:
+            self._add_fused(idx, edges)
+            return
+
+        pending = self.pending
+        pending[TOTAL_LANE].update(edges)
+        for lane in idx:
+            pending[lane].update(edges)
+        self.pending_work += work
+        if self.pending_work > PENDING_MAX:
+            self.fold()
+
+    def _add_fused(self, idx: list[int], edges: set[int]) -> None:
+        # ndmin: itemgetter returns a bare value, not a tuple, for one edge.
+        cols = np.array(itemgetter(*edges)(self.slot), dtype=np.intp, ndmin=1)
+        self.total[cols] += 1
+        if not idx:
+            return
+        # Unique (lane, slot) pairs, so a plain fancy += counts each once.
+        flat = (np.array(idx, dtype=np.intp)[:, None] * self.mat.shape[1] + cols).ravel()
+        self.mat.reshape(-1)[flat] += 1
+
+    def _add_slots(self, fresh: list[int]) -> None:
+        start = len(self.ids)
+        self.ids.extend(fresh)
+        self.slot.update(zip(fresh, range(start, len(self.ids)), strict=True))
+        if len(self.ids) > self.mat.shape[1]:
+            self._grow(self.mat.shape[0], max(2 * self.mat.shape[1], len(self.ids)))
+
+    def _add_lane(self, op: str) -> int:
+        lane = len(self.pending)
+        if lane == self.mat.shape[0]:
+            self._grow(2 * self.mat.shape[0] - 1, self.mat.shape[1])
+        self.lanes[op] = lane
+        self.pending.append(collections.Counter())
+        return lane
+
+    def _grow(self, n_lanes: int, n_slots: int) -> None:
+        mat = np.zeros((n_lanes, n_slots), dtype=self.mat.dtype)
+        lanes, slots = self.mat.shape
+        mat[:lanes, :slots] = self.mat
+        self.mat = mat
+        total = np.zeros(n_slots, dtype=np.int64)
+        total[: len(self.total)] = self.total
+        self.total = total
+
+    def fold(self) -> None:
+        """Move the pending Counters into the matrix and totals."""
+        get = self.slot.__getitem__
+        for lane, counts in enumerate(self.pending):
+            if not counts:
+                continue
+            k = len(counts)
+            cols = np.fromiter(map(get, counts), dtype=np.intp, count=k)
+            vals = np.fromiter(counts.values(), dtype=np.int64, count=k)
+            if lane == TOTAL_LANE:
+                self.total[cols] += vals
+            else:
+                self.mat[lane, cols] += vals.astype(self.mat.dtype)
+            counts.clear()
+        self.pending_work = 0
+        # A pair count never exceeds its edge's total; widen before uint32 can wrap.
+        if self.mat.dtype == np.uint32 and self.total.max(initial=0) >= UINT32_WIDEN_AT:
+            self.mat = self.mat.astype(np.int64)
+
+    def pending_size(self) -> int:
+        """Distinct (lane, edge) entries waiting in the pending Counters."""
+        return sum(map(len, self.pending))
+
+    def entries(self) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, int]:
+        """``(ops, op index, slot, count, n slots)`` per nonzero pair, by op then slot; cached."""
+        if self._entries is None:
+            self.fold()
+            block = self.mat[1 : len(self.pending), : len(self.ids)]
+            who, slot = np.nonzero(block)  # row-major: by op, then slot
+            count = block[who, slot].astype(np.int64)
+            self._entries = (list(self.lanes), who, slot, count, len(self.ids))
+        return self._entries
+
+    def id_array(self) -> np.ndarray:
+        """Edge id per slot; ``object`` dtype when an id does not fit int64."""
+        try:
+            return np.array(self.ids, dtype=np.int64)
+        except OverflowError:  # ids are only hashed; keep them as Python ints
+            return np.array(self.ids, dtype=object)
+
+    def _by_op(self) -> tuple[list[str], list[int], list[int], np.ndarray]:
+        ops, who, slot, count, _ = self.entries()
+        ids = self.id_array()[slot].tolist()
+        bounds = np.searchsorted(who, np.arange(len(ops) + 1)).tolist()
+        return ops, ids, bounds, count
+
+    def per_op(self) -> dict[str, dict[int, int]]:
+        """``{op: {edge: count}}`` for every operator counted."""
+        ops, ids, bounds, count = self._by_op()
+        count = count.tolist()
+        return {
+            op: dict(zip(ids[a:b], count[a:b], strict=True))
+            for op, a, b in zip(ops, bounds, bounds[1:], strict=False)
+        }
+
+    def edge_sets(self) -> dict[str, set[int]]:
+        """``{op: edges}`` for every operator counted."""
+        ops, ids, bounds, _ = self._by_op()
+        return {op: set(ids[a:b]) for op, a, b in zip(ops, bounds, bounds[1:], strict=False)}
+
+    def edges(self) -> dict[int, int]:
+        """``{edge: execs that saw it}`` in first-seen exec order."""
+        self.fold()
+        return dict(zip(self.ids, self.total[: len(self.ids)].tolist(), strict=True))
+
+    @classmethod
+    def from_counters(cls, cc: "_CounterCounts") -> "_EdgeCounts":
+        """Exact copy of a Counter store (one-time migration)."""
+        dense = cls()
+        dense._add_slots(list(cc.total))
+        get = dense.slot.__getitem__
+        n = len(cc.total)
+        dense.total[:n] = np.fromiter(cc.total.values(), dtype=np.int64, count=n)
+        for op, counts in cc.op.items():
+            lane = dense._add_lane(op)
+            k = len(counts)
+            cols = np.fromiter(map(get, counts), dtype=np.intp, count=k)
+            dense.mat[lane, cols] = np.fromiter(counts.values(), dtype=np.int64, count=k)
+        if dense.total.max(initial=0) >= UINT32_WIDEN_AT:
+            dense.mat = dense.mat.astype(np.int64)
+        return dense
+
+    # Never migrates further: record() never reaches check_at.
+    records = 0
+    check_at = 1 << 62
+
+    def op_counts(self) -> dict[str, collections.Counter]:
+        return {op: collections.Counter(c) for op, c in self.per_op().items()}
+
+    def totals(self) -> collections.Counter:
+        return collections.Counter(self.edges())
+
+    def edge_keys(self):
+        return self.slot.keys()
+
+    def edge_order(self):
+        return self.ids
+
+    def marginal(self) -> list[MarginalRow]:
+        # Slots are a dense edge index already grouped by operator: no set flatten.
+        ops, who, slot, _, _ = self.entries()
+        return marginal_rows(ops, np.bincount(who, minlength=len(ops)), slot)
+
+
 class ShapleyAttribution:
     """Compute Shapley values for mutation operator contribution.
 
@@ -132,18 +421,13 @@ class ShapleyAttribution:
         self.window_size = window_size
         # Recent outcomes: list of (operators_used_set, discovered_edges_count)
         self._outcomes: collections.deque = collections.deque(maxlen=window_size)
-        # Per-edge: total number of executions where this edge was observed
-        self._edge_total: collections.Counter = collections.Counter()
-        # Per-operator: per-edge count of executions where both co-occurred. Kept
-        # operator-major so record() updates it with one C-level Counter.update
-        # per operator; ``_edge_op_count`` is the edge-major view, built on read.
-        self._op_edge_count: dict[str, collections.Counter] = defaultdict(collections.Counter)
-        # Per-operator: edges this operator has co-occurred with. A live key view of
-        # ``_op_edge_count`` (the two always held identical sets), so nothing is stored twice.
-        self._operator_edges = _KeyViews(self._op_edge_count)
+        # Exact per (operator, edge) and per-edge counts for every edge ever seen.
+        # Starts on Counters; migrates once to the dense store (wide execs or too
+        # many pairs). The views below are cached until the next write.
+        self._counts: _CounterCounts | _EdgeCounts = _CounterCounts()
+        self._op_view: dict[str, collections.Counter] | None = None
+        self._sets_view: dict[str, set[int]] | None = None
         self._edge_view: dict[int, dict[str, int]] | None = None
-        # How often the edge cap evicted the rarest half (marginal tables are then partial).
-        self.prune_count = 0
 
     def record(
         self, operators: set[str], new_edges: int, edge_indices: set[int] | None = None
@@ -157,50 +441,46 @@ class ShapleyAttribution:
         """
         self._outcomes.append((operators, new_edges))
         if edge_indices:
-            for op in operators:
-                self._op_edge_count[op].update(edge_indices)
-            self._edge_total.update(edge_indices)
-            self._edge_view = None
-            if len(self._edge_total) > SHAPLEY_EDGES_MAX:
-                self._prune_edges()
+            self._counts.add(operators, edge_indices)
+            self._op_view = self._sets_view = self._edge_view = None
+            counts = self._counts
+            if counts.records >= counts.check_at and counts.wants_dense():
+                self._counts = _EdgeCounts.from_counters(counts)
+
+    @property
+    def _op_edge_count(self) -> dict[str, collections.Counter]:
+        """{op: Counter({edge: count})}; cached until the next write. Read-only."""
+        if self._op_view is None:
+            self._op_view = self._counts.op_counts()
+        return self._op_view
+
+    @property
+    def _operator_edges(self) -> Mapping:
+        """{op: edges} co-occurred with; cached until the next write. Read-only."""
+        if self._sets_view is None:
+            self._sets_view = self._counts.edge_sets()
+        return self._sets_view
+
+    @property
+    def _edge_total(self) -> collections.Counter:
+        """{edge: execs that saw it}."""
+        return self._counts.totals()
 
     @property
     def _all_edges(self):
-        """Tracked edges: the key view of ``_edge_total`` (one store, no per-exec set update)."""
-        return self._edge_total.keys()
+        """Every edge seen (set-like key view; nothing is ever evicted)."""
+        return self._counts.edge_keys()
 
     @property
     def _edge_op_count(self) -> dict[int, dict[str, int]]:
-        """Edge-major view ``{edge: {op: count}}``, in first-seen edge order; cached."""
+        """Edge-major view {edge: {op: count}}, in first-seen edge order; cached."""
         if self._edge_view is None:
-            view: dict[int, dict[str, int]] = {edge: {} for edge in self._edge_total}
+            view: dict[int, dict[str, int]] = {edge: {} for edge in self._counts.edge_order()}
             for op, counts in self._op_edge_count.items():
                 for edge, n in counts.items():
                     view[edge][op] = n
             self._edge_view = {edge: per_op for edge, per_op in view.items() if per_op}
         return self._edge_view
-
-    def _prune_edges(self):
-        """Bound tracked edges with batch Misra-Gries over ``_edge_total``.
-
-        Subtracts the (k+1)-th largest total from every total and evicts the
-        non-positive (``k = SHAPLEY_EDGES_MAX``): any edge seen in more than
-        n/(k+1) of all (exec, edge) observations survives, and a stored total
-        undercounts by at most that. Ties evict together, so edge-id order
-        (``prev_loc ^ cur_loc`` hashes) never decides; sorting by id once
-        distorted credit 5.3x. Replaced drop-the-rarest-half, which could evict
-        edges above that bound. Per-operator co-occurrence counts stay exact for
-        the edges kept.
-        """
-        dropped = set(reduce_counts(self._edge_total, SHAPLEY_EDGES_MAX))
-        for counts in self._op_edge_count.values():
-            # C-level intersection; the Python loop only visits edges the operator holds.
-            hit = counts.keys() & dropped
-            if hit:
-                # dict.pop is C-level; Counter.__delitem__ is a Python-level override.
-                collections.deque(map(counts.pop, hit), maxlen=0)
-        self._edge_view = None
-        self.prune_count += 1
 
     def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
         """Compute exact Shapley values for the per-edge frequency-weighted game.
@@ -252,30 +532,23 @@ class ShapleyAttribution:
     def _add_edge_credit(self, op_set: set[str], shapley: dict[str, float]) -> None:
         """Add credit(e, op) / |T_e| per edge to *shapley* in place.
 
-        Works on the operator-major counts: one dense pass over every
-        (operator, edge) pair, grouped by edge with ``np.unique``.
+        One pass over the nonzero (operator, slot) pairs; slots are already a
+        dense edge index, so no np.unique over edge ids.
         """
-        ops = sorted(op for op in op_set if self._op_edge_count.get(op))
-        if not ops:
+        ops, who, edge, count, n = self._counts.entries()
+        pick = np.fromiter((op in op_set for op in ops), dtype=bool, count=len(ops))
+        if not who.size or not pick.any():
             return
-        keys, vals, owner = [], [], []
-        for i, op in enumerate(ops):
-            counts = self._op_edge_count[op]
-            n = len(counts)
-            keys.append(np.fromiter(counts.keys(), dtype=np.int64, count=n))
-            vals.append(np.fromiter(counts.values(), dtype=np.int64, count=n))
-            owner.append(np.full(n, i, dtype=np.int64))
-        ids, count, who = np.concatenate(keys), np.concatenate(vals), np.concatenate(owner)
+        mask = pick[who]
+        who, edge, count = who[mask], edge[mask], count[mask]
 
-        edge = ids
-        if ids.min() < 0 or ids.max() >= DIRECT_MAX_ID:
-            _, edge = np.unique(ids, return_inverse=True)
-        total = np.bincount(edge, weights=count)
-        touching = np.bincount(edge)
+        total = np.bincount(edge, weights=count, minlength=n)
+        touching = np.bincount(edge, minlength=n)
         credit = count / total[edge] / touching[edge]
         per_op = np.bincount(who, weights=credit, minlength=len(ops))
-        for op, value in zip(ops, per_op.tolist(), strict=True):
-            shapley[op] += value
+        for op, value, picked in zip(ops, per_op.tolist(), pick.tolist(), strict=True):
+            if picked:
+                shapley[op] += value
 
     def operator_edge_sets(self) -> dict[str, set[int]]:
         """Copy of the per-operator edge sets."""
@@ -283,8 +556,7 @@ class ShapleyAttribution:
 
     def marginal_coverage(self) -> list[MarginalRow]:
         """Per-operator contribution to union coverage, in greedy cover order."""
-        # marginal_table only reads; skip the per-set copy (~as costly as the table).
-        return marginal_table(self._operator_edges)
+        return self._counts.marginal()
 
     def operator_synergy(self, op_a: str, op_b: str) -> float:
         """Compute synergy between two operators.

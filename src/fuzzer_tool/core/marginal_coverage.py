@@ -102,6 +102,11 @@ def marginal_table(sets: dict[str, set[int]]) -> list[MarginalRow]:
             dtype=np.int64,
             count=int(sizes.sum()),
         )
+    return marginal_rows(ops, sizes, flat)
+
+
+def marginal_rows(ops: list[str], sizes: np.ndarray, flat: np.ndarray) -> list[MarginalRow]:
+    """Rows in greedy cover order; ops[i] holds the next sizes[i] distinct ids of *flat*."""
     owner = np.repeat(np.arange(len(ops)), sizes)
 
     # Dense edge index, and how many operators hold each edge.

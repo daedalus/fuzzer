@@ -9,22 +9,9 @@ stored; every counter is decremented instead and zeros are dropped.
 Guarantee: any key seen more than ``n / (k + 1)`` times survives, and a
 stored count underestimates the true one by at most ``n / (k + 1)``. With
 ``k`` at or above the number of distinct keys the counts are exact.
-
-``reduce_counts`` is the batch (mergeable) form, for callers that count a
-whole batch with C-level ``Counter.update`` first: subtract the (k+1)-th
-largest count from every counter and drop the non-positive. Same guarantee
-(Agarwal et al., "Mergeable summaries", 2012), one O(n) pass per batch
-instead of one per newcomer.
-
-    counts a:5 b:1 c:3 d:1 e:2   k=2   (k+1)-th largest = 2
-    ->     a:3     c:1                 evicted b d e
 """
 
-from collections import deque
 from collections.abc import Hashable, Iterator
-from itertools import compress
-
-import numpy as np
 
 
 class MisraGries:
@@ -69,27 +56,3 @@ class MisraGries:
 
     def __iter__(self) -> Iterator[Hashable]:
         return iter(self._counts)
-
-
-def reduce_counts(counts: dict[Hashable, int], k: int) -> list[Hashable]:
-    """Shrink *counts* to at most *k* keys in place; return the evicted keys.
-
-    No-op at or under *k* keys. Survivors keep their insertion order.
-    """
-    n = len(counts)
-    if n <= k:
-        return []
-
-    keys = list(counts)
-    vals = np.fromiter(counts.values(), dtype=np.int64, count=n)
-    cut = np.partition(vals, n - k - 1)[n - k - 1]  # (k+1)-th largest
-
-    keep = vals > cut
-    evicted = list(compress(keys, (~keep).tolist()))
-    # dict.pop is C-level (Counter.__delitem__ is a Python override); values
-    # then change in place, so survivors keep their order.
-    deque(map(counts.pop, evicted), maxlen=0)
-    dict.update(
-        counts, zip(compress(keys, keep.tolist()), (vals[keep] - cut).tolist(), strict=True)
-    )
-    return evicted
