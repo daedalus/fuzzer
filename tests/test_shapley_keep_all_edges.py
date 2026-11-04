@@ -197,6 +197,33 @@ def test_adversarial_growth_past_initial_capacity():
     assert dict(sa._op_edge_count["op1"]) == dict.fromkeys(wide, 1)
 
 
+def test_regression_fused_writes_widen_uint32(monkeypatch):
+    """Fused-only writes never fold, so the widen check must not live in fold()."""
+    monkeypatch.setattr(shapley, "COUNTER_PAIRS_MAX", 0)
+    monkeypatch.setattr(shapley, "UINT32_WIDEN_AT", 3)
+    wide = set(range(FUSED_MIN_WORK))
+    sa = ShapleyAttribution()
+    for _ in range(3):
+        sa.record({"a"}, len(wide), wide)
+    assert sa._counts.mat.dtype == np.int64
+
+
+def test_adversarial_widen_bound_counts_migrated_totals(monkeypatch):
+    """Totals carried over by migration count toward the widen bound."""
+    monkeypatch.setattr(shapley, "COUNTER_PAIRS_MAX", 1_000_000)
+    monkeypatch.setattr(shapley, "DENSE_WARMUP", 2)
+    monkeypatch.setattr(shapley, "UINT32_WIDEN_AT", 4)
+    wide = set(range(FUSED_MIN_WORK))
+    sa = ShapleyAttribution()
+    sa.record({"a"}, len(wide), wide)
+    sa.record({"a"}, len(wide), wide)  # migrates: totals 2
+    assert sa._counts.mat.dtype == np.uint32
+    sa.record({"a"}, 1, {0})
+    sa.record({"a"}, 1, {0})  # total 4 on a pending-only path
+    assert sa._counts.mat.dtype == np.int64
+    assert dict(sa._op_edge_count["a"])[0] == 4
+
+
 def test_record_without_edges_creates_no_operator():
     sa = ShapleyAttribution()
     sa.record({"a"}, 0, set())

@@ -222,7 +222,17 @@ class _EdgeCounts:
         + pending[lane] Counters (lane 0 = total), not yet folded
     """
 
-    __slots__ = ("lanes", "slot", "ids", "mat", "total", "pending", "pending_work", "_entries")
+    __slots__ = (
+        "lanes",
+        "slot",
+        "ids",
+        "mat",
+        "total",
+        "pending",
+        "pending_work",
+        "bound",
+        "_entries",
+    )
 
     def __init__(self):
         self.lanes: dict[str, int] = {}  # op -> mat row (row 0 unused: TOTAL_LANE)
@@ -232,11 +242,18 @@ class _EdgeCounts:
         self.total = np.zeros(COUNTS_EDGES0, dtype=np.int64)
         self.pending: list[collections.Counter] = [collections.Counter()]  # by lane
         self.pending_work = 0  # increments buffered since the last fold (>= entries)
+        self.bound = 0  # >= every total: an exec adds at most 1 per edge
         self._entries: tuple | None = None
 
     def add(self, ops, edges: set[int]) -> None:
         """Count one exec: each op in *ops* co-occurred once with each edge in *edges*."""
         self._entries = None
+
+        # A pair count never exceeds its edge's total; widen before uint32 can wrap.
+        self.bound += 1
+        if self.bound == UINT32_WIDEN_AT:
+            self.mat = self.mat.astype(np.int64)
+
         new = edges.difference(self.slot)  # exact-dict fast path; usually empty
         if new:
             self._add_slots(list(new))
@@ -305,9 +322,6 @@ class _EdgeCounts:
                 self.mat[lane, cols] += vals.astype(self.mat.dtype)
             counts.clear()
         self.pending_work = 0
-        # A pair count never exceeds its edge's total; widen before uint32 can wrap.
-        if self.mat.dtype == np.uint32 and self.total.max(initial=0) >= UINT32_WIDEN_AT:
-            self.mat = self.mat.astype(np.int64)
 
     def pending_size(self) -> int:
         """Distinct (lane, edge) entries waiting in the pending Counters."""
@@ -368,7 +382,8 @@ class _EdgeCounts:
             k = len(counts)
             cols = np.fromiter(map(get, counts), dtype=np.intp, count=k)
             dense.mat[lane, cols] = np.fromiter(counts.values(), dtype=np.int64, count=k)
-        if dense.total.max(initial=0) >= UINT32_WIDEN_AT:
+        dense.bound = int(dense.total.max(initial=0))
+        if dense.bound >= UINT32_WIDEN_AT:
             dense.mat = dense.mat.astype(np.int64)
         return dense
 
