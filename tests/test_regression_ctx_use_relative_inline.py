@@ -22,9 +22,10 @@ _SHIM = os.path.join(
 )
 _HELPER = "__afl_ctx_use_relative"
 
-# Nested calls so guards fire from more than one frame.
+# Nested calls so guards fire from more than one frame. noinline: clang 18
+# -O2 otherwise folds main into one block, i.e. a single guard.
 _DRIVER = """
-static int leaf(int v) { return v > 3 ? v * 2 : v - 1; }
+__attribute__((noinline)) static int leaf(int v) { return v > 3 ? v * 2 : v - 1; }
 
 int main(int argc, char **argv) {
     int acc = 0;
