@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Funnel (§3) and elastic (§2) hashing (arXiv 2501.02305) vs the shim's linear probe.
+"""Funnel (§3), elastic (§2) hashing (arXiv 2501.02305) and a hybrid vs the shim's linear probe.
 
 Gate for docs/TODO.md "funnel hashing for the edge map's __AFL_PROBE_MAX
 drops": only a drop win with no extra cache lines per lookup justifies a
@@ -15,6 +15,8 @@ deepest probe so far (the cheapest honest bound).
              -> B (loglog n random slots) -> C (2-choice buckets, interleaved)
     elastic: A_1 | A_2 | ... (|A_{i+1}| = |A_i|/2); probe h_{i,j} scanned in
              phi(i, j) order; batch i fills A_i to 1 - delta/2, A_{i+1} to 3/4
+    hybrid:  elastic over line-aligned 8-entry buckets; an empty slot in a
+             probed bucket rules its array out, so misses stop early
 
 Usage:
     python tools/sim_funnel_probe.py --loads 0.7,0.77,0.85,0.9 --trials 5
@@ -54,6 +56,8 @@ FILL_NEXT = 3 / 4  # batch 0 fills A_1, batch i fills A_{i+1}, to this fraction
 NEXT_FULL = 1 / 4  # A_{i+1} free fraction at which case 3 (greedy in A_i) applies
 GREEDY_CAP = 32  # draws per slot before a greedy scan gives up: misses a free slot ~e^-32
 PAIR_I_SHIFT = 24  # elastic pair hash key: eid << 32 | i << 24 | j
+# Entries before the first line boundary: the table starts SHM_METADATA_SIZE into a page.
+LINE_LEAD = (LINE_BYTES - SHM_METADATA_SIZE % LINE_BYTES) % LINE_BYTES // ENTRY_BYTES
 
 # splitmix64 finalizer constants.
 SM_GAMMA = 0x9E3779B97F4A7C15
@@ -70,6 +74,7 @@ class Kind(Enum):
     LINEAR = "linear"
     FUNNEL = "funnel"
     ELASTIC = "elastic"
+    HYBRID = "hybrid"
 
 
 @dataclass(frozen=True)
@@ -289,6 +294,8 @@ class ElasticTable:
     not phi itself: unused 1-D indices are never probed.
     """
 
+    _WIDTH = 1  # entries per probe unit
+
     def __init__(self, size: int, delta: float, c: float = ELASTIC_C) -> None:
         if not 0 < delta < 1 or not math.log2(1 / delta).is_integer():
             raise ValueError(f"delta must be an inverse power of 2 < 1, got {delta}")
@@ -298,9 +305,10 @@ class ElasticTable:
         self._c = c
         self._log_inv = math.log2(1 / delta)
 
-        levels = (size - 1).bit_length()
-        sizes = [max(1, size >> (k + 1)) for k in range(levels)]
-        sizes[0] += size - sum(sizes)
+        units = self._units(size)
+        levels = (units - 1).bit_length()
+        sizes = [max(1, units >> (k + 1)) for k in range(levels)]
+        sizes[0] += units - sum(sizes)
         self._sizes = sizes
         self._offs = [sum(sizes[:k]) for k in range(levels)]
         self._sizes_np = np.array(sizes, dtype=np.uint64)
@@ -328,6 +336,15 @@ class ElasticTable:
         """1-based (array, probe index) where *eid* was placed."""
         return self._where[eid]
 
+    def _units(self, size: int) -> int:
+        return size
+
+    def _claim(self, eid: int, unit: int) -> bool:
+        if self._slots[unit] != EMPTY:
+            return False
+        self._slots[unit] = eid
+        return True
+
     def _slot(self, eid: int, i: int, j: int) -> int:
         key = (eid << 32) | ((i + 1) << PAIR_I_SHIFT) | j
         return self._offs[i] + _splitmix64(key) % self._sizes[i]
@@ -335,10 +352,8 @@ class ElasticTable:
     def _probe(self, eid: int, i: int, top: int) -> bool:
         """Place *eid* at the first free h_{i,1..top}."""
         for j in range(1, top + 1):
-            slot = self._slot(eid, i, j)
-            if self._slots[slot] != EMPTY:
+            if not self._claim(eid, self._slot(eid, i, j)):
                 continue
-            self._slots[slot] = eid
             self._fill[i] += 1
             self._max_j[i] = max(self._max_j[i], j)
             self._where[eid] = (i + 1, j)
@@ -349,14 +364,14 @@ class ElasticTable:
         return self._probe(eid, i, GREEDY_CAP * self._sizes[i])
 
     def _free(self, i: int) -> float:
-        return 1 - self._fill[i] / self._sizes[i]
+        return 1 - self._fill[i] / (self._sizes[i] * self._WIDTH)
 
     def _f(self, eps: float) -> int:
         return math.ceil(self._c * min(math.log2(1 / eps) ** 2, self._log_inv))
 
     def _place(self, eid: int) -> bool:
         if self.batch == 0:
-            if self._fill[0] < math.ceil(FILL_NEXT * self._sizes[0]):
+            if self._fill[0] < math.ceil(FILL_NEXT * self._sizes[0] * self._WIDTH):
                 return self._greedy(eid, 0)
             self.batch = 1
 
@@ -413,11 +428,65 @@ class ElasticTable:
         return Lookup(bool(hit.size), n, int(lines.size))
 
 
+class HybridTable(ElasticTable):
+    """Elastic batching over funnel-style buckets: one probe reads one cache line.
+
+        |lead| A_1: b b b b ... | A_2: b b ... | ... |tail|   b = 8 entries, line-aligned
+
+    Within an array, insert takes the first probed bucket with a free slot, so
+    a bucket with an empty slot proves the key is not later in that array:
+    a miss rules arrays out and stops once every array in use is ruled out.
+    """
+
+    _WIDTH = LINE_ENTRIES
+
+    def _units(self, size: int) -> int:
+        return (size - LINE_LEAD) // LINE_ENTRIES
+
+    def bucket_base(self, unit: int) -> int:
+        return LINE_LEAD + unit * LINE_ENTRIES
+
+    def _claim(self, eid: int, unit: int) -> bool:
+        base = self.bucket_base(unit)
+        for slot in range(base, base + LINE_ENTRIES):
+            if self._slots[slot] != EMPTY:
+                continue
+            self._slots[slot] = eid
+            return True
+        return False
+
+    def lookup(self, eid: int) -> Lookup:
+        """Buckets in phi order, skipping arrays an empty slot already ruled out."""
+        arrays, probes = self._scan_pairs()
+        live = sum(1 for top in self._max_j if top)
+        ruled_out: set[int] = set()
+        lines: set[int] = set()
+        n = 0
+
+        for i, j in zip(arrays.tolist(), probes.tolist(), strict=True):
+            if i in ruled_out:
+                continue
+            n += 1
+            base = self.bucket_base(self._slot(eid, i, j))
+            lines.add(line_of(base))
+            bucket = self._slots[base : base + LINE_ENTRIES].tolist()
+            if eid in bucket:
+                return Lookup(True, n, len(lines))
+            if EMPTY not in bucket:
+                continue
+            ruled_out.add(i)
+            if len(ruled_out) == live:
+                break
+        return Lookup(False, n, len(lines))
+
+
 def make_table(kind: Kind, size: int, window: int, delta: float) -> _GreedyTable | ElasticTable:
     if kind is Kind.LINEAR:
         return LinearTable(size, window)
     if kind is Kind.ELASTIC:
         return ElasticTable(size, delta)
+    if kind is Kind.HYBRID:
+        return HybridTable(size, delta)
     return FunnelTable(size, delta)
 
 

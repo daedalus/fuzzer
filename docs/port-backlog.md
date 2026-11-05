@@ -584,7 +584,11 @@ is the hit path: 2.8-6.4 cache lines per hit vs 1.1-1.5, misses 5.8-32 vs
 by `recommended_map_size` resizing at load 0.7. Elastic hashing (§2), same
 tool: fewer hit probes than funnel (3.4-8.0 at loads 0.6-0.9) but each is a
 fresh line, so 3.4-7.9 lines per hit (3.8 at 0.77 with the best c=1); being
-non-greedy, a miss scans every probe in use: 30-72 lines.
+non-greedy, a miss scans every probe in use: 30-72 lines. Hybrid (elastic
+batching over line-aligned 8-entry buckets; an empty slot rules an array out):
+0 drops to load 0.90, 1.56-2.83 lines per hit, misses 5.0-16.5. Best of the
+three, still above linear's 1.10-1.37 on the hit path; the drop win only lands
+past the 0.7 resize trigger.
 
 **Algorithmica (Algorithms for Modern Hardware) shim and layout ports.**
 Rejected 2026-11-02, re-checked 2026-11-05: Eytzinger/S-tree/SIMD binary

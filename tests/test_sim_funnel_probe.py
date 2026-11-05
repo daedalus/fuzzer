@@ -176,3 +176,41 @@ class TestElastic:
     def test_rejects_bad_delta(self, delta):
         with pytest.raises(ValueError):
             sim.ElasticTable(SIZE, delta)
+
+
+class TestHybrid:
+    def test_buckets_are_line_aligned(self):
+        table = sim.HybridTable(SIZE, DELTA)
+        width = sim.LINE_ENTRIES
+        for unit in range(sum(table.array_sizes())):
+            base = table.bucket_base(unit)
+            assert sim.line_of(base) == sim.line_of(base + width - 1)
+            assert base + width <= SIZE
+
+    def test_lone_key_costs_one_line(self):
+        # One key: batch 0 puts it in A_1's first bucket; a miss sees that
+        # bucket's empty slots, rules A_1 out, and no other array is in use.
+        table = sim.HybridTable(SIZE, DELTA)
+        table.insert(1)
+        assert table.lookup(1) == sim.Lookup(True, 1, 1)
+        assert table.lookup(2) == sim.Lookup(False, 1, 1)
+
+    def test_miss_stops_before_full_scan(self):
+        # Falsification of the early exit: elastic-style misses scan sum(max_j).
+        table = sim.HybridTable(SIZE, DELTA)
+        ids = _fill(table, 0.6)
+        absent = sim.unique_ids(RandPool(seed=SEED + 1), 50, exclude=set(ids))
+        probes = [table.lookup(e).probes for e in absent]
+        assert max(probes) <= sum(table.max_j())
+        assert sum(probes) < len(probes) * sum(table.max_j())
+
+    def test_same_seed_same_stats(self):
+        _args = (sim.Kind.HYBRID, SIZE // 8, WINDOW, DELTA, 0.8, 200)
+        assert sim.run_trial(*_args, RandPool(seed=SEED)) == sim.run_trial(
+            *_args, RandPool(seed=SEED)
+        )
+
+    @pytest.mark.parametrize("delta", [0.3, 1.5, 0.0])
+    def test_rejects_bad_delta(self, delta):
+        with pytest.raises(ValueError):
+            sim.HybridTable(SIZE, delta)
