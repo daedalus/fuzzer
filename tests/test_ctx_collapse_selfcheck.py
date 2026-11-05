@@ -291,14 +291,15 @@ def _extract_fn(text: str, name: str) -> str:
 
 
 def _warn_check(
-    script_text: str, tmp_path: Path, config_mak: str | None
+    script_text: str, tmp_path: Path, config_mak: str | None, make_flags: str = ""
 ) -> subprocess.CompletedProcess:
     mak = tmp_path / "config.mak"
     if config_mak is not None:
         mak.write_text(config_mak)
     prelude = "YELLOW=''\nNC=''\n" + 'warn() { echo -e "  WARN: $1"; }\n'
     fn = _extract_fn(script_text, "warn_if_frame_pointer_omitted")
-    return _bash(f'{prelude}{fn}\nwarn_if_frame_pointer_omitted "{mak}" "ffmpeg"; echo rc=$?')
+    call = f'warn_if_frame_pointer_omitted "{mak}" "ffmpeg" "{make_flags}"'
+    return _bash(f"{prelude}{fn}\n{call}; echo rc=$?")
 
 
 def test_ffmpeg_configure_gets_the_frame_pointer_flag(script_text):
@@ -338,6 +339,48 @@ def test_frame_pointer_check_warns_when_flag_is_missing(script_text, tmp_path):
 def test_frame_pointer_check_ignores_a_missing_file(script_text, tmp_path):
     r = _warn_check(script_text, tmp_path, None)
     assert r.stdout.strip() == "rc=0"
+
+
+def test_regression_frame_pointer_warning_ignored_make_ecflags(script_text, tmp_path):
+    # configure appends -fomit-frame-pointer; make's ECFLAGS comes after it and wins
+    # (ffbuild/common.mak). Measured: ffmpeg_read 9.0.2 had rbp frames in 10,775/10,779
+    # functions while this check warned on every build.
+    r = _warn_check(
+        script_text,
+        tmp_path,
+        "CFLAGS=-fno-omit-frame-pointer -O3 -fomit-frame-pointer\n",
+        make_flags="ECFLAGS=-fno-omit-frame-pointer",
+    )
+    assert "WARN" not in r.stdout
+    assert "rc=0" in r.stdout
+
+
+def test_frame_pointer_check_warns_when_ecflags_omits(script_text, tmp_path):
+    r = _warn_check(
+        script_text,
+        tmp_path,
+        "CFLAGS=-fno-omit-frame-pointer\n",
+        make_flags="ECFLAGS=-fomit-frame-pointer",
+    )
+    assert "WARN" in r.stdout and "-fomit-frame-pointer" in r.stdout
+
+
+def test_frame_pointer_check_ignores_non_ecflags_make_vars(script_text, tmp_path):
+    # Only ECFLAGS is appended last; a make-time CFLAGS= replaces config, not overrides order.
+    r = _warn_check(
+        script_text,
+        tmp_path,
+        "CFLAGS=-O3 -fomit-frame-pointer\n",
+        make_flags="V=1 CFLAGS=-fno-omit-frame-pointer",
+    )
+    assert "WARN" in r.stdout
+
+
+def test_frame_pointer_check_gets_ffmpeg_make_flags(script_text):
+    call = (
+        'warn_if_frame_pointer_omitted "$FFMPEG_DIR/ffbuild/config.mak" "vendored FFmpeg${label}"'
+    )
+    assert f'{call} "$FFMPEG_MAKE_FLAGS"' in script_text
 
 
 def test_no_sibling_calls_flag_is_wired_after_frame_pointer(script_text):
