@@ -596,8 +596,10 @@ linear 1.02-1.05; s>=1.5 both <= 1.02. Measured on ffmpeg_read 9.0.2
 NOT_POWER_LAW. The Zipf model misleads: the first 1% of edges carry 1% of
 touches, the 20 hottest sit at ranks 174-11,215. With the measured weights
 (`--mode real`, loads 0.6-0.9) hybrid costs 1.30-1.45 lines per hit vs linear
-1.04-1.09. Rejected. Also moot there: the auto-sized map (524,288) runs at
-load ~0.03.
+1.04-1.09. Ctx on (frame pointers verified: 10,775/10,779 functions set up
+rbp): 27,602 edges, same 2.04e9 touches, slope 1.64, Spearman -0.60, hottest
+20 at ranks 119-17,811; hybrid 1.21-1.63 vs linear 1.03-1.10. Rejected. Also
+moot there: the auto-sized map (524,288) runs at load 0.03-0.05.
 
 **Map resize load trigger 0.7 -> 0.9** (rejected 2026-11-05).
 `tools/sim_funnel_probe.py --mode growth` replays `recommended_map_size` from
