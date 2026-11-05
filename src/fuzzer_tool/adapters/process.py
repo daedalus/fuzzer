@@ -505,6 +505,35 @@ _PUMP_CHUNK = 65536
 # otherwise hand the target the parent's SIG_IGN.
 _CHILD_DEFAULT_SIGNALS = (signal.SIGPIPE, signal.SIGXFSZ)
 
+# Child gets its own session; builds without POSIX_SPAWN_SETSID
+# (python-build-standalone, uv's default) get its own group instead,
+# which is all killpg cleanup needs. Switched once on first failure.
+_SPAWN_SETSID = {"setsid": True}
+_SPAWN_SETPGROUP = {"setpgroup": 0}
+_spawn_group = _SPAWN_SETSID
+
+
+def _spawn_grouped(argv: list[str], env: dict[str, str], actions: list) -> int:
+    """``posix_spawnp`` *argv* as leader of a new session or process group."""
+    global _spawn_group
+    try:
+        return os.posix_spawnp(
+            argv[0],
+            argv,
+            env,
+            file_actions=actions,
+            setsigdef=_CHILD_DEFAULT_SIGNALS,
+            **_spawn_group,
+        )
+    except NotImplementedError:
+        if _spawn_group is _SPAWN_SETPGROUP:
+            raise
+        _spawn_group = _SPAWN_SETPGROUP
+
+    return os.posix_spawnp(
+        argv[0], argv, env, file_actions=actions, setsigdef=_CHILD_DEFAULT_SIGNALS, **_spawn_group
+    )
+
 
 class _Pump:
     """Feed a child's stdin and drain its stderr on one thread with poll.
@@ -641,14 +670,7 @@ def _spawn_capture(
             fds += [stdin_r, stdin_w]
             actions.append((os.POSIX_SPAWN_DUP2, stdin_r, 0))
 
-        pid = os.posix_spawnp(
-            argv[0],
-            argv,
-            _clean_env(env),
-            file_actions=actions,
-            setsid=True,
-            setsigdef=_CHILD_DEFAULT_SIGNALS,
-        )
+        pid = _spawn_grouped(argv, _clean_env(env), actions)
         _track(pid)
         _limit_child(pid)
 
