@@ -480,6 +480,33 @@ def _growth_lines(timeline: list[tuple[int, int]]) -> list[str]:
     return out
 
 
+def _displacement_lines(cov) -> list[str]:
+    """One line: how far stored edges sit from their home slot.
+
+    e.g. ``Probe displacement: 41 claims, home 97.6%, max 3, mean 0.05, peak load 0.50%``.
+    Empty when *cov* has no histogram (MagicMock fuzzers in report tests).
+    """
+    if not _HAS_NUMPY:
+        return []
+
+    got = getattr(cov, "displacement_histogram", None)
+    res = got() if callable(got) else None
+    if not isinstance(res, tuple) or not isinstance(res[0], np.ndarray):
+        return []
+
+    hist, peak = res
+    total = int(hist.sum())
+    if not total:
+        return []
+
+    used = np.flatnonzero(hist)
+    mean = float((np.arange(hist.size) * hist).sum()) / total
+    return [
+        f"  Probe displacement: {total:,} claims, home {hist[0] / total:.1%}, "
+        f"max {int(used[-1])}, mean {mean:.2f}, peak load {peak:.2%}"
+    ]
+
+
 def _coverage_analysis(f) -> str:
     if not f.shm_cov:
         return ""
@@ -499,6 +526,7 @@ def _coverage_analysis(f) -> str:
     dropped = int(cov.read_dropped_edges())
     if dropped:
         lines.append(f"  Dropped edges:   {dropped:,}")
+    lines.extend(_displacement_lines(cov))
 
     if buckets:
         lines.append(f"  Edge buckets:    {len(buckets)}")
