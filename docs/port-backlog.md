@@ -590,8 +590,14 @@ batching over line-aligned 8-entry buckets; an empty slot rules an array out):
 three, still above linear's 1.10-1.37 on the hit path; the drop win only lands
 past the 0.7 resize trigger. Weighted by Zipf hit frequency (`--mode hot`,
 w = r^-s, hot edges discovered first), loads 0.6-0.9: s=1 hybrid 1.08-1.30 vs
-linear 1.02-1.05; s>=1.5 both <= 1.02. Linear never loses; hybrid is viable
-only if the real s >= 1.5 (unmeasured: fit the shim's per-edge counts).
+linear 1.02-1.05; s>=1.5 both <= 1.02. Measured on ffmpeg_read 9.0.2
+(noasan, ctx off, 32k-exec corpus replayed by `tools/edge_hit_spectrum.py`):
+16,417 edges, discovery-order slope 1.76, Spearman -0.64, `fit_zipf`
+NOT_POWER_LAW. The Zipf model misleads: the first 1% of edges carry 1% of
+touches, the 20 hottest sit at ranks 174-11,215. With the measured weights
+(`--mode real`, loads 0.6-0.9) hybrid costs 1.30-1.45 lines per hit vs linear
+1.04-1.09. Rejected. Also moot there: the auto-sized map (524,288) runs at
+load ~0.03.
 
 **Map resize load trigger 0.7 -> 0.9** (rejected 2026-11-05).
 `tools/sim_funnel_probe.py --mode growth` replays `recommended_map_size` from
