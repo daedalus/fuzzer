@@ -25,6 +25,11 @@ policy (load >= threshold or any drop; new table empty, edges re-inserted).
 Usage:
     python tools/sim_funnel_probe.py --loads 0.7,0.77,0.85,0.9 --trials 5
     python tools/sim_funnel_probe.py --mode growth --thresholds 0.7,0.9
+    python tools/sim_funnel_probe.py --mode hot --zipf 0,0.5,1,1.5
+
+Hot mode weights each hit by Zipf rank-frequency, w_r = r^-s, with r the
+edge's discovery order: hot edges are found first (core/zipf.py, Heaps
+beta = 1/s). s = 0 is uniform, the load mode's hit_ln.
 """
 
 from __future__ import annotations
@@ -80,6 +85,7 @@ SM_MUL2 = 0x94D049BB133111EB
 class Mode(Enum):
     LOAD = "load"
     GROWTH = "growth"
+    HOT = "hot"
 
 
 class Insert(Enum):
@@ -618,6 +624,54 @@ def run_growth(
     return GrowthStats(resizes, size, len(placed) / size, drop_events, hit)
 
 
+def weighted_lines(lines: np.ndarray, s: float) -> float:
+    """Mean of *lines* (discovery order) weighted by Zipf rank-frequency r^-s."""
+    if s < 0:
+        raise ValueError(f"Zipf exponent must be >= 0, got {s}")
+    if not lines.size:
+        return 0.0
+    w = np.arange(1, lines.size + 1, dtype=np.float64) ** -s
+    return float(w @ lines / w.sum())
+
+
+def run_hot(
+    kind: Kind,
+    size: int,
+    window: int,
+    delta: float,
+    load: float,
+    exponents: tuple[float, ...],
+    pool: RandPool,
+) -> tuple[float, ...]:
+    """Frequency-weighted lines per hit at *load*, one value per Zipf exponent."""
+    table = make_table(kind, size, window, delta)
+    ids = unique_ids(pool, int(load * size))
+    placed = [e for e in ids if table.insert(e) is Insert.PLACED]
+    lines = np.array([table.lookup(e).lines for e in placed], dtype=np.float64)
+    return tuple(weighted_lines(lines, x) for x in exponents)
+
+
+def _hot_main(args: argparse.Namespace) -> None:
+    exps = tuple(float(x) for x in args.zipf.split(","))
+    print("load  kind    " + " ".join(f"s={x:<5}" for x in exps))
+    for load in (float(x) for x in args.loads.split(",")):
+        for kind in Kind:
+            runs = [
+                run_hot(
+                    kind,
+                    args.size,
+                    args.window,
+                    args.delta,
+                    load,
+                    exps,
+                    RandPool(seed=args.seed + t),
+                )
+                for t in range(args.trials)
+            ]
+            cols = (statistics.fmean(r[k] for r in runs) for k in range(len(exps)))
+            print(f"{load:5.2f} {kind.value:7} " + " ".join(f"{c:7.3f}" for c in cols))
+
+
 def _growth_main(args: argparse.Namespace) -> None:
     print("edges   thr  kind    resizes final_size load  drop_events hit_ln")
     for edges in (int(x) for x in args.edges.split(",")):
@@ -658,10 +712,14 @@ def main() -> None:
     ap.add_argument("--thresholds", default="0.7,0.9", help="growth: load triggers")
     ap.add_argument("--check-every", type=int, default=256, help="growth: edges per check")
     ap.add_argument("--sample", type=int, default=500, help="growth: hit lookups sampled")
+    ap.add_argument("--zipf", default="0,0.5,1,1.5", help="hot: rank-frequency exponents")
     args = ap.parse_args()
 
     if args.mode == Mode.GROWTH.value:
         _growth_main(args)
+        return
+    if args.mode == Mode.HOT.value:
+        _hot_main(args)
         return
 
     print("load  kind    drop_rate  hit_p  max hit_ln  max  miss_p  max miss_ln max")

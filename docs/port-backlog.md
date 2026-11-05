@@ -588,7 +588,10 @@ non-greedy, a miss scans every probe in use: 30-72 lines. Hybrid (elastic
 batching over line-aligned 8-entry buckets; an empty slot rules an array out):
 0 drops to load 0.90, 1.56-2.83 lines per hit, misses 5.0-16.5. Best of the
 three, still above linear's 1.10-1.37 on the hit path; the drop win only lands
-past the 0.7 resize trigger.
+past the 0.7 resize trigger. Weighted by Zipf hit frequency (`--mode hot`,
+w = r^-s, hot edges discovered first), loads 0.6-0.9: s=1 hybrid 1.08-1.30 vs
+linear 1.02-1.05; s>=1.5 both <= 1.02. Linear never loses; hybrid is viable
+only if the real s >= 1.5 (unmeasured: fit the shim's per-edge counts).
 
 **Map resize load trigger 0.7 -> 0.9** (rejected 2026-11-05).
 `tools/sim_funnel_probe.py --mode growth` replays `recommended_map_size` from
