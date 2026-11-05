@@ -7,7 +7,6 @@ seeds (copied, so cells never share or alter them).
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "lib")
 
 import bench_paired  # noqa: E402
 import eval_set  # noqa: E402
+from child_rusage import TimedRun  # noqa: E402
 
 
 @pytest.fixture
@@ -24,14 +24,14 @@ def seen(monkeypatch):
     """Captures the work dir's seeds at the moment the campaign starts."""
     got: dict[str, list[str]] = {}
 
-    def fake_run(cmd, **kw):
+    def fake_run(cmd, timeout, **kw):
         workdir = Path(cmd[cmd.index("-d") + 1])
         got["seeds"] = sorted(p.name for p in (workdir / "seeds").glob("*"))
         if got["seeds"]:
             (workdir / "seeds" / "scribble").write_bytes(b"x")  # the run writes its corpus
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+        return TimedRun(rc=0, log="", wall=0.0, cpu_user=0.0, cpu_sys=0.0)
 
-    monkeypatch.setattr(bench_paired.subprocess, "run", fake_run)
+    monkeypatch.setattr(bench_paired, "run_timed", fake_run)
     return got
 
 

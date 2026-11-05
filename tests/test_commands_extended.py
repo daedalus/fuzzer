@@ -496,6 +496,55 @@ class TestCmdFuzzConstruction:
         assert result == 0
         assert not (tmp_path / "hot.prof").exists()
 
+    def test_fuzz_profile_mode_sample_writes_collapsed(self, monkeypatch, tmp_path, capsys):
+        """--profile-mode sample dumps collapsed stacks, not a pstats file."""
+        args = self._make_default_args(tmp_path)
+        args.profile_hotpath = True
+        args.profile_mode = "sample"
+        args.profile_out = str(tmp_path / "stacks.txt")
+        mock_fuzzer = MagicMock()
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
+
+        assert cmd_fuzz(args) == 0
+        mock_fuzzer.run.assert_called_once()
+        # Collapsed text ("a;b;c N" per line), not a binary pstats dump.
+        text = (tmp_path / "stacks.txt").read_bytes().decode("utf-8")
+        assert all(line.rsplit(" ", 1)[1].isdigit() for line in text.splitlines())
+        assert b"\x00" not in (tmp_path / "stacks.txt").read_bytes()
+        assert "cProfile" not in capsys.readouterr().out
+
+    def test_fuzz_profile_mode_perf_toggles_trampoline(self, monkeypatch, tmp_path):
+        """--profile-mode perf turns the perf trampoline on around run() only."""
+        args = self._make_default_args(tmp_path)
+        args.profile_hotpath = True
+        args.profile_mode = "perf"
+        calls = []
+        mock_fuzzer = MagicMock()
+        mock_fuzzer.run.side_effect = lambda **_kw: calls.append("run")
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
+        monkeypatch.setattr(
+            sys, "activate_stack_trampoline", lambda b: calls.append(b), raising=False
+        )
+        monkeypatch.setattr(
+            sys, "deactivate_stack_trampoline", lambda: calls.append("off"), raising=False
+        )
+
+        assert cmd_fuzz(args) == 0
+        assert calls == ["perf", "run", "off"]
+
+    def test_regression_profile_mode_perf_unsupported_exits(self, monkeypatch, tmp_path):
+        """Adversarial: Python without the trampoline (3.11) fails before fuzzing."""
+        args = self._make_default_args(tmp_path)
+        args.profile_hotpath = True
+        args.profile_mode = "perf"
+        mock_fuzzer = MagicMock()
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
+        monkeypatch.delattr(sys, "activate_stack_trampoline", raising=False)
+
+        with pytest.raises(SystemExit):
+            cmd_fuzz(args)
+        mock_fuzzer.run.assert_not_called()
+
     def test_fuzz_profile_hotpath_quiet_stats(self, monkeypatch, tmp_path):
         """--profile-hotpath should thread quiet_stats=True into the Fuzzer."""
         args = self._make_default_args(tmp_path)
