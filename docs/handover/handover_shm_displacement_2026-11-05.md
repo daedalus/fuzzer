@@ -89,7 +89,7 @@ the peak-load prediction because it averages over windows with lower load.
 `cov.size`, which counts entries (the run log says `32,768 entries`), so the
 real size is 8x. `fuzz --help` also calls `--map-size` bytes, but it is taken
 as entries (`--map-size 1024` gave load 38%, which only fits 1,024 entries).
-Not fixed here.
+Report fixed (now `32,768 entries (262,144 bytes)`, `test_regression_report_map_size.py`); help text still says bytes.
 
 ### F5. Already tried or already cheap (do not re-propose)
 

@@ -11,6 +11,7 @@ import os
 from collections import Counter
 from pathlib import Path
 
+from fuzzer_tool.adapters.shm import SIZEOF_ENTRY
 from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strategy_display_name
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD, fit_tracker
@@ -519,7 +520,7 @@ def _coverage_analysis(f) -> str:
     lines = [
         "",
         "--- Coverage Analysis ---",
-        f"  SHM map size:    {cov.size:,} bytes",
+        f"  SHM map size:    {cov.size:,} entries ({cov.size * SIZEOF_ENTRY:,} bytes)",
         f"  Unique edges:    {total_seen}",
         f"  Coverage density: {density:.4f}%",
     ]
