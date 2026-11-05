@@ -590,6 +590,14 @@ batching over line-aligned 8-entry buckets; an empty slot rules an array out):
 three, still above linear's 1.10-1.37 on the hit path; the drop win only lands
 past the 0.7 resize trigger.
 
+**Map resize load trigger 0.7 -> 0.9** (rejected 2026-11-05).
+`tools/sim_funnel_probe.py --mode growth` replays `recommended_map_size` from
+8192 entries. Linear, 20 trials: drop events 2-3x higher at 0.9 (7k edges
+0.75 -> 2.1, 20k 1.15 -> 3.45, 60k 2.9 -> 5.8); drops still force the resize,
+so memory is saved only below ~6k edges. Hybrid at 0.9 stays at 8192 for
+6-7k edges but pays 2.0-2.5 lines per hit vs 1.1-1.2. Above ~20k edges the
+2x headroom keeps load under both triggers: no difference.
+
 **Algorithmica (Algorithms for Modern Hardware) shim and layout ports.**
 Rejected 2026-11-02, re-checked 2026-11-05: Eytzinger/S-tree/SIMD binary
 search, binary GCD, factorization, prefetch, branchless shim, huge pages, SoA
