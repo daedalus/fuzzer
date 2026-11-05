@@ -576,6 +576,16 @@ than a memoryless queue. The six pillars map onto subsystems without producing a
 decision. Nothing ports from the accompanying demo scripts, which are matplotlib
 illustration and do not faithfully implement the paper's own equation 8.
 
+**Funnel hashing for the shim edge map** (arXiv 2501.02305 §3, rejected
+2026-11-05). `tools/sim_funnel_probe.py`, 8192 entries, 5 trials: funnel drops
+nothing at any load, linear drops 1.7e-4 at 0.70 and 9.6e-3 at 0.90. The price
+is the hit path: 2.8-6.4 cache lines per hit vs 1.1-1.5, misses 5.8-32 vs
+1.3-5.2 (δ=1/16 is worse). Every edge hit pays that; drops are already handled
+by `recommended_map_size` resizing at load 0.7. Elastic hashing (§2), same
+tool: fewer hit probes than funnel (3.4-8.0 at loads 0.6-0.9) but each is a
+fresh line, so 3.4-7.9 lines per hit (3.8 at 0.77 with the best c=1); being
+non-greedy, a miss scans every probe in use: 30-72 lines.
+
 **Algorithmica (Algorithms for Modern Hardware) shim and layout ports.**
 Rejected 2026-11-02, re-checked 2026-11-05: Eytzinger/S-tree/SIMD binary
 search, binary GCD, factorization, prefetch, branchless shim, huge pages, SoA

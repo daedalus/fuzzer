@@ -247,7 +247,10 @@ class RandPool:
             return [self.randrange(n) for _ in range(count)]
         # _take spans refills; a bare slice truncated for count > _POOL_ENTRIES
         # (and still advanced _idx by the full count).
-        return (self._take(count) % n).tolist()
+        words = self._take(count)
+        if n == 1 << 32:  # full span: n overflows uint32, and % n is identity
+            return words.tolist()
+        return (words % n).tolist()
 
     def random(self) -> float:
         """Return a random float in [0.0, 1.0).  ``random.random()`` equivalent."""
