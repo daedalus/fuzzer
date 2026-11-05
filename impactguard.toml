@@ -91,4 +91,9 @@ suppress = [
     "tests/test_regression_periodicity_null.py:garch",
     "tools/lib/bench_paired.py:prob",
     "tools/lib/factorial_design.py:chi",
+    # Parametrize widened to every sim.Kind when elastic hashing was added
+    # (list(sim.Kind) replaces [LINEAR, FUNNEL]); no case removed.
+    "tests/test_sim_funnel_probe.py:TestAdversarial.test_overfull_table_terminates",
+    "tests/test_sim_funnel_probe.py:TestControl.test_every_placed_key_is_found",
+    "tests/test_sim_funnel_probe.py:TestControl.test_same_seed_same_stats",
 ]
