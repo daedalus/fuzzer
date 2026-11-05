@@ -29,7 +29,10 @@ Usage:
 
 Hot mode weights each hit by Zipf rank-frequency, w_r = r^-s, with r the
 edge's discovery order: hot edges are found first (core/zipf.py, Heaps
-beta = 1/s). s = 0 is uniform, the load mode's hit_ln.
+beta = 1/s). s = 0 is uniform, the load mode's hit_ln. Real mode takes the
+weights measured by tools/edge_hit_spectrum.py instead of a Zipf model:
+
+    python tools/sim_funnel_probe.py --mode real --spectrum spectrum.pkl
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from array import array
 from collections.abc import Iterator
 from dataclasses import dataclass, fields
 from enum import Enum
+from pathlib import Path
 
 import numpy as np
 
@@ -86,6 +90,7 @@ class Mode(Enum):
     LOAD = "load"
     GROWTH = "growth"
     HOT = "hot"
+    REAL = "real"
 
 
 class Insert(Enum):
@@ -624,6 +629,13 @@ def run_growth(
     return GrowthStats(resizes, size, len(placed) / size, drop_events, hit)
 
 
+def weighted_mean(lines: np.ndarray, w: np.ndarray) -> float:
+    total = float(w.sum())
+    if total <= 0:
+        raise ValueError("weights must have a positive sum")
+    return float(w @ lines / total)
+
+
 def weighted_lines(lines: np.ndarray, s: float) -> float:
     """Mean of *lines* (discovery order) weighted by Zipf rank-frequency r^-s."""
     if s < 0:
@@ -631,7 +643,36 @@ def weighted_lines(lines: np.ndarray, s: float) -> float:
     if not lines.size:
         return 0.0
     w = np.arange(1, lines.size + 1, dtype=np.float64) ** -s
-    return float(w @ lines / w.sum())
+    return weighted_mean(lines, w)
+
+
+def run_real(kind: Kind, weights: np.ndarray, load: float, pool: RandPool) -> float:
+    """Lines per hit weighted by measured per-edge touches, in discovery order.
+
+    The table is sized so the measured edge count sits at *load*; dropped
+    edges carry no hits (the shim never finds them).
+    """
+    n = weights.size
+    table = make_table(kind, int(n / load), PROBE_MAX, MAX_DELTA)
+    ids = unique_ids(pool, n)
+    keep = np.array([table.insert(e) is Insert.PLACED for e in ids])
+    lines = np.array([table.lookup(e).lines for e, k in zip(ids, keep, strict=True) if k])
+    return weighted_mean(lines.astype(np.float64), weights[keep].astype(np.float64))
+
+
+def _real_main(args: argparse.Namespace) -> None:
+    from edge_hit_spectrum import Spectrum  # sibling tool
+
+    weights = Spectrum.load(args.spectrum).totals()
+    print(f"edges {weights.size}")
+    print("load  kind    hit_ln")
+    for load in (float(x) for x in args.loads.split(",")):
+        for kind in Kind:
+            runs = [
+                run_real(kind, weights, load, RandPool(seed=args.seed + t))
+                for t in range(args.trials)
+            ]
+            print(f"{load:5.2f} {kind.value:7} {statistics.fmean(runs):7.3f}")
 
 
 def run_hot(
@@ -713,6 +754,7 @@ def main() -> None:
     ap.add_argument("--check-every", type=int, default=256, help="growth: edges per check")
     ap.add_argument("--sample", type=int, default=500, help="growth: hit lookups sampled")
     ap.add_argument("--zipf", default="0,0.5,1,1.5", help="hot: rank-frequency exponents")
+    ap.add_argument("--spectrum", type=Path, help="real: tools/edge_hit_spectrum.py pickle")
     args = ap.parse_args()
 
     if args.mode == Mode.GROWTH.value:
@@ -720,6 +762,9 @@ def main() -> None:
         return
     if args.mode == Mode.HOT.value:
         _hot_main(args)
+        return
+    if args.mode == Mode.REAL.value:
+        _real_main(args)
         return
 
     print("load  kind    drop_rate  hit_p  max hit_ln  max  miss_p  max miss_ln max")

@@ -291,3 +291,20 @@ class TestHot:
     def test_same_seed_same_result(self):
         args = (sim.Kind.HYBRID, SIZE // 4, WINDOW, DELTA, 0.8, (0.0, 1.0))
         assert sim.run_hot(*args, RandPool(seed=SEED)) == sim.run_hot(*args, RandPool(seed=SEED))
+
+
+class TestRealWeights:
+    def test_weighted_mean_arithmetic(self):
+        assert sim.weighted_mean(np.array([1, 3]), np.array([1.0, 0.5])) == pytest.approx(2.5 / 1.5)
+
+    def test_zero_weight_total_raises(self):
+        with pytest.raises(ValueError):
+            sim.weighted_mean(np.array([1, 2]), np.zeros(2))
+
+    @pytest.mark.parametrize("kind", [sim.Kind.LINEAR, sim.Kind.HYBRID])
+    def test_unit_weights_match_hot_uniform(self, kind):
+        # Oracle: equal real weights must equal hot mode at s = 0 on the same draws.
+        n, load = 1600, 0.8
+        got = sim.run_real(kind, np.ones(n), load, RandPool(seed=SEED))
+        (ref,) = sim.run_hot(kind, int(n / load), WINDOW, DELTA, load, (0.0,), RandPool(seed=SEED))
+        assert got == pytest.approx(ref)
