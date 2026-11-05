@@ -44,15 +44,14 @@ import os
 import re
 import shutil
 import statistics
-import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_lock  # noqa: E402
+from child_rusage import LOWER_IS_BETTER, run_timed  # noqa: E402
 from eval_set import TARGET_SETS  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -83,32 +82,22 @@ def run_one(src: str, target: str, flags: str, seed: int, iters: int, timeout: i
         *flags.split(),
         "--boltzmann",
     ]
-    t0 = time.time()
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=env,
-        )
-        log = proc.stdout + proc.stderr
-        rc = proc.returncode
-    except subprocess.TimeoutExpired as exc:
-        log = (exc.stdout or b"").decode(errors="replace") if exc.stdout else ""
-        rc = -1
+        run = run_timed(cmd, timeout, cwd=REPO, env=env)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+    log = run.log
 
     def one(rx):
         m = rx.search(log)
         return int(m.group(1)) if m else 0
 
     return {
-        "secs": round(time.time() - t0, 2),
-        "rc": rc,
+        "secs": round(run.wall, 2),
+        "rc": run.rc,
+        # Off-CPU waits excluded: the low-noise throughput metric (child_rusage.py).
+        "cpu_user": round(run.cpu_user, 3),
+        "cpu_sys": round(run.cpu_sys, 3),
         "edges": one(_EDGES),
         "corpus": one(_CORPUS),
         "crashes": one(_CRASHES),
@@ -131,6 +120,12 @@ def main() -> int:
     ap.add_argument("--name-a", default="boltzmann-count")
     ap.add_argument("--name-b", default="boltzmann-cost")
     ap.add_argument("--out", default="results/paired/replicated.json")
+    ap.add_argument(
+        "--metric",
+        default="edges",
+        choices=("edges", "cpu_user"),
+        help="cpu_user: child user CPU seconds; a win is a seed where B used less CPU",
+    )
     ap.add_argument(
         "--seed-delta",
         action="store_true",
@@ -180,7 +175,7 @@ def main() -> int:
                     print(
                         f"  [{done:>4}/{total}] {arm:<17} {Path(target).name:<15} "
                         f"s={seed:<3} r={rep} edges={r['edges']:<5} "
-                        f"{r['secs']:>6.1f}s{flag}",
+                        f"{r['secs']:>6.1f}s cpu={r['cpu_user']:>6.1f}s{flag}",
                         flush=True,
                     )
                     tmp = out.with_suffix(".json.tmp")
@@ -188,36 +183,44 @@ def main() -> int:
                     tmp.replace(out)
 
     print(f"\n[*] wrote {out} ({len(rows)} runs)")
-    summarise(rows, args.name_a, args.name_b, show_delta=args.seed_delta)
+    summarise(rows, args.name_a, args.name_b, show_delta=args.seed_delta, metric=args.metric)
     if lock:
         lock.release()
     return 0
 
 
-def summarise(rows: list[dict], name_a: str, name_b: str, show_delta: bool = True) -> None:
+def summarise(
+    rows: list[dict], name_a: str, name_b: str, show_delta: bool = True, metric: str = "edges"
+) -> None:
     by: dict = {}
     for r in rows:
-        by.setdefault((r["target"], r["seed"]), {}).setdefault(r["arm"], []).append(r["edges"])
+        # Rows recorded before cpu_user existed cannot be scored on it.
+        if metric not in r:
+            continue
+        by.setdefault((r["target"], r["seed"]), {}).setdefault(r["arm"], []).append(r[metric])
 
     deltas: list = []
     if show_delta:
         print(f"\n{'target':<16} {'seed':>4} {name_a:>16} {name_b:>16} {'delta':>7}")
-        deltas = _seed_deltas(by, name_a, name_b)
+        deltas = _seed_deltas(by, name_a, name_b, -1 if metric in LOWER_IS_BETTER else 1)
     if not deltas:
         return
     for target in sorted({t for t, _, _, _, _ in deltas}):
         _print_wlt(target, [d for t, _, _, _, d in deltas if t == target], name_b)
 
 
-def _seed_deltas(by: dict, name_a: str, name_b: str) -> list[tuple]:
-    """Per-(target, seed) median B-A delta; prints one row each. Skips seeds missing an arm."""
+def _seed_deltas(by: dict, name_a: str, name_b: str, sign: int) -> list[tuple]:
+    """Per-(target, seed) median B-A delta times *sign* (-1: lower is better).
+
+    Prints one row each; skips seeds missing an arm. Positive is always B better.
+    """
     deltas = []
     for (target, seed), arms in sorted(by.items()):
         a, b = arms.get(name_a, []), arms.get(name_b, [])
         if not a or not b:
             continue
         ma, mb = statistics.median(a), statistics.median(b)
-        d = mb - ma
+        d = sign * (mb - ma)
         deltas.append((target, seed, ma, mb, d))
         print(f"{Path(target).name:<16} {seed:>4} {ma:>16.1f} {mb:>16.1f} {d:>+7.1f}")
     return deltas

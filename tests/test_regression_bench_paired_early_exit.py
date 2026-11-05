@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "lib"))
 
 import bench_paired  # noqa: E402
+from child_rusage import TIMEOUT_RC, TimedRun  # noqa: E402
 
 ITERS = 10_000
 TARGET = "/t/target.so"
@@ -33,12 +33,12 @@ def runs(monkeypatch, tmp_path):
     script: list[str] = []
     calls = {"n": 0}
 
-    def fake_run(cmd, **kw):
+    def fake_run(cmd, timeout, **kw):
         log = script[calls["n"]]
         calls["n"] += 1
-        return subprocess.CompletedProcess(cmd, 0, log, "")
+        return TimedRun(rc=0, log=log, wall=1.0, cpu_user=1.0, cpu_sys=0.0)
 
-    monkeypatch.setattr(bench_paired.subprocess, "run", fake_run)
+    monkeypatch.setattr(bench_paired, "run_timed", fake_run)
     monkeypatch.setattr(bench_paired, "RESULTS", tmp_path)
     return script, calls
 
@@ -110,14 +110,17 @@ def test_exec_count_edges(runs, tmp_path, log, complete) -> None:
     ],
 )
 def test_regression_timeout_log_keeps_stderr(monkeypatch, tmp_path, out, err) -> None:
-    def fake_run(cmd, **kw):
-        raise subprocess.TimeoutExpired(cmd, 10, output=out, stderr=err)
+    # run_timed merges stderr into the log (child_rusage.py); the kept log
+    # must be that whole log, sanitizer report included.
+    expected = b"".join(b for b in (out, err) if b).decode()
 
-    monkeypatch.setattr(bench_paired.subprocess, "run", fake_run)
+    def fake_run(cmd, timeout, **kw):
+        return TimedRun(rc=TIMEOUT_RC, log=expected, wall=10.0, cpu_user=9.0, cpu_sys=0.0)
+
+    monkeypatch.setattr(bench_paired, "run_timed", fake_run)
     monkeypatch.setattr(bench_paired, "RESULTS", tmp_path)
 
     assert _arm(tmp_path) == []
 
     (kept,) = (tmp_path / "s_baseline_early").glob("*.log")
-    expected = b"".join(b for b in (out, err) if b).decode()
     assert kept.read_text() == expected

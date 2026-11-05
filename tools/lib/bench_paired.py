@@ -43,16 +43,15 @@ import os
 import re
 import shutil
 import statistics
-import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import bench_lock  # noqa: E402
+from child_rusage import LOWER_IS_BETTER, run_timed  # noqa: E402
 from eval_set import DEFAULT_ITERS, SEED_DIRS, SEEDS, TARGET_SETS, cells  # noqa: E402
 
 from fuzzer_tool.core.exact_tests import (  # noqa: E402
@@ -484,19 +483,11 @@ def run_cell(
         *flags.split(),
         *ARMS[arm],
     ]
-    t0 = time.time()
     try:
-        proc = subprocess.run(
-            cmd, cwd=REPO, capture_output=True, text=True, timeout=timeout, check=False
-        )
-        log = proc.stdout + proc.stderr
-        rc = proc.returncode
-    except subprocess.TimeoutExpired as exc:
-        # Timeout output is bytes even under text=True; stderr holds sanitizer reports.
-        log = b"".join(x for x in (exc.stdout, exc.stderr) if x).decode(errors="replace")
-        rc = -1
+        run = run_timed(cmd, timeout, cwd=REPO)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+    log = run.log
 
     row = {
         "arm": arm,
@@ -504,8 +495,11 @@ def run_cell(
         "seed": seed,
         "rep": rep,
         "iters": iters,
-        "secs": round(time.time() - t0, 2),
-        "rc": rc,
+        "secs": round(run.wall, 2),
+        "rc": run.rc,
+        # Off-CPU waits excluded: the low-noise throughput metric (child_rusage.py).
+        "cpu_user": round(run.cpu_user, 3),
+        "cpu_sys": round(run.cpu_sys, 3),
         **_parse(log),
     }
     # Short of the budget: not a result. Keep the log for diagnosis.
@@ -633,7 +627,7 @@ def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total:
             print(
                 f"  [{done:>4}/{total}] {arm:<18} {Path(target).name:<18} "
                 f"seed={seed:<3} rep={rep} edges={row['edges']:<6} "
-                f"{row['secs']:>6.1f}s{flag}",
+                f"{row['secs']:>6.1f}s cpu={row['cpu_user']:>6.1f}s{flag}",
                 flush=True,
             )
             # Checkpoint after every cell, via a temp file and an atomic
@@ -691,11 +685,18 @@ def _collapse(rows: list[dict], metric: str) -> dict[tuple[str, int], dict]:
 
 def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
     """Pair two arms' rows by (target, seed) and score them."""
+    # Rows recorded before a metric existed (cpu_user) cannot be scored on it.
+    base = [r for r in base if metric in r]
+    test = [r for r in test if metric in r]
     b_by = _collapse(base, metric)
     t_by = _collapse(test, metric)
     shared = sorted(b_by.keys() & t_by.keys())
 
     deltas, dropped_base, dropped_test = _paired_deltas(b_by, t_by, shared, metric)
+
+    # Lower-is-better metrics score base - test: a positive delta is a win.
+    if metric in LOWER_IS_BETTER:
+        deltas = [-d for d in deltas]
     wins = sum(1 for d in deltas if d > 0)
     losses = sum(1 for d in deltas if d < 0)
     ties = len(deltas) - wins - losses
@@ -1130,7 +1131,10 @@ def main() -> int:
     a.add_argument("files", nargs="+")
     a.add_argument("--baseline", default="baseline")
     a.add_argument(
-        "--metric", default="edges", choices=("edges", "corpus", "crashes", "unique", "eps")
+        "--metric",
+        default="edges",
+        choices=("edges", "corpus", "crashes", "unique", "eps", "cpu_user"),
+        help="cpu_user: child user CPU seconds; a win is a cell where test used less CPU",
     )
     a.add_argument(
         "--by-target",

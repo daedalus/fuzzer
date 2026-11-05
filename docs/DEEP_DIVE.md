@@ -900,7 +900,8 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
 | `--resume` | Resume from saved state |
 | `--profile-hotpath` | Profile the fuzz run with cProfile; prints tottime/cumtime/ncalls tables and dumps stats (suppresses the periodic `[*] execs:` status line for clean output; eps is still sampled, so the stats-tick spacing matches an unprofiled run) |
-| `--profile-out PATH` | cProfile dump path for `--profile-hotpath` (default `/tmp/fuzzer_hotpath.prof`) |
+| `--profile-mode MODE` | Profiler for `--profile-hotpath`: `cprofile` (default), `sample` (SIGPROF stack sampler, `adapters/stack_sampler.py`), `perf` (perf trampoline for an external `perf record`, Python >= 3.12). See §Profiling modes |
+| `--profile-out PATH` | Dump path for `--profile-hotpath` (default `/tmp/fuzzer_hotpath.prof`): pstats for `cprofile`, collapsed stacks for `sample` |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
 | `--elo` | Elo arbitration between operator strategies (bandit/mopt/replicator/cem/exp3/eps_greedy/hierarchical/gp_ucb/bo_gp_ucb/softmax/topk) and seed strategies (ga/qea/weighted/pareto/format/bayesian/markov); `--elo all` also enables every scheduler plus the mutation-stack features (metropolis/shapley/mi-guided/secretary/wfc/lineage/`--schedule fast`), and the convergence report lists only schedulers actually used |
 | `--sensitivity` | Per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting |
@@ -1516,6 +1517,35 @@ ruff format src/ tests/
 `noise` (`noise_probe.py`), `diff`, `cache`, `lineage`, `randpool`, `havoc`,
 `huffman`, `group`, `seedzip`. A new `tools/lib/bench*` script must be added to its `_REGISTRY`;
 `tests/test_benchmark_tool.py` fails otherwise.
+
+**CPU-time metric.** `paired` and `replicated` record `cpu_user` / `cpu_sys`
+per cell: user/system CPU seconds of the campaign process tree, from
+`os.wait4` (`tools/lib/child_rusage.py`), so parallel cells cannot leak into
+each other. Score on it with `--metric cpu_user`: lower-is-better metrics
+(`LOWER_IS_BETTER` in `child_rusage.py`) score base - test, so a win and a
+positive median delta always mean the test arm used less CPU. It drops off-CPU time (preemption, I/O, scheduler waits)
+but still moves with clock frequency and cache contention: it is not an
+instruction count. Run the A/A control on the same metric (Hard Rule 46).
+Rows recorded before the field existed are skipped, not scored as 0.
+
+**Profiling modes** (`fuzzer-tool fuzz ... --profile-hotpath --profile-mode M`):
+
+| Mode | Overhead (fuzzgoat noasan, 3k execs) | Output | Use for |
+|---|---|---|---|
+| `cprofile` | +75% wall (2.6 -> 4.6 s) | pstats tables + `.prof` | call counts |
+| `sample` | within run noise | self/inclusive tables + collapsed stacks | 1-10 us/exec costs; thread attribution |
+| `perf` | none until recorded | `/tmp/perf-<pid>.map` for `perf record -g -p PID` | C and Python frames in one profile |
+
+`sample` arms `ITIMER_PROF` at 200 Hz of CPU time. Each tick samples only
+threads whose own CPU clock (`pthread_getcpuclockid`) moved since the last
+tick, so threads parked in waits draw nothing (cProfile on 3.13 billed them
+to their caller). The main thread's sample is the interrupted frame, not
+the handler. A tick that lands during a direct_lite target call is taken
+on return and billed to the Python caller. SA_RESTART keeps the target's
+`read`/`write`/`wait` from failing with EINTR; `poll`/`select`/`nanosleep`
+still can. Stacks are capped at 64 frames and 50,000 distinct shapes
+(overflow bucket `<overflow>`). The collapsed file feeds flamegraph.pl,
+speedscope or inferno.
 
 Compare fuzzer configurations on a target:
 

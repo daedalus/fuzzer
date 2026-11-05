@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
 
 from fuzzer_tool.core import z3_budget
@@ -248,8 +249,20 @@ def _validate_target(target):
         sys.exit(1)
 
 
+class ProfileMode(Enum):
+    """``--profile-mode``: which profiler ``--profile-hotpath`` runs."""
+
+    CPROFILE = "cprofile"  # deterministic; tottime/cumtime/ncalls + .prof dump
+    SAMPLE = "sample"  # SIGPROF stack sampler; collapsed stacks, low overhead
+    PERF = "perf"  # perf trampoline for an external `perf record` (Python >= 3.12)
+
+
+SAMPLE_TOP_SELF = 40
+SAMPLE_TOP_TOTAL = 30
+
+
 def _run_fuzzer(fuzzer, args):
-    """Run the campaign, optionally under cProfile.
+    """Run the campaign, optionally under the ``--profile-mode`` profiler.
 
     Extracted from cmd_fuzz so the --log-json handle can be closed in a
     single finally, rather than duplicating cleanup down both the profiled
@@ -259,6 +272,12 @@ def _run_fuzzer(fuzzer, args):
         fuzzer.run(max_execs=getattr(args, "max_execs", 0))
         return
 
+    mode = ProfileMode(getattr(args, "profile_mode", ProfileMode.CPROFILE.value))
+    _PROFILERS[mode](fuzzer, args)
+
+
+def _run_cprofile(fuzzer, args):
+    """``--profile-mode cprofile``: three pstats tables plus a .prof dump."""
     import cProfile
     import pstats
 
@@ -289,6 +308,62 @@ def _run_fuzzer(fuzzer, args):
         stats.dump_stats(profile_out)
         builtins.print = _patched_print
         print(f"[*] cProfile stats saved to {profile_out}")
+
+
+def _run_sampled(fuzzer, args):
+    """``--profile-mode sample``: self/inclusive sample tables plus collapsed stacks."""
+    from fuzzer_tool.adapters.stack_sampler import StackSampler  # noqa: PLC0415
+
+    sampler = StackSampler()
+    sampler.start()
+    try:
+        fuzzer.run(max_execs=getattr(args, "max_execs", 0))
+    finally:
+        sampler.stop()
+        builtins.print = _original_print
+        n = sampler.samples
+        _print_samples(
+            f" TOP {SAMPLE_TOP_SELF} BY SELF SAMPLES", sampler.top_self(SAMPLE_TOP_SELF), n
+        )
+        _print_samples(
+            f" TOP {SAMPLE_TOP_TOTAL} BY INCLUSIVE SAMPLES", sampler.top_total(SAMPLE_TOP_TOTAL), n
+        )
+        profile_out = getattr(args, "profile_out", "/tmp/fuzzer_hotpath.prof")
+        sampler.write_collapsed(profile_out)
+        builtins.print = _patched_print
+        print(f"[*] {sampler.samples} samples; collapsed stacks saved to {profile_out}")
+
+
+def _print_samples(title, rows, samples):
+    """One sample table: count, share of all *samples*, frame."""
+    print("\n" + "=" * 80)
+    print(title)
+    print("=" * 80)
+    total = samples or 1
+    for label, n in rows:
+        print(f"{n:>8} {100 * n / total:>6.1f}%  {label}")
+
+
+def _run_perf(fuzzer, args):
+    """``--profile-mode perf``: expose Python frames to an external ``perf record``."""
+    activate = getattr(sys, "activate_stack_trampoline", None)
+    if activate is None:
+        print("[-] --profile-mode perf needs Python >= 3.12 (sys.activate_stack_trampoline)")
+        sys.exit(1)
+
+    print(f"[*] perf trampoline on; record with: perf record -F 999 -g -p {os.getpid()}")
+    activate("perf")
+    try:
+        fuzzer.run(max_execs=getattr(args, "max_execs", 0))
+    finally:
+        sys.deactivate_stack_trampoline()
+
+
+_PROFILERS = {
+    ProfileMode.CPROFILE: _run_cprofile,
+    ProfileMode.SAMPLE: _run_sampled,
+    ProfileMode.PERF: _run_perf,
+}
 
 
 def _parse_orbit_arg(spec):
@@ -6646,10 +6721,20 @@ def main() -> int:
         help="Profile the fuzz run with cProfile (tottime/cumtime/ncalls tables + .prof dump)",
     )
     fuzz_parser.add_argument(
+        "--profile-mode",
+        choices=[m.value for m in ProfileMode],
+        default=ProfileMode.CPROFILE.value,
+        help=(
+            "Profiler for --profile-hotpath: cprofile (deterministic, default), "
+            "sample (SIGPROF stack sampler, collapsed stacks to --profile-out), "
+            "perf (perf trampoline for an external `perf record`, Python >= 3.12)"
+        ),
+    )
+    fuzz_parser.add_argument(
         "--profile-out",
         default="/tmp/fuzzer_hotpath.prof",
         metavar="PATH",
-        help="cProfile dump path for --profile-hotpath (default: /tmp/fuzzer_hotpath.prof)",
+        help="Dump path for --profile-hotpath: .prof (cprofile) or collapsed stacks (sample)",
     )
     fuzz_parser.add_argument(
         "--colorize",

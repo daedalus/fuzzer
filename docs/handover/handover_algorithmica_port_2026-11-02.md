@@ -43,6 +43,8 @@ Action: the stale statement in `handover_touched_bitmap_2026-10-07.md` can be up
 
 ### 4.1 Low-noise benchmark metric (book: Benchmarking, Getting Accurate Results)
 
+**Status (2026-11-05): implemented** as `cpu_user` / `cpu_sys` per cell (`tools/lib/child_rusage.py`, `os.wait4` rusage; `--metric cpu_user`). `perf stat` not used: not installed here. No A/A noise comparison against wall time yet (TODO).
+
 Evidence: `tools/lib/bench_paired.py`, `bench_replicated.py` and `noise_probe.py` contain no instruction-count, CPU-time or `perf` metric (grep for `perf_counter|process_time|instructions|perf stat|cycles|rusage|ru_utime|taskset|governor` over `bench_paired.py`, `benchmark.py`, `profile_hotpath.py` returned nothing; `bench_replicated.py` times with `time.time()`). Paired cells compare edge counts, and `noise_probe.py` documents that a cell is not reproducible under the same arm because of wall-clock state. The hugepages A/B had an A/A control drifting -1.0% to -3.7%, the size of every effect measured.
 
 Proposal for throughput A/Bs (T1-T11 of the optimizations handover): add an optional metric of user-mode instructions retired (`perf stat -e instructions:u`) or `resource.getrusage(RUSAGE_CHILDREN).ru_utime`, reported next to wall time, with the A/A control (Hard Rule 46) on the same metric. Instruction counts are insensitive to frequency scaling and neighbours; they do not capture cache or branch effects, so state that in any verdict.
@@ -62,6 +64,8 @@ Not verified: `perf` and `valgrind` are not installed in the sandbox used for th
 `core/mutations/structured.py` ~line 998 has float bit-pattern pairs (denormals, ulp neighbours, NaN payloads). Grep for `0x5f3759df`, `0x5fe6eb50` and `rsqrt` over `src/` and `dictionaries/` found no such constants (only the word `rsqrt` in `ruby.dict` and `x86.dict`). Adding `0x5f3759df` (f32) and `0x5fe6eb50c7b537a9` (f64) to the interesting-values set is a few lines. These are integers, not float patterns, so they probably belong with the integer interesting values rather than the `(f64_bits, f32_bits)` table; check which table the call sites read. Benefit is speculative.
 
 ### 4.4 Sampling profiler for the Python hot path (book: Statistical Profiling)
+
+**Status (2026-11-05): implemented** as `--profile-mode sample` (SIGPROF sampler, `adapters/stack_sampler.py`) and `--profile-mode perf` (`sys.activate_stack_trampoline`, 3.12+; exits on 3.11). `tools/profile_hotpath.py` still uses cProfile. See DEEP_DIVE §Benchmarking, Profiling modes.
 
 T4-T11 savings are 1-10 us per exec, below the overhead of a deterministic profiler like cProfile. Python 3.12 (sandbox: 3.12.3) supports `perf` with `PYTHONPERFSUPPORT=1` / `-X perf`; `pyproject.toml` has `requires-python >=3.11`, and 3.11 lacks it. `tools/profile_hotpath.py` exists; what profiler it uses was not checked.
 
