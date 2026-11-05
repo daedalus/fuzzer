@@ -1993,6 +1993,8 @@ class MapSizeEstimate(NamedTuple):
     - ``"trace_pc_calls"`` — call sites of ``__sanitizer_cov_trace_pc``
       (trace-pc builds, e.g. gcc). Read from the binary but not exact: clang
       also instruments the shim, whose sites are counted.
+    - ``"shim_manual"``   — shim linked, no sancov or trace-pc: manual
+      ``__afl_map_edge`` sites only; MAP_SIZE_DEFAULT.
     - ``"profile"``       — TargetProfile.total_branches.
     - ``"branch_density"`` — disassembly estimate. Approximate.
     - ``"default"``       — nothing worked; MAP_SIZE_DEFAULT.
@@ -2057,6 +2059,21 @@ def estimate_map_size_detail(target: str, profile: object | None = None) -> MapS
         tpc = trace_pc_call_sites(target)
         if tpc:
             blocks, source = tpc, "trace_pc_calls"
+
+    # 1b. Shim, but no sancov and no trace-pc: only the wrapper's hand-placed
+    #     __afl_map_edge sites emit ids (its libraries are uninstrumented).
+    #     The guesses below would count the whole .so, ASAN included:
+    #     png_read_asan.so read 5,713 blocks -> 524,288 entries for ~120 edges.
+    #     The drop counter still grows the map if a target outruns this.
+    if not blocks and detect_ctx_bits(target) is not None:
+        return MapSizeEstimate(
+            entries=MAP_SIZE_DEFAULT,
+            blocks=0,
+            source="shim_manual",
+            ctx_bits=ctx_bits,
+            ngram_k=ngram_k,
+            capped=False,
+        )
 
     # 2. Cached profile data — avoids a full-text disassembly.
     #    total_branches is a branch count, and _size_from_blocks applies

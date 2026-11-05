@@ -151,6 +151,14 @@ Decision rule:
 
 ### P2. Calibrate up-front sizing (fuzzgoat oversizes ~30x)
 
+**Done 2026-11-05 (manual-only builds):** every ASAN `.so` here except
+fuzzgoat (png/zlib/gzip/nop_target, ...) has no sancov section, so sizing
+fell to branch density over the whole `.so` and asked for the 524,288 cap.
+New tier `shim_manual` sizes them at `MAP_SIZE_DEFAULT` (8,192), giving about
+18 us/exec less scan at 60 live edges (ledger 101: in-run null, A/A too
+noisy). Guard-counted builds (fuzzgoat) are unchanged; the calibration below
+is still open.
+
 Up-front sizing already exists: `elf.estimate_map_size` = guards x
 `EDGES_PER_BLOCK` (2.0) x ctx inflation / `TARGET_LOAD_FACTOR` (0.5), capped at
 `MAP_SIZE_MAX` (2^19). On fuzzgoat it chose 32,768 entries, and the measured
