@@ -1521,8 +1521,9 @@ ruff format src/ tests/
 **CPU-time metric.** `paired` and `replicated` record `cpu_user` / `cpu_sys`
 per cell: user/system CPU seconds of the campaign process tree, from
 `os.wait4` (`tools/lib/child_rusage.py`), so parallel cells cannot leak into
-each other. Score on it with `--metric cpu_user`; lower is better, so a
-"win" is a loss. It drops off-CPU time (preemption, I/O, scheduler waits)
+each other. Score on it with `--metric cpu_user`: lower-is-better metrics
+(`LOWER_IS_BETTER` in `child_rusage.py`) score base - test, so a win and a
+positive median delta always mean the test arm used less CPU. It drops off-CPU time (preemption, I/O, scheduler waits)
 but still moves with clock frequency and cache contention: it is not an
 instruction count. Run the A/A control on the same metric (Hard Rule 46).
 Rows recorded before the field existed are skipped, not scored as 0.

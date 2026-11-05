@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import bench_lock  # noqa: E402
-from child_rusage import run_timed  # noqa: E402
+from child_rusage import LOWER_IS_BETTER, run_timed  # noqa: E402
 from eval_set import DEFAULT_ITERS, SEED_DIRS, SEEDS, TARGET_SETS, cells  # noqa: E402
 
 from fuzzer_tool.core.exact_tests import (  # noqa: E402
@@ -693,6 +693,10 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
     shared = sorted(b_by.keys() & t_by.keys())
 
     deltas, dropped_base, dropped_test = _paired_deltas(b_by, t_by, shared, metric)
+
+    # Lower-is-better metrics score base - test: a positive delta is a win.
+    if metric in LOWER_IS_BETTER:
+        deltas = [-d for d in deltas]
     wins = sum(1 for d in deltas if d > 0)
     losses = sum(1 for d in deltas if d < 0)
     ties = len(deltas) - wins - losses
@@ -1130,7 +1134,7 @@ def main() -> int:
         "--metric",
         default="edges",
         choices=("edges", "corpus", "crashes", "unique", "eps", "cpu_user"),
-        help="cpu_user: child user CPU seconds; lower is better, so a 'win' is a loss",
+        help="cpu_user: child user CPU seconds; a win is a cell where test used less CPU",
     )
     a.add_argument(
         "--by-target",

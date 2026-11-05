@@ -23,6 +23,10 @@ from dataclasses import dataclass
 # rc reported for a campaign killed at its timeout (matches subprocess.run callers).
 TIMEOUT_RC = -1
 
+# Metrics where less is better: harnesses flip their delta so a "win" always
+# means the test arm did better (cpu_user: 2.0 s -> 1.8 s scores +0.2).
+LOWER_IS_BETTER = frozenset({"cpu_user"})
+
 
 @dataclass(frozen=True)
 class TimedRun:

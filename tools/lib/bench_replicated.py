@@ -51,7 +51,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_lock  # noqa: E402
-from child_rusage import run_timed  # noqa: E402
+from child_rusage import LOWER_IS_BETTER, run_timed  # noqa: E402
 from eval_set import TARGET_SETS  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -124,7 +124,7 @@ def main() -> int:
         "--metric",
         default="edges",
         choices=("edges", "cpu_user"),
-        help="cpu_user: child user CPU seconds; lower is better, so a 'win' is a loss",
+        help="cpu_user: child user CPU seconds; a win is a seed where B used less CPU",
     )
     ap.add_argument(
         "--seed-delta",
@@ -202,22 +202,25 @@ def summarise(
     deltas: list = []
     if show_delta:
         print(f"\n{'target':<16} {'seed':>4} {name_a:>16} {name_b:>16} {'delta':>7}")
-        deltas = _seed_deltas(by, name_a, name_b)
+        deltas = _seed_deltas(by, name_a, name_b, -1 if metric in LOWER_IS_BETTER else 1)
     if not deltas:
         return
     for target in sorted({t for t, _, _, _, _ in deltas}):
         _print_wlt(target, [d for t, _, _, _, d in deltas if t == target], name_b)
 
 
-def _seed_deltas(by: dict, name_a: str, name_b: str) -> list[tuple]:
-    """Per-(target, seed) median B-A delta; prints one row each. Skips seeds missing an arm."""
+def _seed_deltas(by: dict, name_a: str, name_b: str, sign: int) -> list[tuple]:
+    """Per-(target, seed) median B-A delta times *sign* (-1: lower is better).
+
+    Prints one row each; skips seeds missing an arm. Positive is always B better.
+    """
     deltas = []
     for (target, seed), arms in sorted(by.items()):
         a, b = arms.get(name_a, []), arms.get(name_b, [])
         if not a or not b:
             continue
         ma, mb = statistics.median(a), statistics.median(b)
-        d = mb - ma
+        d = sign * (mb - ma)
         deltas.append((target, seed, ma, mb, d))
         print(f"{Path(target).name:<16} {seed:>4} {ma:>16.1f} {mb:>16.1f} {d:>+7.1f}")
     return deltas

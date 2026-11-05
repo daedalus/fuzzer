@@ -42,9 +42,32 @@ class TestPairedRows:
 
         r = bench_paired.compare(base, test, metric="cpu_user")
 
-        # Test used more CPU on every cell: all "wins" in the raw sign.
+        # Test used more CPU on every cell: every cell is a loss, delta negative.
+        assert r["losses"] == len(base)
+        assert r["wins"] == 0
+        assert r["median_delta"] < 0
+
+    def test_less_cpu_is_a_win(self):
+        """Falsification: the faster arm must score wins, not losses."""
+        base = [_row(s, 2.0) for s in range(6)]
+        test = [_row(s, 2.0 - 0.1 * (s + 1)) for s in range(6)]
+
+        r = bench_paired.compare(base, test, metric="cpu_user")
+
         assert r["wins"] == len(base)
         assert r["median_delta"] > 0
+
+    def test_regression_edges_sign_unchanged(self):
+        """Adversarial: higher-is-better metrics keep test - base."""
+        base = [
+            {"target": "t.so", "seed": s, "edges": 10, "coverage_attached": True} for s in range(4)
+        ]
+        test = [dict(r, edges=12) for r in base]
+
+        r = bench_paired.compare(base, test, metric="edges")
+
+        assert r["wins"] == len(base)
+        assert r["median_delta"] == 2
 
     def test_cpu_control_against_itself(self):
         """Rule 46: the same rows against themselves must show no effect."""
@@ -92,7 +115,9 @@ class TestReplicatedRows:
 
         bench_replicated.summarise(rows, "a", "b", metric="cpu_user")
 
-        assert "+0.5" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "-0.5" in out  # b used 0.5 s more CPU: negative = worse
+        assert "wins 0, loses 1" in out
 
     def test_regression_old_rows_without_cpu_are_skipped(self, capsys):
         """Adversarial: rows recorded before §4.1 lack cpu_user; skip, don't crash."""
