@@ -153,6 +153,7 @@ fuzzer, not just the target.
 | `python tools/gen_ffmpeg_803_seeds.py [--out DIR]` | Write the 8.0.3 version-diff crash seeds (14 crafted) into `<out>/seeds/` (default `~/fuzzing/ffmpeg_803_potential_crashes`) |
 | `tools/mint_ffmpeg_803_baselines.sh [--out DIR]` | Mint 12 container mutation baselines for the 8.0.3 seed pack into `<out>/seeds/` |
 | `tools/benchmark.py list` / `tools/benchmark.py <name> [args]` | All benchmarks behind one entry point (`smoke`, `sweep`, `paired`, `replicated`, …) |
+| `tools/sim_funnel_probe.py [--mode load\|growth\|hot\|real]` / `tools/edge_hit_spectrum.py TARGET -d CORPUS -o OUT.pkl` | SHM probe-table simulator (linear/funnel/elastic/hybrid) and measured per-edge hit spectrum; see `docs/handover/handover_funnel_elastic_hashing_2026-11-05.md` |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
 | `tools/find_dup_tests.py [PATH ...]` | Identical-body tests (AST, docstrings ignored); cross-file hits may bind different per-file names |

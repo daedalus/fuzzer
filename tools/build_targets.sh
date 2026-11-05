@@ -486,16 +486,22 @@ NC='\033[0m'
 ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
 
-# warn_if_frame_pointer_omitted CONFIG_MAK WHAT
+# warn_if_frame_pointer_omitted CONFIG_MAK WHAT [MAKE_FLAGS]
 # Warns when the compile flags a configure step wrote would drop frame
 # pointers: the LAST -f[no-]omit-frame-pointer in CFLAGS-like lines wins, so
 # an -fomit-frame-pointer that configure appends after ours silently turns
-# call-site context (CTX) into a constant. Never fails the build: the answer
-# is a warning, and a missing or unreadable file says nothing.
+# call-site context (CTX) into a constant. MAKE_FLAGS are the make-time
+# assignments; only ECFLAGS counts, since ffbuild/common.mak appends it after
+# everything configure wrote (FFMPEG_MAKE_FLAGS). Never fails the build: the
+# answer is a warning, and a missing or unreadable file says nothing.
 warn_if_frame_pointer_omitted() {
-    local mak="$1" what="${2:-build}" last
+    local mak="$1" what="${2:-build}" make_flags="${3:-}" last ecflags=""
     [ -f "$mak" ] || return 0
-    last="$(grep -E '^(CC|CFLAGS|CPPFLAGS)[A-Z_]*=' "$mak" 2>/dev/null \
+    local word
+    for word in $make_flags; do
+        case "$word" in ECFLAGS=*) ecflags="$ecflags ${word#ECFLAGS=}" ;; esac
+    done
+    last="$( { grep -E '^(CC|CFLAGS|CPPFLAGS)[A-Z_]*=' "$mak" 2>/dev/null; echo "$ecflags"; } \
             | tr ' ' '\n' | grep -E '^-f(no-)?omit-frame-pointer$' | tail -n 1 || true)"
     if [ "$last" != "-fno-omit-frame-pointer" ]; then
         warn "$what: compile flags end with '${last:-no frame-pointer flag}'; call-site context (CTX) will collapse to a constant. Put -fno-omit-frame-pointer last (see FRAME_POINTER)"
@@ -1623,7 +1629,7 @@ STUBEOF
             >>"$BUILD_LOG" 2>&1) || cfg_ok=0
     fi
     if [ "$cfg_ok" -eq 1 ]; then
-        warn_if_frame_pointer_omitted "$FFMPEG_DIR/ffbuild/config.mak" "vendored FFmpeg${label}"
+        warn_if_frame_pointer_omitted "$FFMPEG_DIR/ffbuild/config.mak" "vendored FFmpeg${label}" "$FFMPEG_MAKE_FLAGS"
         log_section "vendored FFmpeg${label}: make"
         if (cd "$FFMPEG_DIR" && make -j$(nproc) CC="$make_cc" $FFMPEG_MAKE_FLAGS -s >>"$BUILD_LOG" 2>&1); then
             # Promote the .a artifacts to the canonical build location.

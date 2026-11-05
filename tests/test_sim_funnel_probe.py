@@ -214,3 +214,97 @@ class TestHybrid:
     def test_rejects_bad_delta(self, delta):
         with pytest.raises(ValueError):
             sim.HybridTable(SIZE, delta)
+
+
+def _tracker(n_edges: int, map_size: int):
+    from fuzzer_tool.core.edge_tracker import EdgeTracker
+
+    t = EdgeTracker(map_size=map_size)
+    for i in range(n_edges):
+        t._global_edge_hits[i] = 1
+    return t
+
+
+class TestGrowth:
+    @pytest.mark.parametrize("n", [50, 99, 100, 5000, 5734, 5735, 7000, 60_000])
+    @pytest.mark.parametrize("size", [8192, 16384])
+    @pytest.mark.parametrize("dropped", [0, 1, 3000])
+    def test_policy_matches_edge_tracker_at_shipped_threshold(self, n, size, dropped):
+        # Oracle: the fuzzer's own recommended_map_size, which hardcodes 0.7.
+        want = _tracker(n, size).recommended_map_size(dropped_edges=dropped)
+        got = sim.recommend_size(n, size, dropped, sim.SHIPPED_THRESHOLD, sim.MAP_SIZE_MAX)
+        assert got == want
+
+    def test_same_seed_same_stats(self):
+        # A/A control.
+        args = (sim.Kind.LINEAR, 3000, 0.7, 256, 50)
+        a = sim.run_growth(*args, RandPool(seed=SEED))
+        b = sim.run_growth(*args, RandPool(seed=SEED))
+        assert a == b
+
+    def test_low_threshold_resizes_before_any_drop(self):
+        # Growth needs HEADROOM x edges > size: 6000 edges cross 0.6 at 5120 (load 0.625).
+        stats = sim.run_growth(sim.Kind.LINEAR, 6000, 0.6, 256, 20, RandPool(seed=SEED))
+        assert stats.resizes >= 1
+        assert stats.drop_events == 0
+
+    def test_disabled_threshold_without_drops_never_resizes(self):
+        # Falsification: a load trigger above 1 can only fire through drops.
+        stats = sim.run_growth(sim.Kind.LINEAR, 500, 2.0, 100, 20, RandPool(seed=SEED))
+        assert (stats.resizes, stats.drop_events, stats.final_size) == (0, 0, sim.MAP_SIZE_DEFAULT)
+
+    def test_capped_map_keeps_dropping_and_terminates(self):
+        stats = sim.run_growth(
+            sim.Kind.LINEAR, 12_000, 0.7, 512, 20, RandPool(seed=SEED), cap=sim.MAP_SIZE_DEFAULT
+        )
+        assert stats.resizes == 0
+        assert stats.final_size == sim.MAP_SIZE_DEFAULT
+        assert stats.drop_events >= 12_000 - sim.MAP_SIZE_DEFAULT
+
+
+class TestHot:
+    def test_zero_exponent_is_plain_mean(self):
+        # Control: uniform weights must reproduce the unweighted mean.
+        lines = np.array([1, 2, 2, 5, 1])
+        assert sim.weighted_lines(lines, 0.0) == pytest.approx(lines.mean())
+
+    def test_two_edge_weights(self):
+        # w = [1, 1/2]: (1*1 + 3*0.5) / 1.5
+        assert sim.weighted_lines(np.array([1, 3]), 1.0) == pytest.approx(2.5 / 1.5)
+
+    def test_steep_exponent_is_hottest_edge(self):
+        assert sim.weighted_lines(np.array([1, 9, 9, 9]), 60.0) == pytest.approx(1.0)
+
+    def test_empty_and_negative(self):
+        assert sim.weighted_lines(np.array([], dtype=np.int64), 1.0) == 0.0
+        with pytest.raises(ValueError):
+            sim.weighted_lines(np.array([1]), -0.5)
+
+    @pytest.mark.parametrize("kind", [sim.Kind.LINEAR, sim.Kind.HYBRID])
+    def test_uniform_matches_run_trial(self, kind):
+        # Oracle: s = 0 must equal run_trial's hit_lines on the same draws.
+        args = (kind, SIZE // 4, WINDOW, DELTA, 0.8)
+        (hot,) = sim.run_hot(*args, (0.0,), RandPool(seed=SEED))
+        ref = sim.run_trial(*args, 10, RandPool(seed=SEED))
+        assert hot == pytest.approx(ref.hit_lines)
+
+    def test_same_seed_same_result(self):
+        args = (sim.Kind.HYBRID, SIZE // 4, WINDOW, DELTA, 0.8, (0.0, 1.0))
+        assert sim.run_hot(*args, RandPool(seed=SEED)) == sim.run_hot(*args, RandPool(seed=SEED))
+
+
+class TestRealWeights:
+    def test_weighted_mean_arithmetic(self):
+        assert sim.weighted_mean(np.array([1, 3]), np.array([1.0, 0.5])) == pytest.approx(2.5 / 1.5)
+
+    def test_zero_weight_total_raises(self):
+        with pytest.raises(ValueError):
+            sim.weighted_mean(np.array([1, 2]), np.zeros(2))
+
+    @pytest.mark.parametrize("kind", [sim.Kind.LINEAR, sim.Kind.HYBRID])
+    def test_unit_weights_match_hot_uniform(self, kind):
+        # Oracle: equal real weights must equal hot mode at s = 0 on the same draws.
+        n, load = 1600, 0.8
+        got = sim.run_real(kind, np.ones(n), load, RandPool(seed=SEED))
+        (ref,) = sim.run_hot(kind, int(n / load), WINDOW, DELTA, load, (0.0,), RandPool(seed=SEED))
+        assert got == pytest.approx(ref)

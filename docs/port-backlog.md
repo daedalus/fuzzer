@@ -588,7 +588,28 @@ non-greedy, a miss scans every probe in use: 30-72 lines. Hybrid (elastic
 batching over line-aligned 8-entry buckets; an empty slot rules an array out):
 0 drops to load 0.90, 1.56-2.83 lines per hit, misses 5.0-16.5. Best of the
 three, still above linear's 1.10-1.37 on the hit path; the drop win only lands
-past the 0.7 resize trigger.
+past the 0.7 resize trigger. Weighted by Zipf hit frequency (`--mode hot`,
+w = r^-s, hot edges discovered first), loads 0.6-0.9: s=1 hybrid 1.08-1.30 vs
+linear 1.02-1.05; s>=1.5 both <= 1.02. Measured on ffmpeg_read 9.0.2
+(noasan, ctx off, 32k-exec corpus replayed by `tools/edge_hit_spectrum.py`):
+16,417 edges, discovery-order slope 1.76, Spearman -0.64, `fit_zipf`
+NOT_POWER_LAW. The Zipf model misleads: the first 1% of edges carry 1% of
+touches, the 20 hottest sit at ranks 174-11,215. With the measured weights
+(`--mode real`, loads 0.6-0.9) hybrid costs 1.30-1.45 lines per hit vs linear
+1.04-1.09. Ctx on (frame pointers verified: 10,775/10,779 functions set up
+rbp): 27,602 edges, same 2.04e9 touches, slope 1.64, Spearman -0.60, hottest
+20 at ranks 119-17,811; hybrid 1.21-1.63 vs linear 1.03-1.10. Ctx on + ng3
+(`ffmpeg_read_9.0.2_ng3`, same corpus): 37,528 edges, slope 1.68, Spearman
+-0.63, hottest 20 at ranks 5-22,847; hybrid 1.14-1.60 vs linear 1.02-1.07.
+Rejected. Also moot there: the auto-sized map (524,288) runs at load 0.03-0.07.
+
+**Map resize load trigger 0.7 -> 0.9** (rejected 2026-11-05).
+`tools/sim_funnel_probe.py --mode growth` replays `recommended_map_size` from
+8192 entries. Linear, 20 trials: drop events 2-3x higher at 0.9 (7k edges
+0.75 -> 2.1, 20k 1.15 -> 3.45, 60k 2.9 -> 5.8); drops still force the resize,
+so memory is saved only below ~6k edges. Hybrid at 0.9 stays at 8192 for
+6-7k edges but pays 2.0-2.5 lines per hit vs 1.1-1.2. Above ~20k edges the
+2x headroom keeps load under both triggers: no difference.
 
 **Algorithmica (Algorithms for Modern Hardware) shim and layout ports.**
 Rejected 2026-11-02, re-checked 2026-11-05: Eytzinger/S-tree/SIMD binary

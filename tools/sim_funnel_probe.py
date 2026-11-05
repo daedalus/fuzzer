@@ -18,8 +18,21 @@ deepest probe so far (the cheapest honest bound).
     hybrid:  elastic over line-aligned 8-entry buckets; an empty slot in a
              probed bucket rules its array out, so misses stop early
 
+Growth mode replays a campaign: edges arrive one by one into a map that
+starts at MAP_SIZE_DEFAULT and resizes by EdgeTracker.recommended_map_size's
+policy (load >= threshold or any drop; new table empty, edges re-inserted).
+
 Usage:
     python tools/sim_funnel_probe.py --loads 0.7,0.77,0.85,0.9 --trials 5
+    python tools/sim_funnel_probe.py --mode growth --thresholds 0.7,0.9
+    python tools/sim_funnel_probe.py --mode hot --zipf 0,0.5,1,1.5
+
+Hot mode weights each hit by Zipf rank-frequency, w_r = r^-s, with r the
+edge's discovery order: hot edges are found first (core/zipf.py, Heaps
+beta = 1/s). s = 0 is uniform, the load mode's hit_ln. Real mode takes the
+weights measured by tools/edge_hit_spectrum.py instead of a Zipf model:
+
+    python tools/sim_funnel_probe.py --mode real --spectrum spectrum.pkl
 """
 
 from __future__ import annotations
@@ -31,10 +44,12 @@ from array import array
 from collections.abc import Iterator
 from dataclasses import dataclass, fields
 from enum import Enum
+from pathlib import Path
 
 import numpy as np
 
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, home_slot
+from fuzzer_tool.core.elf import MAP_SIZE_DEFAULT, MAP_SIZE_MAX
 from fuzzer_tool.core.rand_pool import RandPool
 
 EMPTY = 0
@@ -56,6 +71,12 @@ FILL_NEXT = 3 / 4  # batch 0 fills A_1, batch i fills A_{i+1}, to this fraction
 NEXT_FULL = 1 / 4  # A_{i+1} free fraction at which case 3 (greedy in A_i) applies
 GREEDY_CAP = 32  # draws per slot before a greedy scan gives up: misses a free slot ~e^-32
 PAIR_I_SHIFT = 24  # elastic pair hash key: eid << 32 | i << 24 | j
+# EdgeTracker.recommended_map_size: load trigger, minimum edges, 2x headroom.
+SHIPPED_THRESHOLD = 0.7
+MIN_EDGES = 100
+HEADROOM = 2
+PROBE_MAX = 64  # __AFL_PROBE_MAX
+
 # Entries before the first line boundary: the table starts SHM_METADATA_SIZE into a page.
 LINE_LEAD = (LINE_BYTES - SHM_METADATA_SIZE % LINE_BYTES) % LINE_BYTES // ENTRY_BYTES
 
@@ -63,6 +84,13 @@ LINE_LEAD = (LINE_BYTES - SHM_METADATA_SIZE % LINE_BYTES) % LINE_BYTES // ENTRY_
 SM_GAMMA = 0x9E3779B97F4A7C15
 SM_MUL1 = 0xBF58476D1CE4E5B9
 SM_MUL2 = 0x94D049BB133111EB
+
+
+class Mode(Enum):
+    LOAD = "load"
+    GROWTH = "growth"
+    HOT = "hot"
+    REAL = "real"
 
 
 class Insert(Enum):
@@ -534,6 +562,183 @@ def _row(load: float, kind: Kind, s: TrialStats) -> str:
     )
 
 
+@dataclass(frozen=True)
+class GrowthStats:
+    resizes: int
+    final_size: int
+    final_load: float
+    drop_events: int
+    hit_lines: float  # on the final table: what the plateau's execs pay
+
+
+def recommend_size(n: int, size: int, dropped: int, threshold: float, cap: int) -> int:
+    """EdgeTracker.recommended_map_size with the load threshold as a parameter."""
+    saturated = dropped > 0
+    if not saturated and (n < MIN_EDGES or n / size < threshold):
+        return 0
+
+    # Smallest power of two >= HEADROOM x edges, clamped to [default, cap].
+    needed = (n + dropped) * HEADROOM
+    rec = 1 << (needed - 1).bit_length()
+    rec = max(MAP_SIZE_DEFAULT, min(cap, rec))
+    return rec if rec > size else 0
+
+
+def _rebuild(kind: Kind, size: int, edges: list[int]):
+    """Fresh table holding *edges*: a resized SHM segment starts empty."""
+    table = make_table(kind, size, PROBE_MAX, MAX_DELTA)
+    placed: list[int] = []
+    dropped: list[int] = []
+    for eid in edges:
+        (placed if table.insert(eid) is Insert.PLACED else dropped).append(eid)
+    return table, placed, dropped
+
+
+def run_growth(
+    kind: Kind,
+    edges_total: int,
+    threshold: float,
+    check_every: int,
+    sample: int,
+    pool: RandPool,
+    cap: int = MAP_SIZE_MAX,
+) -> GrowthStats:
+    """Discover *edges_total* edges, applying the resize policy every *check_every*."""
+    size = MAP_SIZE_DEFAULT
+    table, placed, pending = _rebuild(kind, size, [])
+    drop_events = resizes = 0
+
+    for k, eid in enumerate(unique_ids(pool, edges_total), 1):
+        if table.insert(eid) is Insert.PLACED:
+            placed.append(eid)
+        else:
+            pending.append(eid)
+            drop_events += 1
+        if k % check_every and k != edges_total:
+            continue
+
+        new = recommend_size(len(placed), size, len(pending), threshold, cap)
+        if not new:
+            continue
+        size, resizes = new, resizes + 1
+        table, placed, pending = _rebuild(kind, size, placed + pending)
+        drop_events += len(pending)
+
+    picks = pool.randrange_list(len(placed), min(sample, len(placed)))
+    hit = statistics.fmean(table.lookup(placed[i]).lines for i in picks) if picks else 0.0
+    return GrowthStats(resizes, size, len(placed) / size, drop_events, hit)
+
+
+def weighted_mean(lines: np.ndarray, w: np.ndarray) -> float:
+    total = float(w.sum())
+    if total <= 0:
+        raise ValueError("weights must have a positive sum")
+    return float(w @ lines / total)
+
+
+def weighted_lines(lines: np.ndarray, s: float) -> float:
+    """Mean of *lines* (discovery order) weighted by Zipf rank-frequency r^-s."""
+    if s < 0:
+        raise ValueError(f"Zipf exponent must be >= 0, got {s}")
+    if not lines.size:
+        return 0.0
+    w = np.arange(1, lines.size + 1, dtype=np.float64) ** -s
+    return weighted_mean(lines, w)
+
+
+def run_real(kind: Kind, weights: np.ndarray, load: float, pool: RandPool) -> float:
+    """Lines per hit weighted by measured per-edge touches, in discovery order.
+
+    The table is sized so the measured edge count sits at *load*; dropped
+    edges carry no hits (the shim never finds them).
+    """
+    n = weights.size
+    table = make_table(kind, int(n / load), PROBE_MAX, MAX_DELTA)
+    ids = unique_ids(pool, n)
+    keep = np.array([table.insert(e) is Insert.PLACED for e in ids])
+    lines = np.array([table.lookup(e).lines for e, k in zip(ids, keep, strict=True) if k])
+    return weighted_mean(lines.astype(np.float64), weights[keep].astype(np.float64))
+
+
+def _real_main(args: argparse.Namespace) -> None:
+    from edge_hit_spectrum import Spectrum  # sibling tool
+
+    weights = Spectrum.load(args.spectrum).totals()
+    print(f"edges {weights.size}")
+    print("load  kind    hit_ln")
+    for load in (float(x) for x in args.loads.split(",")):
+        for kind in Kind:
+            runs = [
+                run_real(kind, weights, load, RandPool(seed=args.seed + t))
+                for t in range(args.trials)
+            ]
+            print(f"{load:5.2f} {kind.value:7} {statistics.fmean(runs):7.3f}")
+
+
+def run_hot(
+    kind: Kind,
+    size: int,
+    window: int,
+    delta: float,
+    load: float,
+    exponents: tuple[float, ...],
+    pool: RandPool,
+) -> tuple[float, ...]:
+    """Frequency-weighted lines per hit at *load*, one value per Zipf exponent."""
+    table = make_table(kind, size, window, delta)
+    ids = unique_ids(pool, int(load * size))
+    placed = [e for e in ids if table.insert(e) is Insert.PLACED]
+    lines = np.array([table.lookup(e).lines for e in placed], dtype=np.float64)
+    return tuple(weighted_lines(lines, x) for x in exponents)
+
+
+def _hot_main(args: argparse.Namespace) -> None:
+    exps = tuple(float(x) for x in args.zipf.split(","))
+    print("load  kind    " + " ".join(f"s={x:<5}" for x in exps))
+    for load in (float(x) for x in args.loads.split(",")):
+        for kind in Kind:
+            runs = [
+                run_hot(
+                    kind,
+                    args.size,
+                    args.window,
+                    args.delta,
+                    load,
+                    exps,
+                    RandPool(seed=args.seed + t),
+                )
+                for t in range(args.trials)
+            ]
+            cols = (statistics.fmean(r[k] for r in runs) for k in range(len(exps)))
+            print(f"{load:5.2f} {kind.value:7} " + " ".join(f"{c:7.3f}" for c in cols))
+
+
+def _growth_main(args: argparse.Namespace) -> None:
+    print("edges   thr  kind    resizes final_size load  drop_events hit_ln")
+    for edges in (int(x) for x in args.edges.split(",")):
+        for thr in (float(x) for x in args.thresholds.split(",")):
+            for kind in Kind:
+                runs = [
+                    run_growth(
+                        kind,
+                        edges,
+                        thr,
+                        args.check_every,
+                        args.sample,
+                        RandPool(seed=args.seed + t),
+                    )
+                    for t in range(args.trials)
+                ]
+                print(
+                    f"{edges:6d} {thr:4.2f} {kind.value:7} "
+                    f"{statistics.fmean(r.resizes for r in runs):7.1f} "
+                    f"{max(r.final_size for r in runs):10d} "
+                    f"{statistics.fmean(r.final_load for r in runs):5.2f} "
+                    f"{statistics.fmean(r.drop_events for r in runs):11.1f} "
+                    f"{statistics.fmean(r.hit_lines for r in runs):6.2f}"
+                )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--size", type=int, default=8192, help="entries (AFL_MAP_SIZE)")
@@ -543,7 +748,24 @@ def main() -> None:
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--misses", type=int, default=2000, help="absent-id lookups per trial")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--mode", choices=[m.value for m in Mode], default=Mode.LOAD.value)
+    ap.add_argument("--edges", default="6000,7000,20000,60000", help="growth: campaign sizes")
+    ap.add_argument("--thresholds", default="0.7,0.9", help="growth: load triggers")
+    ap.add_argument("--check-every", type=int, default=256, help="growth: edges per check")
+    ap.add_argument("--sample", type=int, default=500, help="growth: hit lookups sampled")
+    ap.add_argument("--zipf", default="0,0.5,1,1.5", help="hot: rank-frequency exponents")
+    ap.add_argument("--spectrum", type=Path, help="real: tools/edge_hit_spectrum.py pickle")
     args = ap.parse_args()
+
+    if args.mode == Mode.GROWTH.value:
+        _growth_main(args)
+        return
+    if args.mode == Mode.HOT.value:
+        _hot_main(args)
+        return
+    if args.mode == Mode.REAL.value:
+        _real_main(args)
+        return
 
     print("load  kind    drop_rate  hit_p  max hit_ln  max  miss_p  max miss_ln max")
     for load in (float(x) for x in args.loads.split(",")):
