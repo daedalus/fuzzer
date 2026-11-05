@@ -3,7 +3,8 @@
 **Status (2026-11-05, PR #290):** analysis + one diagnostic shipped
 (`Probe displacement` line in `--report`). No shim change, no layout bump.
 Verdict on fuzzgoat: placement is not a bottleneck (99.1% of edges in their
-home slot). ffmpeg unmeasured.
+home slot). ffmpeg (2026-11-05, P1): home 98.8%, max 3, placement closed.
+P2 ctx calibration shipped (ledger 102).
 
 ## Trigger
 
@@ -149,6 +150,10 @@ Decision rule:
 - **Home ≥ 95% and max < 32:** placement is closed; stop.
 - **Max near 63 or drops > 0:** go to P2.
 
+**Done 2026-11-05:** ffmpeg_read_9.0.2_asan.so, 20k execs, 524,288 entries:
+1,204,974 claims, home 98.8%, max 3, mean 0.01, peak load 3.32%, 25,711
+edges, 0 drops. Placement closed.
+
 ### P2. Calibrate up-front sizing (fuzzgoat oversizes ~30x)
 
 **Done 2026-11-05 (manual-only builds):** every ASAN `.so` here except
@@ -158,6 +163,23 @@ New tier `shim_manual` sizes them at `MAP_SIZE_DEFAULT` (8,192), giving about
 18 us/exec less scan at 60 live edges (ledger 101: in-run null, A/A too
 noisy). Guard-counted builds (fuzzgoat) are unchanged; the calibration below
 is still open.
+
+**Done 2026-11-05 (ctx factor):** steps 1-2 measured; the excess was context
+inflation, not edges per guard.
+
+| target | guards | edges ctx off / on | per guard off / on | ratio |
+|---|---|---|---|---|
+| fuzzgoat_read_asan.so, 50k execs | 278 | 628 / 1,118 | 2.26 / 4.02 | 1.78x |
+| ffmpeg_read 9.0.2 (funnel handover F4) | 214,532 | 16,417 / 27,602 | | 1.68x |
+
+`EDGES_PER_BLOCK` (2.0) holds; `ctx_inflation_factor(8)` was 16.
+New `CTX_INFLATION_MEASURED = 2.0`, `min(2**bits, 2.0)`. fuzzgoat
+32,768 -> 8,192 entries (worst load 13.6%); ffmpeg stays at the 524,288 cap
+(4 edges/guard x 214,532 / 0.5 = 1.7M), so no ffmpeg A/B: arms identical.
+fuzzgoat in-run A/B, ledger 102: NULL (6/2, p=0.29, -0.74 s/20k; A/A 7/1,
+-0.33 s), 0 drops. `--clock virtual` does not make in-process runs replay
+exactly (A/A edges differ). Test:
+`tests/test_regression_map_size_ctx_calibrated.py`.
 
 Up-front sizing already exists: `elf.estimate_map_size` = guards x
 `EDGES_PER_BLOCK` (2.0) x ctx inflation / `TARGET_LOAD_FACTOR` (0.5), capped at
