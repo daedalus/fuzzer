@@ -83,7 +83,15 @@ Consequences:
 Matches Knuth's linear-probing successful-search cost. The aggregate is below
 the peak-load prediction because it averages over windows with lower load.
 
-### F4. Already tried or already cheap (do not re-propose)
+### F4. Report mislabels map size
+
+`report._coverage_analysis` prints `SHM map size: 32,768 bytes`. The value is
+`cov.size`, which counts entries (the run log says `32,768 entries`), so the
+real size is 8x. `fuzz --help` also calls `--map-size` bytes, but it is taken
+as entries (`--map-size 1024` gave load 38%, which only fits 1,024 entries).
+Not fixed here.
+
+### F5. Already tried or already cheap (do not re-propose)
 
 - **Stepped probe (MSI):** LOSS / NULL, AB_LEDGER #86–92.
 - **Per-exec memset:** replaced by generation tags; the table is wiped once per 256 resets.
@@ -141,21 +149,33 @@ Decision rule:
 - **Home ≥ 95% and max < 32:** placement is closed; stop.
 - **Max near 63 or drops > 0:** go to P2.
 
-### P2. Size the map up front (only if P1 shows pressure)
+### P2. Calibrate up-front sizing (fuzzgoat oversizes ~30x)
 
-`recommended_map_size()` only reacts after drops. Guard count and ctx bits are
-known before the first exec (`elf.detect_ctx_bits`, guard total), so pick
-`M = next_pow2(E_est / α_target)` with α_target ≈ 0.5. Check
-`elf.estimate_map_size` first; it may already do this.
+Up-front sizing already exists: `elf.estimate_map_size` = guards x
+`EDGES_PER_BLOCK` (2.0) x ctx inflation / `TARGET_LOAD_FACTOR` (0.5), capped at
+`MAP_SIZE_MAX` (2^19). On fuzzgoat it chose 32,768 entries, and the measured
+peak load was 1.63% (535 claimed), about 30x below target. Its docstring's
+"memset before every execution" rationale is stale: generation tags wipe once
+per 256 resets.
+
+Oversizing costs a 256 KB wipe per 256 resets plus the table scan, and possibly
+more on ffmpeg. TODO "Map size cost on ffmpeg_read" saw 2^16 run ~18% faster
+than 2^19 at 31.8k edges (unverified, order not alternated).
+
+Plan:
+1. Record peak load (already in the displacement line) on fuzzgoat and ffmpeg.
+2. Derive the realised edges-per-guard x ctx factor from it.
+3. Lower the estimate to that factor, keeping drops at 0 (`recommended_map_size` still grows on drops).
 
 ```python
-# services/fuzzer.py, setup (ifs up: once per run)
-est = estimate_live_edges(guards, ctx_bits)          # core/elf.py
-size = max(size, next_pow2(int(est / LOAD_TARGET)))  # LOAD_TARGET = 0.5
+# core/elf.py -- calibrated factor replaces the 2.0 x 2^ctx guess
+live_est = guards * REALISED_EDGES_PER_GUARD[ctx_bits]  # measured, e.g. fuzzgoat
+entries = next_pow2(int(live_est / TARGET_LOAD_FACTOR))
 ```
 
-Wiring: `services/fuzzer.py` setup → `ShmCoverage(size)` → env
-`AFL_MAP_SIZE` → shim. Validate with the displacement line (target max < 16).
+Wiring: unchanged (`estimate_map_size` -> `services/fuzzer.py` -> `ShmCoverage(size)` ->
+`AFL_MAP_SIZE`). Gate: interleaved in-run A/B (fuzzgoat + ffmpeg, A/A
+control, AB_LEDGER), never slower and no new drops.
 
 ### P3. 4-byte entries (only if a hotpath profile shows table writes)
 
@@ -191,12 +211,15 @@ AB_LEDGER.
 ```python
 C, U = 0x9E3779B1, (1 << 32) - 1
 home = lambda i, M: (((i * C) & U) * M) >> 32
+
+
 def ctx_bounds(M):
     lo, hi = M, 0
     for base in range(1 << 12):
         a = base << 8
         for c in range(1, 256):
-            d = abs(home(a ^ c, M) - home(a, M)); d = min(d, M - d)
+            d = abs(home(a ^ c, M) - home(a, M))
+            d = min(d, M - d)
             lo, hi = min(lo, d), max(hi, d)
     return lo, hi
 ```
