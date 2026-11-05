@@ -92,7 +92,7 @@ class TestFunnel:
 
 
 class TestAdversarial:
-    @pytest.mark.parametrize("kind", [sim.Kind.LINEAR, sim.Kind.FUNNEL])
+    @pytest.mark.parametrize("kind", list(sim.Kind))
     def test_overfull_table_terminates(self, kind):
         size = 256
         table = sim.make_table(kind, size, WINDOW, DELTA)
@@ -113,16 +113,66 @@ class TestAdversarial:
 
 
 class TestControl:
-    def test_same_seed_same_stats(self):
+    @pytest.mark.parametrize("kind", list(sim.Kind))
+    def test_same_seed_same_stats(self, kind):
         # A/A: identical configs must report identical stats, else the harness leaks state.
-        args = (sim.Kind.FUNNEL, SIZE // 8, WINDOW, DELTA, 0.8, 200)
+        args = (kind, SIZE // 8, WINDOW, DELTA, 0.8, 200)
         a = sim.run_trial(*args, RandPool(seed=SEED))
         b = sim.run_trial(*args, RandPool(seed=SEED))
         assert a == b
 
-    @pytest.mark.parametrize("kind", [sim.Kind.LINEAR, sim.Kind.FUNNEL])
+    @pytest.mark.parametrize("kind", list(sim.Kind))
     def test_every_placed_key_is_found(self, kind):
         table = sim.make_table(kind, SIZE, WINDOW, DELTA)
         ids = sim.unique_ids(RandPool(seed=SEED), int(0.9 * SIZE))
         placed = [e for e in ids if table.insert(e) is sim.Insert.PLACED]
         assert all(table.lookup(e).found for e in placed)
+
+
+class TestElastic:
+    def test_arrays_halve_and_cover_table(self):
+        table = sim.ElasticTable(SIZE, DELTA)
+        sizes = table.array_sizes()
+        assert sum(sizes) == SIZE
+        assert len(sizes) == (SIZE - 1).bit_length()
+        assert all(abs(2 * b - a) <= 2 for a, b in zip(sizes, sizes[1:], strict=False))
+
+    def test_phi_injective_bounded_monotone(self):
+        grid = [(i, j) for i in range(1, 20) for j in range(1, 200)]
+        phis = [sim.phi(i, j) for i, j in grid]
+        assert len(set(phis)) == len(grid)
+        # Lemma 1: phi(i, j) <= O(i j^2); bit lengths give the constant 16.
+        assert all(p < 16 * i * j * j for p, (i, j) in zip(phis, grid, strict=True))
+        assert all(sim.phi(5, j) < sim.phi(5, j + 1) for j in range(1, 199))
+
+    def test_hit_probes_equal_phi_rank(self):
+        # Oracle: rank of the key's (i, j) among scanned pairs, counted from phi alone.
+        table = sim.ElasticTable(SIZE // 4, DELTA)
+        ids = _fill(table, 0.8)
+        max_j = table.max_j()
+        pairs = [(i, j) for i, top in enumerate(max_j, 1) for j in range(1, top + 1)]
+        for eid in ids[:: len(ids) // 50]:
+            i, j = table.placement(eid)
+            rank = sum(sim.phi(a, b) <= sim.phi(i, j) for a, b in pairs)
+            hit = table.lookup(eid)
+            assert (hit.found, hit.probes) == (True, rank)
+
+    def test_miss_scans_every_used_probe(self):
+        # Non-greedy: an empty slot proves nothing, so a miss scans all pairs in use.
+        table = sim.ElasticTable(SIZE // 4, DELTA)
+        ids = _fill(table, 0.8)
+        absent = sim.unique_ids(RandPool(seed=SEED + 1), 20, exclude=set(ids))
+        assert {table.lookup(e).probes for e in absent} == {sum(table.max_j())}
+
+    def test_finished_batches_leave_delta_half_free(self):
+        # Paper §2 batch invariant: every A_j before the current batch is 1 - delta/2 full.
+        table = sim.ElasticTable(SIZE, DELTA)
+        _fill(table, 1 - DELTA)
+        sizes, fill = table.array_sizes(), table.fill()
+        for j in range(table.batch - 1):
+            assert fill[j] >= sizes[j] - int(DELTA * sizes[j] / 2)
+
+    @pytest.mark.parametrize("delta", [0.3, 1.5, 0.0])
+    def test_rejects_bad_delta(self, delta):
+        with pytest.raises(ValueError):
+            sim.ElasticTable(SIZE, delta)
