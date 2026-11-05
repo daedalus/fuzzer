@@ -215,6 +215,15 @@ rewired off `fuzz_count` at the same time.
 
 **Effort S–M** for what remains.
 
+**D6. Stop rebuilding seed weights per pick** (algorithmica, prefix sums;
+`docs/handover/handover_algorithmica_port_2026-11-02.md` §7.1) — six Elo arms in
+`services/seed_picker.py` (`katz`, `branch`, `tang`, `aflgo`, `boltzmann`,
+`ecofuzz`) build a Python weight list over the whole corpus, then walk it
+linearly, on every pick. Port: numpy weights + `searchsorted`, or cached weights
+in `core/fenwick_sampler.py` updated when a seed's metadata changes. Replacing
+only the scan with `bisect` leaves the O(n) rebuild. Gate on the `cpu_user` A/A
+control (handover §4.1). Unmeasured. **Effort S–M.**
+
 ---
 
 ## E — Corpus, reduction, crash triage
@@ -566,6 +575,13 @@ is strictly weaker than the drop rates already measured there against
 than a memoryless queue. The six pillars map onto subsystems without producing a
 decision. Nothing ports from the accompanying demo scripts, which are matplotlib
 illustration and do not faithfully implement the paper's own equation 8.
+
+**Algorithmica (Algorithms for Modern Hardware) shim and layout ports.**
+Rejected 2026-11-02, re-checked 2026-11-05: Eytzinger/S-tree/SIMD binary
+search, binary GCD, factorization, prefetch, branchless shim, huge pages, SoA
+scan, AVX2 probe as default, cache-line bucket homes. Reasons and measurements:
+`docs/handover/handover_algorithmica_port_2026-11-02.md` §5, §7.2. Lemire range
+reduction in `rand_pool` is open there (§7.1) as a bias fix, not a speedup.
 
 **D4: adaptive corpus-sync cadence in `parallel.py`** (TigerBeetle, rejected
 2026-09-20). The one genuine *algorithmic* port that source offered: replace
