@@ -79,3 +79,26 @@ T4-T11 savings are 1-10 us per exec, below the overhead of a deterministic profi
 ## 6. Not done
 
 Nothing implemented. No benchmark run. Sandbox lacks `perf`/`valgrind`, so none of section 4 was measured. Suggested order: 4.1 first, since without a stable metric the throughput items cannot be shown to help.
+
+**Stale (2026-11-05):** 4.1-4.4 are now implemented; see their status lines.
+
+## 7. Re-check, 2026-11-05 (verified against `44f3e74`)
+
+An independent pass over the book (source read from `algorithmica-org/algorithmica` on GitHub; the site is proxy-blocked here) agreed with sections 2 and 5 and found the items below.
+
+### 7.1 Open
+
+| Item | Evidence | Port | Caveat |
+|---|---|---|---|
+| A/A noise for `cpu_user` | 4.1 TODO | A/A run, `--metric cpu_user` vs wall | Gates every throughput item |
+| O(n) weight rebuild per pick (book: prefix sums) | `services/seed_picker.py` `_pick_katz_seed:764`, `_pick_branch_seed:789`, `_pick_tang_seed:819`, `_pick_aflgo_seed:1151`, `_pick_boltzmann_seed:1371`, `_pick_ecofuzz_seed:1447`: Python loop builds weights, then a linear cumulative scan | numpy weights + `searchsorted`, or cached weights in `core/fenwick_sampler.py` updated per seed | Elo arms: run a fraction of picks. Swapping only the scan for `bisect` leaves the O(n) rebuild |
+| `% n` range reduction (book: Division, Lemire) | `core/rand_pool.py:353` and `randint`/`choice`/`shuffle` paths | Lemire multiply-shift with rejection | Removes bias, no CPython speed gain. Changes every seeded stream |
+
+### 7.2 Checked and withdrawn
+
+- AVX2 probe as default: measured, rejected (`docs/DEEP_DIVE.md` "SIMD probe runs, opt-in"). Default stays scalar.
+- Cache-line bucket homes (`pos & ~7`): measured, slower everywhere (`docs/DEEP_DIVE.md:669`).
+- Huge pages, SoA scan layout: already settled (sections 2, 3).
+- `__afl_probe_distance` hang: `docs/afl_shim_hotpath_analysis.md` item 5 says it "never terminates" on a dense table. False: the loop is bounded by `i < size` (`afl_shim.c:3139`). Dense table = O(size) per edge, not a hang. That doc is stale.
+- Two-digit LUT in `__afl_put_i64` (`afl_shim.c:3972`): callers are cmp/site dumps and crash records, not per edge. Not proposed.
+- Stale comment: `afl_shim.c:1754` still says `% map_size`; the code multiplies and shifts.
