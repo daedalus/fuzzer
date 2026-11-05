@@ -313,6 +313,45 @@ class TestDistanceTableLayout:
             t.cleanup()
 
 
+class TestMaxDisplacementTrailer:
+    """A u32 after the slots holds the largest home-to-slot distance; the
+    shim caps its walk there. Derived here by walking the slots."""
+
+    ENTRY_BYTES = 16
+
+    def _slots_and_trailer(self, t):
+        cap = t.capacity
+        keys = [
+            ctypes.c_uint64.from_address(t._ptr + 4 + i * self.ENTRY_BYTES).value
+            for i in range(cap)
+        ]
+        trailer = ctypes.c_uint32.from_address(t._ptr + 4 + cap * self.ENTRY_BYTES).value
+        return keys, trailer
+
+    def test_regression_trailer_is_max_displacement(self):
+        # Clustered homes force long runs: every key homes on slot 0 or 1.
+        keys = {i * 128 + (i & 1): 1.0 for i in range(1, 41)}
+        t = DistanceTableShm(keys)
+        try:
+            slots, trailer = self._slots_and_trailer(t)
+            cap = len(slots)
+            disp = [(i - k % cap) % cap for i, k in enumerate(slots) if k != 0]
+            assert len(disp) == len(keys)
+            assert trailer == max(disp)
+            assert trailer > 0
+        finally:
+            t.cleanup()
+
+    def test_regression_trailer_zero_without_collisions(self):
+        # Adversarial edge: distinct homes, no probing → D == 0.
+        t = DistanceTableShm({1: 1.0, 2: 2.0, 3: 3.0})
+        try:
+            _, trailer = self._slots_and_trailer(t)
+            assert trailer == 0
+        finally:
+            t.cleanup()
+
+
 class TestCapacityHeader:
     """The shim probes with ``& (capacity - 1)``: a power-of-two header is the
     contract, checked once at attach instead of two divisions per block.

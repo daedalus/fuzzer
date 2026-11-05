@@ -3028,6 +3028,7 @@ struct __afl_dist_entry {
 
 static uint32_t  *__afl_dist_count = NULL;  /* entries + count at segment head */
 static struct __afl_dist_entry *__afl_dist_table = NULL;
+static uint32_t   __afl_dist_window = 0;    /* max slots one lookup walks */
 static uint64_t   __afl_dist_sum = 0;
 static uint64_t   __afl_dist_hits = 0;
 
@@ -3117,6 +3118,19 @@ __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
         __afl_dist_table = NULL;  /* no stale table from an earlier attach */
         return;
     }
+    /* Trailer after the slots: the writer's max displacement D. No key sits
+     * more than D past its home, so D + 1 slots bound every lookup, even in
+     * a table with no empty slot. No trailer (older writer) or D >= cap (a
+     * shrunk header reads slot bytes as D): walk cap, as before. */
+    __afl_dist_window = cap;
+    uint64_t slots_end = 4 + (uint64_t)cap * sizeof(struct __afl_dist_entry);
+    struct shmid_ds ds;
+    int shmid = __afl_parse_shmid(getenv("__AFL_DIST_SHM_ID"));
+    if (shmctl(shmid, IPC_STAT, &ds) == 0 && (uint64_t)ds.shm_segsz >= slots_end + 4) {
+        uint32_t d = *(uint32_t *)((uint8_t *)p + slots_end);
+        if (d < cap) __afl_dist_window = d + 1;
+    }
+
     __afl_dist_count = (uint32_t *)p;
     __afl_dist_table = (struct __afl_dist_entry *)((uint8_t *)p + 4);
 }
@@ -3136,7 +3150,10 @@ __AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
      * per probe step, 29.7 -> 19.3 ns per lookup (clang -O2). */
     uint32_t mask = size - 1;
     uint32_t pos = (uint32_t)(key & mask);
-    for (uint32_t i = 0; i < size; i++) {
+    /* window <= capacity (attach); a later smaller header still masks
+     * in bounds, so no clamp per lookup. */
+    uint32_t n = __afl_dist_window;
+    for (uint32_t i = 0; i < n; i++) {
         uint32_t idx = (pos + i) & mask;
         uint64_t k = __afl_dist_table[idx].key;
         if (k == 0) break;  /* empty slot — no distance for this block */
