@@ -1707,6 +1707,7 @@ class DistanceTableShm:
 
         uint32 capacity
         struct { uint64 key; uint32 dist; uint32 node_idx; } slots[capacity]
+        uint32 max_disp
 
     The header is the *slot capacity*, not the entry count: a power of
     two >= 2x entries, so empty slots always exist and the shim's linear
@@ -1720,6 +1721,12 @@ class DistanceTableShm:
     K-Scheduler node bitmap (``NodeBitmapShm``); entries without a
     mapping carry ``NODE_IDX_NONE``, which the shim's bounds check
     rejects.  Entries with key == 0 are empty slots.
+
+    *max_disp* is the largest home-to-slot distance placed; the shim
+    caps its walk at ``max_disp + 1`` slots, so a table with no empty
+    slot cannot cost a full scan per miss. Appended after the slots, so
+    no offset moves: an older shim ignores it, and a segment without it
+    keeps the full walk.
     """
 
     def __init__(self, entries: dict[int, float], node_of: dict[int, int] | None = None):
@@ -1743,13 +1750,15 @@ class DistanceTableShm:
         self.capacity = 1
         while self.capacity < 2 * self.num_entries:
             self.capacity *= 2
-        self.shm_bytes = 4 + self.capacity * entry_bytes
+        self.shm_bytes = 4 + self.capacity * entry_bytes + 4
 
         self.shm_id, self._ptr = _alloc_segment(self.shm_bytes)
         ctypes.memset(self._ptr, 0, self.shm_bytes)
         ctypes.c_uint32.from_address(self._ptr).value = self.capacity
+        max_disp = 0
         for key, dist in scaled.items():
             pos = key % self.capacity
+            disp = 0
             while True:
                 off = self._ptr + 4 + pos * entry_bytes
                 if ctypes.c_uint64.from_address(off).value == 0:
@@ -1759,6 +1768,12 @@ class DistanceTableShm:
                     ctypes.c_uint32.from_address(off + 12).value = idx
                     break
                 pos = (pos + 1) % self.capacity
+                disp += 1
+            max_disp = max(max_disp, disp)
+
+        # Trailer: the shim's probe window (see afl_shim.c __afl_map_dist_shm).
+        trailer = self._ptr + 4 + self.capacity * entry_bytes
+        ctypes.c_uint32.from_address(trailer).value = max_disp
         self.env_id = str(self.shm_id)
         _atexit_weak(self)
 

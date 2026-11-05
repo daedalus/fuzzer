@@ -11,7 +11,8 @@ import subprocess
 
 import pytest
 
-from fuzzer_tool.adapters.shm import DistanceTableShm
+from fuzzer_tool.adapters import libc_shm
+from fuzzer_tool.adapters.shm import DistanceTableShm, _alloc_segment
 from tests.conftest import requires_clang
 
 SHIM = "src/fuzzer_tool/adapters/afl_shim.c"
@@ -76,8 +77,20 @@ NOCOV static int run_dist(int argc, char **argv) {
     return 0;
 }
 
+/* Like run_dist, but report the probe window bound at attach. */
+NOCOV static int run_win(int argc, char **argv) {
+    __afl_map_dist_shm();
+    for (int i = 2; i < argc; i++)
+        __afl_probe_distance(strtoull(argv[i], NULL, 0));
+    printf("%d %llu %u %u\n", __afl_dist_table != NULL,
+           (unsigned long long)__afl_dist_hits, (unsigned)__afl_dist_window,
+           (unsigned)__afl_health[__AFL_HEALTH_SEG_REJECTED]);
+    return 0;
+}
+
 NOCOV int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "nz")) return run_nz();
+    if (argc > 1 && !strcmp(argv[1], "win")) return run_win(argc, argv);
     return run_dist(argc, argv);
 }
 """
@@ -173,3 +186,90 @@ class TestDistProbe:
         assert attached == 0
         assert hits == 0
         assert rejected >= 1
+
+
+# Slot layout: u32 capacity, then 16-byte slots, then u32 max displacement.
+_SLOT_BYTES = 16
+_FILLER_KEY = 0x5A5A0000  # never probed: fills slots so none is empty
+
+
+def _trailer(t):
+    return ctypes.c_uint32.from_address(t._ptr + 4 + t.capacity * _SLOT_BYTES)
+
+
+def _run_win(harness, t, *keys):
+    env = {"__AFL_DIST_SHM_ID": t.env_id}
+    out = _run(harness, "win", *map(str, keys), env_extra=env)
+    return tuple(map(int, out))
+
+
+@requires_clang
+class TestDistWindow:
+    """The walk is capped at max displacement + 1, read from the trailer."""
+
+    def test_regression_window_finds_key_at_cap(self, harness):
+        """Falsification: the wrap key sits exactly at the cap and is found."""
+        t = _table()
+        try:
+            disp = _trailer(t).value
+            attached, hits, window, _rej = _run_win(harness, t, 3, _WRAP_KEY)
+        finally:
+            t.cleanup()
+        assert disp == 1  # _WRAP_KEY homes at 3, lands at 0
+        assert attached == 1
+        assert window == disp + 1
+        assert hits == len(_ENTRIES)
+
+    def test_regression_window_bounds_full_table(self, harness):
+        """Adversarial: no empty slot; the miss walk stops at the window."""
+        t = _table()
+        try:
+            for i in range(t.capacity):
+                key = ctypes.c_uint64.from_address(t._ptr + 4 + i * _SLOT_BYTES)
+                if key.value == 0:
+                    key.value = _FILLER_KEY + i
+            attached, hits, window, _rej = _run_win(harness, t, _MISS_KEY)
+        finally:
+            t.cleanup()
+        assert attached == 1
+        assert hits == 0
+        assert window == _trailer_value_for(_ENTRIES) + 1
+        assert window < t.capacity
+
+    def test_regression_trailer_ge_capacity_walks_capacity(self, harness):
+        """Adversarial: D >= capacity is not a bound; fall back to the full walk."""
+        t = _table()
+        try:
+            _trailer(t).value = t.capacity
+            attached, hits, window, rejected = _run_win(harness, t, 3, _WRAP_KEY)
+        finally:
+            t.cleanup()
+        assert attached == 1
+        assert rejected == 0
+        assert window == t.capacity
+        assert hits == len(_ENTRIES)
+
+    def test_regression_no_trailer_walks_capacity(self, harness):
+        """An older writer's segment (no trailer) keeps the full walk."""
+        t = _table()
+        shm_id, ptr = _alloc_segment(4 + t.capacity * _SLOT_BYTES)
+        try:
+            ctypes.memmove(ptr, t._ptr, 4 + t.capacity * _SLOT_BYTES)
+            env = {"__AFL_DIST_SHM_ID": str(shm_id)}
+            out = _run(harness, "win", "3", str(_WRAP_KEY), env_extra=env)
+            attached, hits, window, _rej = map(int, out)
+        finally:
+            libc_shm.shmdt(ptr)
+            libc_shm.shmctl_rmid(shm_id)
+            t.cleanup()
+        assert attached == 1
+        assert hits == len(_ENTRIES)
+        assert window == t.capacity
+
+
+def _trailer_value_for(entries):
+    t = DistanceTableShm(entries)
+    try:
+        return _trailer(t).value
+    finally:
+        t.cleanup()

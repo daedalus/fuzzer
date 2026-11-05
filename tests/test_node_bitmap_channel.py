@@ -49,7 +49,7 @@ class TestDistanceTableNodeColumn:
         t = DistanceTableShm(keys)
         try:
             cap, slots = self._slots(t)
-            assert t.shm_bytes == 4 + cap * 16
+            assert t.shm_bytes == 4 + cap * 16 + 4  # header + slots + max_disp
             stored = {k: (d, n) for k, d, n in slots if k != 0}
             assert len(stored) == len(keys)
             for key, dist in keys.items():
