@@ -5388,13 +5388,19 @@ class Fuzzer:
             shm = self._target_shm_covs.get(t, self.shm_cov)
             runners[t] = base.sibling(t, func, shm.env_id if shm else None)
         self._target_runners = MappingProxyType(runners)
+        base.claim_signals()  # the last .so loaded owns them
 
     def _set_target(self, target: str) -> None:
         """Make *target* active; its in-process runner follows it."""
         self.target = target
         runner = self._target_runners.get(target)
-        if runner is not None:
-            self._inprocess_runner = runner
+        if runner is None or runner is self._inprocess_runner:
+            return
+
+        # One process, one set of signal handlers: hand them over.
+        self._inprocess_runner.release_signals()
+        runner.claim_signals()
+        self._inprocess_runner = runner
 
     def _install_antifuzz_evade(self) -> None:
         """Add the AntiFuzz-evasion preload to the target env (§4.2/§4.3).

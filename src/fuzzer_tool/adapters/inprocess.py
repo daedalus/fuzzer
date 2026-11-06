@@ -483,6 +483,24 @@ class InProcessRunner:
         if reset is not None:
             reset()
 
+    def claim_signals(self) -> None:
+        """Hand the process's crash/timeout/exit handlers to this target.
+
+        Several shim-linked .so in one process share one set of signal
+        dispositions; the active target must own them (afl_shim.c
+        §Signal ownership across modules). No-op on older shims.
+        """
+        self._shim_call("__afl_signals_claim")
+
+    def release_signals(self) -> None:
+        """Stop this target's timeout tick before another target runs."""
+        self._shim_call("__afl_signals_release")
+
+    def _shim_call(self, name: str) -> None:
+        fn = getattr(self._lib, name, None) if self._lib is not None else None
+        if fn is not None:
+            fn()
+
     def shim_health(self) -> tuple[int, ...] | None:
         """Shim counters of the directly loaded target; None when unavailable."""
         if self._lib is None:

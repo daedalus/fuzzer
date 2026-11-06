@@ -5958,19 +5958,22 @@ __AFL_GCC_NO_COV static void __afl_timeout_handler(int sig, siginfo_t *si, void 
     siglongjmp(*jb, __AFL_JMP_TIMEOUT);
 }
 
+__AFL_GCC_NO_COV static int __afl_install_timeout_handler(void) {
+    struct sigaction sa;
+    sa.sa_sigaction = __afl_timeout_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+    if (sigaction(__AFL_TIMEOUT_SIG, &sa, NULL) != 0) return 0;
+    __afl_timeout_handler_live = 1;
+    return 1;
+}
+
 __AFL_GCC_NO_COV static int __afl_timer_ready(void) {
     if (__afl_timer_state) return __afl_timer_state > 0;
     __afl_timer_state = -1;
     if (!__afl_libc_hi) __afl_map_libc_range();
 
-    if (!__afl_timeout_handler_live) {
-        struct sigaction sa;
-        sa.sa_sigaction = __afl_timeout_handler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
-        if (sigaction(__AFL_TIMEOUT_SIG, &sa, NULL) != 0) return 0;
-        __afl_timeout_handler_live = 1;
-    }
+    if (!__afl_timeout_handler_live && !__afl_install_timeout_handler()) return 0;
 
     struct sigevent sev;
     memset(&sev, 0, sizeof(sev));
@@ -6588,17 +6591,57 @@ __AFL_GCC_NO_COV static void __afl_exit_handler(int sig, siginfo_t *si, void *uc
     siglongjmp(*jb, code);
 }
 
+static volatile int __afl_exit_handler_live = 0;
+
 __AFL_GCC_NO_COV static int __afl_exit_sig_ready(void) {
-    static volatile int live = 0;
-    if (live) return 1;
+    if (__afl_exit_handler_live) return 1;
     struct sigaction sa;
     sa.sa_sigaction = __afl_exit_handler;
     sigemptyset(&sa.sa_mask);
     sigaddset(&sa.sa_mask, __AFL_TIMEOUT_SIG);
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
     if (sigaction(__AFL_EXIT_SIG, &sa, NULL) != 0) return 0;
-    live = 1;
+    __afl_exit_handler_live = 1;
     return 1;
+}
+
+/* ── Signal ownership across modules ──────────────────────────────────
+ *
+ * Dispositions are per process, shim state per module. With several
+ * shim-linked .so in one process (multi-target direct_lite) the handler
+ * that fires may belong to a module with no guard frame. Modules re-arming
+ * in turn saved each other as "previous owner" (A.old = B, B.old = A): a
+ * crash in a third module bounced between them forever.
+ *
+ * The host hands ownership over on every module switch:
+ *
+ *   old module            new module
+ *   signals_release()  -> signals_claim()   -> guarded call
+ *   (tick stopped)        (handlers ours)      (crash/timeout/exit land here)
+ */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void __afl_signals_release(void) {
+    if (__afl_timer_state > 0) __afl_timer_period(0);
+    __afl_timer_budget_us = 0;   /* next timed call re-programs the tick */
+}
+
+/* Saved previous owners stay as first installed (load order: acyclic). */
+__AFL_GCC_NO_COV static void __afl_take_crash_handlers(void) {
+    struct sigaction sa;
+    sa.sa_sigaction = __afl_crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, __AFL_TIMEOUT_SIG);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
+        sigaction(__afl_guard_signals[i], &sa, NULL);
+    __afl_handlers_live = 1;
+}
+
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void __afl_signals_claim(void) {
+    __afl_take_crash_handlers();
+    __afl_exit_handler_live = 0;
+    if (__afl_timer_state > 0) __afl_install_timeout_handler();
 }
 
 /* Hand *status* to the owner and end this thread; returns only when no

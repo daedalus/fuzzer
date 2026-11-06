@@ -99,6 +99,7 @@ fuzzer, not just the target.
     - Interim splits are not results (Boltzmann: 7W/2L at 10 grep seeds, 5W/5L for the next 10).
     - Closing a `docs/AB_PENDING.md` row requires its ledger row. `tests/test_ab_ledger.py` enforces the format.
 60. **Evidence over assumptions. Verification over confidence.**
+61. Always run `fuzzer-tool fuzz` with `--push-on-crash https://ntfy.sh/daedalus_fuzzer`.
 
 ## Corpus Rules
 
