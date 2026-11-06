@@ -86,7 +86,6 @@ def _fake_fuzzer(**kw) -> MagicMock:
     f._cmplog = None
     f._inprocess_runner = None
     f._persistent_runner = None
-    f._network_runner = None
     f.ptrace_cov = None
     f._forkserver = kw.get("forkserver")
     f.use_coverage = False
@@ -252,7 +251,7 @@ def test_confirm_hang_budget(monkeypatch):
     assert tr.confirm_hang(b"x") is not None, "budget does not grow with executions"
 
 
-@pytest.mark.parametrize("backend", ["_inprocess_runner", "_persistent_runner", "_network_runner"])
+@pytest.mark.parametrize("backend", ["_inprocess_runner", "_persistent_runner"])
 def test_confirm_hang_skips_fixed_deadline_backends(backend, monkeypatch):
     """Adversarial: backends whose deadline cannot be stretched are not re-run."""
     f = _fake_fuzzer()

@@ -1248,8 +1248,6 @@ The fuzzer includes a self-contained Kalman filter implementation (`src/fuzzer_t
 
 2. **Critical-slowing-down denoising** — `CriticalSlowingDown` accepts an optional `denoiser` (any `KalmanFilter` instance). When provided, `observe(value)` runs `predict(dt=1.0); update(value)` internally and stores `kf.estimate` instead of the raw discovery rate. This reduces false "stalled" calls from single-execution noise spikes.
 
-3. **Adaptive network settle time** — `NetworkRunner` accepts an optional `settle_kf` parameter. When a `KalmanFilter` is attached, the `_settle()` sleep uses the KF's filtered estimate (clamped to `[0.5×initial, 10×initial]`) instead of the fixed `settle` time. An external measurement loop can feed observed edge-plateau latencies into the KF, making settle self-tuning.
-
 ### Design
 
 - **Separate `predict(dt)` and `update(z)`** — the caller is responsible for calling both in sequence each cycle. `update()` does NOT call `predict()` internally, preserving correctness for irregular-time-step callers. Constant-time-interval callers always use `kf.predict(1.0); kf.update(obs)`.

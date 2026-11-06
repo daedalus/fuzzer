@@ -39,10 +39,9 @@ transfer_entropy, crash_mi, length_tracker, structure_function, sensitivity,
 execution_time, exec_time_anomaly, frameshift, format_learner,
 corpus_compression, elo, distance, trace, checksum_learner, csd,
 coverage_homogeneity, garch, continuum, coverage_regime. The one deliberate
-exception is `kalman` (core.kalman.RobustKF): every usage found is embedded
-in something else's construction (a network-adapter settle-time smoother; a
-separate, unconditional filter-smoothing usage in services/stats.py), not a
-standalone analyzer with its own gating flag, so there's no good single
+exception is `kalman` (core.kalman.RobustKF): its usage is embedded in
+something else's construction (an unconditional filter-smoothing usage in
+services/stats.py), not a standalone analyzer with its own gating flag, so there's no good single
 migration site. Two later, non-migration additions follow the same pattern:
 `occupation` (core.analyzers.analyzer_occupation.LongitudinalRarity, finite-time edge-count
 occupation) and `causal_sector` (core.analyzers.analyzer_causal_sector.CausalSectorGraph,

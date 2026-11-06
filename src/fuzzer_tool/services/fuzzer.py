@@ -1075,12 +1075,8 @@ class Fuzzer:
         print(f"[!] WARNING: {msg}")
 
     def _self_test_targets(self) -> list[str]:
-        """Targets the startup shim self-test runs: coverage on, shim present.
-
-        Not network mode: coverage arrives asynchronously after a settle
-        window, so one send says nothing about whether the map attached.
-        """
-        if not self.use_coverage or getattr(self, "_network_runner", None) is not None:
+        """Targets the startup shim self-test runs: coverage on, shim present."""
+        if not self.use_coverage:
             return []
         targets = self.multi_targets or [self.target]
         return [t for t in targets if afl_instrumentation_status(t) == "present"]
@@ -1513,11 +1509,6 @@ class Fuzzer:
         fsm=None,
         ltl=None,
         persistent=False,
-        net_host=None,
-        net_port=None,
-        net_proto="tcp",
-        net_keepalive=False,
-        net_settle_ms=10,
         inprocess=False,
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
@@ -2344,11 +2335,6 @@ class Fuzzer:
         self.fsm = fsm
         self.ltl = ltl
         self.persistent = persistent
-        self.net_host = net_host
-        self.net_port = net_port
-        self.net_proto = net_proto
-        self.net_keepalive = net_keepalive
-        self.net_settle_ms = net_settle_ms
         self.enable_regex_bomb = enable_regex_bomb
         # Colorization (--colorize): off by default. Costs executions and
         # buys redqueen precision, so it needs a per-target A/B first.
@@ -5023,39 +5009,6 @@ class Fuzzer:
                 # summary key off self.persistent.
                 self.persistent = False
 
-        self._network_runner = None
-        if getattr(self, "net_host", None) and getattr(self, "net_port", None):
-            from fuzzer_tool.adapters.network import NetworkRunner
-            from fuzzer_tool.core.kalman import RobustKF
-
-            # Create a settle KF to adapt the per-iteration settle time.
-            # After each run_one() the runner records wall-clock duration
-            # as an observation; the KF's estimate smooths jitter and
-            # provides a filtered settle time via _settle().
-            initial_settle = getattr(self, "net_settle_ms", 10) / 1000
-            settle_kf = RobustKF(
-                dim=1,
-                process_noise=initial_settle * 0.05,
-                measurement_noise=initial_settle * 0.5,
-                huber_threshold=3.0,
-                adaptive_r_gain=0.02,
-            )
-            settle_kf.update(initial_settle)
-
-            self._network_runner = NetworkRunner(
-                host=self.net_host,
-                port=self.net_port,
-                proto=getattr(self, "net_proto", "tcp"),
-                keepalive=getattr(self, "net_keepalive", False),
-                settle=initial_settle,
-                settle_kf=settle_kf,
-            )
-            print(
-                f"[*] Network mode: fuzzing {self._network_runner.proto}://"
-                f"{self.net_host}:{self.net_port} "
-                f"(keepalive={self._network_runner.keepalive}, no reply read)"
-            )
-
         self._inprocess_runner = None
         # Detect ASAN and set LD_PRELOAD BEFORE probing/loading (ctypes.CDLL) for any
         # .so/.dylib/.dll target — needed by both the auto-detect path below and the
@@ -5393,7 +5346,7 @@ class Fuzzer:
 
         Only claims the exact set of runs `run_target_fast` handles today:
         every other mode either owns the child itself (in-process,
-        persistent, network, ptrace) or needs per-execution setup the
+        persistent, ptrace) or needs per-execution setup the
         loader's environment is fixed against (cmplog's file sink truncates
         its log per run; the FIFO sink is run-invariant, and the shim zeroes
         its counters before forking; perf counters must be opened on the
@@ -5404,7 +5357,6 @@ class Fuzzer:
         if (
             self._inprocess_runner
             or self._persistent_runner
-            or self._network_runner
             or self.ptrace_cov
             or self.multi_targets
             or self.file_mode

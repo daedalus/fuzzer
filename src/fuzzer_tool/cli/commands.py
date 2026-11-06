@@ -782,11 +782,6 @@ def cmd_fuzz(args):
         fsm=fsm,
         ltl=ltl,
         persistent=args.persistent,
-        net_host=getattr(args, "net_host", None),
-        net_port=getattr(args, "net_port", None),
-        net_proto=getattr(args, "net_proto", "tcp"),
-        net_keepalive=getattr(args, "net_keepalive", False),
-        net_settle_ms=getattr(args, "net_settle_ms", 10),
         calibrate_stability=getattr(args, "calibrate_stability", 0),
         touched_scan=getattr(args, "touched_scan", None),
         shared_virgin=getattr(args, "shared_virgin", False),
@@ -2907,7 +2902,6 @@ _HAIL_MARY_FLAGS = (
     "corpus_ppmd",
     "corpus_quasiperiodicity",
     "persistent",
-    "net_keepalive",
     "inprocess",
     "inprocess_direct",
     "save_smaller",
@@ -6522,38 +6516,6 @@ def main() -> int:
         "--persistent",
         action="store_true",
         help="Use persistent mode for AFL-loop targets (no fork per iteration)",
-    )
-    fuzz_parser.add_argument(
-        "--net-host",
-        default=None,
-        metavar="IP",
-        help="Network mode: destination IPv4 address of a persistent TCP/UDP target",
-    )
-    fuzz_parser.add_argument(
-        "--net-port",
-        type=int,
-        default=None,
-        metavar="PORT",
-        help="Network mode: destination port (requires --net-host)",
-    )
-    fuzz_parser.add_argument(
-        "--net-proto",
-        default="tcp",
-        choices=("tcp", "udp"),
-        help="Network mode: transport protocol (default: tcp)",
-    )
-    fuzz_parser.add_argument(
-        "--net-keepalive",
-        action="store_true",
-        help="Network mode: reuse one connection across iterations instead of reconnecting each time",
-    )
-    fuzz_parser.add_argument(
-        "--net-settle-ms",
-        type=int,
-        default=10,
-        metavar="MS",
-        help="Network mode: grace period after send() before reading coverage (default: 10; "
-        "no reply is ever read, so this is a fixed guess, not a real sync signal)",
     )
     fuzz_parser.add_argument(
         "--inprocess",

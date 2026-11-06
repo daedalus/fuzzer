@@ -190,7 +190,6 @@ def test_runner_passes_the_configured_timeout(monkeypatch):
     f._cmplog = None
     f._inprocess_runner = None
     f._persistent_runner = None
-    f._network_runner = None
     f.ptrace_cov = None
     f._forkserver = None
     f.use_coverage = True

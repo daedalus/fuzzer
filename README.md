@@ -111,8 +111,6 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 - **`__AFL_LOOP` / `__AFL_INIT`** in shim-built harnesses (auto-detected): one forkserver child serves many inputs; fork after the harness's own setup
 
 ### Campaign Modes
-- **Network targets** (`--net-host`/`--net-port`/`--net-proto`/`--net-settle-ms`): drive the
-  input over TCP/UDP into a listening server instead of stdin or a file
 - **Differential fuzzing** (`--differential`): run every input through a second target and
   flag return-code, stdout, or sanitizer-signature divergence, with drift tracking
 - **Multi-target**: several binaries, shared corpus, weighted round-robin
