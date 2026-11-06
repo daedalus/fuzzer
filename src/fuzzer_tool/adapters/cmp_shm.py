@@ -22,7 +22,7 @@ import weakref
 
 import numpy as np
 
-from fuzzer_tool.adapters import libc_shm
+from fuzzer_tool.adapters import libc_shm, native_scan
 
 CMP_SHM_ENV = "_CMPLOG_COUNTS_SHM"
 
@@ -62,6 +62,9 @@ def _release(addr: int, shm_id: int) -> None:
 class CmpCounterShm:
     """One counters segment: create, expose views, drain, release."""
 
+    # Instances built without __init__ (tests) take the numpy drains.
+    _native: native_scan.CmpDrain | None = None
+
     def __init__(self):
         shm_id = libc_shm.shmget(_LAYOUT.itemsize)
         if shm_id is None:
@@ -81,6 +84,14 @@ class CmpCounterShm:
         self.hit = seg["hit"][0]
         self.sites = seg["sites"][0]
 
+        # C read-and-zero (native_scan.c); None keeps the numpy drains.
+        lib = native_scan.load()
+        if lib is not None:
+            self._native = native_scan.CmpDrain(lib, len(CMP_NAMES), SITE_SLOTS)
+            self._fired_addr = addr + _LAYOUT.fields["fired"][1]
+            self._hit_addr = addr + _LAYOUT.fields["hit"][1]
+            self._sites_addr = addr + _LAYOUT.fields["sites"][1]
+
     @property
     def env_id(self) -> str:
         return str(self._id)
@@ -96,6 +107,10 @@ class CmpCounterShm:
 
     def drain_counts(self) -> list[tuple[str, int, int]]:
         """``(callback, fired, hit)`` for every callback that fired; zeroes them."""
+        if self._native is not None:
+            idx, fired, hit = self._native.counts(self._fired_addr, self._hit_addr)
+            return [(CMP_NAMES[i], f, h) for i, f, h in zip(idx, fired, hit, strict=True)]
+
         idx = np.flatnonzero(self.fired)
         fired = self.fired[idx].tolist()
         hit = self.hit[idx].tolist()
@@ -105,6 +120,9 @@ class CmpCounterShm:
 
     def drain_sites(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """``(slots, fired, hit)`` of sites that fired; zeroes counters, keeps keys."""
+        if self._native is not None:
+            return self._native.sites(self._sites_addr)
+
         sites = self.sites
         slots = np.flatnonzero(sites["fired"])
         fired = sites["fired"][slots].astype(np.int64)

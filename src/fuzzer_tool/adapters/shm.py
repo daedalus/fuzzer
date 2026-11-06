@@ -23,7 +23,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from fuzzer_tool.adapters import libc_shm
+from fuzzer_tool.adapters import libc_shm, native_scan
 from fuzzer_tool.core.count_class import bucket_bits
 
 log = logging.getLogger(__name__)
@@ -257,6 +257,12 @@ MAX_COUNT_GROWTH_FACTOR = 1.5
 _KNOWN_PATH_IDS_MAX = 1 << 22
 
 
+def _live_scan() -> native_scan.LiveScan | None:
+    """Per-table C scan state, or None when the kernels cannot build."""
+    lib = native_scan.load()
+    return native_scan.LiveScan(lib) if lib is not None else None
+
+
 def _atexit_weak(obj) -> None:
     """Run ``obj.cleanup()`` at exit without keeping ``obj`` alive.
 
@@ -323,6 +329,9 @@ class ShmCoverage:
     ``size`` is the number of hash table entries (AFL_MAP_SIZE convention).
     SHM layout: front header (SHM_METADATA_SIZE bytes) + edge table (size * 8 bytes).
     """
+
+    # Instances built without __init__ (tests) take the numpy paths.
+    _native: native_scan.LiveScan | None = None
 
     def __init__(
         self, size: int = SHM_MAP_SIZE, touched_bitmap: bool = False, touched_scan: bool = False
@@ -428,6 +437,8 @@ class ShmCoverage:
         self._scan_memo: tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None = (
             None
         )
+        # C gather + fold (native_scan.c); None keeps the numpy paths.
+        self._native = _live_scan()
 
         self.total_edges = 0
         self.cumulative_edges = 0
@@ -609,7 +620,10 @@ class ShmCoverage:
             if cached_key == key and (counts is not None or not need_counts):
                 return ids, counts
 
-        if self.touched_scan and self.touched_supported:
+        if self._native is not None:
+            ids, counts = self._scan_native()
+            counts = counts if need_counts else None
+        elif self.touched_scan and self.touched_supported:
             # --touched-scan: the shim's bitmap names the slots this
             # generation wrote, so only those are read.
             arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
@@ -628,6 +642,16 @@ class ShmCoverage:
         if memoizable:
             self._scan_memo = (key, ids, counts)
         return ids, counts
+
+    def _scan_native(self) -> tuple[np.ndarray, np.ndarray]:
+        """``_scan``'s gather in one C call: the table walk or the touched bitmap."""
+        table, gen = self._ptr + SHM_METADATA_SIZE, self.read_generation()
+        if self.touched_scan and self.touched_supported:
+            words = self._touched_ptr + SHM_TOUCHED_HEADER
+            return self._native.live_touched(
+                table, self.num_entries, gen, words, self.touched_words
+            )
+        return self._native.live(table, self.num_entries, gen)
 
     def _scan_with_positions(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Live (position, edge_id, count) columns for the matrix analyses.
@@ -1463,6 +1487,10 @@ class ShmCoverage:
         # Slow path: extract edge_ids not yet in _seen_edge_ids
         active_ids, active_counts = self._active_columns()
         self._ids_arr, self._ids_set = active_ids, None
+        folded = self._fold_native(active_ids, active_counts)
+        if folded is not None:
+            return self._finish_scan(key, active_ids, *folded)
+
         new = self._unseen(active_ids)
         self._seen_edge_ids.update(new)
         new_found = False
@@ -1501,6 +1529,77 @@ class ShmCoverage:
         if path_hash:
             self._remember_path(key, active_ids)
 
+        if new_found:
+            self.total_edges += 1
+        return new_found
+
+    def _fold_native(
+        self, ids: np.ndarray, counts: np.ndarray
+    ) -> tuple[set[int], bool, int] | None:
+        """C fold of virgin buckets and maxima: ``(new_ids, old_bucket_moved, max_gain)``.
+
+        None when unavailable or an id is past VIRGIN_DENSE_MAX (the numpy
+        path's dict overflow handles those).
+        """
+        if self._native is None:
+            return None
+
+        out = self._native.fold(
+            ids, counts, self._virgin, self._max_counts, MAX_COUNT_GROWTH_FACTOR
+        )
+        if out is None:
+            hi = int(ids.max()) + 1
+            if hi > VIRGIN_DENSE_MAX:
+                return None
+            self._grow_dense(hi)
+            out = self._native.fold(
+                ids, counts, self._virgin, self._max_counts, MAX_COUNT_GROWTH_FACTOR
+            )
+
+        # Candidates had virgin 0: new ones are those not seen; an old one
+        # with a bucket bit moved bucket (non-candidates are in out.old_moved).
+        cands = out.cand_ids.tolist()
+        new = set(cands) - self._seen_edge_ids
+        old_moved = out.old_moved
+        if not old_moved and len(new) < len(cands):
+            bits = out.cand_bits.tolist()
+            old_moved = any(b and i not in new for i, b in zip(cands, bits, strict=True))
+
+        self.bucket_transitions += out.transitions
+        self.max_count_transitions += out.gain
+        return new, old_moved, out.gain
+
+    def _grow_dense(self, hi: int) -> None:
+        """Grow the virgin and max arrays to hold ids below *hi* (same rule as numpy)."""
+        size = 1 << max(10, (hi - 1).bit_length())
+        if hi > self._virgin.size:
+            grown = np.zeros(size, dtype=np.uint8)
+            grown[: self._virgin.size] = self._virgin
+            self._virgin = grown
+        if hi > self._max_counts.size:
+            grown = np.zeros(size, dtype=np.uint32)
+            grown[: self._max_counts.size] = self._max_counts
+            self._max_counts = grown
+
+    def _finish_scan(
+        self, key: tuple[int, int], ids: np.ndarray, new: set[int], old_moved: bool, gain: int
+    ) -> bool:
+        """Slow-path bookkeeping after a native fold; mirrors the numpy tail."""
+        self._seen_edge_ids.update(new)
+        if new and self._local_ids is None:
+            self.cumulative_edges += len(new)
+            self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+        if self._local_ids is not None:
+            self._note_local(self._last_ids)
+
+        self.last_new_ids = frozenset(new)
+        self.last_old_bucket_novel = old_moved
+        self._last_max_gain = gain
+        self._last_edge_count, self._last_path_hash = key[1], key[0]
+        if key[0]:
+            self._remember_path(key, ids)
+
+        new_found = bool(new) or old_moved
         if new_found:
             self.total_edges += 1
         return new_found
