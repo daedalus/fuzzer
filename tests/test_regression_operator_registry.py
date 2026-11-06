@@ -1006,6 +1006,7 @@ class TestTargetFormatOperators:
         "json_mutate": (b' \n{"a": 1}', b"hello {}"),
         "sql_mutate": (b"  select 1", b"selection 1"),
         "ecdsa_field_mutate": (b"\x10\x00\x02" + bytes(40), b"\x40\x00\x02" + bytes(40)),
+        "tlul_mutate": (b"\x03" + bytes(8) + b"\x01\x02" + bytes(4), b"\x01" * 8),
         "recompress_lz4": (b"\x00\x04\x22\x4d\x18\x64\x40\xa7" + bytes(8), b"\x04\x22\x4d\x18"),
         "recompress_png_idat": (b"\x89PNG\r\n\x1a\n" + bytes(8), b"GIF89a" + bytes(8)),
     }

@@ -27,6 +27,7 @@ from itertools import compress
 
 from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
+from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
 from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
 
@@ -246,6 +247,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "json_mutate",
         "sql_mutate",
         "ecdsa_field_mutate",
+        "tlul_mutate",
         "recompress_lz4",
         "recompress_png_idat",
     },
@@ -682,6 +684,8 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "json_mutate": _sniff_json,
     "sql_mutate": _sniff_sql,
     "ecdsa_field_mutate": _sniff_secp_payload,
+    # TL-UL hardware fuzzing instructions: no magic, the frames must decode.
+    "tlul_mutate": _sniff_tlul,
     # known 32/64-bit modulus literal (NTT primes, 2^31-1, Goldilocks, ...), either endianness.
     "montgomery_word_mutate": _sniff_word_modulus,
     # secp256k1 field prime or curve order as a BE 32-byte literal.

@@ -5103,6 +5103,12 @@ class OperatorEngine:
         out = ecdsa_field_mutate(bytes(buf), self.ctx._rng, self._max_len())
         return self._or_declined("ecdsa_field_mutate", out, buf)
 
+    def _op_tlul_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.tlul import tlul_mutate  # noqa: PLC0415
+
+        out = tlul_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("tlul_mutate", out, buf)
+
     # ── Text-layer decoders (core/mutations/text_codec, tree_mutator) ──
     # byte_idx anchors the edit so the published mutation offset stays true.
 
