@@ -37,6 +37,24 @@ ASAN rerun (`--set fuzzgoat_asan`, libasan preloaded by `run_cell`'s wrapper, ~8
 NULL. Expected: the uniform picker's coupon tail costs ~n*H_n picks once per
 run, a small share of 10k execs.
 
+FFmpeg 9.0.2 ASAN (`--set ffmpeg_asan`, 20 x 10k, three arms run as
+concurrent processes on 4 cores; edges at fixed execs, neither arm reads exec
+timing):
+
+| arm | W/L | McNemar (Holm) | med delta | arm median edges |
+|---|---|---|---|---|
+| round-robin | 4/16 | 0.0118 (0.024) | -1020 | 20,176 |
+| round-robin-ctl (A/A) | 12/8 | 0.503 | +352.5 | 21,127 |
+| baseline | | | | 21,239 |
+
+LOSS (ledger #105). `--round-robin` cycles in fixed order forever, so this is
+not the first pass alone: the first pass is ~n picks of 10k and cannot move
+1,000 edges. Likely cause: a deterministic cycle correlates consecutive picks
+(the same op sequence repeats against each seed), where uniform draws
+decorrelate. Do not use round-robin as the default; a first-pass-then-uniform
+variant would isolate the coupon effect but fuzzgoat (#103, #104) says it is
+negligible.
+
 ## (c) Reachability budgets
 
 `coverage_budget(n)` (uniform-picker bar, miss <= 1e-9) as the reach budget,
