@@ -438,6 +438,8 @@ def _battery() -> list[bytes]:
         b'{"k": [1, 2.5, "s\\n"], "n": null}',
         b"SELECT a, 'x' FROM t WHERE b = 1;",
         b"\x02\x00\x02" + SECP256K1_FIELD_P + bytes(32),
+        # tlul_mutate: TL-UL write, wait, read instruction stream.
+        b"\x03" + bytes(8) + b"\x01\x02" + bytes(4),
         _lz4_frame(),
         _png_idat(),
         # MagicYUV (BMH5 at offset 8): reached before only by the 2% trickle.
