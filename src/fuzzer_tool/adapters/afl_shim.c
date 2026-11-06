@@ -224,6 +224,9 @@
 #include <limits.h>
 #include <signal.h>
 #include <ucontext.h>
+#ifdef __GLIBC__
+#include <gnu/libc-version.h>
+#endif
 #include <execinfo.h>
 #include <fcntl.h>
 #include <setjmp.h>
@@ -5797,33 +5800,156 @@ static int __afl_timeout_handler_live = 0;
  * registered. */
 extern int __asan_report_present(void) __attribute__((weak));
 
-/* Same deferral inside the private heap's lock. Not covered: glibc's own
- * locks (stdio FILE locks, libc malloc arenas in non-private-heap builds,
- * ASAN's allocator); a jump from inside them leaves them held. */
+/* Same deferral inside the private heap's lock. glibc's own locks (arenas,
+ * stdio FILE locks) are covered below by pc; not covered: ASAN's allocator
+ * and locks in other libraries. A jump from inside them leaves them held. */
 #if __AFL_PRIVATE_HEAP
 __AFL_GCC_NO_COV static int __afl_ph_held(void);
 #else
 #define __afl_ph_held() 0
 #endif
 
+/* Same deferral inside glibc, even with the private heap: libc's own
+ * allocations (asprintf, strdup, iconv) and the heap's foreign-pointer
+ * fallbacks take the arena lock. A jump from there left it held, and the
+ * host's next malloc waited forever (ffmpeg calibration, 48 h in
+ * __lll_lock_wait_private), or found the arena half-updated and aborted.
+ *
+ *   tick 1..TICKS                 count down the budget
+ *   then, pc outside libc         jump
+ *   then, pc in libc              defer; retick every FAST_TICK_US so the
+ *                                 next exit from libc is caught (a loop
+ *                                 99% inside asprintf still leaves it)
+ *   pc parked in one syscall      jump after BLOCKED_TICKS: a thread asleep
+ *                                 in a futex or read holds no arena lock
+ *   LIBC_DEFER_TICKS spent        jump anyway (CPU-bound hang inside libc)
+ *
+ * Worst case a hang ends ~200 ms after its budget instead of never. */
+#define __AFL_TIMEOUT_FAST_TICK_US     50u
+#define __AFL_TIMEOUT_LIBC_DEFER_TICKS 4096u  /* ~205 ms at the fast tick */
+#define __AFL_TIMEOUT_BLOCKED_TICKS    2000u  /* ~100 ms parked in one syscall */
+
+static uintptr_t __afl_libc_lo;  /* executable span of libc; 0/0 = unknown */
+static uintptr_t __afl_libc_hi;
+static __thread int __afl_tick_fast;          /* period is FAST_TICK_US */
+static __thread uint32_t __afl_tick_deferred; /* libc deferrals this call */
+static __thread uint32_t __afl_tick_parked;   /* consecutive same-syscall ticks */
+static __thread uintptr_t __afl_tick_pc;      /* pc of the previous deferral */
+
+/* dl_iterate_phdr callback: union of the executable PT_LOADs of the object
+ * holding `fn`. Returns 1 to stop the walk. */
+__AFL_GCC_NO_COV static int __afl_libc_phdr(struct dl_phdr_info *info, size_t size, void *fn) {
+    (void)size;
+    uintptr_t addr = (uintptr_t)fn, lo = UINTPTR_MAX, hi = 0;
+    int owns = 0;
+
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_X)) continue;
+
+        uintptr_t s = info->dlpi_addr + ph->p_vaddr, e = s + ph->p_memsz;
+        if (addr >= s && addr < e) owns = 1;
+        if (s < lo) lo = s;
+        if (e > hi) hi = e;
+    }
+    if (!owns) return 0;
+
+    __afl_libc_lo = lo;
+    __afl_libc_hi = hi;
+    return 1;
+}
+
+/* Located once, outside signal context. gnu_get_libc_version: defined only
+ * by glibc, never interposed (malloc may be, e.g. by an LD_PRELOAD shim). */
+__AFL_GCC_NO_COV static void __afl_map_libc_range(void) {
+#ifdef __GLIBC__
+    dl_iterate_phdr(__afl_libc_phdr, (void *)&gnu_get_libc_version);
+#endif
+}
+
+__AFL_GCC_NO_COV static int __afl_in_libc(uintptr_t pc) {
+    return pc - __afl_libc_lo < __afl_libc_hi - __afl_libc_lo;
+}
+
+/* pc sits on, or just past, a syscall instruction: the kernel rewinds pc
+ * onto it to restart an interrupted wait. Text bytes, always readable. */
+__AFL_GCC_NO_COV static int __afl_at_syscall(uintptr_t pc) {
+#if defined(__x86_64__)
+    const uint8_t *p = (const uint8_t *)pc;   /* syscall = 0f 05 */
+    if (p[0] == 0x0f && p[1] == 0x05) return 1;
+    return pc - 2 >= __afl_libc_lo && p[-2] == 0x0f && p[-1] == 0x05;
+#elif defined(__aarch64__)
+    const uint32_t *p = (const uint32_t *)pc; /* svc #0 = d4000001 */
+    if (p[0] == 0xd4000001u) return 1;
+    return pc - 4 >= __afl_libc_lo && p[-1] == 0xd4000001u;
+#else
+    (void)pc;
+    return 0;
+#endif
+}
+
+__AFL_GCC_NO_COV static void __afl_timer_period(uint64_t tick_us) {
+    struct itimerspec its;
+    its.it_value.tv_sec = (time_t)(tick_us / 1000000u);
+    its.it_value.tv_nsec = (long)(tick_us % 1000000u) * 1000;
+    its.it_interval = its.it_value;
+    timer_settime(__afl_timer, 0, &its, NULL);
+}
+
+__AFL_GCC_NO_COV static uint64_t __afl_tick_of(uint64_t budget_us) {
+    uint64_t tick = budget_us / __AFL_TIMEOUT_TICKS;
+    return tick < __AFL_TIMEOUT_MIN_TICK_US ? __AFL_TIMEOUT_MIN_TICK_US : tick;
+}
+
+/* Back to the budget's period: the fast tick must not outlive the call. */
+__AFL_GCC_NO_COV static void __afl_tick_slow(void) {
+    if (!__afl_tick_fast) return;
+    __afl_tick_fast = 0;
+    __afl_timer_period(__afl_tick_of(__afl_timer_budget_us));
+}
+
+/* 1 while a jump from pc could leave a glibc lock held (see above). */
+__AFL_GCC_NO_COV static int __afl_libc_defer(uintptr_t pc) {
+    if (!__afl_in_libc(pc)) return 0;
+    if (++__afl_tick_deferred > __AFL_TIMEOUT_LIBC_DEFER_TICKS) return 0;
+
+    int parked = pc == __afl_tick_pc && __afl_at_syscall(pc);
+    __afl_tick_parked = parked ? __afl_tick_parked + 1 : 0;
+    __afl_tick_pc = pc;
+    if (__afl_tick_parked >= __AFL_TIMEOUT_BLOCKED_TICKS) return 0;
+
+    if (!__afl_tick_fast) {
+        __afl_tick_fast = 1;
+        __afl_timer_period(__AFL_TIMEOUT_FAST_TICK_US);
+    }
+    return 1;
+}
+
 __AFL_GCC_NO_COV static void __afl_timeout_handler(int sig, siginfo_t *si, void *uc) {
-    (void)sig; (void)uc;
+    (void)sig;
     sigjmp_buf *jb = __afl_guard_jmp;
     if (!jb || !__afl_guard_timed || !si || si->si_code != SI_TIMER) return;
 
     if (__afl_tick_epoch != __afl_guard_epoch) {
         __afl_tick_epoch = __afl_guard_epoch;
         __afl_tick_count = 0;
+        __afl_tick_deferred = 0;
+        __afl_tick_parked = 0;
+        __afl_tick_pc = 0;
     }
     if (++__afl_tick_count <= __AFL_TIMEOUT_TICKS) return;
     if (__asan_report_present && __asan_report_present()) return;
     if (__afl_ph_held()) return;
+    if (__afl_libc_defer(__afl_sym_pc_of(uc))) return;
+
+    __afl_tick_slow();
     siglongjmp(*jb, __AFL_JMP_TIMEOUT);
 }
 
 __AFL_GCC_NO_COV static int __afl_timer_ready(void) {
     if (__afl_timer_state) return __afl_timer_state > 0;
     __afl_timer_state = -1;
+    if (!__afl_libc_hi) __afl_map_libc_range();
 
     if (!__afl_timeout_handler_live) {
         struct sigaction sa;
@@ -5848,14 +5974,8 @@ __AFL_GCC_NO_COV static int __afl_timer_ready(void) {
 __AFL_GCC_NO_COV static void __afl_timer_budget(uint64_t budget_us) {
     if (budget_us == __afl_timer_budget_us) return;
     __afl_timer_budget_us = budget_us;
-
-    uint64_t tick = budget_us / __AFL_TIMEOUT_TICKS;
-    if (tick < __AFL_TIMEOUT_MIN_TICK_US) tick = __AFL_TIMEOUT_MIN_TICK_US;
-    struct itimerspec its;
-    its.it_value.tv_sec = (time_t)(tick / 1000000u);
-    its.it_value.tv_nsec = (long)(tick % 1000000u) * 1000;
-    its.it_interval = its.it_value;
-    timer_settime(__afl_timer, 0, &its, NULL);
+    __afl_tick_fast = 0;
+    __afl_timer_period(__afl_tick_of(budget_us));
 }
 
 /* ── Private heap (-D__AFL_PRIVATE_HEAP=1) ────────────────────────────
@@ -6528,6 +6648,7 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
         int rc = entry(data, size);
         __afl_guard_jmp = prev;
         __afl_guard_timed = prev_timed;
+        __afl_tick_slow();   /* returned while a libc deferral sped the tick */
         if (!prev) __afl_guard_leave();
         if (restore_budget) __afl_timer_budget(prev_budget);
         __afl_ph_leave(ph_prev);
