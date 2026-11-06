@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 from enum import Enum
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.colorization import ColorMode
@@ -1052,6 +1053,8 @@ class Fuzzer:
     _run_mode = RunMode.FULL
     _markov_switch = Switch.ON
     _auto_minimize = Switch.ON
+    # Multi-target .so: target -> its in-process runner; __init__ fills it.
+    _target_runners: MappingProxyType = MappingProxyType({})
 
     def _warn_no_coverage(self) -> None:
         """Warn that an in-process target is running without coverage.
@@ -5163,7 +5166,7 @@ class Fuzzer:
         if not inprocess and self.target.lower().endswith((".so", ".dylib", ".dll")):
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
-            cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            cov_env_id = self._cov_env_id()
             if not cov_env_id:
                 # Without an SHM segment nothing populates the edge bitmap, so
                 # every coverage-guided subsystem downstream (seed scheduling,
@@ -5266,7 +5269,7 @@ class Fuzzer:
         elif inprocess:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
-            cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            cov_env_id = self._cov_env_id()
             if not cov_env_id:
                 # Without an SHM segment nothing populates the edge bitmap, so
                 # every coverage-guided subsystem downstream (seed scheduling,
@@ -5348,11 +5351,50 @@ class Fuzzer:
             if self._inprocess_runner._persistent:
                 print("[*] Persistent loader: enabled (1 process, many calls)")
 
+        self._init_target_runners()
+
         # Before the forkserver: it snapshots LD_PRELOAD once at start.
         self._install_antifuzz_evade()
 
         if forkserver:
             self._setup_forkserver()
+
+    def _cov_env_id(self) -> str | None:
+        """SHM id the in-process runner of ``self.target`` attaches to.
+
+        Multi-target: the target's own map, the one the fuzzer reads.
+        """
+        shm = self.shm_cov
+        if self.multi_targets:
+            shm = self._target_shm_covs.get(self.target, shm)
+        return shm.env_id if shm else None
+
+    def _init_target_runners(self) -> None:
+        """Multi-target .so: one in-process runner per target.
+
+        A single runner ran target 0 on every exec; each target needs its
+        own loaded .so attached to its own map.
+        """
+        base = self._inprocess_runner
+        if base is None or len(self.multi_targets or ()) < 2:
+            return
+
+        probed = base.function_name == self._probe_so_function(self.target)
+        runners = {self.target: base}
+        for t in self.multi_targets:
+            if t in runners:
+                continue
+            func = self._probe_so_function(t) if probed else base.function_name
+            shm = self._target_shm_covs.get(t, self.shm_cov)
+            runners[t] = base.sibling(t, func, shm.env_id if shm else None)
+        self._target_runners = MappingProxyType(runners)
+
+    def _set_target(self, target: str) -> None:
+        """Make *target* active; its in-process runner follows it."""
+        self.target = target
+        runner = self._target_runners.get(target)
+        if runner is not None:
+            self._inprocess_runner = runner
 
     def _install_antifuzz_evade(self) -> None:
         """Add the AntiFuzz-evasion preload to the target env (§4.2/§4.3).
@@ -6076,7 +6118,7 @@ class Fuzzer:
         failed = 0
         try:
             for t in targets:
-                self.target = t
+                self._set_target(t)
                 shm = (
                     self._target_shm_covs.get(t, self.shm_cov)
                     if self.multi_targets
@@ -6090,7 +6132,7 @@ class Fuzzer:
                 failed += bool(issues)
                 self._warn_shim(issues)
         finally:
-            self.target = active
+            self._set_target(active)
 
         self._read_shim_counters()
         if targets and not failed:
@@ -6894,7 +6936,7 @@ class Fuzzer:
         arena = getattr(self, "_target_arena", None)
         if arena is not None:
             self._active_target_idx = arena.select()
-            self.target = self.multi_targets[self._active_target_idx]
+            self._set_target(self.multi_targets[self._active_target_idx])
             return
         # Weighted round-robin: prefer targets with fewer total edges discovered.
         # --target-schedule round-robin skips it: every exec takes the next target.
@@ -6924,7 +6966,7 @@ class Fuzzer:
                     break
         else:
             self._active_target_idx = (self._active_target_idx + 1) % len(self.multi_targets)
-        self.target = self.multi_targets[self._active_target_idx]
+        self._set_target(self.multi_targets[self._active_target_idx])
 
     def _pick_seed(self):
         seed = self._seed_picker.pick_seed()

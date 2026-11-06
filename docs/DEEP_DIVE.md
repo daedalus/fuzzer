@@ -422,6 +422,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Shared corpus**: fuzz multiple binaries with the same corpus — inputs that find coverage in one target can discover paths in others
 - **Glob expansion**: `targets/fuzz_*` expands to all matching executables, automatically skips non-binaries (`.c`, `.py`, `.sh`, etc.)
 - **Per-target SHM**: each target gets its own shared memory region for independent edge tracking
+- **Per-target in-process runner** (`.so` targets): one `InProcessRunner` per target (`InProcessRunner.sibling`), each attached to that target's SHM map; `Fuzzer._set_target` swaps the active runner on every target switch. Before (2026-11-06) one runner served target 0 on the global map: every exec ran target 0 and every per-target map read 0 edges (`tests/test_regression_multi_target_so.py`)
 - **Weighted round-robin**: targets with fewer discovered edges get proportionally more execution time
 - **`--target-schedule round-robin`**: target changes every exec, in order (exec i -> target i mod N), exactly equal shares; default `weighted` = strict RR for 100 execs, then a per-exec draw weighted by 1/edges (`core/target_schedule.py`, test `tests/test_target_schedule.py`)
 - **`--target-schedule wrr`**: smooth weighted round robin on 1/edges. Same long-run share as `weighted` (which is a random draw, not WRR), no RNG, no variance, on from exec 0 (no 100-exec warm-up). Shares are of iterations, so a slow target still eats wall clock (`core/fair_queue.py::SmoothWRR`)

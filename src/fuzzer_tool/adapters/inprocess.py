@@ -261,6 +261,7 @@ class InProcessRunner:
         self.debug = debug
         self.capture_stderr = capture_stderr
         self.use_ptrace = use_ptrace
+        self._placement = placement
 
         self._func: Callable[[bytes], int] | None = None
         self._lib: ctypes.CDLL | None = None
@@ -304,6 +305,28 @@ class InProcessRunner:
         self._forkserver = None
 
         self._start()
+
+    def sibling(
+        self, target: str, function_name: str, coverage_env_id: str | None
+    ) -> "InProcessRunner":
+        """Same mode and options for another target on its own SHM map.
+
+        Example: multi-target runs build one per .so from target 0's runner.
+        """
+        return InProcessRunner(
+            target=target,
+            function_name=function_name,
+            timeout=self.timeout,
+            shm_size=self.shm_size,
+            direct=self.direct,
+            direct_lite=self.direct_lite,
+            coverage_env_id=coverage_env_id,
+            cov=bool(coverage_env_id),
+            debug=self.debug,
+            capture_stderr=self.capture_stderr,
+            use_ptrace=self.use_ptrace,
+            placement=self._placement,
+        )
 
     def _start(self):
         target_lower = self.target.lower()
