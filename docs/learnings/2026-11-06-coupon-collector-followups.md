@@ -32,6 +32,8 @@ applied: one target, no basis for a factor.
 | round-robin | 9/11 | 0.824 | -14.5 |
 | round-robin-ctl (A/A) | 8/12 | 0.503 | -4.5 |
 
+ASAN rerun (`--set fuzzgoat_asan`, libasan preloaded by `run_cell`'s wrapper, ~850 eps): round-robin 9/11, McNemar 0.824, med -5.0; A/A 8/12, 0.503, -2.5. NULL (ledger #104).
+
 NULL. Expected: the uniform picker's coupon tail costs ~n*H_n picks once per
 run, a small share of 10k execs.
 
