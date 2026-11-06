@@ -5629,6 +5629,11 @@ class OperatorEngine:
 
         return self._regularity(fib_encode, buf)
 
+    def _op_pairing_fn(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.pairing import pairing_fn
+
+        return self._regularity(pairing_fn, buf)
+
     # ── Hacker's Delight rightmost-bit + Gosper same-popcount (2026-10-05) ──
     def _op_rightmost_clear(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.hackers_delight import rightmost_clear
