@@ -195,17 +195,17 @@
 <!-- runner -->
 <g id="node10" class="node">
 <title>runner</title>
-<path fill="#f2dcdc" stroke="transparent" stroke-width="0" d="M1639,-571.5C1639,-571.5 1467,-571.5 1467,-571.5 1461,-571.5 1455,-565.5 1455,-559.5 1455,-559.5 1455,-534.5 1455,-534.5 1455,-528.5 1461,-522.5 1467,-522.5 1467,-522.5 1639,-522.5 1639,-522.5 1645,-522.5 1651,-528.5 1651,-534.5 1651,-534.5 1651,-559.5 1651,-559.5 1651,-565.5 1645,-571.5 1639,-571.5"/>
+<path fill="#f2dcdc" stroke="transparent" stroke-width="0" d="M1623,-571.5C1623,-571.5 1467,-571.5 1467,-571.5 1461,-571.5 1455,-565.5 1455,-559.5 1455,-559.5 1455,-534.5 1455,-534.5 1455,-528.5 1461,-522.5 1467,-522.5 1467,-522.5 1623,-522.5 1623,-522.5 1629,-522.5 1635,-528.5 1635,-534.5 1635,-534.5 1635,-559.5 1635,-559.5 1635,-565.5 1629,-571.5 1623,-571.5"/>
 <text text-anchor="start" x="1467" y="-555.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c3232">services/runner.py &#160;+ &#160;adapters/</text>
 <text text-anchor="start" x="1467" y="-544.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c3232">forkserver · process · inprocess</text>
-<text text-anchor="start" x="1467" y="-533.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c3232">persistent_signal · network · ptrace</text>
+<text text-anchor="start" x="1467" y="-533.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c3232">persistent_signal · ptrace</text>
 </g>
 <!-- ops&#45;&gt;runner -->
 <g id="edge4" class="edge">
 <title>ops&#45;&gt;runner</title>
-<path fill="none" stroke="#3f4a58" stroke-width="1.8" d="M807.79,-635.42C833.17,-628.44 861.6,-621.38 888,-616.5 1083.94,-580.3 1316.15,-561.84 1447.86,-553.62"/>
-<polygon fill="#3f4a58" stroke="#3f4a58" stroke-width="1.8" points="1448.19,-555.98 1454.83,-553.18 1447.9,-551.23 1448.19,-555.98"/>
-<text text-anchor="middle" x="1050.5" y="-595.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;mutant</text>
+<path fill="none" stroke="#3f4a58" stroke-width="1.8" d="M807.79,-635.44C833.17,-628.47 861.61,-621.39 888,-616.5 1085.04,-579.97 1319.21,-561.39 1448.01,-553.28"/>
+<polygon fill="#3f4a58" stroke="#3f4a58" stroke-width="1.8" points="1448.18,-555.65 1454.82,-552.85 1447.89,-550.9 1448.18,-555.65"/>
+<text text-anchor="middle" x="1048.5" y="-595.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;mutant</text>
 </g>
 <!-- lib -->
 <g id="node9" class="node">
@@ -225,14 +225,14 @@
 <!-- target -->
 <g id="node12" class="node">
 <title>target</title>
-<polygon fill="#5c3232" stroke="transparent" stroke-width="0" points="1589.5,-460.5 1516.5,-460.5 1516.5,-424.5 1589.5,-424.5 1589.5,-460.5"/>
-<text text-anchor="middle" x="1553" y="-440" font-family="Helvetica,sans-Serif" font-size="10.00" fill="white">TARGET</text>
+<polygon fill="#5c3232" stroke="transparent" stroke-width="0" points="1581.5,-460.5 1508.5,-460.5 1508.5,-424.5 1581.5,-424.5 1581.5,-460.5"/>
+<text text-anchor="middle" x="1545" y="-440" font-family="Helvetica,sans-Serif" font-size="10.00" fill="white">TARGET</text>
 </g>
 <!-- runner&#45;&gt;target -->
 <g id="edge5" class="edge">
 <title>runner&#45;&gt;target</title>
-<path fill="none" stroke="#68727e" stroke-width="1.5" d="M1553,-522.48C1553,-506.08 1553,-484.26 1553,-467.71"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.5" points="1555.38,-467.31 1553,-460.51 1550.62,-467.31 1555.38,-467.31"/>
+<path fill="none" stroke="#68727e" stroke-width="1.5" d="M1545,-522.48C1545,-506.08 1545,-484.26 1545,-467.71"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.5" points="1547.38,-467.31 1545,-460.51 1542.62,-467.31 1547.38,-467.31"/>
 </g>
 <!-- shim -->
 <g id="node11" class="node">
@@ -247,8 +247,8 @@
 <!-- shim&#45;&gt;target -->
 <g id="edge15" class="edge">
 <title>shim&#45;&gt;target</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M1605.65,-900.29C1646.6,-826.55 1728.7,-650.58 1663,-522.5 1647.71,-492.69 1615.36,-471.59 1589.68,-458.74"/>
-<text text-anchor="middle" x="1708" y="-657.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;linked in</text>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M1616.81,-900.34C1637.25,-874.41 1660,-837.02 1660,-799 1660,-799 1660,-799 1660,-546 1660,-503.34 1615.36,-474.05 1581.7,-458.03"/>
+<text text-anchor="middle" x="1681" y="-657.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;linked in</text>
 </g>
 <!-- ltl -->
 <g id="node14" class="node">
@@ -279,7 +279,7 @@
 <!-- target&#45;&gt;cov -->
 <g id="edge6" class="edge">
 <title>target&#45;&gt;cov</title>
-<path fill="none" stroke="#3f4a58" stroke-width="1.8" d="M1525.58,-424.36C1514.1,-415.08 1505.22,-403.51 1514,-393.5 1514.39,-393.05 1702.74,-368.33 1871.72,-346.24"/>
+<path fill="none" stroke="#3f4a58" stroke-width="1.8" d="M1522.76,-424.21C1513.14,-414.67 1505.76,-402.9 1514,-393.5 1514.39,-393.05 1702.74,-368.33 1871.72,-346.24"/>
 <polygon fill="#3f4a58" stroke="#3f4a58" stroke-width="1.8" points="1872.04,-348.59 1878.48,-345.35 1871.43,-343.88 1872.04,-348.59"/>
 <text text-anchor="middle" x="1532" y="-395.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;bitmap</text>
 </g>
@@ -295,7 +295,7 @@
 <!-- target&#45;&gt;cmplog -->
 <g id="edge18" class="edge">
 <title>target&#45;&gt;cmplog</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M1567.5,-424.26C1578,-413.17 1593.26,-399.71 1610,-393.5 1651.26,-378.21 2360.07,-398.85 2402,-385.5 2427.33,-377.44 2451.97,-361.04 2471.1,-345.78"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M1561.73,-424.47C1573.94,-413.31 1591.51,-399.69 1610,-393.5 1651.73,-379.53 2360.07,-398.85 2402,-385.5 2427.33,-377.44 2451.97,-361.04 2471.1,-345.78"/>
 <polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="2473.09,-347.23 2476.86,-341.09 2470.08,-343.54 2473.09,-347.23"/>
 <text text-anchor="middle" x="1642.5" y="-395.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;cmp channels</text>
 </g>
@@ -314,8 +314,8 @@
 <!-- target&#45;&gt;crash -->
 <g id="edge19" class="edge">
 <title>target&#45;&gt;crash</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M1516.45,-441.95C1485.26,-440.14 1442.07,-431.97 1420,-402.5 1411.98,-391.79 1409.51,-378.19 1409.8,-364.81"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="1412.18,-364.77 1410.18,-357.85 1407.43,-364.51 1412.18,-364.77"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M1508.26,-441.06C1479.12,-438.52 1440.07,-429.79 1420,-402.5 1412.07,-391.72 1409.64,-378.1 1409.92,-364.72"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="1412.31,-364.68 1410.3,-357.76 1407.55,-364.42 1412.31,-364.68"/>
 <text text-anchor="middle" x="1452.5" y="-395.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;signal / stderr</text>
 </g>
 <!-- cov&#45;&gt;picker -->

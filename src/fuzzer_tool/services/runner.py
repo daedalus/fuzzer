@@ -196,10 +196,10 @@ class TargetRunner:
 
         Returns the re-run's (rc, stderr), or None when skipped: budget spent,
         or a backend whose deadline is fixed at start-up (in-process,
-        persistent, network). The deadline is restored even if the run raises.
+        persistent). The deadline is restored even if the run raises.
         """
         f = self.f
-        if f._inprocess_runner or f._persistent_runner or f._network_runner:
+        if f._inprocess_runner or f._persistent_runner:
             return None
 
         allowed = HANG_CONFIRM_FREE + f.exec_count // HANG_CONFIRM_EVERY
@@ -300,29 +300,10 @@ class TargetRunner:
         return self._run_other(data, shm)
 
     def _run_other(self, data: bytes, shm) -> tuple[int, str]:
-        """Non-in-process backends: persistent, network, ptrace, forkserver, spawn."""
+        """Non-in-process backends: persistent, ptrace, forkserver, spawn."""
         f = self.f
         if f._persistent_runner:
             rc, err = f._persistent_runner.run_one(data)
-            if f._perf_counters:
-                f._last_perf_deltas = f._perf_counters.read_and_reset()
-            return rc, err
-
-        if f._network_runner:
-            # No reply is read on this socket — coverage comes from shm,
-            # which we reset here so fuzz_one()'s post-run
-            # is_new_coverage_with_edges() reflects only this iteration.
-            if shm:
-                shm.reset_edge_map()
-            t0 = time.monotonic()
-            rc, err = f._network_runner.run_one(data)
-            elapsed = time.monotonic() - t0
-            # Feed the elapsed wall-clock time as a proxy for target
-            # processing latency.  The KF's filtered estimate drives
-            # the adaptive settle in NetworkRunner._settle().
-            if f._network_runner.settle_kf is not None:
-                f._network_runner.settle_kf.predict(dt=1.0)
-                f._network_runner.settle_kf.update(elapsed)
             if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, err

@@ -39,7 +39,6 @@ class TestCmplogStdinMissingReturn:
         f._cmplog = cmplog
         f._inprocess_runner = None
         f._persistent_runner = None
-        f._network_runner = None
         f.ptrace_cov = None
         f._forkserver = None
         f.use_coverage = True

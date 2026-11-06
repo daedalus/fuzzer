@@ -90,7 +90,6 @@ module = [
     "fuzzer_tool.adapters.filesystem",
     "fuzzer_tool.adapters.forkserver",
     "fuzzer_tool.adapters.inprocess",
-    "fuzzer_tool.adapters.network",
     "fuzzer_tool.adapters.perf_event",
     "fuzzer_tool.adapters.persistent_signal",
     "fuzzer_tool.adapters.persistent_subprocess",
