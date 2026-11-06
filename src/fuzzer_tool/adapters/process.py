@@ -532,6 +532,8 @@ _spawn_group = _SPAWN_SETSID
 def _spawn_grouped(argv: list[str], env: dict[str, str], actions: list) -> int:
     """``posix_spawnp`` *argv* as leader of a new session or process group."""
     global _spawn_group
+    # Snapshot: another thread may switch the global before our call fails.
+    group = _spawn_group
     try:
         return os.posix_spawnp(
             argv[0],
@@ -539,15 +541,20 @@ def _spawn_grouped(argv: list[str], env: dict[str, str], actions: list) -> int:
             env,
             file_actions=actions,
             setsigdef=_CHILD_DEFAULT_SIGNALS,
-            **_spawn_group,
+            **group,
         )
     except NotImplementedError:
-        if _spawn_group is _SPAWN_SETPGROUP:
+        if group is _SPAWN_SETPGROUP:
             raise
         _spawn_group = _SPAWN_SETPGROUP
 
     return os.posix_spawnp(
-        argv[0], argv, env, file_actions=actions, setsigdef=_CHILD_DEFAULT_SIGNALS, **_spawn_group
+        argv[0],
+        argv,
+        env,
+        file_actions=actions,
+        setsigdef=_CHILD_DEFAULT_SIGNALS,
+        **_SPAWN_SETPGROUP,
     )
 
 

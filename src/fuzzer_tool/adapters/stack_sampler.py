@@ -55,6 +55,7 @@ class StackSampler:
         self._names: dict[int, str] = {}
         self._cpu: dict[int, float] = {}  # per-thread CPU seconds at last tick
         self._prev_handler: object = None
+        self._prev_timer: tuple[float, float] = (0.0, 0.0)
         self._running = False
 
     @property
@@ -71,16 +72,18 @@ class StackSampler:
 
         self._prev_handler = signal.signal(signal.SIGPROF, self._on_tick)
         signal.siginterrupt(signal.SIGPROF, False)  # SA_RESTART
-        signal.setitimer(signal.ITIMER_PROF, self._interval, self._interval)
+        self._prev_timer = signal.setitimer(signal.ITIMER_PROF, self._interval, self._interval)
         self._running = True
 
     def stop(self) -> None:
-        """Disarm the timer and restore the previous handler. Idempotent."""
+        """Restore the previous handler and timer. Idempotent."""
         if not self._running:
             return
 
+        # Handler before timer: a re-armed caller timer must never tick into ours.
         signal.setitimer(signal.ITIMER_PROF, 0)
         signal.signal(signal.SIGPROF, self._prev_handler)
+        signal.setitimer(signal.ITIMER_PROF, *self._prev_timer)
         self._running = False
 
     def _on_tick(self, _signum: int, frame: FrameType | None) -> None:

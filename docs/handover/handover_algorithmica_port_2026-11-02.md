@@ -91,8 +91,8 @@ An independent pass over the book (source read from `algorithmica-org/algorithmi
 | Item | Evidence | Port | Caveat |
 |---|---|---|---|
 | A/A noise for `cpu_user` | 4.1 TODO | A/A run, `--metric cpu_user` vs wall | Gates every throughput item |
-| O(n) weight rebuild per pick (book: prefix sums) | `services/seed_picker.py` `_pick_katz_seed:764`, `_pick_branch_seed:789`, `_pick_tang_seed:819`, `_pick_aflgo_seed:1151`, `_pick_boltzmann_seed:1371`, `_pick_ecofuzz_seed:1447`: Python loop builds weights, then a linear cumulative scan | numpy weights + `searchsorted`, or cached weights in `core/fenwick_sampler.py` updated per seed | Elo arms: run a fraction of picks. Swapping only the scan for `bisect` leaves the O(n) rebuild |
-| `% n` range reduction (book: Division, Lemire) | `core/rand_pool.py:353` and `randint`/`choice`/`shuffle` paths | Lemire multiply-shift with rejection | Removes bias, no CPython speed gain. Changes every seeded stream |
+| O(n) weight rebuild per pick (book: prefix sums) | `services/seed_picker.py` `_pick_katz_seed:764`, `_pick_branch_seed:789`, `_pick_tang_seed:819`, `_pick_aflgo_seed:1151`, `_pick_boltzmann_seed:1371`, `_pick_ecofuzz_seed:1447`: Python loop builds weights, then a linear cumulative scan | numpy weights + `searchsorted`, or cached weights in `core/fenwick_sampler.py` updated per seed and rebuilt when a shared input changes (`mean_exec_time()`, Boltzmann `_temperature`, AFLGo `max_distance`) | Elo arms: run a fraction of picks. Swapping only the scan for `bisect` leaves the O(n) rebuild |
+| `% n` range reduction (book: Division, Lemire) | `core/rand_pool.py:353` and `randint`/`choice`/`shuffle` paths, plus bulk `randint_list` (`choice_list`) and every other `% width` site in `rand_pool.py` | Lemire multiply-shift with rejection | Removes bias, no CPython speed gain. Changes every seeded stream |
 
 ### 7.2 Checked and withdrawn
 

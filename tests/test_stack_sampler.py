@@ -112,6 +112,44 @@ class TestTimer:
         assert signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0)
         assert signal.getsignal(signal.SIGPROF) is before
 
+    def test_regression_prior_itimer_restored(self):
+        """A caller's ITIMER_PROF survives a sampling window."""
+        before = signal.signal(signal.SIGPROF, lambda *_: None)
+        signal.setitimer(signal.ITIMER_PROF, 1000.0, 1000.0)
+        s = StackSampler()
+
+        try:
+            s.start()
+            s.stop()
+            delay, interval = signal.getitimer(signal.ITIMER_PROF)
+        finally:
+            signal.setitimer(signal.ITIMER_PROF, 0)
+            signal.signal(signal.SIGPROF, before)
+
+        assert interval == 1000.0
+        assert delay > 0
+
+    def test_prior_timer_ticks_prior_handler(self):
+        """Adversarial: after stop, ticks reach the caller's handler, not ours."""
+        ticks = []
+        before = signal.signal(signal.SIGPROF, lambda *_: ticks.append(1))
+        signal.setitimer(signal.ITIMER_PROF, 0.001, 0.001)
+        s = StackSampler(interval_s=0.001)
+
+        try:
+            s.start()
+            s.stop()
+            sampled = s.samples
+            end = time.process_time() + 0.1
+            while time.process_time() < end:
+                pass
+        finally:
+            signal.setitimer(signal.ITIMER_PROF, 0)
+            signal.signal(signal.SIGPROF, before)
+
+        assert ticks
+        assert s.samples == sampled
+
     def test_double_start_raises(self):
         s = StackSampler()
         s.start()

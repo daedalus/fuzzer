@@ -220,7 +220,10 @@ rewired off `fuzz_count` at the same time.
 `services/seed_picker.py` (`katz`, `branch`, `tang`, `aflgo`, `boltzmann`,
 `ecofuzz`) build a Python weight list over the whole corpus, then walk it
 linearly, on every pick. Port: numpy weights + `searchsorted`, or cached weights
-in `core/fenwick_sampler.py` updated when a seed's metadata changes. Replacing
+in `core/fenwick_sampler.py` updated when a seed's metadata changes and rebuilt
+when a shared input changes: `mean_exec_time()` (boltzmann, ecofuzz), Boltzmann
+`_temperature` (reset every pick), AFLGo `max_distance`. Ecofuzz also calls
+`record_snapshot` per seed per pick; a cache must keep that. Replacing
 only the scan with `bisect` leaves the O(n) rebuild. Gate on the `cpu_user` A/A
 control (handover §4.1). Unmeasured. **Effort S–M.**
 
