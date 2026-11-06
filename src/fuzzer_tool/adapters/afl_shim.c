@@ -235,6 +235,7 @@
 #include <sys/shm.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <dlfcn.h>
@@ -5813,8 +5814,9 @@ static int __afl_timeout_handler_live = 0;
 extern int __asan_report_present(void) __attribute__((weak));
 
 /* Same deferral inside the private heap's lock. glibc's own locks (arenas,
- * stdio FILE locks) are covered below by pc; not covered: ASAN's allocator
- * and locks in other libraries. A jump from inside them leaves them held. */
+ * stdio FILE locks) and a shared sanitizer runtime's (ASAN's allocator) are
+ * covered below by pc; not covered: locks in other libraries, and a runtime
+ * linked statically into the target. A jump from inside them leaves them held. */
 #if __AFL_PRIVATE_HEAP
 __AFL_GCC_NO_COV static int __afl_ph_held(void);
 #else
@@ -5841,18 +5843,36 @@ __AFL_GCC_NO_COV static int __afl_ph_held(void);
 #define __AFL_TIMEOUT_LIBC_DEFER_TICKS 4096u  /* ~205 ms at the fast tick */
 #define __AFL_TIMEOUT_BLOCKED_TICKS    2000u  /* ~100 ms parked in one syscall */
 
-static uintptr_t __afl_libc_lo;  /* executable span of libc; 0/0 = unknown */
-static uintptr_t __afl_libc_hi;
+/* Executable spans of the runtimes a tick defers in; 0/0 = not mapped.
+ *   LIBC  glibc (arenas, stdio locks)
+ *   VDSO  clock_gettime and friends: ASAN's allocator reads the clock under
+ *         its region mutex (release-to-OS interval)
+ *   SAN   a shared sanitizer runtime (libasan.so). Its size-class allocator
+ *         maps, refills and releases pages (madvise) under a region mutex; a
+ *         jump from there leaked it and the next allocation of that class
+ *         waited forever (ffmpeg_read ASAN in-process at -t 0.002: 3 of the
+ *         first 5 jumps had pc in libasan). Left unmapped when the runtime is
+ *         linked into the executable or this object: target code lives there. */
+enum { __AFL_RT_LIBC, __AFL_RT_VDSO, __AFL_RT_SAN, __AFL_RT_SPANS };
+static uintptr_t __afl_rt_lo_of[__AFL_RT_SPANS];
+static uintptr_t __afl_rt_hi_of[__AFL_RT_SPANS];
+
+/* dl_iterate_phdr argument: find the object holding fn, fill span `rt`. */
+struct __afl_span {
+    uintptr_t fn;
+    int rt;
+};
 static __thread int __afl_tick_fast;          /* period is FAST_TICK_US */
 static __thread uint32_t __afl_tick_deferred; /* libc deferrals this call */
 static __thread uint32_t __afl_tick_parked;   /* consecutive same-syscall ticks */
 static __thread uintptr_t __afl_tick_pc;      /* pc of the previous deferral */
 
 /* dl_iterate_phdr callback: union of the executable PT_LOADs of the object
- * holding `fn`. Returns 1 to stop the walk. */
-__AFL_GCC_NO_COV static int __afl_libc_phdr(struct dl_phdr_info *info, size_t size, void *fn) {
+ * holding span->fn. Returns 1 to stop the walk. */
+__AFL_GCC_NO_COV static int __afl_libc_phdr(struct dl_phdr_info *info, size_t size, void *arg) {
     (void)size;
-    uintptr_t addr = (uintptr_t)fn, lo = UINTPTR_MAX, hi = 0;
+    struct __afl_span *span = arg;
+    uintptr_t addr = span->fn, lo = UINTPTR_MAX, hi = 0;
     int owns = 0;
 
     for (int i = 0; i < info->dlpi_phnum; i++) {
@@ -5866,36 +5886,57 @@ __AFL_GCC_NO_COV static int __afl_libc_phdr(struct dl_phdr_info *info, size_t si
     }
     if (!owns) return 0;
 
-    __afl_libc_lo = lo;
-    __afl_libc_hi = hi;
+    /* The executable (empty name) or this object: target code lives there. */
+    uintptr_t self = (uintptr_t)&__afl_libc_phdr;
+    if (span->rt == __AFL_RT_SAN && (!info->dlpi_name[0] || (self >= lo && self < hi)))
+        return 1;
+
+    __afl_rt_lo_of[span->rt] = lo;
+    __afl_rt_hi_of[span->rt] = hi;
     return 1;
 }
 
 /* Located once, outside signal context. gnu_get_libc_version: defined only
- * by glibc, never interposed (malloc may be, e.g. by an LD_PRELOAD shim). */
+ * by glibc, never interposed (malloc may be, e.g. by an LD_PRELOAD shim).
+ * __asan_report_present: defined only by the ASAN runtime (weak, above). */
 __AFL_GCC_NO_COV static void __afl_map_libc_range(void) {
+    struct __afl_span spans[__AFL_RT_SPANS] = {
 #ifdef __GLIBC__
-    dl_iterate_phdr(__afl_libc_phdr, (void *)&gnu_get_libc_version);
+        [__AFL_RT_LIBC] = {(uintptr_t)&gnu_get_libc_version, __AFL_RT_LIBC},
 #endif
+        [__AFL_RT_VDSO] = {(uintptr_t)getauxval(AT_SYSINFO_EHDR), __AFL_RT_VDSO},
+        [__AFL_RT_SAN]  = {(uintptr_t)&__asan_report_present, __AFL_RT_SAN},
+    };
+
+    for (int i = 0; i < __AFL_RT_SPANS; i++) {
+        if (!spans[i].fn) continue;   /* no vDSO, no ASAN, or not glibc */
+        dl_iterate_phdr(__afl_libc_phdr, &spans[i]);
+    }
 }
 
-__AFL_GCC_NO_COV static int __afl_in_libc(uintptr_t pc) {
-    return pc - __afl_libc_lo < __afl_libc_hi - __afl_libc_lo;
+/* Start of the runtime span holding pc; 0 = target code. */
+__AFL_GCC_NO_COV static uintptr_t __afl_rt_lo(uintptr_t pc) {
+    for (int i = 0; i < __AFL_RT_SPANS; i++) {
+        uintptr_t lo = __afl_rt_lo_of[i];
+        if (pc - lo < __afl_rt_hi_of[i] - lo) return lo;
+    }
+    return 0;
 }
 
 /* pc sits on, or just past, a syscall instruction: the kernel rewinds pc
  * onto it to restart an interrupted wait. Text bytes, always readable. */
-__AFL_GCC_NO_COV static int __afl_at_syscall(uintptr_t pc) {
+__AFL_GCC_NO_COV static int __afl_at_syscall(uintptr_t pc, uintptr_t lo) {
 #if defined(__x86_64__)
     const uint8_t *p = (const uint8_t *)pc;   /* syscall = 0f 05 */
     if (p[0] == 0x0f && p[1] == 0x05) return 1;
-    return pc - 2 >= __afl_libc_lo && p[-2] == 0x0f && p[-1] == 0x05;
+    return pc - 2 >= lo && p[-2] == 0x0f && p[-1] == 0x05;
 #elif defined(__aarch64__)
     const uint32_t *p = (const uint32_t *)pc; /* svc #0 = d4000001 */
     if (p[0] == 0xd4000001u) return 1;
-    return pc - 4 >= __afl_libc_lo && p[-1] == 0xd4000001u;
+    return pc - 4 >= lo && p[-1] == 0xd4000001u;
 #else
     (void)pc;
+    (void)lo;
     return 0;
 #endif
 }
@@ -5920,12 +5961,14 @@ __AFL_GCC_NO_COV static void __afl_tick_slow(void) {
     __afl_timer_period(__afl_tick_of(__afl_timer_budget_us));
 }
 
-/* 1 while a jump from pc could leave a glibc lock held (see above). */
+/* 1 while a jump from pc could leave a glibc or sanitizer lock held (see
+ * above). */
 __AFL_GCC_NO_COV static int __afl_libc_defer(uintptr_t pc) {
-    if (!__afl_in_libc(pc)) return 0;
+    uintptr_t lo = __afl_rt_lo(pc);
+    if (!lo) return 0;
     if (++__afl_tick_deferred > __AFL_TIMEOUT_LIBC_DEFER_TICKS) return 0;
 
-    int parked = pc == __afl_tick_pc && __afl_at_syscall(pc);
+    int parked = pc == __afl_tick_pc && __afl_at_syscall(pc, lo);
     __afl_tick_parked = parked ? __afl_tick_parked + 1 : 0;
     __afl_tick_pc = pc;
     if (__afl_tick_parked >= __AFL_TIMEOUT_BLOCKED_TICKS) return 0;
@@ -5961,7 +6004,7 @@ __AFL_GCC_NO_COV static void __afl_timeout_handler(int sig, siginfo_t *si, void 
 __AFL_GCC_NO_COV static int __afl_timer_ready(void) {
     if (__afl_timer_state) return __afl_timer_state > 0;
     __afl_timer_state = -1;
-    if (!__afl_libc_hi) __afl_map_libc_range();
+    if (!__afl_rt_hi_of[__AFL_RT_LIBC]) __afl_map_libc_range();
 
     if (!__afl_timeout_handler_live) {
         struct sigaction sa;
