@@ -365,6 +365,7 @@ class TestRegularityOperators:
             "hilbert_patch",
             "hadamard_oa",
             "fib_encode",
+            "pairing_fn",
             "same_popcount_next",
             "same_popcount_prev",
             "parity_lock",

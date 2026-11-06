@@ -97,6 +97,7 @@ Off arm needs a tree without the op.
 |---|---|---|---|
 | `overflow_pair` | Two-field overflow sums | S | fuzzgoat; merge with `div_trap` if both null |
 | FXT ops (`rational_pair`, `sum_shift`, `multiset_next`, `haar_coef`, `revbin_permute`, `hilbert_patch`, `hadamard_oa`, `fib_encode`) | Arndt FXT-book ops | S | fuzzgoat, then FFmpeg / png |
+| `pairing_fn` | Szudzik/Cantor pairing op | S | fuzzgoat |
 | Eleven numeric/text/merge ops (`varint_reencode`, `position_marginal`, `line_ending_swap`, `nul_inject`, …) | Field re-encodings, merges | S | fuzzgoat; drop zero-yield arms |
 | Pair ops (`arith_mid`, `geo_mid`, `power_mid`, `line_blend`, `field_minmax`, `nm_reflect`, `opposition`) | Field interpolation between seeds | S | fuzzgoat; drop any not beating `arith_mid` |
 | Lineage ops (`lineage_step`, `diff_evo`, `bit_majority`, `field_median`, `bit_cross`) | Parent-step / population ops | S | fuzzgoat with `--lineage` |
