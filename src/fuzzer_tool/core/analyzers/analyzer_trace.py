@@ -21,6 +21,8 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 
+from fuzzer_tool.adapters.process import detached_env
+
 log = logging.getLogger(__name__)
 
 # GdbJob.wait() poll interval: gdb runs take ~1-2 s.
@@ -423,6 +425,7 @@ class CrashTracer:
                     capture_output=True,
                     timeout=self.timeout,
                     stdin=stdin_file,
+                    env=detached_env(),
                 )
             output = result.stdout.decode(errors="replace")
             self._parse_gdb_output(output, report)
@@ -537,6 +540,7 @@ class CrashTracer:
                 ],
                 capture_output=True,
                 timeout=self.timeout,
+                env=detached_env(),
             )
             output = result.stderr.decode(errors="replace")
             lines = output.strip().split("\n")
@@ -613,6 +617,7 @@ class GdbJob:
                 stdout=self._out,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                env=detached_env(),  # off the live run's shim channels
             )
 
     def poll(self) -> TraceReport | None:

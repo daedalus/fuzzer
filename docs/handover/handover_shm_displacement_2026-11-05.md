@@ -178,7 +178,9 @@ New `CTX_INFLATION_MEASURED = 2.0`, `min(2**bits, 2.0)`. fuzzgoat
 (4 edges/guard x 214,532 / 0.5 = 1.7M), so no ffmpeg A/B: arms identical.
 fuzzgoat in-run A/B, ledger 102: NULL (6/2, p=0.29, -0.74 s/20k; A/A 7/1,
 -0.33 s), 0 drops. `--clock virtual` does not make in-process runs replay
-exactly (A/A edges differ). Test:
+exactly (A/A edges differ). Causes (2026-11-06): verse-node samples in hash
+order; crash replays writing into live shim channels. Both fixed; occasional
+forks remain (TODO). Test:
 `tests/test_regression_map_size_ctx_calibrated.py`.
 
 Up-front sizing already exists: `elf.estimate_map_size` = guards x

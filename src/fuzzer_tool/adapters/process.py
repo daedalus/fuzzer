@@ -127,6 +127,22 @@ def environ_copy() -> dict[str, str]:
     return dict(cache.decoded)
 
 
+# Variables that attach a child to the live run's shim channels: coverage and
+# bitmap segments, cmplog counters and sinks, the crash-symbol file.
+SHIM_CHANNEL_PREFIXES = ("__AFL_", "_CMPLOG")
+CMPLOG_PREFIXES = ("_CMPLOG",)
+
+
+def detached_env(prefixes: tuple[str, ...] = SHIM_CHANNEL_PREFIXES) -> dict[str, str]:
+    """``environ_copy()`` without the variables named by *prefixes*.
+
+    For side runs of the target (crash replays, triage): inheriting the
+    channels makes them write into the run's live segments, e.g. a background
+    gdb replay's cmplog counts landing in an unrelated execution's drain.
+    """
+    return {k: v for k, v in environ_copy().items() if not k.startswith(prefixes)}
+
+
 # ── Shared child-process machinery ──────────────────────────────────────
 #
 # Used by all three execution modes. This lived under "Stdin mode" while only

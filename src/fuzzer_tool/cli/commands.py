@@ -6696,7 +6696,8 @@ def main() -> int:
         type=int,
         default=0,
         metavar="N",
-        help="Initial edge bitmap size in bytes (default: 0 = auto-size from branch density)",
+        help="Initial edge table size in entries, 8 bytes each "
+        "(default: 0 = auto-size from the target's instrumentation)",
     )
     fuzz_parser.add_argument(
         "--max-collision-risk",
