@@ -3445,26 +3445,39 @@ __AFL_NO_COV static void __afl_log_close(int *fd, const struct __afl_fd_id *id) 
  * the buffer end. Try-lock, never wait: a contended record is dropped and
  * counted (__AFL_HEALTH_CMPLOG_DROPPED), so a signal handler or the
  * re-entrant trace-cmp path can never deadlock on it. */
-static volatile int __afl_cmplog_lock = 0;
-/* This thread owns the lock: a crash handler interrupting our own writer
- * may flush (pos only advances once a record is complete) and must
- * release, or siglongjmp leaves the lock held for good. */
-static __thread int __afl_cmplog_held = 0;
+/* The word names its owner (0 = free): a thread-local's address. A crash
+ * handler or guard landing interrupting our own writer may flush (pos only
+ * advances once a record is complete) and must release, or siglongjmp
+ * leaves the lock held for good. A separate thread-local "held" flag,
+ * stored after the exchange, left a window: on ffmpeg_read (clang -O2) the
+ * timeout tick landed there, ownership read "not mine", and every later
+ * record dropped as CONTENDED. The CAS is now the only step. */
+static volatile uintptr_t __afl_cmplog_lock = 0;
+static __thread char __afl_cmplog_self;
+
+/* 1 when this thread owns the lock. */
+__AFL_NO_COV static inline int __afl_cmplog_mine(void) {
+    return __atomic_load_n(&__afl_cmplog_lock, __ATOMIC_RELAXED) == (uintptr_t)&__afl_cmplog_self;
+}
+
+/* The atomic step of acquire: 1 when this call took the lock. */
+__AFL_NO_COV static inline int __afl_cmplog_take(void) {
+    uintptr_t free_word = 0;
+    return __atomic_compare_exchange_n(&__afl_cmplog_lock, &free_word,
+                                       (uintptr_t)&__afl_cmplog_self, 0,
+                                       __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
 
 __AFL_NO_COV static inline int __afl_cmplog_acquire(void) {
-    if (!__atomic_exchange_n(&__afl_cmplog_lock, 1, __ATOMIC_ACQUIRE)) {
-        __afl_cmplog_held = 1;
-        return 1;
-    }
+    if (__afl_cmplog_take()) return 1;
+
     __afl_health[__AFL_HEALTH_CMPLOG_DROPPED]++;
-    /* __afl_cmplog_held is thread-local: set means this thread owns the lock. */
-    __afl_health[__afl_cmplog_held ? __AFL_HEALTH_CMPLOG_REENTRANT
-                                   : __AFL_HEALTH_CMPLOG_CONTENDED]++;
+    __afl_health[__afl_cmplog_mine() ? __AFL_HEALTH_CMPLOG_REENTRANT
+                                     : __AFL_HEALTH_CMPLOG_CONTENDED]++;
     return 0;
 }
 
 __AFL_NO_COV static inline void __afl_cmplog_release(void) {
-    __afl_cmplog_held = 0;
     __atomic_store_n(&__afl_cmplog_lock, 0, __ATOMIC_RELEASE);
 }
 
@@ -3976,7 +3989,7 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
 
 /* Skipped, not waited for, while another thread owns the buffer. */
 __AFL_NO_COV static void __afl_cmplog_flush(void) {
-    if (__afl_cmplog_held) {   /* signal landed inside our own writer */
+    if (__afl_cmplog_mine()) {   /* signal landed inside our own writer */
         __afl_cmplog_flush_locked();
         return;
     }
@@ -5136,7 +5149,6 @@ __AFL_NO_COV static void __afl_cmp_counts_zero(void) {
  * flushed twice, once per process. Start the child clean. */
 __AFL_NO_COV static void __afl_cmplog_atfork_child(void) {
     __afl_cmplog_pos = 0;
-    __afl_cmplog_held = 0;
     __atomic_store_n(&__afl_cmplog_lock, 0, __ATOMIC_RELEASE);
     /* Shared counters are not the parent's copy: zeroing them here would
      * wipe what the parent (or the fuzzer, in direct_lite) has not read. */
@@ -5606,7 +5618,7 @@ __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *u
      * Folding it in here runs it on every crash, and __afl_cmplog_flush is
      * write(2)-based precisely so it is legal at this point. */
     __afl_cmplog_flush();
-    if (__afl_cmplog_held) __afl_cmplog_release();
+    if (__afl_cmplog_mine()) __afl_cmplog_release();
     /* Same reasoning for the counters: a crashing execution's comparison
      * profile is the one most worth having, and the dump is write(2)-only. */
     __afl_cmp_dump_counts();
@@ -6657,6 +6669,11 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     }
 
     __afl_wguard_land(wg_prev);
+#if __AFL_CMPLOG
+    /* A timeout tick can land mid-record; a lock left held drops every
+     * later record as REENTRANT. pos only advances on complete records. */
+    if (__afl_cmplog_mine()) __afl_cmplog_release();
+#endif
     __afl_guard_jmp = prev;
     __afl_guard_timed = prev_timed;
     if (!prev) __afl_guard_leave();
