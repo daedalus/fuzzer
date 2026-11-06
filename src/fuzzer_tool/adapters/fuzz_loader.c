@@ -604,8 +604,10 @@ static void reply_reject(void) {
     fflush(stdout);
 }
 
-/* Read a RUN body of data_len bytes into *data, growing it as needed.
-   REJECTED means a reply was already sent and the pipe is back in sync. */
+/* Read a RUN body of data_len bytes into *data, sized exactly data_len.
+   REJECTED means a reply was already sent and the pipe is back in sync.
+   Exact, not grow-only: after a 64-byte input an 8-byte one left in the
+   64-byte block hides buf[8] from ASAN's redzone (stale bytes instead). */
 static int recv_payload(long data_len, uint8_t **data, size_t *data_cap) {
     /* A zero-length input is a legitimate test case, and every RUN must
        produce exactly one reply regardless: `continue` here left the
@@ -622,15 +624,16 @@ static int recv_payload(long data_len, uint8_t **data, size_t *data_cap) {
         reply_reject();
         return PAYLOAD_REJECTED;
     }
-    if (data_len > 0 && (size_t)data_len > *data_cap) {
-        uint8_t *grown = realloc(*data, (size_t)data_len);
-        if (!grown) {
+    if (*data == NULL || (size_t)data_len != *data_cap) {
+        /* malloc(0) still yields a redzoned block under ASAN. */
+        free(*data);
+        *data = malloc((size_t)data_len);
+        *data_cap = *data ? (size_t)data_len : 0;
+        if (!*data && data_len > 0) {
             read_bytes(NULL, (size_t)data_len);
             reply_reject();
             return PAYLOAD_REJECTED;
         }
-        *data = grown;
-        *data_cap = (size_t)data_len;
     }
     if (data_len > 0 && !read_bytes(*data, (size_t)data_len)) return PAYLOAD_EOF;
     return PAYLOAD_OK;

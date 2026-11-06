@@ -1350,6 +1350,19 @@ The fuzzer exports `__AFL_WGUARD` (`core/shim_health.export_wguard`); the shim a
 ### Hybrid abort interception
 `afl_shim.c` replaces `abort()` in every build (ASAN included) with a macro calling `__afl_shim_abort()`, which writes `[shim] abort() intercepted` to stderr, counts it (`ABORTS_INTERCEPTED`) and returns. This keeps library assertion failures (FFmpeg's ~1600 `av_assert0` sites) from flooding the crash set; the cost is that the target runs on past the failed assertion. Only code compiled with the shim is affected: `abort()` inside precompiled libraries (libc `assert`, ASAN) still raises `SIGABRT`, which the crash handler recovers inside the guard or hands back outside it. ASAN errors are reported via stderr (`halt_on_error=0:abort_on_error=0`) and parsed by `SanitizerReport`. `--abort-is-crash` (env `__AFL_ABORT_CRASH=1`) makes the override raise SIGABRT instead: for targets whose assertions are bugs. Off by default and not part of `--hail-mary`.
 
+### Exact-size input buffers (ASAN overread visibility)
+Both direct paths hand the target a block sized exactly to the input, so ASAN's redzone starts at `buf[n]` (AFL++ tip: never fuzz on a buffer larger than the input).
+
+```
+ctypes copy, n <= 16   | ctypes object | input |        inline: no redzone
+ctypes copy, n <= 512  | pymalloc pool: input | next |  no redzone
+HeapInput / loader     | malloc(n): input | redzone |   buf[n] reported
+```
+
+- **`fuzz_loader.c` `recv_payload`**: was grow-only; after a 64-byte input an 8-byte one read stale bytes at `buf[8]`. Now reallocates on every length change. Loader RUN cost 6.5 vs 5.8-6.4 us (A/A spread).
+- **`adapters/heap_input.py::HeapInput`** (in-process `EXACT` placement): one cached libc `malloc(n)` block per length <= 512 (bounded, <= 131 KiB), copied by memoryview; larger inputs keep ctypes' own exact `malloc(n)`, with a one-slot reuse on a repeated length. `malloc` resolves through the global scope so preloaded libasan intercepts it. Steady state vs old: 157 vs 290 ns (direct) / 171 vs 381 ns (lite) at <= 512 B; within A/A above.
+- Tests: `tests/test_regression_loader_exact_input.py`, `tests/test_regression_inprocess_exact_input.py` (ASAN reports via `log_path`: direct mode owns fd 2).
+
 ### Guard-page input placement (`--input-placement guard`)
 Opt-in, default `exact`, not set by `--hail-mary`. Direct in-process modes (`--inprocess-direct`, direct_lite) copy each input into one reused mapping so it ends flush against a `PROT_NONE` page (`adapters/guard_arena.py::GuardArena`, idea from sandsifter `injector.c`):
 

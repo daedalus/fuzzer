@@ -186,31 +186,6 @@ class TestCrashMiSampler:
         assert t.weighted_position(8) == _old_pick(t, 8, ScriptedRng(randoms=[0.5]))
 
 
-# ── in-process input buffer ─────────────────────────────────────────────
-
-import ctypes  # noqa: E402
-
-from fuzzer_tool.adapters import inprocess  # noqa: E402
-
-
-class TestInputBuffer:
-    @pytest.mark.parametrize("n", [0, 1, 255, 2048, 20000])
-    def test_regression_exact_size_and_content(self, n):
-        """Exact size keeps ASAN's redzone right after the input (overreads caught)."""
-        data = bytes((i * 31) & 0xFF for i in range(n))
-        buf = inprocess._input_buf(data)
-        assert ctypes.sizeof(buf) == n
-        assert bytes(buf) == data
-
-    @pytest.mark.parametrize("kind", [bytearray, memoryview])
-    def test_buffer_protocol_inputs(self, kind):
-        """Adversarial: mutators hand bytearrays; views must copy, not alias."""
-        src = bytearray(b"\x00\x01\xfe\xff")
-        buf = inprocess._input_buf(kind(src))
-        src[0] = 0x7F
-        assert bytes(buf) == b"\x00\x01\xfe\xff"
-
-
 # ── checksum-learner cmplog pairs ───────────────────────────────────────
 
 from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner  # noqa: E402

@@ -22,6 +22,7 @@ from collections.abc import Callable
 
 from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.guard_arena import GUARD_OVERREAD, GuardArena
+from fuzzer_tool.adapters.heap_input import HeapInput
 from fuzzer_tool.adapters.process import run_target_stdin
 from fuzzer_tool.adapters.shim_factory import (
     ShimResult,
@@ -167,17 +168,6 @@ _US_PER_S = 1_000_000
 _FAULT_SIGS = frozenset((signal.SIGSEGV, signal.SIGBUS))
 
 
-def _input_buf(data) -> ctypes.Array:
-    """Exact-size ``c_uint8`` copy of *data*, filled in C.
-
-    ``(c_uint8 * n)(*data)`` passed every byte as a Python argument:
-    275 us at 2 KB, 2.6 ms at 20 KB, paid on most execs since mutant
-    lengths vary. Exact size, not a reused larger buffer: under in-process
-    ASAN the redzone must start right after the input to catch overreads.
-    """
-    return (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-
-
 def read_shim_health(lib: ctypes.CDLL) -> tuple[int, ...] | None:
     """Snapshot of ``__afl_shim_health()`` counters, or None for an older shim.
 
@@ -215,17 +205,8 @@ def _call_unguarded(r: "InProcessRunner", buf, n: int) -> None:
 
 
 # Input-buffer strategies bound once in __init__ (InputPlacement).
-def _fill_exact(r: "InProcessRunner", data) -> ctypes.Array:
-    return _input_buf(data)
-
-
-def _fill_cached(r: "InProcessRunner", data) -> ctypes.Array:
-    """Reuse the last buffer when the length matches (direct_lite)."""
-    buf = r._c_buf
-    if buf is None or len(buf) != len(data):
-        return _input_buf(data)
-    ctypes.memmove(buf, data, len(data))
-    return buf
+def _fill_heap(r: "InProcessRunner", data) -> ctypes.Array:
+    return r._heap.place(data)
 
 
 def _fill_guard(r: "InProcessRunner", data) -> ctypes.Array:
@@ -295,7 +276,8 @@ class InProcessRunner:
         # Input placement, bound once: guard arena or heap copy.
         self._c_buf: ctypes.Array | None = None
         self._arena = GuardArena() if placement is InputPlacement.GUARD else None
-        self._fill = _fill_guard if self._arena else _fill_cached if direct_lite else _fill_exact
+        self._heap = HeapInput()
+        self._fill = _fill_guard if self._arena else _fill_heap
         self._on_crash = _crash_guard if self._arena else _crash_plain
         # fd 2 -> reused pipe around direct-mode calls (ASAN reports).
         self._stderr = StderrCapture()
@@ -999,6 +981,7 @@ class InProcessRunner:
         self._func_ptr = None
         self._unbind_guard()
         self._c_buf = None
+        self._heap.close()
         if self._arena is not None:
             self._arena.close()
         self._stderr.close()
