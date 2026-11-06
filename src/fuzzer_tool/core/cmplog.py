@@ -647,6 +647,16 @@ def _grown(arr: np.ndarray) -> np.ndarray:
     return np.concatenate([arr, np.zeros_like(arr)])
 
 
+def _put_env(key: str, value: str) -> None:
+    """Set *key* only when it differs: called per exec, values rarely change.
+
+    Each ``os.environ`` assignment is a ``putenv``; comparing first is ~4x
+    cheaper and still repairs a value changed elsewhere.
+    """
+    if os.environ.get(key) != value:
+        os.environ[key] = value
+
+
 class CmplogCollector:
     """Collect and process comparison tracing data from the cmplog shim.
 
@@ -1054,17 +1064,17 @@ class CmplogCollector:
         self.counts_path = self._counts_path_for(self.log_path)
         if self.site_counts_enabled:
             self.sites_path = self._sites_path_for(self.log_path)
-        os.environ["_CMPLOG_OUT"] = self.log_path
-        os.environ["_CMPLOG_COUNTS"] = self.counts_path
+        _put_env("_CMPLOG_OUT", self.log_path)
+        _put_env("_CMPLOG_COUNTS", self.counts_path)
         shm_id = self._counts_shm_id()
         if shm_id:
-            os.environ[CMP_SHM_ENV] = shm_id
+            _put_env(CMP_SHM_ENV, shm_id)
         if self.sites_path:
-            os.environ["_CMPLOG_SITE_COUNTS"] = self.sites_path
+            _put_env("_CMPLOG_SITE_COUNTS", self.sites_path)
         if self.compcov_level:
-            os.environ["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
+            _put_env("__AFL_COMPCOV_LEVEL", str(self.compcov_level))
         if self.prune_const:
-            os.environ[_PRUNE_CONST_ENV] = "1"
+            _put_env(_PRUNE_CONST_ENV, "1")
 
         if not self._shim_path or self.preload is Preload.NONE:
             return
