@@ -473,10 +473,12 @@ def run_cell(
     """Run one campaign and return its parsed outcome."""
     workdir = Path(tempfile.mkdtemp(prefix=f"paired_{arm}_"))
     _seed_workdir(target, workdir)
+    # Via the LD_PRELOAD wrapper: an ASAN .so needs libasan preloaded; the
+    # wrapper adds it only when the target imports __asan_init.
     cmd = [
         sys.executable,
         "-m",
-        "fuzzer_tool",
+        "fuzzer_tool.cli.ldpreload_wrapper",
         "fuzz",
         target,
         "-d",
