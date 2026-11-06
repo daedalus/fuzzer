@@ -36,7 +36,7 @@
 # against whichever versioned ffmpeg_read_*.so targets got built.
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
-#   tools/vendor_brainflayer.sh -> $FUZZ_VENDOR_ROOT/brainflayer (ec_pubkey_diff.so, hash_simd_diff.so)
+#   tools/vendor_brainflayer.sh -> $FUZZ_VENDOR_ROOT/brainflayer (ec_pubkey_diff.so, hash_simd_diff.so, brainflayer_read.so)
 #
 # Layout (2026-09-03, see session notes):
 #   $FUZZ_VENDOR_ROOT/<lib>/     sources (read-only here, fetched by vendor scripts)
@@ -245,7 +245,7 @@ if [ -f "$GREP_SRC/config.h" ] && grep -q "define HAVE_LIBPCRE 1" "$GREP_SRC/con
 fi
 SECP256K1="${SECP256K1_DIR:-$VENDOR/secp256k1}"
 # brainflayer + its pinned libsecp256k1 (vendor/brainflayer/secp256k1), for
-# the ec_pubkey_diff and hash_simd_diff differential targets.
+# the ec_pubkey_diff, hash_simd_diff and brainflayer_read differential targets.
 BRAINFLAYER="${BRAINFLAYER_DIR:-$VENDOR/brainflayer}"
 BRAINFLAYER_SECP256K1="$BRAINFLAYER/secp256k1"
 SQLITE="${SQLITE_DIR:-$VENDOR/sqlite}"
@@ -1096,6 +1096,29 @@ compile_brainflayer_hash_objects() {
     fi
 }
 
+# ── Compile brainflayer_read objects ──────────────────────────────
+# bloom.c (sliced bloom filter: trailer validation, slicing, scalar + AVX2
+# lookups) and mmapf.c (bloom_open's mmap helper). Same shim discipline.
+# bloom.c needs -lm (pow/exp/round), added at link.
+compile_brainflayer_bloom_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -f "$BRAINFLAYER/bloom.c" ] || return 1
+    echo "Compiling brainflayer bloom objects${suffix:+ ($suffix)}..."
+    local cov_flag
+    cov_flag="$(cov_flag_for_cc "$cc")"
+    local rc=0
+    $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags \
+        -c "$BRAINFLAYER/bloom.c" -o "/tmp/bf_bloom${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
+    $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags \
+        -c "$BRAINFLAYER/mmapf.c" -o "/tmp/bf_mmapf${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "brainflayer bloom objects${suffix:+ ($suffix)}"
+    else
+        warn "brainflayer bloom objects${suffix:+ ($suffix)} failed"
+        return 1
+    fi
+}
+
 # ── Compile the sqlite amalgamation object ─────────────────────────
 # Vendored via tools/vendor_sqlite.sh (extracts to vendor/sqlite/).
 #
@@ -1942,6 +1965,24 @@ build_standalone_so_targets() {
         warn "hash_simd_diff${out_suffix}.so: vendor/brainflayer not found, skipping (run tools/vendor_brainflayer.sh)"
     fi
 
+    # brainflayer_read — brainflayer's sliced bloom filter vs an independent
+    # slice reference, scalar vs AVX2 lookups. Same object discipline.
+    local BF_BLOOM_OBJS="/tmp/bf_bloom${suffix}.o /tmp/bf_mmapf${suffix}.o"
+    local BF_BLOOM_INC="-I$BRAINFLAYER"
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" ]; then
+        :  # target source absent — nothing to build
+    elif [ "$suffix" = "_nosan" ]; then
+        if compile_brainflayer_bloom_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+            build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" "$TARGETS/brainflayer_read_nosan.so" "$BF_BLOOM_OBJS -lm -Wl,--export-dynamic" "$flags $BF_BLOOM_INC"
+        else
+            warn "brainflayer_read_nosan.so: compile failed, skipping"
+        fi
+    elif compile_brainflayer_bloom_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+        build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" "$TARGETS/brainflayer_read${out_suffix}.so" "$BF_BLOOM_OBJS -lm -Wl,--export-dynamic" "$flags $BF_BLOOM_INC"
+    else
+        warn "brainflayer_read${out_suffix}.so: vendor/brainflayer not found, skipping (run tools/vendor_brainflayer.sh)"
+    fi
+
     # sqlite_read — vendored SQLite amalgamation (tools/vendor_sqlite.sh
     # extracts to vendor/sqlite). Same object discipline as lz4_read and
     # secp256k1_read above: sqlite3.c is compiled separately, without
@@ -2099,6 +2140,7 @@ verify_afl() {
              "$TARGETS"/secp256k1_read.so "$TARGETS"/secp256k1_read_nosan.so \
              "$TARGETS"/ec_pubkey_diff.so "$TARGETS"/ec_pubkey_diff_noasan.so "$TARGETS"/ec_pubkey_diff_nosan.so "$TARGETS"/ec_pubkey_diff_asan.so \
              "$TARGETS"/hash_simd_diff.so "$TARGETS"/hash_simd_diff_noasan.so "$TARGETS"/hash_simd_diff_nosan.so "$TARGETS"/hash_simd_diff_asan.so \
+             "$TARGETS"/brainflayer_read.so "$TARGETS"/brainflayer_read_noasan.so "$TARGETS"/brainflayer_read_nosan.so "$TARGETS"/brainflayer_read_asan.so \
              "$TARGETS"/sqlite_read.so "$TARGETS"/sqlite_read_nosan.so \
              "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so \
              "$TARGETS"/fuzzgoat_read "$TARGETS"/fuzzgoat_read_nosan "$TARGETS"/fuzzgoat_read.so "$TARGETS"/fuzzgoat_read_nosan.so \
@@ -2950,6 +2992,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "ec_pubkey_diff" "$state" "$([ -f "$BRAINFLAYER/ec_pubkey_fast.c" ] && echo "found at $BRAINFLAYER" || echo "not vendored — run tools/vendor_brainflayer.sh")"
     state=$([ -f "$BRAINFLAYER/sha256_pub.c" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "hash_simd_diff" "$state" "$([ -f "$BRAINFLAYER/sha256_pub.c" ] && echo "found at $BRAINFLAYER" || echo "not vendored — run tools/vendor_brainflayer.sh")"
+    state=$([ -f "$BRAINFLAYER/bloom.c" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "brainflayer_read" "$state" "$([ -f "$BRAINFLAYER/bloom.c" ] && echo "found at $BRAINFLAYER" || echo "not vendored — run tools/vendor_brainflayer.sh")"
     echo ""
 }
 

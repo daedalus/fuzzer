@@ -260,6 +260,7 @@ What the counters buy:
 | `sqlite_read` | SQLite amalgamation | `deserialize` + `integrity_check` + full table scan, sandboxed to `:memory:` with an authorizer and a hard heap limit; **no mode byte**, so the 16-byte magic stays at offset 0 for the mutator sniffer |
 | `lz4_read` | LZ4 | block and frame APIs |
 | `secp256k1_read` | libsecp256k1 | |
+| `brainflayer_read` | brainflayer `bloom.c` | differential: sliced bloom filter slicing vs reference, scalar vs AVX2 lookups |
 | `grep_read`, `fgrep_read` | GNU grep, fgrep | |
 | `fuzzgoat_read`, `unrar_read`, `tailslayer_read` | third-party | |
 | `test_target`, `nop_target`, `heap_oob_target`, `asan_target`, `ubsan_target`, `tracecmp_target` | synthetic | fixtures with known-planted bugs, used by the test suite |
