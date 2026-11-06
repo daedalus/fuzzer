@@ -22,8 +22,10 @@ import threading
 import time
 
 from fuzzer_tool.adapters.process import (
+    CMPLOG_PREFIXES,
     CRASH_SIGNALS,
     SIGNAL_CRASH_CODES,
+    detached_env,
     environ_copy,
     run_target_fast,
     run_target_file,
@@ -769,7 +771,9 @@ class TargetRunner:
                 fh.write(_LOADER_SCRIPT)
             runner._loader_path = path
 
-        env = environ_copy()
+        # No cmplog: a whole interpreter's comparisons would land in the
+        # next execution's vector. __AFL_* stays for the crash record.
+        env = detached_env(CMPLOG_PREFIXES)
         env["_PTRACE_TRACEME"] = "1"
         env["_TIMEOUT"] = str(int(f.timeout))
         proc = subprocess.Popen(

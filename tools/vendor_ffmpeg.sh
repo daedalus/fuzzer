@@ -243,8 +243,8 @@ apply_patches() {
             return 1
         fi
     else
-        # Check if already applied by trying a dry-run
-        if (cd "$FFMPEG_DIR" && git apply --check "$patch_file" 2>&1 | grep -q "Check patch"); then
+        # Already applied iff it reverses cleanly (upstream in 9.0.2+).
+        if (cd "$FFMPEG_DIR" && git apply --check -R "$patch_file" 2>/dev/null); then
             echo "  OK: Patch already applied"
         else
             echo "  WARN: Patch may not apply cleanly to FFmpeg $FFMPEG_VERSION"

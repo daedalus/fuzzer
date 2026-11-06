@@ -3480,7 +3480,7 @@ class _VerseNode:
 
 class _WsNode(_VerseNode):
     def __init__(self, samples):
-        self._samples = list(set(samples))
+        self._samples = list(dict.fromkeys(samples))  # first-seen order, not hash order
 
     def Generate(self, v, buf):
         if v._rng.random() != 0 and self._samples:
@@ -3492,7 +3492,7 @@ class _WsNode(_VerseNode):
 
 class _AlphaNumNode(_VerseNode):
     def __init__(self, samples):
-        self._samples = list(set(samples))
+        self._samples = list(dict.fromkeys(samples))  # first-seen order, not hash order
 
     def Generate(self, v, buf):
         if v._rng.random() != 0 and self._samples:
@@ -3515,7 +3515,7 @@ class _AlphaNumNode(_VerseNode):
 
 class _NumNode(_VerseNode):
     def __init__(self, samples, hex=False):
-        self._samples = list(set(samples))
+        self._samples = list(dict.fromkeys(samples))  # first-seen order, not hash order
         self._hex = hex
 
     def Generate(self, v, buf):

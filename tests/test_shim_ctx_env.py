@@ -9,10 +9,12 @@ build has no walk to switch on. The Python side reads the same variable
 
 from __future__ import annotations
 
+import functools
 import inspect
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -45,6 +47,11 @@ int main(void) {
 """
 SIZE = 1024
 
+# Separation tests hash the two call sites' return addresses. At the default
+# 8 bits they collide 1 time in 256 by layout alone: clang 18.1.3 put them at
+# 0x7995 and 0x799a, both ctx 34. 32 bits makes that 2**-32.
+WIDE = "-D__AFL_CTX_BITS=32"
+
 
 @pytest.fixture(scope="module")
 def ctx_target(tmp_path_factory):
@@ -54,6 +61,14 @@ def ctx_target(tmp_path_factory):
 @pytest.fixture(scope="module")
 def free_target(tmp_path_factory):
     return _build(tmp_path_factory.mktemp("cx_off"), _DRIVER, "-D__AFL_CTX_SENSITIVE=0")
+
+
+@functools.cache
+def _widened(exe: Path, default: str) -> Path:
+    """The fixture's driver rebuilt at WIDE, beside it (pytest tmp)."""
+    out = exe.parent / "wide"
+    out.mkdir(exist_ok=True)
+    return _build(out, _DRIVER, default, WIDE)
 
 
 def _run(exe, env_value):
@@ -89,10 +104,11 @@ class TestShimReadsEnv:
         assert off_by_env
 
     def test_on_separates_the_two_call_sites(self, ctx_target):
-        _, _, on = _run(ctx_target, None)
-        _, _, off = _run(ctx_target, "0")
+        wide = _widened(ctx_target, "-D__AFL_CTX_SENSITIVE=1")
+        _, _, on = _run(wide, None)
+        _, _, off = _run(wide, "0")
         assert len(on) > len(off)
-        assert _run(ctx_target, "1")[2] == on
+        assert _run(wide, "1")[2] == on
 
     @pytest.mark.parametrize(("env_value", "mode"), [(None, 0), ("0", 0), ("1", 1)])
     def test_context_free_build_follows_the_env_both_ways(self, free_target, env_value, mode):
@@ -100,8 +116,9 @@ class TestShimReadsEnv:
         assert (got, err) == (mode, "")
 
     def test_context_free_build_switched_on_separates_call_sites(self, free_target):
-        _, _, off = _run(free_target, None)
-        _, _, on = _run(free_target, "1")
+        wide = _widened(free_target, "-D__AFL_CTX_SENSITIVE=0")
+        _, _, off = _run(wide, None)
+        _, _, on = _run(wide, "1")
         assert len(on) > len(off)
 
     def test_zero_width_build_stays_off_even_when_asked(self, tmp_path_factory):
