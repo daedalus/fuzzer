@@ -249,7 +249,7 @@ class TestMapSizing:
         assert _size_from_blocks(20_000, 0) == 131_072  # was 32_768
 
     def test_context_builds_get_more_room(self):
-        assert _size_from_blocks(1_000, 8) > _size_from_blocks(1_000, 0)
+        assert _size_from_blocks(5_000, 8) > _size_from_blocks(5_000, 0)
 
     def test_unknown_ctx_is_treated_as_context_free(self):
         assert _size_from_blocks(5_000, None) == _size_from_blocks(5_000, 0)

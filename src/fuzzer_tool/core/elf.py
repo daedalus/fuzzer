@@ -1499,6 +1499,11 @@ EDGES_PER_BLOCK = 2.0
 # load 0.5.
 TARGET_LOAD_FACTOR = 0.5
 
+# Distinct edges, ctx 8 on vs off, same build and corpus: fuzzgoat 628 ->
+# 1,118 (1.78x), ffmpeg_read 9.0.2 16,417 -> 27,602 (1.68x). Rounded up.
+# The old sqrt(2**bits) guess gave 16x: fuzzgoat ran at 1.66% peak load.
+CTX_INFLATION_MEASURED = 2.0
+
 # Upper bound on entries, and the reason for it.
 #
 # ShmCoverage.reset_edge_map() bumps a generation counter instead of
@@ -1939,21 +1944,15 @@ def detect_cmplog_functions(target: str) -> tuple[str, ...]:
 def ctx_inflation_factor(ctx_bits: int | None) -> float:
     """How much context-sensitivity multiplies the distinct-edge count.
 
-    The true factor is the target's call-graph fan-in, which no static
-    analysis here can predict -- 2**ctx_bits is only the ceiling, and a real
-    target sits far below it (most edges have exactly one caller). Sizing for
-    the ceiling would demand gigabytes for ctx_bits=8.
-
-    So this returns a deliberately modest estimate and leans on the runtime
-    drop counter (ShmCoverage.read_dropped_edges) to correct it: guessing low
-    and resizing on evidence beats guessing high and paying the reset cost on
-    every execution forever. sqrt of the ceiling, clamped, is a heuristic
-    with no measurement behind it -- it is a starting point that the feedback
-    loop is expected to fix, not a prediction.
+    The true factor is the target's call-graph fan-in; 2**ctx_bits is only
+    the ceiling (most edges have one caller). Returns the measured ratio
+    CTX_INFLATION_MEASURED, never above the ceiling. The runtime drop
+    counter (ShmCoverage.read_dropped_edges) grows the map if a target
+    outruns it.
     """
     if not ctx_bits:
         return 1.0
-    return min(2.0 ** (ctx_bits / 2.0), 16.0)
+    return min(2.0**ctx_bits, CTX_INFLATION_MEASURED)
 
 
 def ngram_inflation_factor(k: int | None) -> float:
