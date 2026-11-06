@@ -304,6 +304,10 @@ ARMS: dict[str, list[str]] = {
     "field-hmm": ["--field-hmm"],
     # A/A control (Rule 46): baseline again, must not reject.
     "field-hmm-ctl": [],
+    # Coupon-collector first pass: every op once per n picks vs uniform
+    # (~n*H_n picks to try all). ctl is baseline again (Rule 46).
+    "round-robin": ["--round-robin"],
+    "round-robin-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -395,6 +399,8 @@ ARM_BASELINES: dict[str, str] = {
     "seed-lottery-transfer": "seed-lottery-lineage",
     "field-hmm": "baseline",
     "field-hmm-ctl": "baseline",
+    "round-robin": "baseline",
+    "round-robin-ctl": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
