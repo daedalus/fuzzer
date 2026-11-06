@@ -7,6 +7,8 @@ import random
 from fuzzer_tool.core.mutations.flv import FlvMutator, parse_flv, serialize_flv
 from fuzzer_tool.core.operator_registry import format_gate_matches
 
+from .support.scripted_rng import ScriptedRng
+
 
 def _flv_bytes(rng=None) -> bytes:
     return FlvMutator()._generate_random_flv(rng=rng or random.Random(1))
@@ -36,13 +38,16 @@ class TestFlvMutator:
     def test_mutate_changes_output_over_many_trials(self):
         data = _flv_bytes(random.Random(1))
         mutator = FlvMutator()
-        changed = False
-        for i in range(50):
-            out = mutator.mutate(data, max_len=len(data) * 2, rng=random.Random(i))
-            if out != data:
-                changed = True
-                break
-        assert changed
+        stream_id_op, stream_id = 4, 1
+        # Op 4 sets tag 0's stream_id: after header, PreviousTagSize(4),
+        # type(1) + data_size(3) + timestamp(4).
+        rng = ScriptedRng(randints=[stream_id_op, stream_id], choice_idxs=[0])
+        out = mutator.mutate(data, max_len=len(data) * 2, rng=rng)
+
+        off = int.from_bytes(data[5:9], "big") + 4 + 8
+        expected = bytearray(data)
+        expected[off : off + 3] = stream_id.to_bytes(3, "big")
+        assert out == bytes(expected)
 
     def test_mutate_output_stays_within_max_len(self):
         data = _flv_bytes(random.Random(1))

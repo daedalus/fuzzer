@@ -15,6 +15,8 @@ from fuzzer_tool.core.mutations.mpegts import (
 )
 from fuzzer_tool.core.operator_registry import format_gate_matches
 
+from .support.scripted_rng import ScriptedRng
+
 
 def _pat_packet(pid: int = PAT_PID, cc: int = 0) -> bytes:
     payload = bytes([0x00, 0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00])
@@ -103,15 +105,14 @@ class TestMpegtsMutator:
     def test_mutate_changes_output_over_many_trials(self):
         _packets_unused, data = self._packets()
         mutator = MpegtsMutator()
-        rng = random.Random(1234)
-        changed = False
-        for i in range(50):
-            rng.seed(i)
-            out = mutator.mutate(data, max_len=len(data) * 2, rng=rng)
-            if out != data:
-                changed = True
-                break
-        assert changed
+        tei_op = 2
+        # Op 2 flips packet 0's transport_error_indicator (top bit of byte 1).
+        rng = ScriptedRng(randints=[tei_op], choice_idxs=[0])
+        out = mutator.mutate(data, max_len=len(data) * 2, rng=rng)
+
+        expected = bytearray(data)
+        expected[1] ^= 0x80
+        assert out == bytes(expected)
 
     def test_mutate_output_stays_within_max_len(self):
         _packets_unused, data = self._packets()

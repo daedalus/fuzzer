@@ -19,9 +19,11 @@ import random
 import pytest
 
 from fuzzer_tool.core.exhaustive_pool import ExhaustivePool
-from fuzzer_tool.core.mutations.generic import _swap_tuple
+from fuzzer_tool.core.mutations.generic import _non_identity_permutations, _swap_tuple
 from fuzzer_tool.core.permutation import perm_sign
 from fuzzer_tool.core.rand_pool import RandPool
+
+from .support.scripted_rng import ScriptedRng
 
 
 @pytest.fixture(params=[random, RandPool(seed=1234)], ids=["stdlib_random", "rand_pool"])
@@ -130,15 +132,22 @@ def test_odd_m_result_is_never_a_pure_rotation_of_picked(rng):
     # shape used for even m (which is what the parity trap warns
     # against): the m-cycle rotation should not be the *only* shape
     # produced.
+    class _SampleRng(ScriptedRng):
+        """ScriptedRng whose sample() returns the first k of the population."""
+
+        def sample(self, population, k):
+            return population[:k]
+
     for m in (3, 5, 7):
-        rotations_only = True
-        for _ in range(200):
-            picked, permuted = _swap_tuple(10, rng, m)
-            rotation = picked[1:] + picked[:1]
-            if permuted != rotation:
-                rotations_only = False
-                break
-        assert not rotations_only, f"m={m} fallback degenerated into pure rotation"
+        # Script choice() onto the first-two transposition: odd, so never
+        # an m-cycle rotation.
+        swap_first_two = (1, 0, *range(2, m))
+        idx = _non_identity_permutations(m).index(swap_first_two)
+        picked, permuted = _swap_tuple(10, _SampleRng(choice_idxs=[idx]), m)
+
+        assert picked == tuple(range(m))
+        assert permuted == swap_first_two
+        assert permuted != picked[1:] + picked[:1], f"m={m} fallback degenerated into pure rotation"
 
 
 # ── Non-degenerate distribution sanity ────────────────────────────────────

@@ -80,6 +80,11 @@ HORIZON = 0.5
 
 ESTIMATORS = ("gt", "chao", "gtoul")
 
+#: ETA search: grid points over the horizon (first-crossing scan), then
+#: bisection steps inside the bracket (span / 2^60: below float resolution).
+ETA_GRID = 64
+ETA_BISECT = 60
+
 
 # ── Pure estimators ────────────────────────────────────────────────────
 
@@ -133,6 +138,45 @@ def good_toulmin(qk: Sequence[float], t: int, ratio: float) -> float:
             coef *= (horizon + i) / (t - i)
         sign = -sign
     return total
+
+
+def execs_to_new(qk: Sequence[float], t: int, k: float, ratio_max: float = HORIZON) -> float | None:
+    """Coupon-collector ETA: executions until ``k`` new edges are expected.
+
+    Smallest ``h`` in ``(0, ratio_max * t]`` with ``good_toulmin(h / t) >= k``;
+    None past that window (the series is unreliable beyond it) or when no
+    singletons remain. ``U(h)`` is not monotone under heavy Q2, so a grid
+    finds the first crossing and bisection refines it::
+
+        U │      ╭──╮          k crossed first at h*, not on the falling side
+        k ┼ ─ ─ ●─ ─ ╲─ ─
+          │   ╱        ╲
+          └──h*─────────── h
+    """
+    if t <= 0 or k <= 0 or not qk or qk[0] <= 0:
+        return None
+
+    # Grid scan for the first bracket [lo, hi] with U(lo) < k <= U(hi).
+    span = ratio_max * t
+    lo = 0.0
+    hi = None
+    for j in range(1, ETA_GRID + 1):
+        h = span * j / ETA_GRID
+        if good_toulmin(qk, t, h / t) >= k:
+            hi = h
+            break
+        lo = h
+    if hi is None:
+        return None
+
+    # Bisection inside the bracket.
+    for _ in range(ETA_BISECT):
+        mid = (lo + hi) / 2
+        if good_toulmin(qk, t, mid / t) >= k:
+            hi = mid
+        else:
+            lo = mid
+    return hi
 
 
 def shrunk_m0(q1: int, t: int, prior_m0: float, prior_strength: float) -> float:
@@ -278,6 +322,26 @@ class GoodTuringSeedStrategy:
     def residual_risk(self) -> float:
         """Campaign-wide ``M0``: P(next exec of any seed hits an unseen edge)."""
         return self._m0(self._global)
+
+    def execs_to_edges(self, k: float) -> float | None:
+        """Campaign-wide executions until ``k`` new edges; None past the horizon.
+
+        ``gtoul`` inverts the full series; ``gt``/``chao`` use the first-order
+        rate ``k / M0`` inside the same window.
+        """
+        g = self._global
+        if self._estimator == "gtoul":
+            return execs_to_new(g.qk, g.t, k, self._horizon)
+
+        m0 = self._m0(g)
+        if m0 <= 0 or k <= 0:
+            return None
+        eta = k / m0
+        return eta if eta <= self.eta_window() else None
+
+    def eta_window(self) -> float:
+        """Executions ``execs_to_edges`` can see ahead (``horizon * T``)."""
+        return self._horizon * self._global.t
 
     def discovery_probability(self, seed: bytes) -> float:
         """Shrunk ``M0`` for *seed*; the global rate while it is unfuzzed."""

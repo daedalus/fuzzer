@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from fuzzer_tool.core.rand_pool import _POOL_ENTRIES, RandPool
+from tests.support.coupon import coverage_budget
 
 # ── Pool internals ──────────────────────────────────────────────────────
 
@@ -180,8 +181,8 @@ class TestRandint:
             assert 0 <= v <= 10
 
     def test_range(self):
-        p = RandPool()
-        vals = {p.randint(0, 1) for _ in range(200)}
+        p = RandPool(seed=1)
+        vals = {p.randint(0, 1) for _ in range(coverage_budget(2))}
         assert vals == {0, 1}
 
     def test_advances_pool(self):
@@ -842,7 +843,7 @@ class TestRandomBetween:
     def test_power_of_two_width(self):
         """Power-of-two widths exercise the mask fast path."""
         p = RandPool(seed=3)
-        vals = {p.random_between(0, 15) for _ in range(2000)}
+        vals = {p.random_between(0, 15) for _ in range(coverage_budget(16))}
         assert vals == set(range(16))
 
     def test_non_power_of_two_is_uniform(self):

@@ -21,6 +21,7 @@ import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.op_tsallis import TsallisINFScheduler, tsallis_probs
+from tests.support.coupon import coverage_budget
 from tests.support.scripted_rng import ScriptedRng
 
 
@@ -218,12 +219,13 @@ def test_centred_loss_stays_uniform():
 
 
 def test_equal_operators_are_all_reached():
-    """Adversarial for lock-in: 252 equal 5% arms over 20k rounds. The
-    running-mean baseline this replaced left 94 never drawn."""
+    """Adversarial for lock-in: 252 equal 5% arms, covered within the draws a
+    uniform picker needs (coupon budget, miss <= 1e-9). The running-mean
+    baseline this replaced left 94 never drawn in 20k."""
     s, arms = _with_arms(252)
     env = random.Random(1234)
     seen = set()
-    for _ in range(20_000):
+    for _ in range(coverage_budget(len(arms))):
         op = s.select_op(arms)
         seen.add(op)
         s.record(op, env.random() < 0.05)

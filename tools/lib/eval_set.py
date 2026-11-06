@@ -179,6 +179,12 @@ FUZZGOAT_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/fuzzgoat_read_noasan.so", "-D dictionaries/json.dict"),
 ]
 
+# fuzzgoat_asan: same target, ASAN build; run_cell preloads libasan through
+# the LD_PRELOAD wrapper. Not comparable with the noasan set.
+FUZZGOAT_ASAN_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/fuzzgoat_read_asan.so", "-D dictionaries/json.dict"),
+]
+
 # fuzzgoat_katz: trace-pc fuzzgoat (tools/build_targets.sh --distance), the
 # build the Katz node channel needs; noasan for the reason above. Not
 # comparable with the fuzzgoat set (different instrumentation).
@@ -191,6 +197,12 @@ FUZZGOAT_KATZ_TARGETS: list[tuple[str, str]] = [
 # Cells start from an empty corpus like every set. Not comparable with others.
 FFMPEG_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/ffmpeg_read_9.0.2_noasan.so", "-D dictionaries/wav.dict"),
+]
+
+# ffmpeg_asan: FFmpeg 9.0.2 ASAN (tools/build_targets.sh --ffmpeg-opts=asan),
+# libasan preloaded by run_cell's wrapper. Not comparable with others.
+FFMPEG_ASAN_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/ffmpeg_read_9.0.2_asan.so", "-D dictionaries/wav.dict"),
 ]
 
 # ffmpeg_803: FFmpeg 8.0.3 (FFMPEG_VERSIONS=8.0.3 tools/vendor_ffmpeg.sh
@@ -214,8 +226,10 @@ TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "direct_lite_signal": DIRECT_LITE_SIGNAL_TARGETS,
     "container_signal": CONTAINER_SIGNAL_TARGETS,
     "fuzzgoat": FUZZGOAT_TARGETS,
+    "fuzzgoat_asan": FUZZGOAT_ASAN_TARGETS,
     "fuzzgoat_katz": FUZZGOAT_KATZ_TARGETS,
     "ffmpeg": FFMPEG_TARGETS,
+    "ffmpeg_asan": FFMPEG_ASAN_TARGETS,
     "ffmpeg_803": FFMPEG_803_TARGETS,
 }
 

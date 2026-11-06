@@ -65,18 +65,14 @@ class TestUtf8Widen:
         assert widened
 
     def test_widens_different_positions(self):
-        seen_positions = set()
-        for _ in range(30):
-            buf = bytearray(b"abcdef")
+        """Scripted pick widens exactly that position (every position reachable)."""
+        src = b"abcdef"
+        for idx, b in enumerate(src):
+            self.engine.f._rng = ScriptedRng(choice_idxs=[idx])
+            buf = bytearray(src)
             self.engine._op_utf8_widen(buf, 0, b"")
-            assert len(buf) == 7  # exactly one byte widened to 2 bytes
-            # Find which original position was widened (the 2-byte sequence)
-            for i in range(6):
-                if buf[i] >= 0xC0:
-                    seen_positions.add(i)
-                    break
-        # Over 30 trials we should see at least 3 different positions
-        assert len(seen_positions) >= 3, f"Only saw positions {seen_positions}"
+            overlong = bytes([0xC0 | (b >> 6), 0x80 | (b & 0x3F)])
+            assert buf == src[:idx] + overlong + src[idx + 1 :]
 
     def test_empty_buffer(self):
         buf = bytearray(b"")
@@ -973,28 +969,18 @@ class TestVarsizeOperator:
         self.engine = OperatorEngine(_make_minimal_fuzzer())
 
     def test_varsize_can_grow_buffer(self):
-        """varsize can insert bytes into buffer."""
-        grew = False
-        for _ in range(50):
-            buf = bytearray(b"abcdefgh")
-            self.engine._op_varsize(buf, 0, b"")
-            if len(buf) > 8:
-                grew = True
-                assert len(buf) <= 16  # max insert 8 bytes
-                break
-        assert grew, "varsize should sometimes grow the buffer"
+        """varsize can insert bytes into buffer (mode 0, size 3, at 2)."""
+        self.engine.f._rng = ScriptedRng(randints=[0, 3, 2], randbytes=[b"XYZ"])
+        buf = bytearray(b"abcdefgh")
+        self.engine._op_varsize(buf, 0, b"")
+        assert buf == b"ab" + b"XYZ" + b"cdefgh"
 
     def test_varsize_can_shrink_buffer(self):
-        """varsize can delete bytes from buffer."""
-        shrank = False
-        for _ in range(50):
-            buf = bytearray(b"abcdefgh")
-            self.engine._op_varsize(buf, 0, b"")
-            if len(buf) < 8:
-                shrank = True
-                assert len(buf) >= 1  # must keep at least 1 byte
-                break
-        assert shrank, "varsize should sometimes shrink the buffer"
+        """varsize can delete bytes from buffer (mode 1, size 3, at 2)."""
+        self.engine.f._rng = ScriptedRng(randints=[1, 3, 2])
+        buf = bytearray(b"abcdefgh")
+        self.engine._op_varsize(buf, 0, b"")
+        assert buf == b"ab" + b"fgh"
 
     def test_varsize_respects_max_len(self):
         """varsize must not grow buffer beyond max_len."""
@@ -1012,15 +998,16 @@ class TestVarsizeOperator:
         assert buf == b""
 
     def test_varsize_single_byte_can_only_grow(self):
-        """Single-byte buffer can only grow (must keep at least 1 byte)."""
-        grew = False
-        for _ in range(50):
-            buf = bytearray(b"x")
-            self.engine._op_varsize(buf, 0, b"")
-            if len(buf) > 1:
-                grew = True
-                break
-        assert grew, "varsize should be able to grow single-byte buffer"
+        """Single-byte buffer: insert grows it, delete is a no-op."""
+        self.engine.f._rng = ScriptedRng(randints=[0, 1, 1], randbytes=[b"Y"])
+        buf = bytearray(b"x")
+        self.engine._op_varsize(buf, 0, b"")
+        assert buf == b"xY"
+
+        self.engine.f._rng = ScriptedRng(randints=[1])
+        buf = bytearray(b"x")
+        self.engine._op_varsize(buf, 0, b"")
+        assert buf == b"x"
 
     def test_varsize_never_deletes_all(self):
         """varsize never reduces buffer to zero bytes."""

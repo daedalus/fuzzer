@@ -8,6 +8,8 @@ from fuzzer_tool.core.mutations.weizz_structural import WeizzChunkMutator, Weizz
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY
 
+from .support.scripted_rng import ScriptedRng
+
 
 def _ctx(pairs, *, enabled=True, max_len=4096):
     return MutationContext(
@@ -44,14 +46,15 @@ def test_field_mutate_changes_bytes_inside_field():
     pairs = [(b"HEAD", b"XXXX"), (b"BODY", b"YYYY")]
     ctx = _ctx(pairs, enabled=True)
     m = WeizzFieldMutator()
-    rng = random.Random(0)
-    out = None
-    for _ in range(40):
-        candidate = m.mutate(data, rng, max_len=64, context=ctx)
-        if candidate is not None and candidate != data:
-            out = candidate
-            break
-    assert out is not None
+    body_span, bit_flip, pos, bit = 1, 2, 5, 3
+    # Both spans are magic, so no non-magic roll: pick BODY span (4..8),
+    # bit-flip branch, byte 5, bit 3.
+    rng = ScriptedRng(randints=[body_span, bit_flip, pos, bit])
+    out = m.mutate(data, rng, max_len=64, context=ctx)
+
+    expected = bytearray(data)
+    expected[pos] ^= 1 << bit
+    assert out == bytes(expected)
     assert len(out) == len(data)
 
 
