@@ -129,6 +129,25 @@ _OS_SEED_ARMS = {
     "gram": "_seed_gram",
     "lottery": "_seed_lottery",
 }
+# Fallback chain of _pick_unarbitrated, in priority order: (gating fuzzer
+# attribute, picker method, OS arm name or None). An arm whose attribute is
+# None declines without side effects, so only armed ones are called.
+_FALLBACK_ARMS = (
+    ("_entropy_kl", "_pick_entropy_kl_seed", None),
+    ("_entropy_zscore", "_pick_entropy_zscore_seed", None),
+    ("_entropy_deviation", "_pick_entropy_deviation_seed", None),
+    ("_entropic_seed", "_pick_entropic_seed", None),
+    ("_good_turing_seed", "_pick_good_turing_seed", None),
+    ("_entropy_gradient", "_pick_entropy_gradient_seed", None),
+    ("_entropy_loo", "_pick_entropy_loo_seed", None),
+    ("_seed_residual", "_pick_residual_seed", None),
+    ("_seed_strata", "_pick_strata_seed", None),
+    *((attr, "_pick_os_seed", name) for name, attr in _OS_SEED_ARMS.items()),
+    ("_seed_drr", "_pick_seed_drr_seed", None),
+    ("_seed_round_robin", "_pick_seed_round_robin_seed", None),
+)
+_FALLBACK_ATTRS = tuple(attr for attr, _m, _n in _FALLBACK_ARMS)
+
 _OS_SEED_SIGNALS = {
     "stride": ("weight", "cost"),
     "eevdf": ("cost", "weight"),
@@ -357,6 +376,8 @@ class _EdgeVectors:
         self._owners_src = None  # owner dict self.owners was read from
         self._rare_by_set: dict[int, int] = {}  # id(set) -> rare classes, one pass
         self._rare = self._rare_edges
+        # id(set) -> (set, len, stats) for the last prepare's seed sets.
+        self._stats_by_set: dict[int, tuple[set[int], int, tuple[int, int, int]]] = {}
 
     def indices(self, edges: set[int]) -> np.ndarray:
         entry = self._arrays.get(id(edges))
@@ -421,6 +442,36 @@ class _EdgeVectors:
             self.classes = clusters.class_index(np.array(self._ids, dtype=np.int64))
             self._rare_by_set = self._count_rare_classes(seed_sets)
             self._rare = self._rare_classes
+        self._stats_by_set = self._batch_stats(seed_sets)
+
+    def _batch_stats(self, seed_sets: list[set[int]]) -> dict:
+        """``stats`` for every pass set from one gather (was 3 per set).
+
+        Segment sums over the concatenated index arrays: the same integers
+        the per-set sums give. Sets are non-empty (``prepare`` callers drop
+        empty ones), which ``reduceat`` needs.
+        """
+        sets = [s for s in seed_sets if s]
+        if not sets:
+            return {}
+        idx = [self._arrays[id(s)][2] for s in sets]
+        lens = np.fromiter(map(len, idx), dtype=np.int64, count=len(idx))
+        starts = np.concatenate(([0], np.cumsum(lens)[:-1]))
+        flat = np.concatenate(idx)
+
+        n = self.owners[flat]
+        totals = np.add.reduceat(n, starts).tolist()
+        if self.recent is None:
+            overlaps = [0] * len(sets)
+        else:
+            overlaps = np.add.reduceat(self.recent[flat], starts).tolist()
+        if self.classes is None:
+            rares = np.add.reduceat(n <= RARE_EDGE_OWNERS, starts, dtype=np.int64).tolist()
+        else:
+            rares = [self._rare_by_set[id(s)] for s in sets]
+
+        rows = zip(sets, rares, totals, overlaps, strict=True)
+        return {id(s): (s, len(s), (r, t, o)) for s, r, t, o in rows}
 
     def _gather_owners(self, owners, changes) -> None:
         # Owner count per dense index. Incremental when the same dict was
@@ -474,6 +525,9 @@ class _EdgeVectors:
 
     def stats(self, edges: set[int]) -> tuple[int, int, int]:
         """``(rare_count, total_owners, overlap)`` for one seed's edge set."""
+        hit = self._stats_by_set.get(id(edges))
+        if hit is not None and hit[0] is edges and hit[1] == len(edges):
+            return hit[2]
         idx = self.indices(edges)
         n = self.owners[idx]
         overlap = int(self.recent[idx].sum()) if self.recent is not None else 0
@@ -486,6 +540,9 @@ class SeedPicker:
     Holds a reference to the Fuzzer instance for accessing shared state.
     """
 
+    # Instances built without __init__ (tests) rebind arms on first pick.
+    _armed_cache: tuple[tuple, list] | None = None
+
     def __init__(self, fuzzer, seed=None):
         self.f = fuzzer
         # Dense per-seed edge arrays, kept across weight passes; the tables
@@ -497,6 +554,8 @@ class SeedPicker:
         self._pass_xtarget: tuple | None | object = _XT_UNSET
         # (corpus size, exec_count, key -> component) from the last component pass.
         self._group_memo: tuple[int, int, dict[str, int]] | None = None
+        # (arm attribute values, armed pickers); see _armed().
+        self._armed_cache: tuple[tuple, list] | None = None
 
         # Bound once here rather than read off the fuzzer per pick: the
         # katz/tang/aflgo arms below draw from it directly, and a picker
@@ -1267,20 +1326,7 @@ class SeedPicker:
         # Without --elo these arms have no arbiter, so they run ahead of the
         # generic weighted picker the same way kruskal-count does -- and hand
         # the pick straight back when they decline.
-        for pick in (
-            self._pick_entropy_kl_seed,
-            self._pick_entropy_zscore_seed,
-            self._pick_entropy_deviation_seed,
-            self._pick_entropic_seed,
-            self._pick_good_turing_seed,
-            self._pick_entropy_gradient_seed,
-            self._pick_entropy_loo_seed,
-            self._pick_residual_seed,
-            self._pick_strata_seed,
-            *(functools.partial(self._pick_os_seed, name) for name in _OS_SEED_ARMS),
-            self._pick_seed_drr_seed,
-            self._pick_seed_round_robin_seed,
-        ):
+        for pick in self._armed():
             chosen = pick()
             if chosen is not None:
                 return chosen
@@ -1295,6 +1341,28 @@ class SeedPicker:
         if f.corpus:
             return rng.choice(f.corpus)
         return self._format_aware_seed()
+
+    def _armed(self) -> list:
+        """Pickers of the fallback chain whose arm is attached, in order.
+
+        Rebound only when an arm attribute changes (identity compare): the
+        chain used to rebuild 20 callables and call each per pick, though
+        an unattached arm just returns None.
+        """
+        f = self.f
+        state = tuple(getattr(f, attr, None) for attr in _FALLBACK_ATTRS)
+        cached = self._armed_cache
+        if cached is not None and cached[0] == state:
+            return cached[1]
+
+        picks = []
+        for (_attr, method, os_name), arm in zip(_FALLBACK_ARMS, state, strict=True):
+            if arm is None:
+                continue
+            fn = getattr(self, method)
+            picks.append(fn if os_name is None else functools.partial(fn, os_name))
+        self._armed_cache = (state, picks)
+        return picks
 
     def _pick_markov_seed(self) -> bytes:
         f = self.f
