@@ -12,6 +12,7 @@ compatibility, and degenerate-input safety.
 import random
 
 from fuzzer_tool.core.rand_pool import RandPool
+from tests.support.scripted_rng import ScriptedRng
 
 
 def _rng(seed: int = 42) -> random.Random:
@@ -291,15 +292,11 @@ class TestFlacBlockTypeAndFields:
         from fuzzer_tool.core.mutations.flac import BLOCK_TYPE_RESERVED, FlacBlock, FlacMutator
 
         mut = FlacMutator()
-        seen_reserved = False
-        for seed in range(100):
-            mut._rng = _rng(seed)
-            blocks = [FlacBlock(is_last=True, block_type=0, data=b"\x00" * 34)]
-            out = mut._mutate_block_type(blocks, 4096)
-            if out[0].block_type == BLOCK_TYPE_RESERVED:
-                seen_reserved = True
-                break
-        assert seen_reserved, "127 must be a reachable outcome across enough seeds"
+        # block 0, then the last candidate type: reserved 127.
+        mut._rng = ScriptedRng(randints=[0], choice_idxs=[-1])
+        blocks = [FlacBlock(is_last=True, block_type=0, data=b"\x00" * 34)]
+        out = mut._mutate_block_type(blocks, 4096)
+        assert out == [FlacBlock(True, BLOCK_TYPE_RESERVED, blocks[0].data)]
 
     def test_streaminfo_field_mutation_touches_bytes_10_18(self):
         from fuzzer_tool.core.mutations.flac import (

@@ -16,9 +16,18 @@ import pytest
 
 from fuzzer_tool.core.mutations import custom_mutator as cm
 from fuzzer_tool.core.mutator_interface import MutationContext
+from tests.support.scripted_rng import ScriptedRng
 
 CC = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
 pytestmark = pytest.mark.skipif(CC is None, reason="no C compiler")
+
+
+class _IndexRng(ScriptedRng):
+    """ScriptedRng whose randrange() also consumes the randints script."""
+
+    def randrange(self, _n):
+        return next(self._randints)
+
 
 # Keeps a 4-byte magic and asks the host to mutate everything after it.
 _MAGIC_PLUGIN = r"""
@@ -115,7 +124,7 @@ _FAULTS = {
     "fpe": "raise(SIGFPE)",
     "ill": "__builtin_trap()",
     "stack": "d[0] = (uint8_t)rec(d, 0)",
-    "hang": "for (;;) { __asm__ volatile(\"\"); }",
+    "hang": 'for (;;) { __asm__ volatile(""); }',
     "wild_mutate": "LLVMFuzzerMutate((uint8_t *)16, 8, 64)",
 }
 
@@ -130,7 +139,6 @@ size_t LLVMFuzzerCustomCrossOver(const uint8_t *a, size_t na, const uint8_t *b,
     return 1;
 }
 """
-
 
 
 def _build(tmp_path, name: str, src: str) -> str:
@@ -276,8 +284,10 @@ class TestRegistration:
         assert op.mutate(b"AAAABBBB", rng, 64, context=solo) is None
         pair = MutationContext(corpus=[b"AAAABBBB", b"CCCCDDDD"])
         assert op.is_available(pair, b"AAAABBBB")
-        outs = {op.mutate(b"AAAABBBB", rng, 64, context=pair) for _ in range(20)}
-        assert outs == {None, b"AAAADDDD"}  # None when it drew itself as the partner
+        a, b = pair.corpus
+        assert op.mutate(a, _IndexRng(randints=[0]), 64, context=pair) is None
+        got = op.mutate(a, _IndexRng(randints=[1, 0]), 64, context=pair)
+        assert got == a[: len(a) // 2] + b[len(b) // 2 :]
 
 
 class TestIsolation:
@@ -288,14 +298,17 @@ class TestIsolation:
         src = _FAULT_TMPL.replace("FAULT", _FAULTS[kind])
         return cm.CustomMutatorPlugin(_build(tmp_path, kind, src), **kw)
 
-    @pytest.mark.parametrize("kind,name", [
-        ("segv", "SIGSEGV"),
-        ("abort", "SIGABRT"),
-        ("fpe", "SIGFPE"),
-        ("ill", "SIGILL"),
-        ("stack", "SIGSEGV"),
-        ("wild_mutate", "SIGSEGV"),
-    ])
+    @pytest.mark.parametrize(
+        "kind,name",
+        [
+            ("segv", "SIGSEGV"),
+            ("abort", "SIGABRT"),
+            ("fpe", "SIGFPE"),
+            ("ill", "SIGILL"),
+            ("stack", "SIGSEGV"),
+            ("wild_mutate", "SIGSEGV"),
+        ],
+    )
     def test_fault_is_contained(self, tmp_path, rng, kind, name):
         plugin = self._plugin(tmp_path, kind)
         assert plugin.mutate(self.TRIGGER, 64, rng) is None

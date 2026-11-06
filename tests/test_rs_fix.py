@@ -68,6 +68,15 @@ def _hamming(a: bytes, b: bytes) -> int:
     return sum(x != y for x, y in zip(a, b, strict=True))
 
 
+class _BoundedRng(ScriptedRng):
+    """ScriptedRng whose randint() rejects draws outside the caller's bounds."""
+
+    def randint(self, a, b):
+        v = super().randint(a, b)
+        assert a <= v <= b, (a, v, b)
+        return v
+
+
 def _sample(n: int) -> bytes:
     return bytes((i * 7 + 3) % 256 for i in range(n))
 
@@ -170,20 +179,22 @@ class TestFix:
 
     def test_outputs_are_valid_or_within_2t_plus_1_of_original(self):
         """Repair gives a changed valid codeword; injection stays within 2t+1 symbols."""
-        rng = RandPool(seed=11)
         data = QR_DATA + QR_EC  # a valid codeword, nsym 10 -> t = 5
-        seen = set()
-        for _ in range(200):
-            out = rs_fix(data, rng, 10)
-            assert out is not None and len(out) == len(data)
-            if _valid(out, 10):
-                assert out != data
-                seen.add("repaired")
-                continue
-            dist = _hamming(out, data)
-            assert 1 <= dist <= 2 * 5 + 1
-            seen.add("correctable" if dist <= 5 else "uncorrectable")
-        assert seen == {"repaired", "correctable", "uncorrectable"}
+        t = 5
+
+        # span 0, mode 0, 1 edit, pos 0, bit-flip branch, bit 0.
+        out = rs_fix(data, _BoundedRng(randints=[0, 0, 1, 0, 1, 0]), 10)
+        want = bytes([QR_DATA[0] ^ 1]) + QR_DATA[1:]
+        assert out == want + rs_parity(want, 10)
+        assert _valid(out, 10) and out != data
+
+        # span 0, mode 1/2, count at the band's top, identity picks, xor 1 each.
+        for mode, count in ((1, t), (2, 2 * t + 1)):
+            draws = [0, mode, count, *range(count), *([1] * count)]
+            out = rs_fix(data, _BoundedRng(randints=draws), 10)
+            assert out == bytes(b ^ 1 for b in data[:count]) + data[count:]
+            assert _hamming(out, data) == count
+            assert not _valid(out, 10)
 
     def test_correctable_mode_distance_within_t(self):
         # span 0, mode 1 (correctable), 3 errors, positions 0,0,0 (identity picks), values 1,2,3.

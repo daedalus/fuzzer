@@ -18,6 +18,7 @@ from fuzzer_tool.core.schedulers.pos_levy import (
     PositionLevyScheduler,
     _reflect,
 )
+from tests.support.scripted_rng import ScriptedRng as SupportRng
 
 SEED = bytes(1000)
 NO_SPARK = 0.99  # random() draw above SPARK_RATE
@@ -137,12 +138,10 @@ class TestColdAndAnchor:
 
     def test_multi_offset_gain_can_pick_each_offset(self):
         offsets = [3, 50, 700]
-        seen = set()
-        for seed in range(60):
-            lv = PositionLevyScheduler(RandPool(seed=seed))
+        for idx, want in enumerate(offsets):
+            lv = PositionLevyScheduler(SupportRng(randints=[idx]))
             _gain(lv, *offsets)
-            seen.add(lv.anchor(SEED))
-        assert seen == set(offsets)
+            assert lv.anchor(SEED) == want
 
     def test_weight_does_not_change_the_anchor(self):
         lv = _lv()

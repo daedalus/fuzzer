@@ -503,14 +503,15 @@ class TestPopcountLock:
 class TestFloatSqueeze:
     def test_emits_non_finite_doubles(self, seeded):
         """At least one aligned double in the region must be inf or NaN."""
-        found = False
-        for _ in range(40):
-            out = S.float_squeeze(bytes(1024), rng=seeded)
-            values = struct.unpack(f"<{len(out) // 8}d", out)
-            if any(not math.isfinite(v) for v in values):
-                found = True
-                break
-        assert found
+        wides = [wide for wide, _ in S._FLOAT_PATTERNS]
+        doubles = struct.unpack(f"<{len(wides)}d", struct.pack(f"<{len(wides)}Q", *wides))
+        picks = [i for i, d in enumerate(doubles) if not math.isfinite(d)][:2]
+        # width 8, region length 16 at offset 0, little-endian, one pattern per double.
+        rng = ScriptedRng(choice_idxs=[S._FLOAT_WIDTHS.index(8), *picks], randints=[16, 0, 1])
+        out = S.float_squeeze(bytes(1024), rng=rng)
+        head = b"".join(struct.pack("<Q", wides[i]) for i in picks)
+        assert out == head + bytes(1024 - len(head))
+        assert not any(math.isfinite(v) for v in struct.unpack("<2d", out[:16]))
 
     def test_patterns_are_paired_by_value_class(self):
         """Each (f64, f32) entry must denote the same class, not a truncation."""
@@ -533,14 +534,15 @@ class TestDegenerateGeometry:
         """
         monkeypatch.setattr(S, "_GEOMETRY_WIDTHS", (4,))
         monkeypatch.setattr(S, "_GEOMETRY_DIMS", (2,))
-        found = False
-        for _ in range(40):
-            out = S.degenerate_geometry(bytes(1024), rng=seeded)
-            words = struct.unpack(f"<{len(out) // 4}I", out)
-            if any(w and w == words[i + 2] for i, w in enumerate(words[:-2])):
-                found = True
-                break
-        assert found
+        point = (0x01020304, 0x0A0B0C0D)
+        # width/dims idx 0, coincident, region 24 (3 points) at 0, little-endian, base.
+        rng = ScriptedRng(
+            choice_idxs=[0, 0, S._GEOMETRY_MODES.index("coincident")],
+            randints=[24, 0, 1, *point],
+        )
+        out = S.degenerate_geometry(bytes(1024), rng=rng)
+        head = struct.pack("<6I", *(point * 3))
+        assert out == head + bytes(1024 - len(head))
 
     def test_collinear_points_share_a_constant_step(self, seeded, monkeypatch):
         """Assert the run directly rather than bounding distinct deltas.
