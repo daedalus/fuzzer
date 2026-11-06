@@ -261,6 +261,7 @@ class InProcessRunner:
         self.debug = debug
         self.capture_stderr = capture_stderr
         self.use_ptrace = use_ptrace
+        self._placement = placement
 
         self._func: Callable[[bytes], int] | None = None
         self._lib: ctypes.CDLL | None = None
@@ -304,6 +305,28 @@ class InProcessRunner:
         self._forkserver = None
 
         self._start()
+
+    def sibling(
+        self, target: str, function_name: str, coverage_env_id: str | None
+    ) -> "InProcessRunner":
+        """Same mode and options for another target on its own SHM map.
+
+        Example: multi-target runs build one per .so from target 0's runner.
+        """
+        return InProcessRunner(
+            target=target,
+            function_name=function_name,
+            timeout=self.timeout,
+            shm_size=self.shm_size,
+            direct=self.direct,
+            direct_lite=self.direct_lite,
+            coverage_env_id=coverage_env_id,
+            cov=bool(coverage_env_id),
+            debug=self.debug,
+            capture_stderr=self.capture_stderr,
+            use_ptrace=self.use_ptrace,
+            placement=self._placement,
+        )
 
     def _start(self):
         target_lower = self.target.lower()
@@ -459,6 +482,24 @@ class InProcessRunner:
         )
         if reset is not None:
             reset()
+
+    def claim_signals(self) -> None:
+        """Hand the process's crash/timeout/exit handlers to this target.
+
+        Several shim-linked .so in one process share one set of signal
+        dispositions; the active target must own them (afl_shim.c
+        §Signal ownership across modules). No-op on older shims.
+        """
+        self._shim_call("__afl_signals_claim")
+
+    def release_signals(self) -> None:
+        """Stop this target's timeout tick before another target runs."""
+        self._shim_call("__afl_signals_release")
+
+    def _shim_call(self, name: str) -> None:
+        fn = getattr(self._lib, name, None) if self._lib is not None else None
+        if fn is not None:
+            fn()
 
     def shim_health(self) -> tuple[int, ...] | None:
         """Shim counters of the directly loaded target; None when unavailable."""
