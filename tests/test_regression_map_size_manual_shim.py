@@ -7,13 +7,14 @@ branch density. That counts the whole ``.so``: png_read_asan.so read 5,713
 "blocks" and asked for 524,288 entries for ~120 live edges.
 """
 
+import logging
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from fuzzer_tool.core.elf import MAP_SIZE_DEFAULT, estimate_map_size_detail
+from fuzzer_tool.core.elf import MAP_SIZE_DEFAULT, estimate_map_size, estimate_map_size_detail
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIM = ROOT / "src" / "fuzzer_tool" / "adapters" / "afl_shim.c"
@@ -70,3 +71,14 @@ def test_guard_build_keeps_exact_count(built):
 def test_no_shim_still_uses_branch_density(built):
     """Adversarial: a plain .so, no shim -- the new tier must not fire."""
     assert estimate_map_size_detail(built["noshim"]).source == "branch_density"
+
+
+def test_regression_shim_manual_log_names_tier(built, caplog):
+    """The INFO line said "from 0 blocks"; it must name the manual-site tier."""
+    with caplog.at_level(logging.INFO, logger="fuzzer_tool.core.elf"):
+        estimate_map_size(built["manual"])
+
+    sized = [r.getMessage() for r in caplog.records if "map sized" in r.getMessage()]
+    assert sized
+    assert "from 0 blocks" not in sized[-1]
+    assert "shim_manual" in sized[-1]

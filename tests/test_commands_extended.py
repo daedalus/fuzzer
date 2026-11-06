@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -21,6 +22,15 @@ from fuzzer_tool.cli.commands import (
     cmd_tmin,
     main,
 )
+
+# CPU seconds a mocked run() burns so the 200 Hz sampler records ticks.
+BURN_CPU_S = 0.1
+
+
+def _burn_cpu(*_args, **_kwargs) -> None:
+    end = time.process_time() + BURN_CPU_S
+    while time.process_time() < end:
+        pass
 
 
 class TestDetectAsan:
@@ -503,12 +513,14 @@ class TestCmdFuzzConstruction:
         args.profile_mode = "sample"
         args.profile_out = str(tmp_path / "stacks.txt")
         mock_fuzzer = MagicMock()
+        mock_fuzzer.run.side_effect = _burn_cpu
         monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
 
         assert cmd_fuzz(args) == 0
         mock_fuzzer.run.assert_called_once()
         # Collapsed text ("a;b;c N" per line), not a binary pstats dump.
         text = (tmp_path / "stacks.txt").read_bytes().decode("utf-8")
+        assert text.strip(), "sampler wrote no stacks"
         assert all(line.rsplit(" ", 1)[1].isdigit() for line in text.splitlines())
         assert b"\x00" not in (tmp_path / "stacks.txt").read_bytes()
         assert "cProfile" not in capsys.readouterr().out

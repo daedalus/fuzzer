@@ -2143,9 +2143,11 @@ def estimate_map_size(target: str, profile: object | None = None) -> int:
     Priority, logged at INFO on every call so the tier is visible in a run
     log rather than inferred from the number:
 
-    1. sancov guard count, when either sancov section is present (exact).
-    2. TargetProfile.total_branches, avoiding a redundant disassembly.
-    3. branch_density x .text_size estimation.
+    1. sancov section size (guards, cntrs, bools; exact), else
+       __sanitizer_cov_trace_pc call sites.
+    2. shim_manual: shim linked, no sancov or trace-pc -> MAP_SIZE_DEFAULT.
+    3. TargetProfile.total_branches, avoiding a redundant disassembly.
+    4. branch_density x .text_size estimation.
 
     Use estimate_map_size_detail() when the caller needs the tier.
 
@@ -2171,6 +2173,13 @@ def estimate_map_size(target: str, profile: object | None = None) -> int:
         log.info(
             "%s: map sized at %d entries (default -- no sancov section, no "
             "profile, and .text could not be disassembled)",
+            target,
+            est.entries,
+        )
+    elif est.source == "shim_manual":
+        log.info(
+            "%s: map sized at %d entries (default -- shim_manual: only "
+            "hand-placed __afl_map_edge sites, count unreadable)",
             target,
             est.entries,
         )

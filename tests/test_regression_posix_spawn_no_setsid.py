@@ -96,3 +96,40 @@ def test_fallback_timeout_kills_stragglers(tmp_path, no_setsid):
     # Background child shared the group, so the timeout kill reached it.
     straggler = int(err.split()[0])
     assert not _alive(straggler)
+
+
+def test_regression_setsid_fallback_race(tmp_path, monkeypatch):
+    """Another thread switched the group between our setsid try and its failure."""
+    real = os.posix_spawnp
+    calls: list[dict] = []
+
+    def _spawnp(path, argv, env, **kw):
+        calls.append(kw)
+        if not kw.get("setsid"):
+            return real(path, argv, env, **kw)
+
+        # Simulate the other thread winning the switch first.
+        process._spawn_group = process._SPAWN_SETPGROUP
+        raise NotImplementedError("posix_spawnp: setsid unavailable on this platform")
+
+    monkeypatch.setattr(process.os, "posix_spawnp", _spawnp)
+    monkeypatch.setattr(process, "_spawn_group", process._SPAWN_SETSID)
+
+    assert run_target_stdin(_script(tmp_path, "s", "exit 0\n"), b"", TIMEOUT)[0] == 0
+    assert [kw.get("setsid", False) for kw in calls] == [True, False]
+
+
+def test_setpgroup_failure_propagates(monkeypatch):
+    """Adversarial: the fallback itself unsupported raises, no retry loop."""
+    calls: list[dict] = []
+
+    def _spawnp(path, argv, env, **kw):
+        calls.append(kw)
+        raise NotImplementedError("unsupported")
+
+    monkeypatch.setattr(process.os, "posix_spawnp", _spawnp)
+    monkeypatch.setattr(process, "_spawn_group", process._SPAWN_SETSID)
+
+    with pytest.raises(NotImplementedError):
+        process._spawn_grouped(["/bin/true"], {}, [])
+    assert len(calls) == 2
