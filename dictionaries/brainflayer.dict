@@ -1,0 +1,8 @@
+# brainflayer sliced bloom filter trailer (bloom.h: bloom_trailer)
+magic="BLFSLICE"
+version="\x01"
+log2bits_min="\x14"
+log2bits_max="\x28"
+log2bits_lshift="\x21"
+slices_max="\xa0"
+legacy="BLFSLICE\x01\x00"

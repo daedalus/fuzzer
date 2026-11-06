@@ -1,6 +1,6 @@
 #!/bin/bash
 # Vendor brainflayer + its pinned libsecp256k1 for the differential fuzz
-# targets ec_pubkey_diff and hash_simd_diff.
+# targets ec_pubkey_diff, hash_simd_diff and brainflayer_read (bloom filter).
 #
 # Extracts to vendor/brainflayer/, with the pinned libsecp256k1 (the commit
 # brainflayer's own submodule points at) under vendor/brainflayer/secp256k1/.
@@ -149,6 +149,9 @@ if [ "$BUILD_CHECK" -eq 1 ]; then
         -c "$BRAINFLAYER_DIR/sha256_pub.c" -o "$tmpdir/sha256_pub.o" 2>/dev/null || rc=$?
     $cc -O2 -g -fPIC -fno-omit-frame-pointer \
         -c "$BRAINFLAYER_DIR/ripemd160_256.c" -o "$tmpdir/ripemd160_256.o" 2>/dev/null || rc=$?
+    # brainflayer_read side: sliced bloom filter.
+    $cc -O2 -g -fPIC -fno-omit-frame-pointer \
+        -c "$BRAINFLAYER_DIR/bloom.c" -o "$tmpdir/bloom.o" 2>/dev/null || rc=$?
     rm -rf "$tmpdir"
     if [ $rc -eq 0 ]; then
         ok "all objects compile ($cc)"
@@ -163,7 +166,7 @@ fi
 MISSING=0
 for f in ec_pubkey_fast.c ec_pubkey_fast.h mmapf.c mmapf.h \
          sha256_pub.c sha256_pub.h sha256_simd.h \
-         ripemd160_256.c ripemd160_256.h ripemd160_simd.h \
+         ripemd160_256.c ripemd160_256.h ripemd160_simd.h bloom.c bloom.h \
          secp256k1/src/secp256k1.c secp256k1/include/secp256k1.h \
          secp256k1/src/libsecp256k1-config.h; do
     if [ -f "$BRAINFLAYER_DIR/$f" ]; then

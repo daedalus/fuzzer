@@ -1771,6 +1771,28 @@ the wrapper must keep the last *successful* parse in a separate object and never
 touch the loop-scratch object afterwards. Verified: 52 edges / ~79% map saturation
 on a 5k-exec campaign with zero crashes.
 
+### Vendored brainflayer bloom target (brainflayer_read)
+
+`targets/brainflayer_read.so` fuzzes brainflayer's sliced bloom filter (`bloom.c`)
+from the existing `tools/vendor_brainflayer.sh` tree. `compile_brainflayer_bloom_objects()`
+builds `bloom.c` + `mmapf.c` without the shim; the link adds `-lm`.
+
+Input: `[16-byte trailer][hash160 records, 20 B each, max 32]`. Trailer first, so
+`BLFSLICE` sits at offset 0 (`dictionaries/brainflayer.dict`). Magic and version are
+checked as `bloom_probe()` does; `log2bits`/`k` go through the library's `bloom_init()`;
+`log2bits = 0` selects the legacy 1 GiB filter.
+
+Differential, aborts on the first disagreement:
+
+1. `bloom_slice()` vs `bf_ref_slice()`, a bit-by-bit MSB-first walk (sliced filters only).
+2. `bloom_chk()` after `bloom_set()`: no false negatives.
+3. `bloom_chk_n()` vs `bloom_chk()` over records and their complements, scalar then AVX2.
+
+The filter is an anonymous `MAP_NORESERVE` mapping (up to 128 GiB of address space),
+unmapped per exec; touched pages are bounded by records × k. Oracle tested in
+`tests/test_regression_brainflayer_bloom_target.py`: stock `bloom.c` passes (control),
+a copy with slice offsets XOR 1 aborts.
+
 ### Vendored SQLite target (sqlite_read)
 
 `targets/sqlite_read.so` wraps the vendored SQLite amalgamation
