@@ -789,6 +789,22 @@ class _GateCache:
     oks: list[bool]
 
 
+# Distinct sniff results whose format masks one fuzzer remembers. Few exist
+# (most seeds match no format); the cap only bounds a pathological corpus.
+_FORMAT_MEMO_MAX = 64
+
+
+@dataclass
+class _FormatMemo:
+    """Format mask for one sniff result (see ``_format_mask``)."""
+
+    plan: "_Plan"
+    live: set
+    live_len: int
+    mask: list[bool]
+    pending: list[int]
+
+
 def _format_available(name: str) -> Callable[[object, bytes], bool]:
     sniff = _FORMAT_SNIFFERS[name]
 
@@ -1231,7 +1247,8 @@ class OperatorRegistry:
         # One pass per gate kind over a precomputed mask, then one C-level
         # compress: no per-op kind dispatch (was ~44 of 73 us per call).
         plan = self._current_plan()
-        mask = plan.always.copy()
+        # Gate kinds own disjoint slots, so the format pass can run first.
+        mask, pending = self._format_mask(plan, fuzzer, data)
 
         # Context gates (slow path): each distinct gate once, fanned out.
         for fn, slots in plan.predicates:
@@ -1239,8 +1256,6 @@ class OperatorRegistry:
             for i in slots:
                 mask[i] = ok
         self._steady_gates(plan, mask, fuzzer, data)
-
-        pending = self._sniff_formats(plan, mask, fuzzer, data)
 
         if plan.mutators:
             # One fuzzer snapshot per call, not one per class-based mutator.
@@ -1273,16 +1288,50 @@ class OperatorRegistry:
             for i in slots:
                 mask[i] = ok
 
-    @staticmethod
-    def _sniff_formats(plan: "_Plan", mask: list, fuzzer, data: bytes) -> list[int]:
-        """Mark live or sniffed formats and input-only gates; return slots
-        awaiting the trickle."""
-        formats = plan.formats
+    def _format_mask(self, plan: "_Plan", fuzzer, data: bytes) -> tuple[list, list[int]]:
+        """``plan.always`` plus the format pass; memoized per fuzzer.
 
+        The pass depends on the input only through its sniff result, and most
+        seeds share one (fuzzgoat: none match), so the mask is kept per
+        result: plan, live-format set and sniff equal -> same mask. The pass
+        walked every format slot per call.
+        """
+        live = getattr(fuzzer, "_live_formats", None)
+        memos = getattr(fuzzer, "_format_memo", None)
+        if live is None or not isinstance(memos, dict):
+            mask = plan.always.copy()
+            pending = self._sniff_formats(plan, mask, fuzzer, data)
+            self._init_memo(fuzzer)
+            return mask, pending
+
+        matched = self._matched(plan, data)
+        memo = memos.get(matched)
+        # live only grows in place (add), so identity + size pin its contents.
+        fresh = memo is not None and memo.plan is plan and memo.live is live
+        if fresh and memo.live_len == len(live):
+            return memo.mask.copy(), memo.pending
+
+        mask = plan.always.copy()
+        pending = self._sniff_formats(plan, mask, fuzzer, data, matched)
+        if len(memos) >= _FORMAT_MEMO_MAX:
+            memos.clear()
+        memos[matched] = _FormatMemo(plan, live, len(live), mask.copy(), pending)
+        return mask, pending
+
+    @staticmethod
+    def _init_memo(fuzzer) -> None:
+        """Give *fuzzer* an empty memo table; stubs without attributes skip it."""
+        if fuzzer is None:
+            return
+        with contextlib.suppress(AttributeError):
+            fuzzer._format_memo = {}
+
+    @staticmethod
+    def _matched(plan: "_Plan", data: bytes) -> frozenset[int]:
+        """Slots *data* enables by content, cached per hash in ``plan.sniffed``."""
         # Sniffers and input-only gates are pure in the input, and one
         # parent seed feeds many execs: evaluate each content once (keyed by
-        # hash, so big seeds are not pinned). Formats keep applying hits to
-        # this fuzzer's live set.
+        # hash, so big seeds are not pinned).
         key = hash64(data) if data else 0
         matched = plan.sniffed.get(key)
         if matched is None:
@@ -1290,6 +1339,18 @@ class OperatorRegistry:
             if len(plan.sniffed) >= _SNIFF_CACHE_MAX:
                 plan.sniffed.clear()
             plan.sniffed[key] = matched
+        return matched
+
+    @staticmethod
+    def _sniff_formats(
+        plan: "_Plan", mask: list, fuzzer, data: bytes, matched: frozenset[int] | None = None
+    ) -> list[int]:
+        """Mark live or sniffed formats and input-only gates; return slots
+        awaiting the trickle. Formats keep applying hits to this fuzzer's
+        live set."""
+        formats = plan.formats
+        if matched is None:
+            matched = OperatorRegistry._matched(plan, data)
         for i in plan.input_slots:
             mask[i] = i in matched
 

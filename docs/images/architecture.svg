@@ -268,12 +268,13 @@
 <!-- cov -->
 <g id="node13" class="node">
 <title>cov</title>
-<path fill="#c6dcea" stroke="transparent" stroke-width="0" d="M2377.5,-346.5C2377.5,-346.5 1890.5,-346.5 1890.5,-346.5 1884.5,-346.5 1878.5,-340.5 1878.5,-334.5 1878.5,-334.5 1878.5,-287.5 1878.5,-287.5 1878.5,-281.5 1884.5,-275.5 1890.5,-275.5 1890.5,-275.5 2377.5,-275.5 2377.5,-275.5 2383.5,-275.5 2389.5,-281.5 2389.5,-287.5 2389.5,-287.5 2389.5,-334.5 2389.5,-334.5 2389.5,-340.5 2383.5,-346.5 2377.5,-346.5"/>
-<text text-anchor="start" x="1890.5" y="-330.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">adapters/shm.py &#160;→ &#160;core/edge_tracker.py</text>
-<text text-anchor="start" x="1890.5" y="-319.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">SHM edge hash table · hit buckets · per&#45;edge max counts (PerfFuzz)</text>
-<text text-anchor="start" x="1890.5" y="-308.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">edge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first&#45;seen</text>
-<text text-anchor="start" x="1890.5" y="-297.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap</text>
-<text text-anchor="start" x="1890.5" y="-286.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/edge_clusters.py: incidence classes · clusters · medoids · gaps (&#45;&#45;edge&#45;clusters, &#45;&#45;pos&#45;centroid)</text>
+<path fill="#c6dcea" stroke="transparent" stroke-width="0" d="M2377.5,-352C2377.5,-352 1890.5,-352 1890.5,-352 1884.5,-352 1878.5,-346 1878.5,-340 1878.5,-340 1878.5,-282 1878.5,-282 1878.5,-276 1884.5,-270 1890.5,-270 1890.5,-270 2377.5,-270 2377.5,-270 2383.5,-270 2389.5,-276 2389.5,-282 2389.5,-282 2389.5,-340 2389.5,-340 2389.5,-346 2383.5,-352 2377.5,-352"/>
+<text text-anchor="start" x="1890.5" y="-336" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">adapters/shm.py &#160;→ &#160;core/edge_tracker.py</text>
+<text text-anchor="start" x="1890.5" y="-325" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">SHM edge hash table · hit buckets · per&#45;edge max counts (PerfFuzz)</text>
+<text text-anchor="start" x="1890.5" y="-314" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">adapters/native_scan.c (ctypes): live gather · virgin/max fold · cmplog drains</text>
+<text text-anchor="start" x="1890.5" y="-303" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">edge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first&#45;seen</text>
+<text text-anchor="start" x="1890.5" y="-292" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap</text>
+<text text-anchor="start" x="1890.5" y="-281" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/edge_clusters.py: incidence classes · clusters · medoids · gaps (&#45;&#45;edge&#45;clusters, &#45;&#45;pos&#45;centroid)</text>
 </g>
 <!-- target&#45;&gt;cov -->
 <g id="edge6" class="edge">
@@ -320,7 +321,7 @@
 <!-- cov&#45;&gt;picker -->
 <g id="edge32" class="edge">
 <title>cov&#45;&gt;picker</title>
-<path fill="none" stroke="#2f7d5a" stroke-width="1.6" d="M2132.05,-346.55C2127.97,-421.5 2119.63,-593.09 2128,-602.5 2163.7,-642.61 2212.3,-576.39 2248,-616.5 2279.62,-652.02 2281.12,-689.37 2248,-723.5 2237.7,-734.11 1996.75,-730.52 1982,-731.5 1943.21,-734.09 1933.81,-738.28 1895,-740.5 1613.89,-756.56 908.53,-730.33 628,-754.5 604.6,-756.52 580.14,-759.41 555.96,-762.76"/>
+<path fill="none" stroke="#2f7d5a" stroke-width="1.6" d="M2131.75,-352.06C2127.59,-429.57 2119.82,-593.32 2128,-602.5 2163.7,-642.61 2212.3,-576.39 2248,-616.5 2279.62,-652.02 2281.12,-689.37 2248,-723.5 2237.7,-734.11 1996.75,-730.52 1982,-731.5 1943.21,-734.09 1933.81,-738.28 1895,-740.5 1613.89,-756.56 908.53,-730.33 628,-754.5 604.6,-756.52 580.14,-759.41 555.96,-762.76"/>
 <polygon fill="#2f7d5a" stroke="#2f7d5a" stroke-width="1.6" points="555.56,-760.41 549.15,-763.72 556.22,-765.13 555.56,-760.41"/>
 <text text-anchor="middle" x="2157" y="-544.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#2f7d5a">rarity · Chao2 &#160;</text>
 </g>
@@ -338,8 +339,8 @@
 <!-- cov&#45;&gt;infoth -->
 <g id="edge20" class="edge">
 <title>cov&#45;&gt;infoth</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M2134,-275.39C2134,-257.31 2134,-234.93 2134,-215.32"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="2136.38,-215.32 2134,-208.52 2131.62,-215.32 2136.38,-215.32"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M2134,-269.83C2134,-252.95 2134,-233.2 2134,-215.64"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="2136.38,-215.57 2134,-208.77 2131.62,-215.57 2136.38,-215.57"/>
 </g>
 <!-- ledger -->
 <g id="node17" class="node">
@@ -352,8 +353,8 @@
 <!-- cov&#45;&gt;ledger -->
 <g id="edge21" class="edge">
 <title>cov&#45;&gt;ledger</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M2198.09,-275.39C2243.72,-250.74 2304.15,-218.11 2346.18,-195.41"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="2347.39,-197.46 2352.24,-192.13 2345.13,-193.27 2347.39,-197.46"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M2208.38,-269.83C2252.46,-246.02 2307.15,-216.49 2346.08,-195.46"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="2347.34,-197.49 2352.19,-192.16 2345.07,-193.3 2347.34,-197.49"/>
 </g>
 <!-- corpus -->
 <g id="node19" class="node">
@@ -381,7 +382,7 @@
 <!-- cov&#45;&gt;obs -->
 <g id="edge29" class="edge">
 <title>cov&#45;&gt;obs</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M2304.86,-275.47C2394.54,-256.64 2489.78,-235.23 2509,-225.5 2568.88,-195.21 2568.85,-166.14 2623,-126.5 2655.39,-102.79 2694.58,-79.25 2723.08,-62.97"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M2330.73,-270C2412.1,-252.64 2491.62,-234.29 2509,-225.5 2568.88,-195.21 2568.85,-166.14 2623,-126.5 2655.39,-102.79 2694.58,-79.25 2723.08,-62.97"/>
 <polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="2724.26,-65.04 2728.99,-59.61 2721.91,-60.9 2724.26,-65.04"/>
 </g>
 <!-- ltl&#45;&gt;lib -->
