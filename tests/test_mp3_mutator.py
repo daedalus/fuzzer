@@ -12,6 +12,8 @@ from fuzzer_tool.core.mutations.mp3 import (
 )
 from fuzzer_tool.core.operator_registry import format_gate_matches
 
+from .support.scripted_rng import ScriptedRng
+
 
 def _frame_bytes(rng=None) -> bytes:
     return Mp3Mutator()._generate_random_mp3(rng=rng or random.Random(1))
@@ -79,13 +81,14 @@ class TestMp3Mutator:
     def test_mutate_changes_output_over_many_trials(self):
         _frames_unused, data = self._frames_and_data()
         mutator = Mp3Mutator()
-        changed = False
-        for i in range(50):
-            out = mutator.mutate(data, max_len=len(data) * 2, rng=random.Random(i))
-            if out != data:
-                changed = True
-                break
-        assert changed
+        channel_op, mode = 4, 2
+        # Op 4 rewrites frame 0's channel_mode (top 2 bits of header byte 3).
+        rng = ScriptedRng(randints=[channel_op, mode], choice_idxs=[0])
+        out = mutator.mutate(data, max_len=len(data) * 2, rng=rng)
+
+        expected = bytearray(data)
+        expected[3] = (expected[3] & 0x3F) | (mode << 6)
+        assert out == bytes(expected)
 
     def test_mutate_output_stays_within_max_len(self):
         _frames_unused, data = self._frames_and_data()

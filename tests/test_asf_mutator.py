@@ -6,11 +6,14 @@ import random
 
 from fuzzer_tool.core.mutations.asf import (
     HEADER_OBJECT_GUID,
+    OBJECT_HEADER_LEN,
     AsfMutator,
     parse_asf_objects,
     serialize_asf_objects,
 )
 from fuzzer_tool.core.operator_registry import format_gate_matches
+
+from .support.scripted_rng import ScriptedRng
 
 
 def _asf_bytes(rng=None) -> bytes:
@@ -47,13 +50,14 @@ class TestAsfMutator:
     def test_mutate_changes_output_over_many_trials(self):
         data = _asf_bytes(random.Random(1))
         mutator = AsfMutator()
-        changed = False
-        for i in range(50):
-            out = mutator.mutate(data, max_len=len(data) * 2, rng=random.Random(i))
-            if out != data:
-                changed = True
-                break
-        assert changed
+        flip_op, idx, bit = 3, 5, 2
+        # Op 3 flips bit `bit` of header-object body byte `idx`.
+        rng = ScriptedRng(randints=[flip_op, idx, bit])
+        out = mutator.mutate(data, max_len=len(data) * 2, rng=rng)
+
+        expected = bytearray(data)
+        expected[OBJECT_HEADER_LEN + idx] ^= 1 << bit
+        assert out == bytes(expected)
 
     def test_mutate_output_stays_within_max_len(self):
         data = _asf_bytes(random.Random(1))

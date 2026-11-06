@@ -7,6 +7,8 @@ import random
 from fuzzer_tool.core.mutations.riff import RiffMutator, parse_riff_chunks, serialize_riff
 from fuzzer_tool.core.operator_registry import format_gate_matches
 
+from .support.scripted_rng import ScriptedRng
+
 
 def _riff_bytes(rng=None) -> bytes:
     return RiffMutator()._generate_random_riff(rng=rng or random.Random(1))
@@ -45,13 +47,15 @@ class TestRiffMutator:
     def test_mutate_changes_output_over_many_trials(self):
         data = _riff_bytes(random.Random(1))
         mutator = RiffMutator()
-        changed = False
-        for i in range(50):
-            out = mutator.mutate(data, max_len=len(data) * 2, rng=random.Random(i))
-            if out != data:
-                changed = True
-                break
-        assert changed
+        outer_size_op, zero_idx = 7, 0
+        # Op 7 rewrites the outer RIFF size; inner randint is evaluated
+        # before choice(), which picks the literal 0.
+        rng = ScriptedRng(randints=[outer_size_op, 1], choice_idxs=[zero_idx])
+        out = mutator.mutate(data, max_len=len(data) * 2, rng=rng)
+
+        expected = bytearray(data)
+        expected[4:8] = bytes(4)  # RIFF size field after "RIFF"
+        assert out == bytes(expected)
 
     def test_mutate_output_stays_within_max_len(self):
         data = _riff_bytes(random.Random(1))

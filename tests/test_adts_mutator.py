@@ -12,6 +12,8 @@ from fuzzer_tool.core.mutations.adts import (
 )
 from fuzzer_tool.core.operator_registry import format_gate_matches
 
+from .support.scripted_rng import ScriptedRng
+
 
 def _frame_bytes(rng=None) -> bytes:
     return AdtsMutator()._generate_random_adts(rng=rng or random.Random(1))
@@ -74,13 +76,14 @@ class TestAdtsMutator:
     def test_mutate_changes_output_over_many_trials(self):
         _frames_unused, data = self._frames_and_data()
         mutator = AdtsMutator()
-        changed = False
-        for i in range(50):
-            out = mutator.mutate(data, max_len=len(data) * 2, rng=random.Random(i))
-            if out != data:
-                changed = True
-                break
-        assert changed
+        protection_op = 4
+        # Op 4 flips frame 0's protection_absent (low bit of header byte 1).
+        rng = ScriptedRng(randints=[protection_op], choice_idxs=[0])
+        out = mutator.mutate(data, max_len=len(data) * 2, rng=rng)
+
+        expected = bytearray(data)
+        expected[1] ^= 0x01
+        assert out == bytes(expected)
 
     def test_mutate_output_stays_within_max_len(self):
         _frames_unused, data = self._frames_and_data()

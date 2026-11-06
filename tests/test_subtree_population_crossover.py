@@ -13,6 +13,7 @@ from fuzzer_tool.core.grammar import Grammar, SubtreePopulation, TreeMutator
 from fuzzer_tool.services.operators import OperatorEngine
 
 from .support.operator_env import make_minimal_fuzzer
+from .support.scripted_rng import ScriptedRng
 
 
 def _json_grammar() -> Grammar:
@@ -56,16 +57,18 @@ class TestSubtreePopulation:
         """Adversarial: an item harvested long after the pool filled up
         must still have a nonzero chance of surviving eviction — a buggy
         reservoir (e.g. only replacing index 0) would never let it in."""
-        seen_late_item = False
-        for trial in range(200):
-            pop = SubtreePopulation(max_per_rule=4)
-            rng = random.Random(trial)
-            for i in range(50):
-                pop.add(self._interior_node("value", str(i).encode()), rng=rng)
-            if any(n.children[0].data == b"49" for n in pop._pools["value"]):
-                seen_late_item = True
-                break
-        assert seen_late_item, "item #49 never survived reservoir sampling across 200 trials"
+        cap, n_items, slot = 4, 50, 2
+        # Items 0..cap-1 fill the pool draw-free; items cap..n-2 draw
+        # j = seen (>= cap, no eviction); the last item draws j = slot.
+        late_draws = list(range(cap, n_items - 1)) + [slot]
+        pop = SubtreePopulation(max_per_rule=cap)
+        rng = ScriptedRng(randints=late_draws)
+        for i in range(n_items):
+            pop.add(self._interior_node("value", str(i).encode()), rng=rng)
+
+        expected = [str(i).encode() for i in range(cap)]
+        expected[slot] = str(n_items - 1).encode()
+        assert [n.children[0].data for n in pop._pools["value"]] == expected
 
 
 class TestCanonicalHashing:
@@ -202,15 +205,12 @@ class TestTreeSplice:
         pop = SubtreePopulation()
         pop.add(donor_tree, rng=random.Random(3))
 
-        found_donor_bytes = False
-        for seed in range(64):
-            tm._rng = random.Random(seed)
-            clone = tm._clone_tree(target_tree)
-            out = tm._tree_splice(clone, max_len=4096, population=pop)
-            if b"DONOR_MARKER_XYZ" in out or b"other" in out:
-                found_donor_bytes = True
-                break
-        assert found_donor_bytes, "splice never grafted in bytes from the donor tree"
+        # Target's only interior node is its root: weighted pick (randint
+        # over its size) lands on root, then sample() picks donor root.
+        tm._rng = ScriptedRng(randints=[0, 0])
+        clone = tm._clone_tree(target_tree)
+        out = tm._tree_splice(clone, max_len=4096, population=pop)
+        assert out == donor_tree.serialize()
 
     def test_mutate_tree_op3_is_splice(self):
         """The op-3 branch in mutate_tree must route to _tree_splice, not
@@ -222,22 +222,22 @@ class TestTreeSplice:
         pop = SubtreePopulation()
         pop.add(donor_tree, rng=random.Random(3))
 
-        class _FixedOpRng:
-            """Forces mutate_tree's op selection to pick splice (op index 3)."""
+        splice_op = 3
+
+        class _FixedOpRng(ScriptedRng):
+            """Forces mutate_tree's op roll to splice; later draws scripted."""
 
             def randint(self, a, b):
+                v = super().randint(a, b)
                 if b == 5:  # the op-selection roll in mutate_tree
-                    return 3
-                return random.Random(0).randint(a, b)
+                    assert v == splice_op
+                return v
 
-        found_donor_bytes = False
-        for _ in range(32):
-            clone = tm._clone_tree(tree)
-            out = tm.mutate_tree(clone, max_len=4096, rng=_FixedOpRng(), population=pop)
-            if b"DONOR_MARKER_XYZ" in out or b"other" in out:
-                found_donor_bytes = True
-                break
-        assert found_donor_bytes
+        # Op roll, then _tree_splice's root pick and donor sample.
+        rng = _FixedOpRng(randints=[splice_op, 0, 0])
+        clone = tm._clone_tree(tree)
+        out = tm.mutate_tree(clone, max_len=4096, rng=rng, population=pop)
+        assert out == donor_tree.serialize()
 
 
 class TestGrammarTreeMutateOperatorWiring:

@@ -7,6 +7,8 @@ import random
 from fuzzer_tool.core.mutations.ogg import OggMutator, parse_ogg_pages, serialize_ogg_pages
 from fuzzer_tool.core.operator_registry import format_gate_matches
 
+from .support.scripted_rng import ScriptedRng
+
 
 def _page_bytes(rng=None) -> bytes:
     return OggMutator()._generate_random_ogg(rng=rng or random.Random(1))
@@ -36,13 +38,14 @@ class TestOggMutator:
     def test_mutate_changes_output_over_many_trials(self):
         data = _page_bytes(random.Random(1)) + _page_bytes(random.Random(2))
         mutator = OggMutator()
-        changed = False
-        for i in range(50):
-            out = mutator.mutate(data, max_len=len(data) * 2, rng=random.Random(i))
-            if out != data:
-                changed = True
-                break
-        assert changed
+        header_type_op, bit = 0, 1
+        # Op 0 flips one header_type bit of page 0 (byte after "OggS"+version).
+        rng = ScriptedRng(randints=[header_type_op, bit], choice_idxs=[0])
+        out = mutator.mutate(data, max_len=len(data) * 2, rng=rng)
+
+        expected = bytearray(data)
+        expected[len(b"OggS") + 1] ^= 1 << bit
+        assert out == bytes(expected)
 
     def test_mutate_output_stays_within_max_len(self):
         data = _page_bytes(random.Random(1)) + _page_bytes(random.Random(2))
