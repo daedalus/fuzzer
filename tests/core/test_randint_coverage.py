@@ -22,13 +22,13 @@ from collections import Counter
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-
-DELTA = 1e-9
+from tests.support.coupon import DELTA
+from tests.support.coupon import coverage_budget as _budget
 
 
 def coverage_budget(n: int, delta: float = DELTA) -> int:
     """Draws needed so P(any of n values unseen) <= delta."""
-    return math.ceil(n * (math.log(n) + math.log(1.0 / delta)))
+    return _budget(n, delta)
 
 
 def miss_probability_bound(n: int, draws: int) -> float:

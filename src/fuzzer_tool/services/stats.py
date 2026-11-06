@@ -68,6 +68,9 @@ from fuzzer_tool.services.te_position import (
 
 log = logging.getLogger(__name__)
 
+# New-edge counts the summary forecasts an ETA for (coupon-collector tail).
+ETA_TARGETS = (1, 10)
+
 
 def _arena_leaders(ranking: list) -> str:
     """``top_op=..(r) top_seed=..(r)[ top_pos=..(r)][ top_tgt=..(r)]`` from a strategy ranking."""
@@ -678,6 +681,7 @@ class StatsReporter:
                 f" {'[STALLED]' if bayes['p_stalled'] > 0.5 else ''}"
             )
         self._print_summary_zipf(f)
+        self._print_summary_eta(f)
         self._print_summary_edge_stats(f)
         self._print_summary_confirm(f)
 
@@ -694,6 +698,20 @@ class StatsReporter:
             print(
                 f"  Heaps:             beta={heaps.beta:.2f}, 2x execs -> +{heaps.doubling_gain:.1%} edges"
             )
+
+    def _print_summary_eta(self, f) -> None:
+        """Coupon-collector ETA: execs until the next k new edges (Good-Turing arm only)."""
+        from fuzzer_tool.core.schedulers.seed_good_turing import GoodTuringSeedStrategy
+
+        gt = getattr(f, "_good_turing_seed", None)
+        if not isinstance(gt, GoodTuringSeedStrategy):
+            return
+
+        for k in ETA_TARGETS:
+            noun = "edge" if k == 1 else "edges"
+            eta = gt.execs_to_edges(k)
+            when = f"~{eta:,.0f} execs" if eta is not None else f"> {gt.eta_window():,.0f} execs"
+            print(f"  Next {k} new {noun}: {when}")
 
     def _print_summary_edge_stats(self, f) -> None:
         """Hit concentration, plateau, rarefied half corpus, seed resample."""
