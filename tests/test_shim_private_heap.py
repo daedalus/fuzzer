@@ -17,6 +17,10 @@ AFL_SHIM = Path(__file__).resolve().parents[1] / "src/fuzzer_tool/adapters/afl_s
 PH = "-D__AFL_PRIVATE_HEAP=1"
 HOST_STRESS = 3000
 BIG = 2 * 1024 * 1024
+WIDE = 4000  # asprintf width: above tcache's 1032 B, so libc takes the arena lock
+LIBC_SPIN_CALLS = 200
+PARK_CALLS = 20  # each costs budget + the bounded libc deferral (<= ~205 ms)
+HANG_S = 20  # a deadlocked host never exits; anything past this is one
 
 _HOST = r"""
 #include <dlfcn.h>
@@ -56,6 +60,7 @@ _TARGET = r"""
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
+#include <pthread.h>
 #include <signal.h>
 
 int t_overflow(const uint8_t *d, size_t n) {
@@ -103,6 +108,33 @@ int t_leak_crash(const uint8_t *d, size_t n) {
 int t_spin(const uint8_t *d, size_t n) {
     (void)d; (void)n;
     for (;;) free(malloc(100));
+}
+/* Hang inside glibc's allocator: asprintf mallocs through libc, the free of
+ * that foreign pointer goes back to libc. Sizes skip tcache, so the arena
+ * lock is held for much of the loop. */
+int t_spin_libc(const uint8_t *d, size_t n) {
+    (void)d; (void)n;
+    for (;;) {
+        char *s = NULL;
+        if (asprintf(&s, "%@WIDE@d", 1) < 0) return 1;
+        free(s);
+    }
+}
+/* Hangs that never leave libc: asleep in a futex, spinning on a spinlock. */
+int t_park_libc(const uint8_t *d, size_t n) {
+    (void)d; (void)n;
+    pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&m);
+    pthread_mutex_lock(&m);
+    return 0;
+}
+int t_spinlock_libc(const uint8_t *d, size_t n) {
+    (void)d; (void)n;
+    pthread_spinlock_t s;
+    pthread_spin_init(&s, 0);
+    pthread_spin_lock(&s);
+    pthread_spin_lock(&s);
+    return 0;
 }
 int t_calloc(const uint8_t *d, size_t n) {
     (void)d; (void)n;
@@ -178,7 +210,7 @@ int t_zero(const uint8_t *d, size_t n) {
     void *a = malloc(0), *b = malloc(0);
     return (a && b && a != b) ? 0 : 1;
 }
-""".replace("@BIG@", str(BIG))
+""".replace("@BIG@", str(BIG)).replace("@WIDE@", str(WIDE))
 
 
 def _cc(out: Path, args: list[str]) -> None:
@@ -208,12 +240,12 @@ def build(tmp_path_factory):
     return d
 
 
-def _run(build, so, entry, n=1, timeout_us=0):
+def _run(build, so, entry, n=1, timeout_us=0, wall_s=120):
     proc = subprocess.run(
         [str(build / "host"), str(build / so), entry, str(n), str(timeout_us)],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=wall_s,
     )
     rcs = [int(x[3:]) for x in proc.stdout.split() if x.startswith("rc=")]
     return proc.returncode, rcs, proc.stdout
@@ -277,6 +309,31 @@ def test_crash_reclaims_the_call_allocations(build):
 def test_timeout_never_leaves_the_heap_locked(build):
     rc, rcs, out = _run(build, "priv.so", "t_spin", n=20, timeout_us=20000)
     assert rc == 0 and rcs == [-1] * 20 and "host=OK" in out
+
+
+@requires_clang
+def test_regression_timeout_inside_libc_malloc_deadlocks_host(build):
+    """A tick that jumped out of glibc malloc left the arena lock held.
+
+    The next host malloc then waited forever (ffmpeg calibration, 48 h stuck
+    in __lll_lock_wait_private under numpy). Every call must still time out,
+    and the host heap must stay usable afterwards.
+    """
+    try:
+        rc, rcs, out = _run(
+            build, "priv.so", "t_spin_libc", n=LIBC_SPIN_CALLS, timeout_us=20000, wall_s=HANG_S
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("host deadlocked: a timeout left glibc's arena lock held")
+    assert rc == 0 and rcs == [-1] * LIBC_SPIN_CALLS and "host=OK" in out, out[-400:]
+
+
+@requires_clang
+@pytest.mark.parametrize("entry", ["t_park_libc", "t_spinlock_libc"])
+def test_hang_that_never_leaves_libc_still_times_out(build, entry):
+    """The libc deferral is bounded: a futex sleep or a libc spin still ends."""
+    rc, rcs, out = _run(build, "priv.so", entry, n=PARK_CALLS, timeout_us=20000, wall_s=HANG_S)
+    assert rc == 0 and rcs == [-1] * PARK_CALLS and "host=OK" in out, out[-400:]
 
 
 @requires_clang
