@@ -6657,6 +6657,11 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     }
 
     __afl_wguard_land(wg_prev);
+#if __AFL_CMPLOG
+    /* A timeout tick can land mid-record; a lock left held drops every
+     * later record as REENTRANT. pos only advances on complete records. */
+    if (__afl_cmplog_held) __afl_cmplog_release();
+#endif
     __afl_guard_jmp = prev;
     __afl_guard_timed = prev_timed;
     if (!prev) __afl_guard_leave();
