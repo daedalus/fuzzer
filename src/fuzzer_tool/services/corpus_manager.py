@@ -28,6 +28,7 @@ import numpy as np
 from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.filesystem import (
     load_corpus,
+    safe_subdir,
     save_crash,
     save_irreplaceable,
     save_timeout_seed,
@@ -371,17 +372,17 @@ def _retire_seed_file(corpus_dir: Path, h: str) -> bool:
     moved = False
 
     full = corpus_dir / "seeds" / h[:2] / f"id_{h}"
-    if full.is_file():
-        dest = corpus_dir / "seeds" / "pruned" / h[:2]
-        dest.mkdir(parents=True, exist_ok=True)
+    dest = safe_subdir(corpus_dir, "seeds", "pruned", h[:2]) if full.is_file() else None
+    if dest is not None:
         shutil.move(str(full), str(dest / full.name))
         moved = True
 
     deltas_dir = corpus_dir / "deltas"
     for delta in (deltas_dir / f"delta_{h}.json", deltas_dir / h[:2] / f"delta_{h}.json"):
-        if delta.is_file():
-            dest = deltas_dir / "pruned" / h[:2]
-            dest.mkdir(parents=True, exist_ok=True)
+        if not delta.is_file():
+            continue
+        dest = safe_subdir(corpus_dir, "deltas", "pruned", h[:2])
+        if dest is not None:
             shutil.move(str(delta), str(dest / delta.name))
             moved = True
 
@@ -2193,8 +2194,6 @@ class CorpusManager:
         f = self.f
         seeds_dir = f.corpus_dir / "seeds"
         deltas_dir = f.corpus_dir / "deltas"
-        pruned_dir = seeds_dir / "pruned"
-        pruned_dir.mkdir(parents=True, exist_ok=True)
         # Prune full seeds — seeds are stored in two-digit hash
         # subdirectories (seeds/ab/id_abc...), so walk recursively.
         # Skip the irreplaceable/ subdirectory — those seeds are never pruned.
@@ -2205,9 +2204,11 @@ class CorpusManager:
             if "irreplaceable" in fh.parts:
                 continue
             h = fh.name[3:]
-            if h not in kept_set:
-                sub = pruned_dir / h[:2]
-                sub.mkdir(parents=True, exist_ok=True)
+            if h in kept_set:
+                continue
+            # None: seeds/, pruned/ or the shard is a symlink out of the corpus.
+            sub = safe_subdir(f.corpus_dir, "seeds", "pruned", h[:2])
+            if sub is not None:
                 shutil.move(str(fh), str(sub / fh.name))
         # Zip-resident seeds: a member cannot move, so tombstone it.
         store = seed_zip.lookup(f.corpus_dir)
@@ -2216,16 +2217,16 @@ class CorpusManager:
         # Prune delta files
         if not deltas_dir.exists():
             return
-        deltas_pruned_dir = deltas_dir / "pruned"
         for fh in deltas_dir.iterdir():
             if not fh.is_file():
                 continue
             if not (fh.suffix == ".json" and fh.name.startswith("delta_")):
                 continue
             h = fh.name[6:-5]
-            if h not in kept_set:
-                sub = deltas_pruned_dir / h[:2]
-                sub.mkdir(parents=True, exist_ok=True)
+            if h in kept_set:
+                continue
+            sub = safe_subdir(f.corpus_dir, "deltas", "pruned", h[:2])
+            if sub is not None:
                 shutil.move(str(fh), str(sub / fh.name))
 
     def minimax_robust_admission(

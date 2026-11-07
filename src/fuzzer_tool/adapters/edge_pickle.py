@@ -49,6 +49,10 @@ _BATCH_HEAD = _HEAD + b"q\x00"
 _STOP = b"."
 # Opcodes that close a batch: SETITEMS (many items), SETITEM (one).
 _BATCH_END = frozenset(("SETITEMS", "SETITEM"))
+# Opcodes that pop back to the last MARK (TUPLE, SETITEMS, APPENDS, ...).
+_POPS_MARK = frozenset(
+    op.name for op in pickletools.opcodes if pickletools.markobject in op.stack_before
+)
 
 # A cut pickle can surface as any of these, depending on where the cut fell.
 _TORN = (EOFError, pickle.UnpicklingError, ValueError, AttributeError, IndexError, TypeError)
@@ -143,20 +147,23 @@ def _batch_spans(f: BinaryIO) -> Iterator[tuple[int, int]]:
     items open with ``MARK k v ... SETITEMS``, so the MARK is part of the span
     and ``_HEAD + span`` is loadable as-is.
 
-    Only the MARK that opens a batch counts: a MARK anywhere else starts a
-    nested container (an array reduce's args tuple), never a boundary. A
-    missed boundary merely merges two batches, which still unpickles.
+    A batch ends at a SETITEM(S) back at MARK depth 0. A 2-D array's state
+    tuple opens a nested MARK (closed by TUPLE): tracking only the last MARK
+    lost it, so every batch after a 2-D array was dropped. e.g.
+    ``MARK k (MARK .. TUPLE) SETITEMS``: depth 1, 2, 1, 0 -> boundary.
     """
     start = len(_HEAD)
-    mark = None
+    depth = 0
     try:
         for op, _, pos in pickletools.genops(f):
             if op.name == "MARK":
-                mark = pos
-            elif op.name in _BATCH_END and mark in (None, start):
+                depth += 1
+                continue
+            if op.name in _POPS_MARK:
+                depth -= 1
+            if op.name in _BATCH_END and depth == 0:
                 yield start, pos + 1
                 start = pos + 1
-                mark = None
     except _TORN:
         return
 

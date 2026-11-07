@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from fuzzer_tool.adapters import libc_mem, libc_shm
-from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.adapters.filesystem import hash_data, is_regular, safe_subdir
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.count_items import _TAG_BITS, CountItems
@@ -796,11 +796,9 @@ def _commit_results(
                 continue
             shutil.copy2(fpath, out_path / fpath.name)
             meta = fpath.with_suffix(".txt")
-            if meta.exists():
+            if is_regular(meta):
                 shutil.copy2(meta, out_path / meta.name)
-    else:
-        pruned_dir = corpus_path / "pruned"
-        pruned_dir.mkdir(parents=True, exist_ok=True)
+    elif safe_subdir(corpus_path, "pruned") is not None:
         for fpath in corpus_files:
             if str(fpath) not in kept_set:
                 if not fpath.exists():
@@ -811,8 +809,10 @@ def _commit_results(
                     if str(fpath).startswith(str(corpus_path))
                     else Path(fpath.name)
                 )
-                dest_dir = pruned_dir / rel.parent
-                dest_dir.mkdir(parents=True, exist_ok=True)
+                # None: pruned/ (or a shard under it) symlinks out of the corpus.
+                dest_dir = safe_subdir(corpus_path, "pruned", *rel.parent.parts)
+                if dest_dir is None:
+                    continue
                 dest = dest_dir / rel.name
                 shutil.move(str(fpath), str(dest))
                 meta = fpath.with_suffix(".txt")
@@ -822,9 +822,9 @@ def _commit_results(
                         if str(meta).startswith(str(corpus_path))
                         else Path(meta.name)
                     )
-                    meta_dest_dir = pruned_dir / meta_rel.parent
-                    meta_dest_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(meta), str(meta_dest_dir / meta_rel.name))
+                    meta_dest_dir = safe_subdir(corpus_path, "pruned", *meta_rel.parent.parts)
+                    if meta_dest_dir is not None:
+                        shutil.move(str(meta), str(meta_dest_dir / meta_rel.name))
             elif batch_mode:
                 # In batch mode, keep survivors in place and record them
                 pass

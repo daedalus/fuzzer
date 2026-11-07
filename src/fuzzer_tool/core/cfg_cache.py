@@ -27,6 +27,7 @@ pure-data classes; anything else is refused, never executed.
 
 import gzip
 import hashlib
+import io
 import logging
 import os
 import pickle
@@ -36,7 +37,7 @@ from pathlib import Path
 from fuzzer_tool.core import cfg as _cfg_mod
 from fuzzer_tool.core import elf as _elf_mod
 from fuzzer_tool.core.cfg import FunctionCFG
-from fuzzer_tool.core.state_store import _ALLOWED_GLOBALS, UnsafeStateError
+from fuzzer_tool.core.state_store import _ALLOWED_GLOBALS, UnsafeStateError, read_capped
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,10 @@ _CFG_GLOBALS = _ALLOWED_GLOBALS | {
 }
 
 _CACHE_SUBDIR = "fuzzer_cfgcache"
+
+# Decompressed artifact cap (gzip bomb). ffmpeg's 2.74M blocks pickle to
+# well under this; past it the load is a miss and the CFGs are recomputed.
+_MAX_CFG_BYTES = 1 << 30
 _cache_dir_memo: str | None = None
 
 
@@ -128,7 +133,7 @@ def load(identity_key: str) -> dict[str, FunctionCFG] | None:
     path = _artifact_path(identity_key)
     try:
         with open(path, "rb") as raw, gzip.GzipFile(fileobj=raw, mode="rb") as fh:
-            payload = _CfgUnpickler(fh).load()
+            payload = _CfgUnpickler(io.BytesIO(read_capped(fh, _MAX_CFG_BYTES))).load()
     except FileNotFoundError:
         return None  # plain miss — not worth a warning
     except (

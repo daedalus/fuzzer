@@ -56,6 +56,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from bench_paired import _wilcoxon_signed_rank, holm  # noqa: E402
 
+from fuzzer_tool.core.state_store import UnsafeStateError, allowed_global  # noqa: E402
+
 FUZZ_ROOT = Path.home() / "fuzzing"
 DEFAULT_OUT = FUZZ_ROOT / "ab_synergy" / "rows.pkl"
 DEFAULT_WORK = FUZZ_ROOT / "ab_synergy" / "work"
@@ -343,13 +345,23 @@ def _save(manifest: dict, results: dict, out: Path) -> None:
     tmp.replace(out)
 
 
+# array('I') rows reduce through these on top of the state allowlist.
+_ROWS_GLOBALS = frozenset({("array", "array"), ("array", "_array_reconstructor")})
+
+
 class _RowsUnpickler(pickle.Unpickler):
-    """Maps legacy __main__.Arm (files written before plain keys) to Arm."""
+    """Maps legacy __main__.Arm (files written before plain keys) to Arm.
+
+    Everything else must be on the state allowlist: a rows file is a file,
+    and plain ``pickle.load`` would run a planted payload.
+    """
 
     def find_class(self, module: str, name: str):
         if (module, name) == ("__main__", "Arm"):
             return Arm
-        return super().find_class(module, name)
+        if allowed_global(module, name, _ROWS_GLOBALS):
+            return super().find_class(module, name)
+        raise UnsafeStateError(f"refusing to load disallowed object {module}.{name} from rows")
 
 
 def _read(path: Path) -> tuple[dict, dict]:

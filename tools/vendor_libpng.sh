@@ -96,7 +96,12 @@ if [ ! -d "$LIBPNG_DIR" ]; then
     extracted="$VENDOR_DIR/libpng-${LIBPNG_VERSION}"
     if [ ! -d "$extracted" ]; then
         # Fallback: auto-detect from tarball contents
-        extracted="$VENDOR_DIR/$(tar -tzf "$LIBPNG_TARBALL" | head -1 | cut -f1 -d"/")"
+        top="$(tar -tzf "$LIBPNG_TARBALL" | head -1 | cut -f1 -d"/")"
+        # A first member of "", "." or ".." would mv $VENDOR_DIR or its parent.
+        case "$top" in
+            ""|.|..) echo "ERROR: unexpected tarball layout: '$top'"; exit 1 ;;
+        esac
+        extracted="$VENDOR_DIR/$top"
     fi
     mv "$extracted" "$LIBPNG_DIR"
     ok "libpng extracted to $LIBPNG_DIR"
