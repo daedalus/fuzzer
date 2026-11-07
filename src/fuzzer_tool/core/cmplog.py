@@ -388,6 +388,17 @@ class CmplogRecords(enum.Enum):
     OFF = 1
 
 
+class CountsDrain(enum.Enum):
+    """Whether ``collect_tokens`` also drains the comparison counters.
+
+    SKIP when the caller already drained on the execution boundary: a second
+    drain resets the per-exec vectors with nothing new to fill them.
+    """
+
+    DRAIN = 0
+    SKIP = 1
+
+
 def _eviction_victims(pool: list, value: dict, excess: int) -> set[int]:
     """Indices of the *excess* entries smallest by ``(value, index)``.
 
@@ -1252,7 +1263,7 @@ class CmplogCollector:
             CMPLOG_FILE_MAX_BYTES,
         )
 
-    def collect_tokens(self) -> list[bytes]:
+    def collect_tokens(self, counts: CountsDrain = CountsDrain.DRAIN) -> list[bytes]:
         """Read new cmplog data and extract operand tokens and pairs.
 
         Reads from the current file position up to CMPLOG_MAX_LINES_PER_READ
@@ -1266,6 +1277,10 @@ class CmplogCollector:
         which is the intended trade, but it does mean the cap must not also
         drop the lines it *did* read.
 
+        Args:
+            counts: SKIP when the caller drained the counters on the
+                execution boundary (FuzzRound._execute); DRAIN otherwise.
+
         Returns:
             List of unique byte sequences found in comparison operands.
             Also populates self.pairs with (operand_a, operand_b) tuples
@@ -1276,7 +1291,8 @@ class CmplogCollector:
         # record stream is empty (a target whose comparisons all *pass*
         # writes no layer-1 records at all, yet is exactly the target whose
         # asserted counts you want to see).
-        self.collect_counts()
+        if counts is CountsDrain.DRAIN:
+            self.collect_counts()
         # Early returns below mean "this drain saw nothing", not "same as last".
         self.last_pairs = []
 

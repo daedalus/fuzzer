@@ -7,11 +7,13 @@
  *   SHM edge table --fs_live / fs_live_touched--> ids[], counts[]
  *   ids[], counts[] --fs_fold--> virgin[], maxc[] updated + candidates
  *   cmplog counters --fs_drain_counts / fs_drain_sites--> deltas, zeroed
+ *   input bytes --fs_mi_bump--> CrashMITracker histograms + running sums
  *
  * Layouts mirror adapters/shm.py (_ENTRY_DTYPE) and adapters/cmp_shm.py
  * (_SITE). Pure code, no state: not linked into targets.
  */
 
+#include <math.h>
 #include <stdint.h>
 
 #define GEN_SHIFT 56          /* generation byte: top byte of the 8-byte entry */
@@ -141,4 +143,59 @@ long fs_drain_sites(struct site *sites, long n, int64_t *slots, int64_t *f_out, 
         sites[i].fired = sites[i].hit = 0;
     }
     return k;
+}
+
+/*
+ * CrashMITracker state (analyzer_crash_eta.py); bound once per array swap.
+ * total/crash are (rows, 256) uint32 histograms, the rest one per row.
+ */
+struct mi_state {
+    uint32_t *total, *crash;
+    uint64_t *pos_counts, *crash_rows;
+    double *s_total, *s_crash, *s_clean;
+    const double *step; /* f(k + 1) - f(k), f(k) = k log2 k */
+    long step_size;
+};
+
+/* f(k + 1) - f(k): table below step_size, else the formula (0 log 0 = 0). */
+static inline double mi_step(const struct mi_state *st, uint32_t k) {
+    if (k < (uint64_t)st->step_size)
+        return st->step[k];
+    double kf = (double)k;
+    return (kf + 1.0) * log2(kf + 1.0) - kf * log2(kf);
+}
+
+/*
+ * One exec: for each position p < n with byte v, cell = p * 256 + v.
+ * Adds the f-step of the cell's old count to the row sums, then counts it.
+ * Positions are distinct, so each cell is touched once. Mirrors
+ * CrashMITracker._bump_sums plus the position count.
+ */
+long fs_mi_bump(const uint8_t *v, long n, long is_crash, const struct mi_state *st) {
+    uint32_t *total = st->total, *crash = st->crash;
+
+    /* Ifs up: one loop per outcome. */
+    if (is_crash) {
+        for (long p = 0; p < n; p++) {
+            long cell = p * 256 + v[p];
+            uint32_t c = crash[cell];
+            st->s_total[p] += mi_step(st, total[cell]);
+            st->s_crash[p] += mi_step(st, c);
+            st->crash_rows[p]++;
+            crash[cell] = c + 1;
+            total[cell]++;
+            st->pos_counts[p]++;
+        }
+        return n;
+    }
+
+    for (long p = 0; p < n; p++) {
+        long cell = p * 256 + v[p];
+        uint32_t t = total[cell];
+        st->s_total[p] += mi_step(st, t);
+        st->s_clean[p] += mi_step(st, t - crash[cell]);
+        total[cell] = t + 1;
+        st->pos_counts[p]++;
+    }
+    return n;
 }
