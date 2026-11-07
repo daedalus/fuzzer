@@ -35,6 +35,8 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+from fuzzer_tool.core.state_store import safe_load
+
 # ---------------------------------------------------------------------------
 # Source URLs
 # ---------------------------------------------------------------------------
@@ -166,7 +168,8 @@ def _github_raw_url(repo: str, path: str, fname: str) -> str:
 
 
 # Cache path
-CACHE_PATH = "/tmp/ffmpeg_seeds.pkl"
+# Per-user cache: a fixed /tmp path lets another local user plant the pickle.
+CACHE_PATH = os.path.join(os.path.expanduser("~"), ".cache", "fuzzer_tool", "ffmpeg_seeds.pkl")
 
 # Minimum file size to keep (skip tiny/empty downloads)
 MIN_SIZE = 8
@@ -178,11 +181,12 @@ MIN_SIZE = 8
 def load_cache() -> dict:
     if os.path.exists(CACHE_PATH):
         with open(CACHE_PATH, "rb") as f:
-            return pickle.load(f)
+            return safe_load(f)
     return {"oss_fuzz": {}, "fate": {}, "cve": {}, "analysis": {}}
 
 
 def save_cache(cache: dict) -> None:
+    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
     with open(CACHE_PATH, "wb") as f:
         pickle.dump(cache, f)
 

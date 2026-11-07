@@ -30,7 +30,12 @@ import time
 import urllib.request
 from urllib.parse import urljoin
 
-CACHE_PATH = "/tmp/corpus_ffmpeg_issues.pkl"
+from fuzzer_tool.core.state_store import safe_load
+
+# Per-user cache: a fixed /tmp path lets another local user plant the pickle.
+CACHE_PATH = os.path.join(
+    os.path.expanduser("~"), ".cache", "fuzzer_tool", "corpus_ffmpeg_issues.pkl"
+)
 
 # Media extensions that are useful as FFmpeg fuzz seeds. Anything outside
 # this set is skipped to avoid pulling avatars, logs, or patch files.
@@ -138,12 +143,13 @@ def load_cache() -> dict:
     """Load the persistent issue cache from disk."""
     if os.path.exists(CACHE_PATH):
         with open(CACHE_PATH, "rb") as f:
-            return pickle.load(f)
+            return safe_load(f)
     return {}
 
 
 def save_cache(cache: dict) -> None:
     """Persist the issue cache to disk."""
+    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
     with open(CACHE_PATH, "wb") as f:
         pickle.dump(cache, f)
 

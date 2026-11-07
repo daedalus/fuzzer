@@ -38,6 +38,8 @@ from typing import BinaryIO
 
 import numpy as np
 
+from fuzzer_tool.core.state_store import UnsafeStateError, allowed_global, safe_load
+
 log = logging.getLogger(__name__)
 
 _PROTO = 3
@@ -51,6 +53,16 @@ _BATCH_END = frozenset(("SETITEMS", "SETITEM"))
 # A cut pickle can surface as any of these, depending on where the cut fell.
 _TORN = (EOFError, pickle.UnpicklingError, ValueError, AttributeError, IndexError, TypeError)
 
+# Array reducers on top of the state allowlist: _reduce_ids (frombuffer) and
+# numpy's own protocol-5 reduce (_frombuffer) in pre-splice exports.
+_EDGE_GLOBALS = frozenset(
+    {
+        ("numpy", "frombuffer"),
+        ("numpy.core.numeric", "_frombuffer"),
+        ("numpy._core.numeric", "_frombuffer"),
+    }
+)
+
 
 class _Stub:
     """Stand-in for numpy objects when only the keys are wanted."""
@@ -63,12 +75,18 @@ class _Stub:
 
 
 class _KeysOnly(pickle.Unpickler):
-    """Unpickles the dict with every numpy object replaced by ``_Stub``."""
+    """Unpickles the dict with every numpy object replaced by ``_Stub``.
+
+    Anything else must be on the state allowlist: an export is a file, and
+    e.g. ``os.system`` would otherwise run on ``open``.
+    """
 
     def find_class(self, module: str, name: str):
         if module.partition(".")[0] == "numpy":
             return _Stub
-        return super().find_class(module, name)
+        if allowed_global(module, name):
+            return super().find_class(module, name)
+        raise UnsafeStateError(f"refusing to load disallowed object {module}.{name} from export")
 
 
 def _reduce_ids(a: np.ndarray):
@@ -109,7 +127,7 @@ def read_edges_pickle(path: str | Path) -> dict[str, np.ndarray]:
     with open(path, "rb") as f:
         while True:
             try:
-                batch = pickle.load(f)
+                batch = safe_load(f, _EDGE_GLOBALS)
             except _TORN:
                 return merged
             if not _valid(batch):
@@ -156,7 +174,7 @@ def iter_edges_pickle(path: str | Path) -> Iterator[dict[str, np.ndarray]]:
         with open(path, "rb") as f:
             while True:
                 try:
-                    batch = pickle.load(f)
+                    batch = safe_load(f, _EDGE_GLOBALS)
                 except _TORN:
                     return
                 if not _valid(batch):
@@ -168,7 +186,7 @@ def iter_edges_pickle(path: str | Path) -> Iterator[dict[str, np.ndarray]]:
         for start, end in _batch_spans(scan):
             data.seek(start)
             try:
-                batch = pickle.loads(_HEAD + data.read(end - start) + _STOP)
+                batch = safe_load(io.BytesIO(_HEAD + data.read(end - start) + _STOP), _EDGE_GLOBALS)
             except _TORN:
                 return
             if not _valid(batch):

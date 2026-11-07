@@ -35,6 +35,7 @@ from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.sdr import distinct_reps, reps_report
 from fuzzer_tool.core.set_cover import min_cover
+from fuzzer_tool.core.state_store import UnsafeStateError, safe_load
 
 
 def _maxrss_kb() -> int:
@@ -125,6 +126,9 @@ _TRIM_EVERY = 100
 
 # Replay return code of a timed-out run (spawn and in-process alike).
 _TIMEOUT_RC = -1
+
+# A torn or foreign batch-state file surfaces as one of these.
+_STATE_ERRORS = (OSError, EOFError, ValueError, pickle.UnpicklingError)
 
 
 class PruneMode(Enum):
@@ -307,6 +311,30 @@ def _discover_corpus_files(corpus_path: Path) -> list[Path]:
     )
 
 
+def _read_batch_state(path: Path) -> dict:
+    """Batch-mode state, or {} when unreadable.
+
+    Restricted unpickler: the file sits in the corpus dir, which is shared
+    and copied, so plain ``pickle.load`` would run a planted payload.
+    """
+    try:
+        with gzip.open(path, "rb") as f:
+            state = safe_load(f)
+    except UnsafeStateError:
+        print(f"[!] refusing untrusted batch state {path}; restarting batch", file=sys.stderr)
+        return {}
+    except _STATE_ERRORS as exc:
+        print(f"[!] unreadable batch state {path} ({exc}); restarting batch", file=sys.stderr)
+        return {}
+
+    if not isinstance(state, dict):
+        print(f"[!] batch state {path} is not a dict; restarting batch", file=sys.stderr)
+        return {}
+
+    # Callers set() each value; a scalar there would raise TypeError.
+    return {k: v for k, v in state.items() if isinstance(v, (set, frozenset, list, tuple))}
+
+
 def _pick_seeds(files: list[Path], max_seeds: int, rng: RandPool) -> list[Path]:
     """Uniform k-of-n subset of *files*, in disk order; all when uncapped.
 
@@ -410,12 +438,7 @@ def minimize_corpus(
     state_file = corpus_path / ".minimize_batch_state.pkl.gz"
     processed_hashes = set()
     if batch_mode and state_file.exists():
-        try:
-            with gzip.open(state_file, "rb") as f:
-                state = pickle.load(f)
-            processed_hashes = set(state.get("processed", set()))
-        except Exception:
-            processed_hashes = set()
+        processed_hashes = set(_read_batch_state(state_file).get("processed", set()))
 
     if batch_mode:
         filtered = []
@@ -761,19 +784,9 @@ def _commit_results(
     state_file = corpus_path / ".minimize_batch_state.pkl.gz"
     state = {"processed": set(), "survivors": set()}
     if batch_mode and state_file.exists():
-        try:
-            with gzip.open(state_file, "rb") as f:
-                state = pickle.load(f)
-            if "processed" not in state:
-                state["processed"] = set()
-            else:
-                state["processed"] = set(state["processed"])
-            if "survivors" not in state:
-                state["survivors"] = set()
-            else:
-                state["survivors"] = set(state["survivors"])
-        except Exception:
-            state = {"processed": set(), "survivors": set()}
+        loaded = _read_batch_state(state_file)
+        state["processed"] = set(loaded.get("processed", set()))
+        state["survivors"] = set(loaded.get("survivors", set()))
 
     if output_dir:
         out_path.mkdir(parents=True, exist_ok=True)
