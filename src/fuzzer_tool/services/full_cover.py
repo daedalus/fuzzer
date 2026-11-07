@@ -27,7 +27,7 @@ import numpy as np
 
 from fuzzer_tool.adapters import seed_tar, seed_zip
 from fuzzer_tool.adapters.edge_pickle import iter_edges_pickle
-from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.adapters.filesystem import hash_data, is_regular
 from fuzzer_tool.core.set_cover import min_cover
 from fuzzer_tool.services.minimize import _commit_results, _discover_corpus_files
 
@@ -230,7 +230,7 @@ def _write_cover(
             dest_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, dest_dir / path.name)
             meta = path.with_suffix(".txt")
-            if meta.exists():
+            if is_regular(meta):
                 shutil.copy2(meta, dest_dir / meta.name)
 
     if corpus.tarred:

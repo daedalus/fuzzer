@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 import time
 from collections.abc import Iterator
@@ -39,6 +40,42 @@ from fuzzer_tool.core.similarity import crash_signature_similarity
 SNAPSHOT_INTERVAL = 20
 
 log = logging.getLogger(__name__)
+
+# A seed key: key16() output. Anything else (e.g. "xx/../../x" from a delta
+# or crash sidecar) would join into a path outside the corpus.
+_SEED_HASH = re.compile(r"[0-9a-f]{16}")
+
+# Characters kept in a filename built from target output (sanitizer
+# signatures): "ubsan:x@../a.c:3:5" -> "ubsan:x@.._a.c:3:5".
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._@:+-]")
+
+
+def safe_component(text: str) -> str:
+    """*text* as one path component: no separators, never empty, ``.`` or ``..``."""
+    name = _UNSAFE_NAME.sub("_", text)
+    return name if name.strip(".") else "_"
+
+
+def is_regular(path: Path) -> bool:
+    """A regular file reached without a symlink: safe to copy out of a foreign dir."""
+    return path.is_file() and not path.is_symlink()
+
+
+def safe_subdir(root: Path, *parts: str) -> Path | None:
+    """``root/parts`` created dir by dir; None if a component is a symlink.
+
+    Prune targets (``seeds/pruned/<hh>``) live in a corpus that may come from
+    elsewhere: a symlinked ``pruned`` would move seeds out of it.
+    """
+    cur = Path(root)
+    for part in Path(*parts).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            log.warning("refusing symlinked corpus dir %s", cur)
+            return None
+        cur.mkdir(exist_ok=True)
+    return cur
+
 
 # Crash-sidecar artifacts are read-only on disk so a stray cleanup pass or
 # corpus-minimizer sweep can't silently overwrite a discovered reproducer.
@@ -324,7 +361,7 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
     Delta records are accepted both flat (``deltas/delta_<h>.json``, what
     save_to_corpus writes) and sharded (``deltas/<hh>/delta_<h>.json``).
     """
-    if _depth > SNAPSHOT_INTERVAL + 2:
+    if _depth > SNAPSHOT_INTERVAL + 2 or not _SEED_HASH.fullmatch(h):
         return None
     corpus_dir = Path(corpus_dir)
     for base in _REHYDRATE_FULL_ROOTS:
@@ -555,7 +592,9 @@ def load_corpus(
         Normalizes filenames to id_{hash} if they don't already match, so that
         pruning (which globs for id_*) can find them.
         """
-        if not base_dir.exists():
+        # A symlinked dir resolves its own base_real, so _is_full_seed would
+        # pass every file in the target and the rename below would clobber it.
+        if not base_dir.exists() or base_dir.is_symlink():
             return
         # Invariant across the loop; resolving it per entry cost a second path
         # resolution on every corpus file at load time.
@@ -569,7 +608,7 @@ def load_corpus(
             if mark_irreplaceable:
                 irreplaceable_hashes.add(h)
         for sub in base_dir.iterdir():
-            if not sub.is_dir():
+            if not sub.is_dir() or sub.is_symlink():
                 continue
             if sub.name == "pruned":
                 continue
@@ -599,7 +638,7 @@ def load_corpus(
             if f.is_file() and f.suffix == ".json" and f.name.startswith("delta_"):
                 h = f.name[6:-5]
                 delta_files.append((h, f))
-            elif f.is_dir() and f.name != "pruned":
+            elif f.is_dir() and not f.is_symlink() and f.name != "pruned":
                 _collect_deltas_from_dir(f)
 
     # Scan the canonical corpus layout only. Anything else under corpus_dir
@@ -757,13 +796,13 @@ def count_archive_seeds(corpus_dir: Path) -> int | None:
 
 def _iter_full_dir(base: Path) -> Iterator[bytes]:
     """Full seeds under *base* and its subdirectories, pruned/ skipped."""
-    stack = [base] if base.is_dir() else []
+    stack = [base] if base.is_dir() and not base.is_symlink() else []
     while stack:
         cur = stack.pop()
         real = cur.resolve()
         for f in cur.iterdir():
             if f.is_dir():
-                if f.name != "pruned":
+                if f.name != "pruned" and not f.is_symlink():
                     stack.append(f)
                 continue
             if _is_full_seed(f, real):
@@ -1570,7 +1609,7 @@ def _evict_crash(crashes_dir: Path, cluster_id: str) -> None:
 def _crash_name_parts(report: SanitizerReport | None, returncode: int) -> tuple[str, str]:
     """``(error_short, sanitizer_short)`` filename fragments."""
     if report and report.is_valid():
-        error_short = report.error_type.replace("-", "")[:20]
+        error_short = safe_component(report.error_type.replace("-", "")[:20])
         sanitizer_short = report.sanitizer.replace("Sanitizer", "")[:4].lower()
         return error_short, sanitizer_short
     return f"signal{signal_number(returncode)}", "sig"

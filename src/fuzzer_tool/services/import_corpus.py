@@ -11,7 +11,7 @@ import string
 import sys
 from pathlib import Path
 
-from fuzzer_tool.adapters.filesystem import free_slot, hash_data
+from fuzzer_tool.adapters.filesystem import free_slot, hash_data, is_regular
 from fuzzer_tool.core.misra_gries import MisraGries
 
 # Misra–Gries counters per returned token: 64x kept 198-200 of the exact
@@ -92,7 +92,7 @@ def import_from_afl(
     queue_dir = afl_path / "queue"
     if queue_dir.is_dir():
         for f in sorted(queue_dir.iterdir()):
-            if not f.is_file():
+            if not is_regular(f):
                 continue
             if _admit(corpus_out, f.read_bytes(), seen_hashes):
                 seeds_imported += 1
@@ -103,7 +103,7 @@ def import_from_afl(
         crash_out = Path(target_crashes)
         crash_out.mkdir(parents=True, exist_ok=True)
         for f in sorted(crash_dir.iterdir()):
-            if not f.is_file() or f.suffix == ".txt":
+            if not is_regular(f) or f.suffix == ".txt":
                 continue
             data = f.read_bytes()
             h = hash_data(data)
@@ -113,7 +113,7 @@ def import_from_afl(
                 crashes_imported += 1
                 # Copy metadata if exists
                 meta = f.with_suffix(".txt")
-                if meta.exists():
+                if is_regular(meta):
                     shutil.copy2(meta, dest.with_suffix(".txt"))
 
     return seeds_imported, crashes_imported
@@ -140,7 +140,7 @@ def import_from_libfuzzer(corpus_dir: str, target_corpus: str) -> int:
 
     imported = 0
     for f in sorted(src.iterdir()):
-        if not f.is_file():
+        if not is_regular(f):
             continue
         data = f.read_bytes()
         if not data:
@@ -175,7 +175,7 @@ def import_from_honggfuzz(
 
     imported = 0
     for f in sorted(src.iterdir()):
-        if not f.is_file():
+        if not is_regular(f):
             continue
         data = f.read_bytes()
         if not data:

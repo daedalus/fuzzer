@@ -1226,6 +1226,16 @@ State files:
 
 **Restricted loading.** Every pickle read from disk goes through `state_store.safe_load(fh, extra)`: builtins/collections/numpy containers only, plus a caller's `extra` pairs; anything else raises `UnsafeStateError`. Callers: `StateStore.load`, edge exports (`adapters/edge_pickle.py`, extra = numpy `frombuffer`/`_frombuffer`; `_KeysOnly` stubs numpy and checks the rest with `allowed_global`), minimize batch state (`.minimize_batch_state.pkl.gz`), the ffmpeg tool caches (now `~/.cache/fuzzer_tool/`, not `/tmp`), and A/B rows (`tools/ab_synergy_multi_ffmpeg.py` `_RowsUnpickler`, extra = `array` reducers). `cfg_cache` keeps its own allowlist subclass. Gzip readers go through `state_store.read_capped(fh, cap)`: `state.pkl.gz` and CFG artifacts inflate to at most 1 GiB (`_MAX_STATE_BYTES`, `_MAX_CFG_BYTES`); past it the file is unreadable / a cache miss. Capped read-then-unpickle also made CFG loads 1.6-2x faster than streaming from gzip. `iter_edges_pickle` finds batch boundaries by MARK depth, so 2-D arrays no longer hide batches (scan cost +0-3.5%, `genops`-bound). Cost: none measured (12 MiB export, `safe_load` vs `pickle.load` ratio 0.996-1.020). Tests: `tests/test_regression_pickle_load_rce.py`.
 
+**Corpus path containment.** A corpus may come from elsewhere, so nothing it contains may steer a path outside it (`adapters/filesystem.py`):
+- Loader (`load_corpus`, `_iter_seeds`) skips symlinked dirs; a `seeds/ab -> ~/.ssh` used to get every file renamed to `id_<hash>`.
+- Prune destinations (`_retire_seed_file`, `CorpusManager._prune_files`, `minimize._commit_results`) are built by `safe_subdir(root, *parts)`: dir by dir, None on a symlinked component (seed stays put, warning logged).
+- `rehydrate_by_hash` accepts only 16-hex keys (`_SEED_HASH`): delta `parent`, crash `parent_seed` and `seed_meta.parent_key` reach it unchecked.
+- Copies out of foreign dirs (`.txt` sidecars in `minimize`/`full_cover`, `import` sources) require `is_regular` (no symlink). `tools/group_seed_corpus.py` drops links resolving outside the source tree.
+- Crash filenames from target output (`sweep`, `save_crash`) go through `safe_component`: `[^A-Za-z0-9._@:+-]` -> `_`.
+- `tools/extract_ffmpeg_seeds.py` accepts fuzzer dir names matching `[A-Za-z0-9_-]+`; `tools/vendor_libpng.sh` refuses a `""`/`.`/`..` top member.
+
+Cost: none (3k seeds: load 188-197 vs 225-254 ms, prune 147-164 vs 158-163 ms, noise). Tests: `tests/test_regression_path_traversal.py`.
+
 ### Cross-campaign ledger (`--preset-ledger`)
 
 Per-target memory across campaigns, ported from Stardust's opening selection

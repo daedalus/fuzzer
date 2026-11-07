@@ -103,14 +103,19 @@ def get_fuzzer_tags(fuzzer_name: str) -> list[str]:
 def parse_corpus(corpus_directory: Path) -> list[Path]:
     """Recursively list sample files; skip checksums and raw FATE refs."""
     files: list[Path] = []
+    root_real = corpus_directory.resolve()
     for root, _dirs, names in os.walk(corpus_directory):
         for filename in names:
+            path = Path(root) / filename
+            # Copies follow links: one out of the tree would pull a local file in.
+            if path.is_symlink() and not path.resolve().is_relative_to(root_real):
+                continue
             lower = filename.lower()
             if any(s in lower for s in _SKIP_NAME_SUBSTR):
                 continue
             if any(lower.endswith(suf) for suf in _SKIP_SUFFIXES):
                 continue
-            files.append(Path(root) / filename)
+            files.append(path)
     log.info("Parsed %d corpus files from %s", len(files), corpus_directory)
     return files
 

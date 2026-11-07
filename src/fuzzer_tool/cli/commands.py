@@ -2578,6 +2578,13 @@ def _sweep_is_crash(report, returncode, stderr) -> bool:
     return any(sig in stderr for sig in _SWEEP_CRASH_MARKERS)
 
 
+def _sweep_crash_name(h: str, sig: str) -> str:
+    """Crash filename; *sig* is target output (UBSAN ``@../a.c:3:5``), so flatten it."""
+    from fuzzer_tool.adapters.filesystem import safe_component
+
+    return f"crash_{h[:12]}_{safe_component(sig)}"
+
+
 def cmd_sweep(args):
     """Linearly scan corpus seeds for missed crashes.
 
@@ -2639,7 +2646,7 @@ def cmd_sweep(args):
         found += 1
         h = hash_data(seed)
         sig = report.signature if report and report.is_valid() else f"signal{abs(returncode)}"
-        crash_name = f"crash_{h[:12]}_{sig}"
+        crash_name = _sweep_crash_name(h, sig)
         crash_path = crashes_dir / crash_name
         if not crash_path.exists():
             crash_path.write_bytes(seed)

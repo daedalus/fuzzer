@@ -241,6 +241,9 @@ def url_basename(url: str) -> str:
 # ---------------------------------------------------------------------------
 # OSS-Fuzz: parse target_dec_fate.list and download crash reproductions
 # ---------------------------------------------------------------------------
+_FUZZER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
 def parse_fate_list(text: str) -> list[dict]:
     """Parse target_dec_fate.list into structured entries.
 
@@ -257,6 +260,9 @@ def parse_fate_list(text: str) -> list[dict]:
             continue
         spec = parts[0]
         fuzzer = parts[-1]
+        # Becomes a directory under seeds/: "../x" or "/abs" would escape it.
+        if not _FUZZER_NAME.fullmatch(fuzzer):
+            continue
         # Match: <issue_num>/<testcase_id> (bare format in target_dec_fate.list)
         m = re.match(r"(\d+)/(\d+)", spec)
         if not m:
