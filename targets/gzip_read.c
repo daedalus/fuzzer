@@ -145,7 +145,7 @@ int fuzz_gzip(const unsigned char *buf, size_t size) {
 
     /* Test multi-member: check if there's more gzip data after the trailer */
     size_t member_end = trailer_pos + 8;
-    if (member_end < size && buf[member_end] == 0x1F && buf[member_end + 1] == 0x8B) {
+    if (member_end + 1 < size && buf[member_end] == 0x1F && buf[member_end + 1] == 0x8B) {
         __afl_map_edge(0x1C00);
         /* Recursive decompress of next member — bounded to prevent stack overflow */
         if (chunk_count < 10) {
