@@ -8,6 +8,7 @@ of "live entries", "fold" and "drain"; pointers and scratch stay here.
     ShmCoverage._scan      -> LiveScan.live / live_touched
     ShmCoverage._scan_new  -> LiveScan.fold
     CmpCounterShm.drain_*  -> CmpDrain.counts / sites
+    CrashMITracker.record  -> MIBump.bump
 
 ``load()`` returns None when no compiler is available; callers keep their
 numpy paths for that case.
@@ -50,6 +51,7 @@ _SIGNATURES = {
     "fs_fold": [_P, _P, _L, _P, _L, _P, _L, _P, ctypes.c_double, _P, _P, _P],
     "fs_drain_counts": [_P, _P, _L, _P, _P, _P],
     "fs_drain_sites": [_P, _L, _P, _P, _P],
+    "fs_mi_bump": [ctypes.c_char_p, _L, _L, _P],
 }
 
 # Loaded library, or False once a build failed (don't retry per instance).
@@ -72,7 +74,7 @@ def _compile(out: str) -> bool:
 
     # clang first (Hard Rule 4), gcc only as a fallback.
     for cc in _COMPILERS:
-        cmd = [cc, "-O2", "-shared", "-fPIC", "-o", tmp, _SRC]
+        cmd = [cc, "-O2", "-shared", "-fPIC", "-o", tmp, _SRC, "-lm"]
         try:
             res = subprocess.run(
                 cmd, capture_output=True, timeout=_COMPILE_TIMEOUT, env=_clean_env()
@@ -238,3 +240,70 @@ class CmpDrain:
         k = self._sites(sites, self._n_sites, self._a, self._b, self._c)
         out = self._out[:, :k].copy()  # kept by the caller's fold
         return out[0], out[1], out[2]
+
+
+class _MIState(ctypes.Structure):
+    """Mirrors ``struct mi_state`` in native_scan.c."""
+
+    _fields_ = [
+        ("total", _P),
+        ("crash", _P),
+        ("pos_counts", _P),
+        ("crash_rows", _P),
+        ("s_total", _P),
+        ("s_crash", _P),
+        ("s_clean", _P),
+        ("step", _P),
+        ("step_size", _L),
+    ]
+
+
+# (attribute, dtype) of each array MIBump.bind takes, in _MIState order.
+_MI_ARRAYS = (
+    ("total", np.uint32),
+    ("crash", np.uint32),
+    ("pos_counts", np.uint64),
+    ("crash_rows", np.uint64),
+    ("s_total", np.float64),
+    ("s_crash", np.float64),
+    ("s_clean", np.float64),
+)
+
+
+class MIBump:
+    """CrashMITracker histogram + running-sum update, one C pass per exec.
+
+    Array addresses are bound once (``bind``) and held, so a call passes
+    four arguments. Rebind whenever the caller replaces an array: the held
+    references keep the old ones alive, so a missed rebind writes stale
+    arrays but never freed memory.
+    """
+
+    def __init__(self, lib: ctypes.CDLL, step: np.ndarray):
+        self._fn = lib.fs_mi_bump
+        self._step = np.ascontiguousarray(step, dtype=np.float64)
+        self._state = _MIState()
+        self._ref = ctypes.byref(self._state)
+        self._held: tuple[np.ndarray, ...] = ()
+
+    def bind(self, *arrays: np.ndarray) -> None:
+        """Point the kernel at *arrays*, in ``_MI_ARRAYS`` order."""
+        for arr, (name, dtype) in zip(arrays, _MI_ARRAYS, strict=True):
+            if arr.dtype != dtype or not arr.flags.c_contiguous:
+                raise ValueError(f"MIBump.bind: {name} must be C-contiguous {dtype.__name__}")
+
+        for arr, (name, _) in zip(arrays, _MI_ARRAYS, strict=True):
+            setattr(self._state, name, _addr(arr))
+        self._state.step = _addr(self._step)
+        self._state.step_size = self._step.size
+        self._held = arrays
+
+    def bump(self, data: bytes, n: int, is_crash: bool) -> None:
+        """Count *data*[:n] (one byte per position) under *is_crash*."""
+        self._fn(data, n, is_crash, self._ref)
+
+
+def mi_bump(step: np.ndarray) -> MIBump | None:
+    """An unbound MIBump over *step*; None when the kernel cannot build."""
+    lib = load()
+    return MIBump(lib, step) if lib is not None else None

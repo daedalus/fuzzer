@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import numpy as _np
 
+from fuzzer_tool.adapters import native_scan
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.target_profiler import TargetProfile
@@ -84,6 +85,10 @@ class CrashMITracker:
         # Rows are allocated lazily up to the largest input seen, so the
         # default 4096-position tracker costs 8 MiB only if inputs
         # actually reach that length.
+        #
+        # Ifs up: the C kernel (one pass per exec) when it builds, else numpy.
+        self._kernel = native_scan.mi_bump(_STEP_TABLE)
+        self._bump = self._kernel.bump if self._kernel is not None else self._bump_np
         self._rows = 0
         self._byte_total_arr = _np.zeros((0, 256), dtype=_np.uint32)
         self._joint_crash_arr = _np.zeros((0, 256), dtype=_np.uint32)
@@ -128,13 +133,7 @@ class CrashMITracker:
         n = min(len(input_bytes), self.max_positions, self.DENSE_POSITION_CAP)
         if n:
             self._grow(n)
-            values = _np.frombuffer(bytes(input_bytes), dtype=_np.uint8, count=n)
-            # One flat gather feeds the sums and the scatter (was two 2-D
-            # fancy gathers + arange per exec: record 14.8 -> 8.1 us at
-            # 300 bytes). Positions are distinct, so the scatter is safe.
-            idx = self._row_base[:n] + values
-            self._bump_sums(idx, n, is_crash)
-            self._position_counts_arr[:n] += 1
+            self._bump(bytes(input_bytes), n, is_crash)
             self._count_bound += 1
 
         # The dense representation is already bounded, so there is nothing
@@ -144,6 +143,30 @@ class CrashMITracker:
         # campaign's 36,140 sorted() calls.
         if due(self.total_execs, 50, "crash_eta.invalidate"):
             self._cache_valid = False
+
+    def _bump_np(self, data: bytes, n: int, is_crash: bool) -> None:
+        """numpy fallback for the C kernel's ``fs_mi_bump``."""
+        values = _np.frombuffer(data, dtype=_np.uint8, count=n)
+        # One flat gather feeds the sums and the scatter (was two 2-D
+        # fancy gathers + arange per exec: record 14.8 -> 8.1 us at
+        # 300 bytes). Positions are distinct, so the scatter is safe.
+        idx = self._row_base[:n] + values
+        self._bump_sums(idx, n, is_crash)
+        self._position_counts_arr[:n] += 1
+
+    def _bind_kernel(self) -> None:
+        """Point the C kernel at the current arrays; after every swap."""
+        if self._kernel is None:
+            return
+        self._kernel.bind(
+            self._byte_total_arr,
+            self._joint_crash_arr,
+            self._position_counts_arr,
+            self._crash_rows,
+            self._s_total,
+            self._s_crash,
+            self._s_clean,
+        )
 
     def _grow(self, n: int) -> None:
         """Make sure at least *n* position rows are allocated."""
@@ -169,6 +192,7 @@ class CrashMITracker:
             grown[: self._rows] = getattr(self, name)[: self._rows]
             setattr(self, name, grown)
         self._rows = new_rows
+        self._bind_kernel()
 
     # ------------------------------------------------------------------
     # Dict views over the dense store
@@ -259,6 +283,7 @@ class CrashMITracker:
         self._s_crash = _np.zeros(self._rows, dtype=_np.float64)
         self._s_clean = _np.zeros(self._rows, dtype=_np.float64)
         self._crash_rows = _np.zeros(self._rows, dtype=_np.uint64)
+        self._bind_kernel()
 
     def _bump_sums(self, idx, n: int, is_crash: bool) -> None:
         """Add f(k+1) - f(k) for the byte each position saw, then count it.
@@ -299,6 +324,7 @@ class CrashMITracker:
             self._s_clean[lo:hi] = _f(total).sum(axis=1)
 
         self._crash_rows = self._joint_crash_arr.sum(axis=1, dtype=_np.uint64)
+        self._bind_kernel()
 
     def _mi_rows(self, rows) -> list[float]:
         """mi() for each of *rows* from the running sums (closed form above)."""

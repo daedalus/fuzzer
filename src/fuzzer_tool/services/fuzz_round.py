@@ -36,7 +36,7 @@ from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
 from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.clock import clock_of
-from fuzzer_tool.core.cmplog import CmplogRecords
+from fuzzer_tool.core.cmplog import CmplogRecords, CountsDrain
 from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
 from fuzzer_tool.core.orbit_dedup import run_probe
 from fuzzer_tool.core.ro_rd import classify_operator_name
@@ -465,7 +465,8 @@ class FuzzRound:
         f._cmplog_skip_counter += 1
         if self._collect_now:
             f._cmplog_skip_counter = 0
-            new_tokens = f._cmplog.collect_tokens()
+            # Counters were drained in _execute; a second drain empties them.
+            new_tokens = f._cmplog.collect_tokens(CountsDrain.SKIP)
         else:
             new_tokens = []
         self._cmplog_found = bool(new_tokens)
