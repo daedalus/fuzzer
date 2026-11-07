@@ -167,6 +167,10 @@ _US_PER_S = 1_000_000
 # Signals whose si_addr is the faulting data address.
 _FAULT_SIGS = frozenset((signal.SIGSEGV, signal.SIGBUS))
 
+# Read by the shim (afl_shim.c __afl_ctx_relative_init): "1" hashes caller
+# context from load-base-relative return addresses instead of raw ones.
+CTX_RELATIVE_ENV = "FUZZER_KEEP_ASLR"
+
 
 def read_shim_health(lib: ctypes.CDLL) -> tuple[int, ...] | None:
     """Snapshot of ``__afl_shim_health()`` counters, or None for an older shim.
@@ -340,6 +344,12 @@ class InProcessRunner:
     def _start_c(self):
         mode = "direct" if self.direct else "subprocess"
         cov = bool(self.coverage_env_id)
+
+        # Base-relative caller context, before any load (direct here, loader
+        # children via os.environ). disable_aslr() fixes only children: a .so
+        # loaded into this process sits at a randomized base, so raw return
+        # addresses gave different edge ids every run and per backend.
+        os.environ.setdefault(CTX_RELATIVE_ENV, "1")
 
         # Build coverage shim via factory
         if cov:

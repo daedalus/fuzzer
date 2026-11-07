@@ -87,7 +87,18 @@ def build_so(tmp_path):
         src.write_text(TARGET_SRC)
         so = d / "t.so"
         proc = subprocess.run(
-            [cc, "-O1", "-fPIC", "-shared", "-o", str(so), str(src), str(SHIM)],
+            # Frame pointers, as build_targets.sh: without them the ctx walk hashes stack junk.
+            [
+                cc,
+                "-O1",
+                "-fno-omit-frame-pointer",
+                "-fPIC",
+                "-shared",
+                "-o",
+                str(so),
+                str(src),
+                str(SHIM),
+            ],
             capture_output=True,
             text=True,
         )

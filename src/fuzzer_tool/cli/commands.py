@@ -271,6 +271,16 @@ def _preload_asan(target: str) -> None:
     print(f"[*] LD_PRELOAD={libasan} (ASAN must load first for .so targets)")
 
 
+def _asan_so_ready(target: str) -> None:
+    """Preload libasan when *target* is a dynamically ASAN-linked .so.
+
+    Every command that loads a .so (directly or in the loader child) needs
+    it, else the child dies with "ASan runtime does not come first".
+    """
+    if _is_shared_object(target) and _detect_asan(target):
+        _preload_asan(target)
+
+
 def _so_exec(target: str, timeout: float):
     """Bind one-input execution of a .so target: ``data -> (rc, stderr)``.
 
@@ -281,8 +291,7 @@ def _so_exec(target: str, timeout: float):
     from fuzzer_tool.adapters.inprocess import InProcessRunner
     from fuzzer_tool.services.fuzzer import Fuzzer
 
-    if _detect_asan(target):
-        _preload_asan(target)
+    _asan_so_ready(target)
     runner = InProcessRunner(
         target=target,
         function_name=Fuzzer._probe_so_function(target),
@@ -1653,6 +1662,7 @@ def cmd_minimize(args):
     # A module:function target has no file to check.
     if not (args.inprocess and ":" in args.target):
         _validate_target(args.target)
+        _asan_so_ready(args.target)
     from fuzzer_tool.core.rand_pool import RandPool
     from fuzzer_tool.services.minimize import PruneMode, minimize_corpus
 
@@ -1752,6 +1762,7 @@ def cmd_edge_dump(args):
     """Replay a corpus and write each seed's edge ids; no pruning."""
     if not (args.inprocess and ":" in args.target):
         _validate_target(args.target)
+        _asan_so_ready(args.target)
     import time
 
     from fuzzer_tool.services.edge_export import export_edges
