@@ -1315,7 +1315,7 @@ build_fgrep_targets() {
     local FGREP_INC="-I$FGREP/include -I$FGREP/src"
 
     local out_suffix="_noasan"
-    [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+    [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
     # fgrep_read includes fgrep .c files directly and needs -mavx2 for AVX2 intrinsics
     build_target "${TARGETS_SRC:-$TARGETS}/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
@@ -1337,7 +1337,7 @@ build_simple_targets() {
     local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     echo "Building simple targets ($label)..."
     local out_suffix="_noasan"
-    [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+    [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
     local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
     local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"
@@ -1909,18 +1909,17 @@ build_standalone_so_targets() {
     # secp256k1_read — vendored libsecp256k1 (tools/vendor_secp256k1.sh
     # extracts to vendor/secp256k1). Same object discipline as lz4_read
     # above: library objects are compiled separately, without -include $SHIM.
-    # _nosan builds a distinct _nosan.so instead of overwriting the base .so.
+    # The no-sanitizer pass writes _noasan.so.
     local SECP256K1_OBJS="/tmp/secp256k1${suffix}.o /tmp/precomputed_ecmult${suffix}.o /tmp/precomputed_ecmult_gen${suffix}.o"
     local SECP256K1_INC="-I$SECP256K1/src -I$SECP256K1/include"
     if [ ! -f "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" ]; then
         :  # target source absent — nothing to build
     elif [ "$suffix" = "_nosan" ]; then
-        # Always compile fresh _nosan objects with coverage, and emit a
-        # distinct _nosan.so so the base .so from the "" pass is preserved.
+        # Always compile fresh _nosan objects with coverage.
         if compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read_nosan.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read_noasan.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
         else
-            warn "secp256k1_read_nosan.so: compile failed, skipping"
+            warn "secp256k1_read_noasan.so: compile failed, skipping"
         fi
     elif compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read${out_suffix}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
@@ -1932,16 +1931,16 @@ build_standalone_so_targets() {
     # the reference libsecp256k1 (tools/vendor_brainflayer.sh -> vendor/
     # brainflayer). Same object discipline as secp256k1_read: the fast path,
     # mmap helper and reference library are compiled separately, without the
-    # shim. _nosan builds a distinct _nosan.so so the base pass is preserved.
+    # shim. The no-sanitizer pass writes _noasan.so.
     local BF_EC_OBJS="/tmp/bf_ec_pubkey_fast${suffix}.o /tmp/bf_mmapf${suffix}.o /tmp/bf_secp256k1${suffix}.o"
     local BF_EC_INC="-I$BRAINFLAYER"
     if [ ! -f "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" ]; then
         :  # target source absent — nothing to build
     elif [ "$suffix" = "_nosan" ]; then
         if compile_brainflayer_ec_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" "$TARGETS/ec_pubkey_diff_nosan.so" "$BF_EC_OBJS -Wl,--export-dynamic" "$flags $BF_EC_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" "$TARGETS/ec_pubkey_diff_noasan.so" "$BF_EC_OBJS -Wl,--export-dynamic" "$flags $BF_EC_INC"
         else
-            warn "ec_pubkey_diff_nosan.so: compile failed, skipping"
+            warn "ec_pubkey_diff_noasan.so: compile failed, skipping"
         fi
     elif compile_brainflayer_ec_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" "$TARGETS/ec_pubkey_diff${out_suffix}.so" "$BF_EC_OBJS -Wl,--export-dynamic" "$flags $BF_EC_INC"
@@ -1958,9 +1957,9 @@ build_standalone_so_targets() {
         :  # target source absent — nothing to build
     elif [ "$suffix" = "_nosan" ]; then
         if compile_brainflayer_hash_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" "$TARGETS/hash_simd_diff_nosan.so" "$BF_HASH_OBJS -lcrypto -Wl,--export-dynamic" "$flags $BF_HASH_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" "$TARGETS/hash_simd_diff_noasan.so" "$BF_HASH_OBJS -lcrypto -Wl,--export-dynamic" "$flags $BF_HASH_INC"
         else
-            warn "hash_simd_diff_nosan.so: compile failed, skipping"
+            warn "hash_simd_diff_noasan.so: compile failed, skipping"
         fi
     elif compile_brainflayer_hash_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" "$TARGETS/hash_simd_diff${out_suffix}.so" "$BF_HASH_OBJS -lcrypto -Wl,--export-dynamic" "$flags $BF_HASH_INC"
@@ -1976,9 +1975,9 @@ build_standalone_so_targets() {
         :  # target source absent — nothing to build
     elif [ "$suffix" = "_nosan" ]; then
         if compile_brainflayer_bloom_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" "$TARGETS/brainflayer_read_nosan.so" "$BF_BLOOM_OBJS -lm -Wl,--export-dynamic" "$flags $BF_BLOOM_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" "$TARGETS/brainflayer_read_noasan.so" "$BF_BLOOM_OBJS -lm -Wl,--export-dynamic" "$flags $BF_BLOOM_INC"
         else
-            warn "brainflayer_read_nosan.so: compile failed, skipping"
+            warn "brainflayer_read_noasan.so: compile failed, skipping"
         fi
     elif compile_brainflayer_bloom_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" "$TARGETS/brainflayer_read${out_suffix}.so" "$BF_BLOOM_OBJS -lm -Wl,--export-dynamic" "$flags $BF_BLOOM_INC"
@@ -1989,8 +1988,7 @@ build_standalone_so_targets() {
     # sqlite_read — vendored SQLite amalgamation (tools/vendor_sqlite.sh
     # extracts to vendor/sqlite). Same object discipline as lz4_read and
     # secp256k1_read above: sqlite3.c is compiled separately, without
-    # -include $SHIM. _nosan builds a distinct _nosan.so instead of
-    # overwriting the base .so.
+    # -include $SHIM. The no-sanitizer pass writes _noasan.so.
     local SQLITE_OBJS="/tmp/sqlite3${suffix}.o"
     # -lm: sqlite's math functions; -lpthread even at THREADSAFE=0 because
     # the shim's own machinery links against it.
@@ -2002,7 +2000,7 @@ build_standalone_so_targets() {
         warn "sqlite_read${out_suffix}.so: vendor/sqlite not found, skipping (run tools/vendor_sqlite.sh)"
     elif compile_sqlite_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         if [ "$suffix" = "_nosan" ]; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read_nosan.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read_noasan.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
         else
             build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read${out_suffix}.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
         fi
