@@ -220,8 +220,29 @@ class TraceReport:
         if self.source_context:
             lines.extend(["", "--- Source ---", self.source_context])
         if self.disassembly:
-            lines.extend(["", "--- Disassembly ---", self.disassembly])
+            lines.extend(["", "--- Disassembly ---", _crash_site_disasm(self.disassembly)])
         return "\n".join(lines)
+
+
+# Disassembly lines kept in the .txt sidecar, centred on gdb's "=>" (the
+# faulting instruction). The .trace file keeps every block.
+SIDECAR_DISASM_LINES = 40
+_DISASM_END = "End of assembler dump."
+
+
+def _crash_site_disasm(text: str) -> str:
+    """First block (``disassemble $pc``) only, windowed around ``=>``."""
+    lines = text.splitlines()
+    end = next((i for i, ln in enumerate(lines) if ln.strip() == _DISASM_END), len(lines) - 1)
+    header, body = lines[:1], lines[1:end]
+    if len(body) <= SIDECAR_DISASM_LINES:
+        return "\n".join(lines[: end + 1])
+
+    mark = next((i for i, ln in enumerate(body) if ln.startswith("=>")), 0)
+    lo = max(0, min(mark - SIDECAR_DISASM_LINES // 2, len(body) - SIDECAR_DISASM_LINES))
+    hidden = len(body) - SIDECAR_DISASM_LINES
+    note = f"   ... {hidden} more lines in the .trace file"
+    return "\n".join([*header, *body[lo : lo + SIDECAR_DISASM_LINES], note])
 
 
 def _gdb_signal(lines: list[str], report: TraceReport) -> None:

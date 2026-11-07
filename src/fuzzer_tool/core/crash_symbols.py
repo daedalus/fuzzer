@@ -20,12 +20,16 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import tempfile
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from fuzzer_tool.core.sanitizer import is_runtime_module
 
 ENV_VAR = "__AFL_CRASH_SYM_OUT"
+# This process's executable: an in-process (.so) target unwinds into it.
+_INTERPRETER = os.path.realpath(sys.executable)
 _MAX_BYTES = 1 << 16  # a sink this large only holds repeats of the same crash
 
 
@@ -53,12 +57,21 @@ class SymFrame:
         return " ".join(parts)
 
 
+class Resolver(StrEnum):
+    """Who named the frames of a :class:`CrashSymbol`."""
+
+    NONE = ""
+    RUNTIME = "runtime"  # __sanitizer_symbolize_pc in the target
+    DWARF = "dwarf"  # core.pc_resolver, from the module file
+
+
 @dataclass
 class CrashSymbol:
     signal: int = 0
     pc: int = 0
     fault_addr: int = 0
     symbolized: bool = False
+    resolver: Resolver = Resolver.NONE
     frames: list[SymFrame] = field(default_factory=list)
 
     def frame_strings(self) -> list[str]:
@@ -72,6 +85,7 @@ class CrashSymbol:
             "pc": f"0x{self.pc:x}",
             "fault_addr": f"0x{self.fault_addr:x}",
             "symbolized": self.symbolized,
+            "resolver": self.resolver.value,
             "frames": [
                 {
                     "pc": f"0x{f.pc:x}",
@@ -149,6 +163,8 @@ def parse_line(line: str) -> CrashSymbol | None:
         resolved = [fr for chunk in text.split(";") if (fr := _parse_frame(pc, chunk))]
         sym.frames.extend(resolved or [SymFrame(pc=pc)])
         sym.symbolized = sym.symbolized or any(fr.function or fr.file for fr in resolved)
+    if sym.symbolized:
+        sym.resolver = Resolver.RUNTIME
     return sym
 
 
@@ -198,8 +214,11 @@ def crash_pcs(sym: CrashSymbol | None) -> tuple[int, ...] | None:
         return None
 
     # libc / sanitizer runtime frames (glibc abort -> raise -> pthread_kill)
-    # name no target site; skipped unless nothing else is left.
-    target = [f.pc for f in sym.frames if not is_runtime_module(f.module)]
+    # and, in-process, the interpreter's own frames name no target site;
+    # skipped unless nothing else is left.
+    target = [
+        f.pc for f in sym.frames if not is_runtime_module(f.module) and f.module != _INTERPRETER
+    ]
     out: list[int] = []
     for pc in target or [f.pc for f in sym.frames] or [sym.pc]:
         if pc and (not out or out[-1] != pc):
@@ -207,11 +226,52 @@ def crash_pcs(sym: CrashSymbol | None) -> tuple[int, ...] | None:
     return tuple(out) or None
 
 
+def resolve_raw(sym: CrashSymbol) -> bool:
+    """Name unsymbolized target frames from their module's DWARF / symtab.
+
+    One batch per module; libc / runtime frames are left as they are.
+    Returns True if any frame got a name.
+    """
+    from fuzzer_tool.core.pc_resolver import resolver_for
+
+    by_module: dict[str, list[int]] = {}
+    for i, fr in enumerate(sym.frames):
+        if (
+            fr.function
+            or not fr.module
+            or is_runtime_module(fr.module)
+            or fr.module == _INTERPRETER
+        ):
+            continue
+        by_module.setdefault(fr.module, []).append(i)
+
+    named = False
+    for module, idxs in by_module.items():
+        res = resolver_for(module)
+        if res is None:
+            continue
+
+        frames = [sym.frames[i] for i in idxs]
+        sites = res.resolve(
+            [f.pc for f in frames], [f.offset for f in frames], [i > 0 for i in idxs]
+        )
+        for fr, site in zip(frames, sites, strict=True):
+            if site is None:
+                continue
+            fr.function, fr.file, fr.line = site
+            named = True
+    if named:
+        sym.symbolized, sym.resolver = True, Resolver.DWARF
+    return named
+
+
 def hydrate(meta, sym: CrashSymbol | None) -> bool:
     """Fill *meta* from a shim record. Never overwrites a value another
     source (sanitizer report, ptrace) already set. Returns True if applied."""
     if sym is None:
         return False
+    if not sym.symbolized:
+        resolve_raw(sym)
     meta.shim_symbol = sym.to_dict()
     if not meta.frames:
         meta.frames = sym.frame_strings()

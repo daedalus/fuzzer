@@ -80,3 +80,23 @@ def test_other_libc_file_not_trusted() -> None:
     assert libc_symbol("/other/root/lib/libc.so.6", 0x1234) == ""
     mod, off = _where("free")
     assert libc_symbol(mod, 1 << 40) == ""  # offset past the object
+
+
+def test_regression_private_heap_abort_high() -> None:
+    """-D__AFL_PRIVATE_HEAP=1 (fuzzgoat .so): the shim's own allocator aborts
+    on a double / invalid free; its frame, not libc's, sits above the target.
+    fuzzgoat [[]] (use-after-free -> double free) read LOW."""
+    raise_ = _frame(*_where("raise"))
+    ph = {**_frame("/t/fuzzgoat.so", 0x6227), "function": "__afl_ph_release"}
+    target = {**_frame("/t/fuzzgoat.so", 0x11D6), "function": "json_value_free_ex"}
+
+    assert shim_exploitability(ABRT, _sym(raise_, ph, target)) == "HIGH"
+
+
+def test_named_target_abort_not_private_heap() -> None:
+    """Adversarial: a named target frame that is not the private heap stays no-verdict."""
+    raise_ = _frame(*_where("raise"))
+    abort = _frame(*_where("abort"))
+    target = {**_frame("/t/fuzzgoat.so", 0x11D6), "function": "__afl_phony_assert"}
+
+    assert shim_exploitability(ABRT, _sym(raise_, abort, target)) is None

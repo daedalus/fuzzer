@@ -1173,6 +1173,9 @@ compile_sqlite_objects() {
 # Fuzzgoat is vendored as source. To avoid multiple-definition errors with
 # the AFL shim (which is injected via `-include $SHIM` into the wrapper TU
 # only), compile fuzzgoat.c separately without the shim and link the object.
+# clang -O2 deletes fuzzgoat's planted `*NULL` load as UB ("A" payload exits
+# 0); this keeps it, so all 4 planted bugs stay findable.
+FUZZGOAT_CFLAGS="-fno-delete-null-pointer-checks"
 compile_fuzzgoat_object() {
     local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
     # return 0, not 1: every other optional-vendor guard in this script
@@ -1188,7 +1191,7 @@ compile_fuzzgoat_object() {
     # cannot clobber another's before its link.
     local cov_flag
     cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
-    $cc $flags $cov_flag -O2 $DEBUG_CFLAGS $extra_cflags -I"$VENDOR/fuzzgoat" \
+    $cc $flags $cov_flag -O2 $FUZZGOAT_CFLAGS $DEBUG_CFLAGS $extra_cflags -I"$VENDOR/fuzzgoat" \
         -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o "/tmp/fuzzgoat${suffix}.o" 2>>"$BUILD_LOG"
 }
 
@@ -2124,44 +2127,13 @@ build_vendored_so_targets() {
 verify_afl() {
     echo "Verifying AFL symbols..."
     local count=0 fail_count=0
-    for f in "$TARGETS"/fuzz_* "$TARGETS"/fgrep_read "$TARGETS"/fgrep_read_nosan \
-             "$TARGETS"/fgrep_read.so "$TARGETS"/fgrep_read_nosan.so \
-             "$TARGETS"/asan_target "$TARGETS"/asan_target_nosan "$TARGETS"/asan_target.so "$TARGETS"/asan_target_nosan.so \
-             "$TARGETS"/antifuzz_demo "$TARGETS"/antifuzz_demo_nosan "$TARGETS"/antifuzz_demo.so "$TARGETS"/antifuzz_demo_nosan.so \
-             "$TARGETS"/png_read "$TARGETS"/png_read_nosan "$TARGETS"/png_read.so "$TARGETS"/png_read_nosan.so \
-             "$TARGETS"/zlib_read "$TARGETS"/zlib_read_nosan "$TARGETS"/zlib_read.so "$TARGETS"/zlib_read_nosan.so \
-             "$TARGETS"/gzip_read "$TARGETS"/gzip_read_nosan "$TARGETS"/gzip_read.so "$TARGETS"/gzip_read_nosan.so \
-             "$TARGETS"/jpeg_read "$TARGETS"/jpeg_read_nosan "$TARGETS"/jpeg_read.so "$TARGETS"/jpeg_read_nosan.so \
-             "$TARGETS"/test_target "$TARGETS"/test_target_nosan "$TARGETS"/test_target.so "$TARGETS"/test_target_nosan.so \
-             "$TARGETS"/proto_target "$TARGETS"/proto_target_nosan "$TARGETS"/proto_target.so "$TARGETS"/proto_target_nosan.so \
-             "$TARGETS"/nop_target "$TARGETS"/nop_target_nosan "$TARGETS"/nop_target.so "$TARGETS"/nop_target_nosan.so \
-             "$TARGETS"/tailslayer_read "$TARGETS"/tailslayer_read.so \
-             "$TARGETS"/lz4_read "$TARGETS"/lz4_read_nosan "$TARGETS"/lz4_read.so "$TARGETS"/lz4_read_nosan.so \
-             "$TARGETS"/secp256k1_read.so "$TARGETS"/secp256k1_read_nosan.so \
-             "$TARGETS"/ec_pubkey_diff.so "$TARGETS"/ec_pubkey_diff_noasan.so "$TARGETS"/ec_pubkey_diff_nosan.so "$TARGETS"/ec_pubkey_diff_asan.so \
-             "$TARGETS"/hash_simd_diff.so "$TARGETS"/hash_simd_diff_noasan.so "$TARGETS"/hash_simd_diff_nosan.so "$TARGETS"/hash_simd_diff_asan.so \
-             "$TARGETS"/brainflayer_read.so "$TARGETS"/brainflayer_read_noasan.so "$TARGETS"/brainflayer_read_nosan.so "$TARGETS"/brainflayer_read_asan.so \
-             "$TARGETS"/sqlite_read.so "$TARGETS"/sqlite_read_nosan.so \
-             "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so \
-             "$TARGETS"/fuzzgoat_read "$TARGETS"/fuzzgoat_read_nosan "$TARGETS"/fuzzgoat_read.so "$TARGETS"/fuzzgoat_read_nosan.so \
-             "$TARGETS"/grep_read_ng2.so "$TARGETS"/grep_read_ng3.so \
-             "$TARGETS"/asan_target_ng2.so "$TARGETS"/asan_target_ng3.so \
-             "$TARGETS"/antifuzz_demo_ng2.so "$TARGETS"/antifuzz_demo_ng3.so \
-             "$TARGETS"/test_target_ng2.so "$TARGETS"/test_target_ng3.so \
-             "$TARGETS"/proto_target_ng2.so "$TARGETS"/proto_target_ng3.so \
-             "$TARGETS"/png_read_ng2.so "$TARGETS"/png_read_ng3.so \
-             "$TARGETS"/zlib_read_ng2.so "$TARGETS"/zlib_read_ng3.so \
-             "$TARGETS"/gzip_read_ng2.so "$TARGETS"/gzip_read_ng3.so \
-             "$TARGETS"/jpeg_read_ng2.so "$TARGETS"/jpeg_read_ng3.so \
-             "$TARGETS"/nop_target_ng2.so "$TARGETS"/nop_target_ng3.so \
-             "$TARGETS"/fuzzgoat_read_ng2.so "$TARGETS"/fuzzgoat_read_ng3.so \
-             "$TARGETS"/tailslayer_read_ng2.so "$TARGETS"/tailslayer_read_ng3.so \
-             "$TARGETS"/lz4_read_ng2.so "$TARGETS"/lz4_read_ng3.so \
-             "$TARGETS"/secp256k1_read_ng2.so "$TARGETS"/secp256k1_read_ng3.so \
-             "$TARGETS"/sqlite_read_ng2.so "$TARGETS"/sqlite_read_ng3.so \
-             "$TARGETS"/fgrep_read_ng2.so "$TARGETS"/fgrep_read_ng3.so; do
+    # Every ELF in the build root: a fixed name list fell behind the
+    # _noasan / _asan.so / _ubsan.so outputs and checked 8 of ~60 targets.
+    # ffmpeg_read_* is summarised separately below.
+    for f in "$TARGETS"/*; do
         [ -f "$f" ] || continue
-        [[ "$f" == *.c ]] && continue
+        [[ "$(basename "$f")" == ffmpeg_read_* ]] && continue
+        [ "$(head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] || continue
         local n=$(nm "$f" 2>/dev/null | grep -c __afl || true)
         if [ "$n" -gt 0 ]; then
             count=$((count + 1))

@@ -123,7 +123,7 @@ class TestWiring:
 
     def test_target_built_verified_and_listed(self, build_src):
         assert 'build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c"' in build_src
-        assert '"$TARGETS"/brainflayer_read.so' in build_src
+        assert 'for f in "$TARGETS"/*; do' in build_src  # verify_afl scans the whole build root
         assert '"brainflayer_read"' in build_src
 
     def test_dictionary_has_magic(self):

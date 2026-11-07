@@ -19,8 +19,10 @@ addresses (inlined code); all are returned and treated as targets.
 """
 
 import logging
+import posixpath
 import struct
 import zlib
+from array import array
 from pathlib import Path
 from typing import NamedTuple
 
@@ -52,6 +54,11 @@ _DW_FORM_strx3 = 0x27
 _DW_FORM_strx4 = 0x28
 _DW_FORM_addrx = 0x1B
 _DW_FORM_addrx1 = 0x29
+_DW_FORM_addrx2 = 0x2A
+_DW_FORM_addrx3 = 0x2B
+_DW_FORM_addrx4 = 0x2C
+_DW_FORM_loclistx = 0x22
+_DW_FORM_rnglistx = 0x23
 _DW_FORM_sdata = 0x0D
 _DW_FORM_flag = 0x0C
 _DW_FORM_flag_present = 0x19
@@ -255,6 +262,10 @@ def _rd_u16(sections, data, off, addr_size, str_base):
     return struct.unpack_from("<H", data, off)[0], off + 2
 
 
+def _rd_u24(sections, data, off, addr_size, str_base):
+    return int.from_bytes(data[off : off + 3], "little"), off + 3
+
+
 def _rd_u32(sections, data, off, addr_size, str_base):
     return struct.unpack_from("<I", data, off)[0], off + 4
 
@@ -308,6 +319,8 @@ _FORM_READERS = {
     **{form: _strx_reader(form) for form in _STRX_INDEX},
     _DW_FORM_udata: _rd_uleb,
     _DW_FORM_addrx: _rd_uleb,
+    _DW_FORM_loclistx: _rd_uleb,
+    _DW_FORM_rnglistx: _rd_uleb,
     _DW_FORM_ref_udata: _rd_uleb,
     _DW_FORM_sdata: _rd_sleb,
     _DW_FORM_flag_present: _rd_flag_present,
@@ -316,6 +329,9 @@ _FORM_READERS = {
     _DW_FORM_addrx1: _rd_u8,
     _DW_FORM_ref1: _rd_u8,
     _DW_FORM_data2: _rd_u16,
+    _DW_FORM_addrx2: _rd_u16,
+    _DW_FORM_addrx3: _rd_u24,
+    _DW_FORM_addrx4: _rd_u32,
     _DW_FORM_ref2: _rd_u16,
     _DW_FORM_data4: _rd_u32,
     _DW_FORM_ref4: _rd_u32,
@@ -538,10 +554,9 @@ def _line_file_tables(data, p, header_end, version, comp_dir, sections):
     dirs: list[str] = [""]
     files: list[tuple[str, int]] = []  # (display name, dir index)
     if version >= 5:
-        dirs[0] = comp_dir or ""
+        # Entry 0 of the v5 table is the comp dir itself.
         dir_entries, p = _read_v5_table(data, p, sections, header_end)
-        for fields in dir_entries:
-            dirs.append(str(fields.get(_DW_LNCT_path, "")))
+        dirs = [str(fields.get(_DW_LNCT_path, "")) for fields in dir_entries] or [comp_dir or ""]
         file_entries, p = _read_v5_table(data, p, sections, header_end)
         for fields in file_entries:
             files.append(
@@ -572,14 +587,20 @@ def _line_display(version: int, files: list, dirs: list[str]):
     1-based. *files* is shared, so DW_LNE_define_file additions are seen.
     """
     first = 0 if version >= 5 else 1
+    root = dirs[0] if version >= 5 else ""
 
     def _display(file_idx: int) -> str:
         if not first <= file_idx < len(files) + first:
             return ""
         fname, dir_idx = files[file_idx - first]
-        if dir_idx < len(dirs) and dirs[dir_idx]:
-            return f"{dirs[dir_idx]}/{fname}"
-        return fname
+        if fname.startswith("/"):
+            return fname
+        if not (dir_idx < len(dirs) and dirs[dir_idx]):
+            return fname
+        d = dirs[dir_idx]
+        if root and dir_idx and not d.startswith("/"):
+            d = f"{root}/{d}"  # v5: relative dirs hang off entry 0
+        return posixpath.normpath(f"{d}/{fname}")
 
     return _display
 
@@ -739,7 +760,7 @@ class DwarfLineResolver:
         except Exception:
             log.debug("DWARF parse failed for %s", self.target, exc_info=True)
 
-        self._loaded = bool(self._by_basename)
+        self._loaded = self._has_rows()
         if self._loaded:
             log.info(
                 "DwarfLineResolver: %d files, %d lines in %s",
@@ -788,6 +809,9 @@ class DwarfLineResolver:
         prog = _LineProgram(data, end, hdr, version, addr_size, files, display)
         self._index_line_rows(prog.run(header_end))
 
+    def _has_rows(self) -> bool:
+        return bool(self._by_basename)
+
     def _index_line_rows(self, rows: list[tuple[str, int, int]]) -> None:
         """Index rows by basename → line → addresses (dedup, first address
         of each contiguous run wins via sorted dedup below)."""
@@ -813,3 +837,65 @@ class DwarfLineResolver:
         # the line stays the same); the meaningful entry point is the
         # lowest address.
         return addrs
+
+
+class DwarfSiteResolver(DwarfLineResolver):
+    """Address -> ``(file, line)``: the reverse of :class:`DwarfLineResolver`.
+
+    Same line-program walk; rows are kept by address instead of by file.
+    A lookup returns the last row at or below the address. Under inlining
+    that row is the innermost inlined source line.
+    """
+
+    def __init__(self, target: str):
+        super().__init__(target)
+        self._addrs = array("Q")
+        self._lines = array("I")
+        self._file_ids = array("I")
+        self._files: dict[str, int] = {}
+        self._names: list[str] = []
+        self._sorted = False
+
+    def _has_rows(self) -> bool:
+        return bool(self._addrs)
+
+    def _index_line_rows(self, rows: list[tuple[str, int, int]]) -> None:
+        files = self._files
+        for display, ln, addr in rows:
+            if addr <= 0 or not display:
+                continue
+            fid = files.get(display)
+            if fid is None:
+                fid = files[display] = len(self._names)
+                self._names.append(display)
+            self._addrs.append(addr)
+            self._lines.append(ln)
+            self._file_ids.append(fid)
+
+    def _sort(self) -> None:
+        """Order the rows by address once, in bulk."""
+        import numpy as np
+
+        addrs = np.frombuffer(self._addrs, dtype=np.uint64)
+        order = np.argsort(addrs, kind="stable")
+        self._addr_np = addrs[order]
+        self._line_np = np.frombuffer(self._lines, dtype=np.uint32)[order]
+        self._fid_np = np.frombuffer(self._file_ids, dtype=np.uint32)[order]
+        self._sorted = True
+
+    def sites(self, addrs: list[int]) -> list[tuple[str, int, int] | None]:
+        """``(file, line, row_addr)`` per address; None below the first row."""
+        import numpy as np
+
+        if not self._loaded or not addrs:
+            return [None] * len(addrs)
+        if not self._sorted:
+            self._sort()
+
+        idx = np.searchsorted(self._addr_np, np.asarray(addrs, dtype=np.uint64), side="right") - 1
+        return [
+            None
+            if i < 0
+            else (self._names[int(self._fid_np[i])], int(self._line_np[i]), int(self._addr_np[i]))
+            for i in idx.tolist()
+        ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -40,6 +41,19 @@ _CRASH_CLUSTER_DIAG_MAX_SIZE: int = int(
 # Rows of the field map printed in the .txt sidecar; the .json keeps them all.
 MAX_TXT_ROWS = 64  # changed fields shown when a baseline is known
 MAX_TXT_ROWS_NO_BASE = 32  # fields shown when there is no baseline
+
+
+# "==1==ERROR: AddressSanitizer: SEGV on ... (pc 0x55.. bp" / "... at pc 0x55.. bp"
+_REPORT_PC_RE = re.compile(r"ERROR: \w+Sanitizer: [^\n]*?\bpc (0x[0-9a-fA-F]+)")
+
+# Sidecar title per crash_symbols.Resolver value ("" = raw PCs only).
+_SHIM_RUNTIME = "runtime"
+_SHIM_RAW = "raw pc, no symbolizer"
+_SHIM_SOURCES = {
+    _SHIM_RUNTIME: "sanitizer runtime",
+    "dwarf": "module DWARF + symtab",
+    "": _SHIM_RAW,
+}
 
 
 def configure_crash_cluster(threshold: float = 0.7, core_threshold: float = 0.5) -> None:
@@ -210,11 +224,7 @@ class CrashMetadata:
 
         if self.shim_symbol:
             sym = self.shim_symbol
-            lines.append(
-                "=== shim symbolization ("
-                + ("sanitizer runtime" if sym.get("symbolized") else "raw pc, no symbolizer")
-                + ") ==="
-            )
+            lines.append(f"=== shim symbolization ({self._shim_source(sym)}) ===")
             lines.append(
                 f"  signal={sym.get('signal')} pc={sym.get('pc')} fault={sym.get('fault_addr')}"
             )
@@ -251,6 +261,23 @@ class CrashMetadata:
         _append_block(lines, "input text", self.input_text_repr)
 
         return "\n".join(lines)
+
+    def _shim_source(self, sym: dict) -> str:
+        """Who named the shim frames, and whether they are the reported site.
+
+        With a sanitizer report the shim record is a later fault: in-process
+        ASAN (halt_on_error=0) reports, runs on, then faults elsewhere.
+        """
+        default = _SHIM_RUNTIME if sym.get("symbolized") else ""
+        src = _SHIM_SOURCES.get(sym.get("resolver", default), _SHIM_RAW)
+        if not self.sanitizer or self._report_pc() == str(sym.get("pc", "")):
+            return src  # no report, or the report's own signal (ASAN SEGV)
+        return f"{src}; later fault, after the sanitizer report"
+
+    def _report_pc(self) -> str:
+        """``0x..`` pc from the sanitizer report header; "" when it has none."""
+        m = _REPORT_PC_RE.search(self.raw_stderr)
+        return f"0x{int(m.group(1), 16):x}" if m else ""
 
     def _sidecar_fault(self, lines: list[str]) -> None:
         """Sanitizer diagnosis, or returncode/signal info for plain crashes."""
