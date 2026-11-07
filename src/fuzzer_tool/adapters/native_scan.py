@@ -6,7 +6,7 @@ loads it with ctypes and exposes numpy-level calls. Callers work in terms
 of "live entries", "fold" and "drain"; pointers and scratch stay here.
 
     ShmCoverage._scan      -> LiveScan.live / live_touched
-    ShmCoverage._scan_new  -> LiveScan.fold
+    ShmCoverage._scan_new  -> LiveScan.fold, or LiveScan.live_fold (gather + fold)
     CmpCounterShm.drain_*  -> CmpDrain.counts / sites
     CrashMITracker.record  -> MIBump.bump
 
@@ -37,7 +37,7 @@ _COMPILERS = ("clang", "gcc")
 _COMPILE_TIMEOUT = 60
 
 # Index-matched to the ST_* enum in native_scan.c.
-_ST_TRANSITIONS, _ST_OLD_MOVED, _ST_GAIN, _ST_FIELDS = range(4)
+_ST_TRANSITIONS, _ST_OLD_MOVED, _ST_GAIN, _ST_LIVE, _ST_FIELDS = range(5)
 
 # fs_fold's return when an id is past the virgin or max array.
 _FOLD_GROW = -1
@@ -49,6 +49,7 @@ _SIGNATURES = {
     "fs_live": [_P, _L, ctypes.c_uint32, _P, _P],
     "fs_live_touched": [_P, _L, ctypes.c_uint32, _P, _L, _P, _P],
     "fs_fold": [_P, _P, _L, _P, _L, _P, _L, _P, ctypes.c_double, _P, _P, _P],
+    "fs_live_fold": [_P, _P, _L, ctypes.c_uint32, _P, _L],
     "fs_drain_counts": [_P, _P, _L, _P, _P, _P],
     "fs_drain_sites": [_P, _L, _P, _P, _P],
     "fs_mi_bump": [ctypes.c_char_p, _L, _L, _P],
@@ -137,6 +138,24 @@ class FoldOut(NamedTuple):
     gain: int
 
 
+class _FoldState(ctypes.Structure):
+    """Mirrors ``struct fold_state`` in native_scan.c."""
+
+    _fields_ = [
+        ("ids", _P),
+        ("counts", _P),
+        ("cand_ids", _P),
+        ("cand_bits", _P),
+        ("stats", _P),
+        ("bucket", _P),
+        ("virgin", _P),
+        ("vsize", _L),
+        ("maxc", _P),
+        ("msize", _L),
+        ("factor", ctypes.c_double),
+    ]
+
+
 class LiveScan:
     """Edge-table gather and virgin/max fold, with reusable scratch."""
 
@@ -144,10 +163,16 @@ class LiveScan:
         self._live = lib.fs_live
         self._live_touched = lib.fs_live_touched
         self._fold = lib.fs_fold
+        self._live_fold = lib.fs_live_fold
         self._bucket = BUCKET_BIT_TABLE
         self._bucket_addr = _addr(self._bucket)
         self._stats = np.zeros(_ST_FIELDS, dtype=np.uint64)
         self._stats_addr = _addr(self._stats)
+
+        # live_fold's bound arrays: rebound when scratch, virgin or maxc move.
+        self._state = _FoldState(stats=self._stats_addr, bucket=self._bucket_addr)
+        self._state_ref = ctypes.byref(self._state)
+        self._bound: tuple = ()
         self._cap = -1
         self._grow(0)
 
@@ -158,9 +183,12 @@ class LiveScan:
         self._cap = max(n, 2 * self._cap)
         self._ids = np.empty(self._cap, dtype=np.uint32)
         self._counts = np.empty(self._cap, dtype=np.uint32)
+        self._cand_ids = np.empty(self._cap, dtype=np.uint32)
         self._cand_bits = np.empty(self._cap, dtype=np.uint8)
         self._ids_addr, self._counts_addr = _addr(self._ids), _addr(self._counts)
         self._bits_addr = _addr(self._cand_bits)
+        self._state.ids, self._state.counts = self._ids_addr, self._counts_addr
+        self._state.cand_ids, self._state.cand_bits = _addr(self._cand_ids), self._bits_addr
 
     def _copy_out(self, k: int) -> tuple[np.ndarray, np.ndarray]:
         # Copies: callers cache these (scan memo, known paths).
@@ -216,6 +244,53 @@ class LiveScan:
             bool(st[_ST_OLD_MOVED]),
             st[_ST_GAIN],
         )
+
+    def live_fold(
+        self,
+        table: int,
+        n: int,
+        gen: int,
+        words: int,
+        nwords: int,
+        virgin: np.ndarray,
+        maxc: np.ndarray,
+        factor: float,
+    ) -> tuple[np.ndarray, np.ndarray, FoldOut | None]:
+        """:meth:`live` (or :meth:`live_touched` when *words*) then :meth:`fold`, one call.
+
+        Returns copies of the live ids/counts and the fold; the fold is None,
+        with nothing written, when an id is past *virgin* or *maxc* (grow
+        them and call :meth:`fold` on the returned columns).
+        """
+        self._grow(n)
+        self._bind(virgin, maxc, factor)
+        nc = self._live_fold(self._state_ref, table, n, gen, words, nwords)
+        k = int(self._stats[_ST_LIVE])
+        ids, counts = self._copy_out(k)
+        if nc == _FOLD_GROW:
+            return ids, counts, None
+
+        st = self._stats.tolist()
+        out = FoldOut(
+            self._cand_ids[:nc],
+            self._cand_bits[:nc],
+            st[_ST_TRANSITIONS],
+            bool(st[_ST_OLD_MOVED]),
+            st[_ST_GAIN],
+        )
+        return ids, counts, out
+
+    def _bind(self, virgin: np.ndarray, maxc: np.ndarray, factor: float) -> None:
+        """Point the fold state at *virgin*/*maxc*; skipped while they are the same objects."""
+        b = self._bound
+        if b and b[0] is virgin and b[1] is maxc and b[2] == factor:
+            return
+
+        st = self._state
+        st.virgin, st.vsize = _addr(virgin), virgin.size
+        st.maxc, st.msize = _addr(maxc), maxc.size
+        st.factor = factor
+        self._bound = (virgin, maxc, factor)
 
 
 class CmpDrain:

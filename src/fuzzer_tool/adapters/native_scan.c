@@ -6,6 +6,7 @@
  *
  *   SHM edge table --fs_live / fs_live_touched--> ids[], counts[]
  *   ids[], counts[] --fs_fold--> virgin[], maxc[] updated + candidates
+ *   SHM edge table --fs_live_fold--> both of the above in one call
  *   cmplog counters --fs_drain_counts / fs_drain_sites--> deltas, zeroed
  *   input bytes --fs_mi_bump--> CrashMITracker histograms + running sums
  *
@@ -20,7 +21,7 @@
 #define COUNT_MASK 0xFFFFFFu  /* hit count below the generation byte */
 #define BUCKET_CLAMP 255u     /* bucket table has 256 rows */
 
-enum { ST_TRANSITIONS, ST_OLD_MOVED, ST_GAIN, ST_FIELDS };
+enum { ST_TRANSITIONS, ST_OLD_MOVED, ST_GAIN, ST_LIVE, ST_FIELDS };
 
 /* Live entry: generation byte matches and edge_id != 0. */
 static inline long take(uint64_t w, uint8_t gen, uint32_t *ids, uint32_t *counts, long k) {
@@ -108,6 +109,34 @@ long fs_fold(const uint32_t *ids, const uint32_t *counts, long n, uint8_t *virgi
     stats[ST_OLD_MOVED] = moved;
     stats[ST_GAIN] = gain;
     return nc;
+}
+
+/* fs_live_fold's bound arrays (native_scan.LiveScan); rebound on any swap. */
+struct fold_state {
+    uint32_t *ids, *counts;       /* gather scratch, >= n entries */
+    uint32_t *cand_ids;           /* separate from ids: fold reads ids */
+    uint8_t *cand_bits;
+    uint64_t *stats;              /* ST_FIELDS words */
+    const uint8_t *bucket;
+    uint8_t *virgin;
+    long vsize;
+    uint32_t *maxc;
+    long msize;
+    double factor;
+};
+
+/*
+ * Gather the live entries (table walk, or the touched bitmap when words is
+ * non-NULL), then fold them. stats[ST_LIVE] = live count, written even when
+ * the fold refuses (-1): the caller grows its arrays and refolds the gather.
+ */
+long fs_live_fold(const struct fold_state *st, const uint64_t *table, long n, uint32_t gen,
+                  const uint64_t *words, long nwords) {
+    long k = words ? fs_live_touched(table, n, gen, words, nwords, st->ids, st->counts)
+                   : fs_live(table, n, gen, st->ids, st->counts);
+    st->stats[ST_LIVE] = (uint64_t)k;
+    return fs_fold(st->ids, st->counts, k, st->virgin, st->vsize, st->maxc, st->msize,
+                   st->bucket, st->factor, st->cand_ids, st->cand_bits, st->stats);
 }
 
 /* Per-callback counters: emit (index, fired, hit) where fired != 0; zero them. */

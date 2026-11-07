@@ -803,6 +803,8 @@ class _FormatMemo:
     live_len: int
     mask: list[bool]
     pending: list[int]
+    # Steady gate results applied to `mask` (identity = gate epoch).
+    gates: "_GateCache | None" = None
 
 
 def _format_available(name: str) -> Callable[[object, bytes], bool]:
@@ -1238,28 +1240,30 @@ class OperatorRegistry:
                 table[name] = getattr(engine, spec.handler_name)
         return table
 
-    def available(self, fuzzer, data: bytes) -> list[str]:
+    def available(self, fuzzer, data: bytes, ctx: MutationContext | None = None) -> list[str]:
         """Operator names whose availability predicate passes for *fuzzer*.
 
         Mirrors the historic build_ops() conditions (dictionary, markov,
-        cem, grammar, cmplog, per-input redqueen).
+        cem, grammar, cmplog, per-input redqueen). *ctx* is the caller's
+        round snapshot (``OperatorEngine.mutate``); None builds one.
         """
         # One pass per gate kind over a precomputed mask, then one C-level
         # compress: no per-op kind dispatch (was ~44 of 73 us per call).
         plan = self._current_plan()
-        # Gate kinds own disjoint slots, so the format pass can run first.
-        mask, pending = self._format_mask(plan, fuzzer, data)
+        # Gate kinds own disjoint slots: steady gates ride in the format mask.
+        gates = self._steady_cache(plan, fuzzer, data)
+        mask, pending = self._format_mask(plan, fuzzer, data, gates)
 
         # Context gates (slow path): each distinct gate once, fanned out.
         for fn, slots in plan.predicates:
             ok = bool(fn(fuzzer, data))
             for i in slots:
                 mask[i] = ok
-        self._steady_gates(plan, mask, fuzzer, data)
 
         if plan.mutators:
             # One fuzzer snapshot per call, not one per class-based mutator.
-            ctx = MutationContext.from_fuzzer(fuzzer)
+            if ctx is None:
+                ctx = MutationContext.from_fuzzer(fuzzer)
             for i, mutator in plan.mutators:
                 mask[i] = bool(mutator.is_available(ctx, data))
 
@@ -1271,11 +1275,12 @@ class OperatorRegistry:
         return list(compress(plan.names, mask))
 
     @staticmethod
-    def _steady_gates(plan: "_Plan", mask: list, fuzzer, data: bytes) -> None:
+    def _steady_cache(plan: "_Plan", fuzzer, data: bytes) -> "_GateCache":
         """Input-free context gates, re-run every PRED_REFRESH_CALLS calls.
 
         Cached on the fuzzer (like ``_live_formats``), so two fuzzers never
         share results; a new plan or a fuzzer without attributes re-runs.
+        A refresh is a new object: format memos key on its identity.
         """
         cache = getattr(fuzzer, "_gate_cache", None)
         if cache is None or cache.plan is not plan or cache.left <= 0:
@@ -1284,23 +1289,32 @@ class OperatorRegistry:
             with contextlib.suppress(AttributeError):
                 fuzzer._gate_cache = cache
         cache.left -= 1
+        return cache
+
+    @staticmethod
+    def _apply_steady(plan: "_Plan", mask: list, cache: "_GateCache") -> None:
+        """Write *cache*'s steady results into their slots."""
         for (_fn, slots), ok in zip(plan.steady, cache.oks, strict=True):
             for i in slots:
                 mask[i] = ok
 
-    def _format_mask(self, plan: "_Plan", fuzzer, data: bytes) -> tuple[list, list[int]]:
-        """``plan.always`` plus the format pass; memoized per fuzzer.
+    def _format_mask(
+        self, plan: "_Plan", fuzzer, data: bytes, gates: "_GateCache"
+    ) -> tuple[list, list[int]]:
+        """``plan.always``, the format pass and the steady gates; memoized per fuzzer.
 
         The pass depends on the input only through its sniff result, and most
         seeds share one (fuzzgoat: none match), so the mask is kept per
-        result: plan, live-format set and sniff equal -> same mask. The pass
-        walked every format slot per call.
+        result: plan, live-format set, sniff and gate epoch equal -> same
+        mask. The pass walked every format slot per call; the steady fan-out
+        wrote 40 slots per call.
         """
         live = getattr(fuzzer, "_live_formats", None)
         memos = getattr(fuzzer, "_format_memo", None)
         if live is None or not isinstance(memos, dict):
             mask = plan.always.copy()
             pending = self._sniff_formats(plan, mask, fuzzer, data)
+            self._apply_steady(plan, mask, gates)
             self._init_memo(fuzzer)
             return mask, pending
 
@@ -1308,14 +1322,15 @@ class OperatorRegistry:
         memo = memos.get(matched)
         # live only grows in place (add), so identity + size pin its contents.
         fresh = memo is not None and memo.plan is plan and memo.live is live
-        if fresh and memo.live_len == len(live):
+        if fresh and memo.live_len == len(live) and memo.gates is gates:
             return memo.mask.copy(), memo.pending
 
         mask = plan.always.copy()
         pending = self._sniff_formats(plan, mask, fuzzer, data, matched)
+        self._apply_steady(plan, mask, gates)
         if len(memos) >= _FORMAT_MEMO_MAX:
             memos.clear()
-        memos[matched] = _FormatMemo(plan, live, len(live), mask.copy(), pending)
+        memos[matched] = _FormatMemo(plan, live, len(live), mask.copy(), pending, gates)
         return mask, pending
 
     @staticmethod
