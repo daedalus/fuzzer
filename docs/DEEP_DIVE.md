@@ -1224,6 +1224,8 @@ State files:
 
   Use `--no-save-state` to skip writing the file entirely.
 
+**Restricted loading.** Every pickle read from disk goes through `state_store.safe_load(fh, extra)`: builtins/collections/numpy containers only, plus a caller's `extra` pairs; anything else raises `UnsafeStateError`. Callers: `StateStore.load`, edge exports (`adapters/edge_pickle.py`, extra = numpy `frombuffer`/`_frombuffer`; `_KeysOnly` stubs numpy and checks the rest with `allowed_global`), minimize batch state (`.minimize_batch_state.pkl.gz`), and the ffmpeg tool caches (now `~/.cache/fuzzer_tool/`, not `/tmp`). `cfg_cache` keeps its own allowlist subclass. `state.pkl.gz` decompresses to at most `_MAX_STATE_BYTES` (1 GiB; a gzip bomb is rejected as unreadable). Cost: none measured (12 MiB export, `safe_load` vs `pickle.load` ratio 0.996-1.020). Tests: `tests/test_regression_pickle_load_rce.py`.
+
 ### Cross-campaign ledger (`--preset-ledger`)
 
 Per-target memory across campaigns, ported from Stardust's opening selection

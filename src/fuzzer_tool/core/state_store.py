@@ -32,7 +32,7 @@ import logging
 import pickle
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 _GZIP_LEVEL = 1
 
 STATE_FILENAME = "state.pkl.gz"
+
+# Decompressed state cap. Real states are tens of MiB; a few-KiB gzip of
+# zeros inflates to GiBs, so read() without a cap is unbounded memory.
+_MAX_STATE_BYTES = 1 << 30
 
 # Legacy per-component JSON files, kept so an existing corpus directory can
 # be migrated on first load and then cleaned up.
@@ -85,28 +89,58 @@ _ALLOWED_GLOBALS = {
     ("numpy._core.multiarray", "scalar"),
 }
 
+# (module, name) pairs a caller admits on top of _ALLOWED_GLOBALS.
+Globals = frozenset[tuple[str, str]]
+
 
 class UnsafeStateError(Exception):
     """Raised when a state file references a disallowed global."""
 
 
 class _SafeUnpickler(pickle.Unpickler):
-    """Unpickler that refuses anything outside :data:`_ALLOWED_GLOBALS`.
+    """Unpickler that refuses anything outside :data:`_ALLOWED_GLOBALS` | *extra*.
 
     Without this, loading a state file from an untrusted corpus directory
     would execute whatever the file's author chose.
     """
 
+    def __init__(self, file: BinaryIO, extra: Globals = frozenset()) -> None:
+        super().__init__(file)
+        self._extra = extra
+
     def find_class(self, module: str, name: str):  # noqa: D102
-        if (module, name) in _ALLOWED_GLOBALS:
+        if allowed_global(module, name, self._extra):
             return super().find_class(module, name)
-        raise UnsafeStateError(
-            f"refusing to load disallowed object {module}.{name} from state file"
-        )
+        raise UnsafeStateError(f"refusing to load disallowed object {module}.{name} from pickle")
 
 
 def _safe_loads(raw: bytes) -> Any:
     return _SafeUnpickler(io.BytesIO(raw)).load()
+
+
+def allowed_global(module: str, name: str, extra: Globals = frozenset()) -> bool:
+    """True when *module.name* is in the state allowlist or *extra*."""
+    return (module, name) in _ALLOWED_GLOBALS or (module, name) in extra
+
+
+def safe_load(fh: BinaryIO, extra: Globals = frozenset()) -> Any:
+    """``pickle.load`` restricted to the state allowlist plus *extra*.
+
+    The one loader for every pickle read from disk: corpus dirs, exports and
+    caches can come from elsewhere, and plain ``pickle.load`` runs their code.
+
+    Raises:
+        UnsafeStateError: the pickle names a global outside the allowlist.
+    """
+    return _SafeUnpickler(fh, extra).load()
+
+
+def _read_capped(fh: BinaryIO) -> bytes:
+    """All of *fh*, or ValueError past :data:`_MAX_STATE_BYTES` (gzip bomb)."""
+    raw = fh.read(_MAX_STATE_BYTES + 1)
+    if len(raw) > _MAX_STATE_BYTES:
+        raise ValueError(f"state file inflates past {_MAX_STATE_BYTES} bytes")
+    return raw
 
 
 def _verify_readable(blob: bytes) -> None:
@@ -157,7 +191,7 @@ class StateStore:
         if self.path.exists():
             try:
                 with gzip.open(self.path, "rb") as fh:
-                    data = _safe_loads(fh.read())
+                    data = _safe_loads(_read_capped(fh))
                 if isinstance(data, dict):
                     self._data = data
                     return self._data
