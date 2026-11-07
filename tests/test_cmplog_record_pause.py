@@ -159,7 +159,7 @@ class _Cmplog:
         self.pairs = [(b"a", b"b")] * n_pairs
         self.collects = 0
 
-    def collect_tokens(self):
+    def collect_tokens(self, counts=None):
         self.collects += 1
         return []
 
