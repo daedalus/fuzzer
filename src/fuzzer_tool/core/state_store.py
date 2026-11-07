@@ -135,11 +135,15 @@ def safe_load(fh: BinaryIO, extra: Globals = frozenset()) -> Any:
     return _SafeUnpickler(fh, extra).load()
 
 
-def _read_capped(fh: BinaryIO) -> bytes:
-    """All of *fh*, or ValueError past :data:`_MAX_STATE_BYTES` (gzip bomb)."""
-    raw = fh.read(_MAX_STATE_BYTES + 1)
-    if len(raw) > _MAX_STATE_BYTES:
-        raise ValueError(f"state file inflates past {_MAX_STATE_BYTES} bytes")
+def read_capped(fh: BinaryIO, cap: int) -> bytes:
+    """All of *fh*, or ValueError past *cap* bytes.
+
+    For gzip readers: a few KiB of zeros inflate to GiBs, so a bare
+    ``read()`` is unbounded memory.
+    """
+    raw = fh.read(cap + 1)
+    if len(raw) > cap:
+        raise ValueError(f"inflates past {cap} bytes")
     return raw
 
 
@@ -191,7 +195,7 @@ class StateStore:
         if self.path.exists():
             try:
                 with gzip.open(self.path, "rb") as fh:
-                    data = _safe_loads(_read_capped(fh))
+                    data = _safe_loads(read_capped(fh, _MAX_STATE_BYTES))
                 if isinstance(data, dict):
                     self._data = data
                     return self._data
