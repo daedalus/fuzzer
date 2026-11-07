@@ -248,7 +248,7 @@ What the counters buy:
 
 ### Ready-Made Targets
 `tools/vendor_*.sh` fetches the source, `tools/build_targets.sh` builds every variant
-(plain, `_nosan`, `.so`, `_asan.so`, `_ubsan.so`) with the shim linked in:
+(`_asan`, `_noasan`, `_asan.so`, `_noasan.so`, `_ubsan.so`) with the shim linked in:
 
 | Target | Library | Notes |
 |---|---|---|

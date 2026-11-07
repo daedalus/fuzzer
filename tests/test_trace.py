@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fuzzer_tool.core.analyzers.analyzer_trace import (
+    SIDECAR_DISASM_LINES,
     TraceReport,
     _get_exported_functions,
     _is_shared_object,
@@ -151,6 +152,36 @@ class TestTraceReport:
         assert "fuzz_test" in block
         assert "((void(*)())0)();" in block
         assert "call   *%rcx" in block
+
+    @staticmethod
+    def _dump(func: str, n: int, mark: int | None) -> list[str]:
+        body = [
+            f"{'=> ' if i == mark else '   '}0x{0x1000 + i:x} <+{i}>:\tmov    %eax,%ebx"
+            for i in range(n)
+        ]
+        return [f"Dump of assembler code for function {func}:", *body, "End of assembler dump."]
+
+    def test_regression_sidecar_disasm_capped(self):
+        """GDB disassembles $pc plus every exported function; all of it went
+        into the .txt sidecar (~950 KB per fuzzgoat .so crash). The sidecar
+        keeps the crash-site block around '=>'; the .trace keeps the rest."""
+        crash = self._dump("json_parse_ex", 3000, mark=1500)
+        other = self._dump("fuzz_shm_run", 3000, mark=None)
+        r = TraceReport(signal="SIGSEGV", disassembly="\n".join(crash + other))
+
+        block = r.sidecar_block()
+        disasm = block.split("--- Disassembly ---\n", 1)[1].splitlines()
+        assert any(ln.startswith("=> ") for ln in disasm)
+        assert "fuzz_shm_run" not in block
+        assert len(disasm) <= SIDECAR_DISASM_LINES + 2  # + header, elision note
+        assert "fuzz_shm_run" in r.format()  # full dump stays in the .trace
+
+    def test_sidecar_disasm_without_marker(self):
+        """Adversarial: no '=>' (gdb printed none) still caps, from the block start."""
+        r = TraceReport(signal="SIGSEGV", disassembly="\n".join(self._dump("f", 500, mark=None)))
+        disasm = r.sidecar_block().split("--- Disassembly ---\n", 1)[1].splitlines()
+        assert disasm[0].startswith("Dump of assembler code for function f")
+        assert len(disasm) <= SIDECAR_DISASM_LINES + 2
 
     def test_sidecar_block_empty(self):
         # Nothing captured (gdb unavailable / target untraceable) → no section.

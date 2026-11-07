@@ -17,7 +17,7 @@ import os
 import re
 import struct
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -604,6 +604,57 @@ def _read_sym_names(elf: bytes, sym_sec: int | None, str_sec: int | None) -> lis
             .decode(errors="replace")
         )
     return names
+
+
+# Elf64_Sym, one record per 24 bytes; st_info's low nibble is the type.
+_SYM_DTYPE = [
+    ("name", "<u4"), ("info", "u1"), ("other", "u1"),
+    ("shndx", "<u2"), ("value", "<u8"), ("size", "<u8"),
+]  # fmt: skip
+_STT_FUNC = 2
+
+
+class FuncTable(NamedTuple):
+    """Defined functions of one ELF, sorted by start address."""
+
+    starts: Any  # np.ndarray[uint64]
+    ends: Any  # np.ndarray[uint64]
+    names: list[str]
+
+
+def func_table(elf: bytes) -> FuncTable | None:
+    """``STT_FUNC`` symbols of .symtab (else .dynsym); None when there are none.
+
+    One numpy view over the symbol table, filtered and sorted in bulk.
+    """
+    import numpy as np
+
+    if not _elf64_le(elf):
+        return None
+    secs = _sym_sections(elf)
+    if secs is None:
+        return None
+    symtab, strtab, dynsym, dynstr = secs
+    for sym_sec, str_sec in ((symtab, strtab), (dynsym, dynstr)):
+        if sym_sec is None or str_sec is None:
+            continue
+        off, size = struct.unpack_from("<QQ", elf, sym_sec + 24)
+        syms = np.frombuffer(elf, dtype=_SYM_DTYPE, count=size // 24, offset=off)
+        keep = syms[
+            ((syms["info"] & 0xF) == _STT_FUNC) & (syms["shndx"] != 0) & (syms["value"] > 0)
+        ]
+        if not keep.size:
+            continue
+
+        keep = keep[np.argsort(keep["value"], kind="stable")]
+        str_off = struct.unpack_from("<Q", elf, str_sec + 24)[0]
+        names = [
+            elf[str_off + n : elf.index(b"\x00", str_off + n)].decode(errors="replace")
+            for n in keep["name"].tolist()
+        ]
+        starts = keep["value"].copy()
+        return FuncTable(starts, starts + np.maximum(keep["size"], 1), names)
+    return None
 
 
 def _symbol_names(target: str) -> list[str]:

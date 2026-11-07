@@ -1651,6 +1651,9 @@ _HEAP_FUNCS = frozenset((
     "aligned_alloc", "malloc_trim",
 ))  # fmt: skip
 _SIGABRT = 6
+# afl_shim.c private heap (-D__AFL_PRIVATE_HEAP=1): __afl_ph_release ->
+# __afl_ph_die raises SIGABRT on a double / invalid free.
+_PRIVATE_HEAP_PREFIX = "__afl_ph_"
 
 
 def shim_exploitability(signo: int, shim_symbol: dict) -> str | None:
@@ -1669,6 +1672,8 @@ def shim_exploitability(signo: int, shim_symbol: dict) -> str | None:
     first = next((i for i, m in enumerate(mods) if m and not is_runtime_module(m)), 0)
     if first == 0 or not mods[first - 1]:
         return None
+    if str(frames[first].get("function") or "").startswith(_PRIVATE_HEAP_PREFIX):
+        return "HIGH"
 
     entry = libc_symbol(mods[first - 1], int(frames[first - 1].get("offset") or 0))
     return "HIGH" if entry in _HEAP_FUNCS else None

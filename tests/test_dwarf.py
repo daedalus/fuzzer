@@ -197,3 +197,44 @@ class TestNoDebugInfo:
         resolver = DwarfLineResolver(str(out))
         assert not resolver.load()
         assert resolver.resolve("plain.c", 1) == []
+
+
+def test_regression_dwarf5_rnglistx_cu(tmp_path):
+    """clang -O2 + per-function sections gives the CU ``DW_AT_ranges`` in
+    ``DW_FORM_rnglistx``; the parser raised on the unknown form and loaded
+    nothing (fuzzgoat_read_nosan, clang 18)."""
+    if not shutil.which("clang"):
+        pytest.skip("clang not available")
+    src = tmp_path / "t.c"
+    src.write_text(SRC)
+    out = tmp_path / "t"
+    cmd = ["clang", "-O2", "-gdwarf-5", "-ffunction-sections", "-o", str(out), str(src)]
+    if subprocess.run(cmd, capture_output=True).returncode != 0:
+        pytest.skip("clang build failed")
+
+    r = DwarfLineResolver(str(out))
+    assert r.load()
+    assert r.resolve("t.c", _line(MARKERS["helper_body"]))
+
+
+def test_regression_dwarf5_dir_index(tmp_path):
+    """v5 directory entry 0 is the comp dir itself; prepending comp_dir as
+    well shifted every index by one (afl_shim.c showed under
+    /usr/include/.../bits). Code from a header in inc/ must name inc/."""
+    if not shutil.which("clang"):
+        pytest.skip("clang not available")
+    from fuzzer_tool.core.dwarf import DwarfSiteResolver
+
+    (tmp_path / "inc").mkdir()
+    (tmp_path / "inc" / "h.h").write_text("static int twice(int x) {\n    return x * 2;\n}\n")
+    (tmp_path / "t.c").write_text('#include "h.h"\nint main(void) {\n    return twice(3);\n}\n')
+    out = tmp_path / "t"
+    cmd = ["clang", "-O0", "-gdwarf-5", "-Iinc", "-o", str(out), "t.c"]
+    if subprocess.run(cmd, cwd=tmp_path, capture_output=True).returncode != 0:
+        pytest.skip("clang build failed")
+
+    r = DwarfSiteResolver(str(out))
+    assert r.load()
+    files = set(r._names)
+    assert any(f.endswith("inc/h.h") and f.startswith("/") for f in files), files
+    assert not any(f.count(str(tmp_path)) > 1 for f in files), files

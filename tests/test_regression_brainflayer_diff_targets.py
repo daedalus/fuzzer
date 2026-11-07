@@ -173,8 +173,7 @@ class TestBuildWiring:
         assert 'build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c"' in build_src
 
     def test_targets_in_verify_pass(self, build_src):
-        assert '"$TARGETS"/ec_pubkey_diff.so' in build_src
-        assert '"$TARGETS"/hash_simd_diff.so' in build_src
+        assert 'for f in "$TARGETS"/*; do' in build_src  # verify_afl scans the whole build root
 
     def test_targets_in_feature_matrix(self, build_src):
         assert '"ec_pubkey_diff"' in build_src

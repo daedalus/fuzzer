@@ -5580,11 +5580,15 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
         text[0] = '-'; text[1] = 0;
         if (__sanitizer_symbolize_pc && pc && !__afl_sym_raw()) {
             __afl_sym_busy = 1;
-            text[0] = 0;
+            memset(text, 0, sizeof(text));
             __sanitizer_symbolize_pc((void *)(i ? pc : pc + 1), "%f|%s|%l|%m|%o",
                                      text, sizeof(text));
             __afl_sym_busy = 0;
             text[sizeof(text) - 1] = 0;
+            /* Inlined frames come NUL-separated ("leaf|..\0caller|..\0\0"):
+             * join them with ';' or only the innermost survives. */
+            for (size_t k = 0; k + 2 < sizeof(text); k++)
+                if (!text[k] && text[k + 1]) text[k] = ';';
         } else if (pc) {
             __afl_sym_module(text, sizeof(text), pc);
         }

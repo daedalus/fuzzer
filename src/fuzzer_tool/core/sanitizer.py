@@ -99,6 +99,10 @@ _ASAN_HEADER_TYPES = (
     ("out of memory:", "out-of-memory"),
 )
 
+# ASAN SEGV inside its own deallocator: free() of a wild pointer whose chunk
+# header is unmapped. Readable header -> ASAN says "bad-free"; same bug.
+_ASAN_DEALLOC_FRAME = "__asan::Allocator::Deallocate"
+
 # Stack frame line: "#0 0x4011d6 in foo a.c:1" or unsymbolized "#0 0x4011d6  (/bin/t+0x11d6)".
 _FRAME_LINE_RE = re.compile(
     r"^\s*#(\d+)\s+(0x[0-9a-fA-F]+)\s+(?:in\s+(\S+)|\(([^)\s]+)\))", re.MULTILINE
@@ -152,6 +156,7 @@ _RUNTIME_PREFIXES = (
 _RUNTIME_MODULES = (
     "libc.so", "libc-", "ld-linux", "libasan", "libubsan", "libmsan", "libtsan",
     "liblsan", "libclang_rt", "libgcc_s", "libpthread", "libstdc++", "libc++",
+    "libffi",  # ctypes call into an in-process target
 )  # fmt: skip
 
 # Harness entry: frames below it are the fuzzer's (ctypes, libffi, loader).
@@ -381,6 +386,13 @@ def report_stacks(stderr: str) -> dict[str, list[Frame]]:
     return stacks
 
 
+def _dealloc_bad_free(error_type: str, stack: list[tuple[int, str]]) -> str:
+    """``SEGV`` raised inside ASAN's deallocator -> ``bad-free``; else unchanged."""
+    if error_type == "SEGV" and stack and stack[0][1].startswith(_ASAN_DEALLOC_FRAME):
+        return "bad-free"
+    return error_type
+
+
 def _ubsan_type(message: str) -> str:
     """Check name for a "runtime error:" message, e.g. "signed-integer-overflow"."""
     for phrase, name in _UBSAN_RUNTIME_TYPES:
@@ -550,7 +562,7 @@ class SanitizerReport:
         stack = _crash_stack(stderr, m.start())
         return cls(
             m.group(1),
-            error_type,
+            _dealloc_bad_free(error_type, stack),
             fault_addr,
             [f for _, f in stack],
             stderr,

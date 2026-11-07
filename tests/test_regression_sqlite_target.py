@@ -129,9 +129,7 @@ class TestBuildWiring:
 
     def test_target_is_built_and_verified(self, build_src):
         assert 'build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c"' in build_src
-        assert '"$TARGETS"/sqlite_read.so' in build_src, (
-            "sqlite_read.so missing from the AFL-symbol verify pass"
-        )
+        assert 'for f in "$TARGETS"/*; do' in build_src  # verify_afl scans the whole build root
         assert '"sqlite_read"' in build_src, "sqlite_read missing from the feature matrix"
 
     def test_gcc_fallback_does_not_lose_the_target(self, build_src):
