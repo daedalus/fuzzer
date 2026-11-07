@@ -5019,8 +5019,11 @@ class Fuzzer:
         # with "ASan runtime does not come first" instead of running the target.
         target_is_asan = False
         target_is_ubsan = False
+        # Multi-target: any sanitized .so needs the runtime preload and stderr
+        # capture, not only target 0 (siblings inherit this runner's setup).
+        san_targets = self.multi_targets or [self.target]
         if self.target.lower().endswith((".so", ".dylib", ".dll")):
-            target_is_asan = _detect_asan(self.target)
+            target_is_asan = any(_detect_asan(t) for t in san_targets)
             if target_is_asan:
                 libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
                 if not os.path.exists(libasan):
@@ -5104,7 +5107,7 @@ class Fuzzer:
             # UBSAN detection — set UBSAN_OPTIONS so errors abort the
             # target for crash detection.  The UBSAN runtime was already
             # preloaded via LD_PRELOAD by ldpreload_wrapper.py.
-            target_is_ubsan = _detect_ubsan(self.target)
+            target_is_ubsan = any(_detect_ubsan(t) for t in san_targets)
             if target_is_ubsan:
                 ubsan_opts = os.environ.get("UBSAN_OPTIONS", "")
                 opt_parts = [p for p in ubsan_opts.split(":") if p] if ubsan_opts else []

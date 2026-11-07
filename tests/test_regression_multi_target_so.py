@@ -197,3 +197,32 @@ def test_regression_set_target_same_target_no_syscalls():
 
     assert log == []
     assert f.target == "unknown"
+
+
+# Heap overflow on every input: only an ASAN report names it.
+_ASAN_OOB_SRC = """
+#include <stdlib.h>
+#include <stddef.h>
+int fuzz_shm_run(const unsigned char *d, size_t n) {
+    volatile char *p = malloc(4);
+    char c = p[n + 4];
+    free((void *)p);
+    return c + (n ? d[0] : 0);
+}
+"""
+
+
+def _asan_so(tmp: Path, name: str, src: str) -> Path:
+    sub = tmp / name
+    sub.mkdir()
+    return _build(sub, src, "-fsanitize-coverage=trace-pc-guard", shared=True, asan=True)
+
+
+@requires_clang
+def test_regression_multi_target_asan_after_plain(tmp_path):
+    """Falsification: an ASAN .so behind a plain target 0 still reports ASAN crashes."""
+    r = _fuzz(tmp_path, _so(tmp_path, "alpha"), _asan_so(tmp_path, "oob", _ASAN_OOB_SRC))
+
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "does not come first" not in r.stdout + r.stderr
+    assert any("heapbufferoverflow" in p.name for p in _crash_files(tmp_path))
