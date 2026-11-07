@@ -251,6 +251,9 @@ class SharedVirgin:
 # ShmCoverage._update_max_counts for why this is not strict `>`.
 MAX_COUNT_GROWTH_FACTOR = 1.5
 
+# _fold_native's default: no fold made yet (None means the C fold refused).
+_NOT_FOLDED = object()
+
 # Budget, in stored edge ids, for ShmCoverage._known_paths (~4 B each). The
 # cache is cleared when a new path would exceed it: bounded memory, one
 # re-scan per path afterwards.
@@ -1484,10 +1487,16 @@ class ShmCoverage:
             self._last_path_hash = path_hash
             return False
 
-        # Slow path: extract edge_ids not yet in _seen_edge_ids
-        active_ids, active_counts = self._active_columns()
+        # Slow path: extract edge_ids not yet in _seen_edge_ids. Native and
+        # memo cold: gather and fold in one C call.
+        gathered = self._gather_fold()
+        if gathered is not None:
+            active_ids, active_counts, out = gathered
+        else:
+            active_ids, active_counts = self._active_columns()
+            out = _NOT_FOLDED
         self._ids_arr, self._ids_set = active_ids, None
-        folded = self._fold_native(active_ids, active_counts)
+        folded = self._fold_native(active_ids, active_counts, out)
         if folded is not None:
             return self._finish_scan(key, active_ids, *folded)
 
@@ -1533,20 +1542,48 @@ class ShmCoverage:
             self.total_edges += 1
         return new_found
 
+    def _gather_fold(self) -> tuple[np.ndarray, np.ndarray, "native_scan.FoldOut | None"] | None:
+        """``_scan`` + ``_fold_native``'s C fold in one call: ``(ids, counts, fold)``.
+
+        None without the native kernels or when the scan memo already holds
+        this table (an earlier ``_scan`` this exec): the two-step path reuses
+        it. The fold is None when an id is past the dense arrays.
+        """
+        if self._native is None:
+            return None
+        key = self._scan_key()
+        memo = self._scan_memo
+        if memo is not None and memo[0] == key and memo[2] is not None:
+            return None
+
+        table = self._ptr + SHM_METADATA_SIZE
+        words, nwords = 0, 0
+        if self.touched_scan and self.touched_supported:
+            words, nwords = self._touched_ptr + SHM_TOUCHED_HEADER, self.touched_words
+        ids, counts, out = self._native.live_fold(
+            table, self.num_entries, key[2], words, nwords,
+            self._virgin, self._max_counts, MAX_COUNT_GROWTH_FACTOR,
+        )  # fmt: skip
+        if key[1] != 0:
+            self._scan_memo = (key, ids, counts)
+        return ids, counts, out
+
     def _fold_native(
-        self, ids: np.ndarray, counts: np.ndarray
+        self, ids: np.ndarray, counts: np.ndarray, out=_NOT_FOLDED
     ) -> tuple[set[int], bool, int] | None:
         """C fold of virgin buckets and maxima: ``(new_ids, old_bucket_moved, max_gain)``.
 
-        None when unavailable or an id is past VIRGIN_DENSE_MAX (the numpy
-        path's dict overflow handles those).
+        *out*: the fold ``_gather_fold`` made (None: refused, grow first);
+        _NOT_FOLDED folds here. None when unavailable or an id is past
+        VIRGIN_DENSE_MAX (the numpy path's dict overflow handles those).
         """
         if self._native is None:
             return None
 
-        out = self._native.fold(
-            ids, counts, self._virgin, self._max_counts, MAX_COUNT_GROWTH_FACTOR
-        )
+        if out is _NOT_FOLDED:
+            out = self._native.fold(
+                ids, counts, self._virgin, self._max_counts, MAX_COUNT_GROWTH_FACTOR
+            )
         if out is None:
             hi = int(ids.max()) + 1
             if hi > VIRGIN_DENSE_MAX:

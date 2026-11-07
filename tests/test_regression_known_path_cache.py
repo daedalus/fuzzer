@@ -63,15 +63,23 @@ def cov():
 
 @pytest.fixture
 def scans(cov, monkeypatch):
-    """Count slow-path table scans."""
+    """Count slow-path table scans (two-step, or the fused native gather)."""
     calls = []
     real = cov._active_columns
+    real_fused = cov._gather_fold
 
     def spy():
         calls.append(1)
         return real()
 
+    def spy_fused():
+        got = real_fused()
+        if got is not None:
+            calls.append(1)
+        return got
+
     monkeypatch.setattr(cov, "_active_columns", spy)
+    monkeypatch.setattr(cov, "_gather_fold", spy_fused)
     return calls
 
 
