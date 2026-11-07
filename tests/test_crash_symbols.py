@@ -100,11 +100,11 @@ int main(void){ uint8_t b[1]={0}; return __afl_guarded_call(boom,b,1) == -11 ? 0
 """
 
 
-def _build(tmp_path, *flags):
+def _build(tmp_path, *flags, src=_HARNESS):
     cc = shutil.which("clang") or shutil.which("gcc")
     if not cc:
         pytest.skip("no C compiler")
-    (tmp_path / "h.c").write_text(_HARNESS)
+    (tmp_path / "h.c").write_text(src)
     exe = tmp_path / "h"
     r = subprocess.run(
         [
@@ -184,3 +184,36 @@ def test_shim_symbolizes_with_asan_runtime(tmp_path):
     assert sym and sym.symbolized
     assert sym.frames[0].function == "boom" and sym.frames[0].file.endswith("h.c")
     assert sym.frames[0].line > 0
+
+
+# Fault inside an always_inline callee: one PC, two source frames.
+_INLINED_HARNESS = r"""
+#include <stdint.h>
+#include <stddef.h>
+int __afl_guarded_call(int (*)(const uint8_t*,size_t), const uint8_t*, size_t);
+static inline __attribute__((always_inline)) int leaf(size_t n){ volatile int *p=(int*)0x10; return *p+(int)n; }
+__attribute__((noinline)) int boom(const uint8_t *d, size_t n){ return leaf(n); }
+int main(void){ uint8_t b[1]={0}; return __afl_guarded_call(boom,b,1) == -11 ? 0 : 3; }
+"""
+
+
+def test_regression_shim_keeps_inlined_frames(tmp_path):
+    """__sanitizer_symbolize_pc NUL-separates inlined frames; the shim
+    kept only the first, so fuzzgoat's default_free hid json_value_free_ex."""
+    exe = _build(tmp_path, "-fsanitize=address", "-fno-omit-frame-pointer", src=_INLINED_HARNESS)
+    out = tmp_path / "sym.log"
+    assert _run(exe, out, ASAN_OPTIONS="handle_segv=0:symbolize=1").returncode == 0
+    sym = cs.parse_line(out.read_text().splitlines()[-1])
+    assert sym and sym.symbolized
+
+    at_pc = [f.function for f in sym.frames if f.pc == sym.frames[0].pc]
+    assert at_pc[:2] == ["leaf", "boom"]
+
+
+def test_shim_no_phantom_inlined_frames(tmp_path):
+    """Adversarial: the zeroed tail must not turn into extra frames."""
+    exe = _build(tmp_path, "-fsanitize=address", "-fno-omit-frame-pointer")
+    out = tmp_path / "sym.log"
+    assert _run(exe, out, ASAN_OPTIONS="handle_segv=0:symbolize=1").returncode == 0
+    sym = cs.parse_line(out.read_text().splitlines()[-1])
+    assert sym and [f.function for f in sym.frames if f.pc == sym.frames[0].pc] == ["boom"]
