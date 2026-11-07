@@ -105,6 +105,8 @@ class CrashMITracker:
         # Sampler arrays (_refresh): observed positions, their MI, and the
         # prefix sums of max(MI, 0.01). The dict view is built on demand.
         self._cache_valid: bool = False
+        # A crash since the last _refresh: all_mi() rebuilds on it.
+        self._crash_since_refresh: bool = False
         self._pos_arr = _np.zeros(0, dtype=_np.int64)
         self._mi_arr = _np.zeros(0, dtype=_np.float64)
         self._prefix_arr = _np.zeros(0, dtype=_np.float64)
@@ -124,7 +126,14 @@ class CrashMITracker:
         self.total_execs += 1
         if is_crash:
             self.total_crashes += 1
-            self._cache_valid = False
+            # The sampler rebuilds at power-of-two crash counts only (1, 2,
+            # 4, ...): the first crash turns MI on, later ones wait for the
+            # 50-exec cadence below. Every crash was a full MI rebuild: 7.7%
+            # of a fuzzgoat run at a 7% crash rate. all_mi() stays exact.
+            self._crash_since_refresh = True
+            c = self.total_crashes
+            if c & (c - 1) == 0:
+                self._cache_valid = False
 
         # Track every execution's byte values, crash or not — MI needs the
         # non-crash outcomes as the contrasting class, otherwise
@@ -361,10 +370,13 @@ class CrashMITracker:
         self._pos_list = self._pos_arr.tolist()
         self._prefix_list = self._prefix_arr.tolist()
         self._cache_valid = True
+        self._crash_since_refresh = False
         self._mi_dict_valid = False
 
     def all_mi(self) -> dict[int, float]:
         """Compute MI for all observed positions."""
+        if self._crash_since_refresh:
+            self._cache_valid = False
         self._refresh()
         if not self._mi_dict_valid:
             self._mi_cache = dict(zip(self._pos_arr.tolist(), self._mi_arr.tolist(), strict=True))

@@ -52,6 +52,25 @@ from fuzzer_tool.services.operators import HAVOC_SUB_OPS
 
 log = logging.getLogger(__name__)
 
+# Subtrees of seeds/ a prune never moves files out of.
+_PRUNED = "pruned"
+_IRREPLACEABLE = "irreplaceable"
+
+
+def _live_seed_files(seeds_dir: Path):
+    """``id_*`` files under *seeds_dir*, minus pruned/ and irreplaceable/.
+
+    pruned/ is skipped as a tree: it outgrows the live corpus (3,202 vs ~120
+    files on fuzzgoat) and its files are already where a prune puts them.
+    irreplaceable/ seeds are never pruned.
+    """
+    for root, dirs, files in os.walk(seeds_dir):
+        top = root == str(seeds_dir)
+        dirs[:] = [d for d in dirs if d != _IRREPLACEABLE and not (top and d == _PRUNED)]
+        for name in files:
+            if name.startswith("id_"):
+                yield Path(root, name)
+
 
 class PoissonAdmissionDecision(Enum):
     """Outcome of Poisson-disk admission check."""
@@ -1008,12 +1027,17 @@ class CorpusManager:
         """True when a fault-address triage cannot change this crash's fate.
 
         A repeat input is dropped unread, and a sanitizer signature ignores
-        the fault address, so a known one stays known. A signal signature
-        may still split on the address (``signal:11@0x0``).
+        the fault address, so a known one stays known. So does a signal
+        signature keyed by the shim's crash site (``signal:11@0x234@0x500``):
+        site PCs win over the fault address. Without a site a signal
+        signature may still split on the address (``signal:11@0x0``).
         """
         from fuzzer_tool.adapters.filesystem import classify_crash
+        from fuzzer_tool.core.crash_symbols import crash_pcs
 
         f = self.f
+        # Peek, not drain: save_crash reads this record after the triage.
+        pcs = crash_pcs(self._peek_sym())
         verdict = classify_crash(
             data,
             returncode,
@@ -1023,12 +1047,23 @@ class CorpusManager:
             crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
             crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
             crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
+            crash_pcs=pcs,
         )
         if verdict.duplicate_input:
             return True
 
         sanitizer = verdict.report is not None and verdict.report.is_valid()
-        return sanitizer and not verdict.novel
+        return (sanitizer or pcs is not None) and not verdict.novel
+
+    def _peek_sym(self):
+        """This crash's shim record without consuming it (see _drain_sym)."""
+        f = self.f
+        sym = getattr(f, "_pending_crash_sym", None)
+        if sym is not None:
+            return sym
+
+        sink = getattr(f, "_crash_sym_sink", None)
+        return sink.peek() if sink is not None else None
 
     def _record_frames(self, verdict) -> None:
         """Remember the first valid stack frames seen for each crash signature."""
@@ -2197,13 +2232,7 @@ class CorpusManager:
         pruned_dir.mkdir(parents=True, exist_ok=True)
         # Prune full seeds — seeds are stored in two-digit hash
         # subdirectories (seeds/ab/id_abc...), so walk recursively.
-        # Skip the irreplaceable/ subdirectory — those seeds are never pruned.
-        for fh in seeds_dir.rglob("id_*"):
-            if not fh.is_file():
-                continue
-            # Skip files under seeds/irreplaceable/ (never pruned)
-            if "irreplaceable" in fh.parts:
-                continue
+        for fh in _live_seed_files(seeds_dir):
             h = fh.name[3:]
             if h not in kept_set:
                 sub = pruned_dir / h[:2]

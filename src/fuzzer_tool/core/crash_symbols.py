@@ -19,6 +19,7 @@ This module owns the Python half: the sink file, parsing, and filling
 from __future__ import annotations
 
 import contextlib
+import enum
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -152,6 +153,13 @@ def parse_line(line: str) -> CrashSymbol | None:
     return sym
 
 
+class Consume(enum.Enum):
+    """Whether reading the sink truncates it."""
+
+    TRUNCATE = 0
+    KEEP = 1
+
+
 class CrashSymbolSink:
     """The file the shim appends to, and the reader that drains it."""
 
@@ -169,13 +177,20 @@ class CrashSymbolSink:
 
     def drain(self) -> CrashSymbol | None:
         """Newest record, then truncate. None when the shim wrote nothing."""
+        return self._newest(Consume.TRUNCATE)
+
+    def peek(self) -> CrashSymbol | None:
+        """Newest record, left in place for a later :meth:`drain`."""
+        return self._newest(Consume.KEEP)
+
+    def _newest(self, consume: Consume) -> CrashSymbol | None:
         try:
             with open(self.path, "rb") as fh:
                 fh.seek(0, os.SEEK_END)
                 size = fh.tell()
                 fh.seek(max(0, size - _MAX_BYTES))
                 raw = fh.read().decode("utf-8", errors="replace")
-            if size:
+            if size and consume is Consume.TRUNCATE:
                 with open(self.path, "r+b") as fh:
                     fh.truncate(0)
         except OSError:

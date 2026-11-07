@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.core.crash_symbols import CrashSymbolSink
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.services import fuzz_round
 from fuzzer_tool.services.corpus_manager import CorpusManager
@@ -87,6 +88,64 @@ def test_novel_sanitizer_crash_triaged(fuzzer) -> None:
 def test_known_signal_crash_still_triaged(fuzzer) -> None:
     # Edge: the fault address may split a known signal signature.
     fuzzer.crash_sigs["signal:11"] = 1
+    _triage(fuzzer, b"new-input", SEGV, "")
+
+    assert _Triage.calls == [b"new-input"]
+
+
+# Shim crash-stack record: two target frames. With frames the signal
+# signature is the site (signal:11@0x234@0x500), not the fault address, so
+# triage cannot change a known one.
+_SYM = "SYM 11 0x401234 0x0 0x401234:-@0x401500:-\n"
+_SITE_SIG = "signal:11@0x234@0x500"
+
+
+@pytest.fixture
+def sink(fuzzer, tmp_path):
+    s = CrashSymbolSink(str(tmp_path / "crashsym.log"))
+    fuzzer._crash_sym_sink = s
+    fuzzer._pending_crash_sym = None
+    yield s
+    s.close()
+
+
+def _write(sink, line: str) -> None:
+    with open(sink.path, "a") as fh:
+        fh.write(line)
+
+
+def test_regression_known_site_signal_crash_not_triaged(fuzzer, sink) -> None:
+    fuzzer.crash_sigs[_SITE_SIG] = 1
+    _write(sink, _SYM)
+    _triage(fuzzer, b"new-input", SEGV, "")
+
+    assert _Triage.calls == []
+
+
+def test_skip_leaves_shim_record_for_save_crash(fuzzer, sink) -> None:
+    # Adversarial: deciding must not consume the record save_crash reads.
+    fuzzer.crash_sigs[_SITE_SIG] = 1
+    _write(sink, _SYM)
+    _triage(fuzzer, b"new-input", SEGV, "")
+
+    sym = sink.drain()
+    assert sym is not None and sym.pc == 0x401234
+
+
+def test_novel_site_signal_crash_triaged(fuzzer, sink) -> None:
+    # Falsification: an unseen site still gets its registers.
+    fuzzer.crash_sigs["signal:11@0x999"] = 1
+    _write(sink, _SYM)
+    _triage(fuzzer, b"new-input", SEGV, "")
+
+    assert _Triage.calls == [b"new-input"]
+
+
+def test_malformed_record_still_triaged(fuzzer, sink) -> None:
+    # Adversarial: no parseable site -> the fault address may matter.
+    fuzzer.crash_sigs[_SITE_SIG] = 1
+    fuzzer.crash_sigs["signal:11"] = 1
+    _write(sink, "SYM garbage\n")
     _triage(fuzzer, b"new-input", SEGV, "")
 
     assert _Triage.calls == [b"new-input"]
