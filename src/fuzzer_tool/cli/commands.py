@@ -174,6 +174,8 @@ def _load_hash_list(path: str | None) -> set[str] | None:
 
 
 _STACK_HASH_PREFIX = "# stack-hash "
+# Loaded, never exec'd: verify/replay route these through the loader child.
+SHARED_OBJECT_SUFFIXES = (".so", ".dylib", ".dll")
 
 
 def _detect_asan(target: str) -> bool:
@@ -237,6 +239,57 @@ def _get_dirs(args, target):
     corpus_dir = args.corpus or str(fuzz_dir / "corpus")
     crashes_dir = args.crashes or str(fuzz_dir / "crashes")
     return corpus_dir, crashes_dir
+
+
+def _is_shared_object(target: str) -> bool:
+    return target.lower().endswith(SHARED_OBJECT_SUFFIXES)
+
+
+def _preload_asan(target: str) -> None:
+    """Put libasan first in LD_PRELOAD for a dynamically ASAN-linked .so.
+
+    A .so loaded into Python (or the loader child) needs the runtime ahead
+    of every other library, else ASAN aborts with "does not come first".
+    """
+    if not _is_shared_object(target):
+        return
+    if _detect_asan_static(target):
+        print("[*] ASAN statically linked — no LD_PRELOAD needed")
+        return
+
+    # Full path: ctypes.util.find_library may return a bare name.
+    libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
+    if not os.path.exists(libasan):
+        import ctypes.util
+
+        libasan = ctypes.util.find_library("asan") or libasan
+    existing = os.environ.get("LD_PRELOAD", "")
+    if libasan in existing:
+        return
+
+    os.environ["LD_PRELOAD"] = f"{libasan}:{existing}" if existing else libasan
+    print(f"[*] LD_PRELOAD={libasan} (ASAN must load first for .so targets)")
+
+
+def _so_exec(target: str, timeout: float):
+    """Bind one-input execution of a .so target: ``data -> (rc, stderr)``.
+
+    A .so cannot be exec'd: it dies with SIGSEGV on every input, so verify
+    and replay once "confirmed" every crash file. It runs through the
+    in-process loader child instead. Returns (run, stop).
+    """
+    from fuzzer_tool.adapters.inprocess import InProcessRunner
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    if _detect_asan(target):
+        _preload_asan(target)
+    runner = InProcessRunner(
+        target=target,
+        function_name=Fuzzer._probe_so_function(target),
+        timeout=timeout,
+        capture_stderr=True,
+    )
+    return runner.run_one, runner.stop
 
 
 def _validate_target(target):
@@ -507,24 +560,7 @@ def cmd_fuzz(args):
         # For .so targets loaded via ctypes, ASAN must be first in library list.
         # Set LD_PRELOAD to ensure ASAN loads before Python's libraries.
         # Skip this if ASAN is statically linked (defined T/t symbol, not U).
-        is_so = args.target.lower().endswith((".so", ".dylib", ".dll"))
-        asan_static = _detect_asan_static(args.target) if is_so else False
-        if is_so and not asan_static:
-            # Find full path to libasan (ctypes.util.find_library may return relative name)
-            libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
-            if not os.path.exists(libasan):
-                import ctypes.util
-
-                libasan = ctypes.util.find_library("asan") or libasan
-            existing = os.environ.get("LD_PRELOAD", "")
-            if libasan not in existing:
-                if existing:
-                    os.environ["LD_PRELOAD"] = f"{libasan}:{existing}"
-                else:
-                    os.environ["LD_PRELOAD"] = libasan
-                print(f"[*] LD_PRELOAD={libasan} (ASAN must load first for .so targets)")
-        elif asan_static:
-            print("[*] ASAN statically linked — no LD_PRELOAD needed")
+        _preload_asan(args.target)
 
     # ASAN calls _exit() which kills inprocess-direct mode.
     # The verify_asan_link_order=0 shim and libasan are preloaded
@@ -1896,7 +1932,7 @@ def _verify_exec(args, data):
 
 def _verify_verdict(name, returncode, stderr) -> bool:
     """Print the verdict for one crash; True when the crash reproduced."""
-    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, signal_number
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
     report = SanitizerReport.parse(stderr)
@@ -1909,7 +1945,7 @@ def _verify_verdict(name, returncode, stderr) -> bool:
         print(f"  [-] {name}: timeout (not a crash)")
         return False
     if returncode in SIGNAL_CRASH_CODES or returncode < 0:
-        print(f"  [+] {name}: signal {abs(returncode)}")
+        print(f"  [+] {name}: signal {signal_number(returncode)}")
         return True
     print(f"  [-] {name}: no crash (rc={returncode})")
     return False
@@ -1942,22 +1978,31 @@ def cmd_verify(args):
     failed = 0
     errors = 0
 
-    for crash_file in crash_files:
-        data = crash_file.read_bytes()
-        if not data:
-            continue
+    # Decided once: a .so runs in the loader child, anything else is exec'd.
+    run, stop = (lambda data: _verify_exec(args, data)), None
+    if _is_shared_object(args.asan_target):
+        run, stop = _so_exec(args.asan_target, args.timeout)
 
-        try:
-            returncode, stderr = _verify_exec(args, data)
-        except Exception as e:
-            print(f"  [!] {crash_file.name}: execution error: {e}")
-            errors += 1
-            continue
+    try:
+        for crash_file in crash_files:
+            data = crash_file.read_bytes()
+            if not data:
+                continue
 
-        if _verify_verdict(crash_file.name, returncode, stderr):
-            confirmed += 1
-        else:
-            failed += 1
+            try:
+                returncode, stderr = run(data)
+            except Exception as e:
+                print(f"  [!] {crash_file.name}: execution error: {e}")
+                errors += 1
+                continue
+
+            if _verify_verdict(crash_file.name, returncode, stderr):
+                confirmed += 1
+            else:
+                failed += 1
+    finally:
+        if stop is not None:
+            stop()
 
     print(f"\n[*] Results: {confirmed} confirmed, {failed} not reproduced, {errors} errors")
     return 0 if confirmed > 0 else 1
@@ -2020,11 +2065,17 @@ def cmd_replay(args):
     data = crash_path.read_bytes()
     print(f"[*] Replaying {len(data)} bytes from {args.crash_file}")
 
-    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, signal_number
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
-    env = os.environ.copy()
-    returncode, stderr = _replay_exec(args, data, env)
+    if _is_shared_object(args.target):
+        run, stop = _so_exec(args.target, args.timeout)
+        try:
+            returncode, stderr = run(data)
+        finally:
+            stop()
+    else:
+        returncode, stderr = _replay_exec(args, data, os.environ.copy())
 
     report = SanitizerReport.parse(stderr)
     if returncode == -1 and not (report and report.is_valid()):
@@ -2041,7 +2092,7 @@ def cmd_replay(args):
         return 0
 
     if returncode in SIGNAL_CRASH_CODES or returncode < 0:
-        print(f"[+] Crash reproduced: signal {abs(returncode)}")
+        print(f"[+] Crash reproduced: signal {signal_number(returncode)}")
         return 0
 
     print(f"[*] No crash detected (returncode={returncode})")
