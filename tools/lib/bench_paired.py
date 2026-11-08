@@ -59,6 +59,7 @@ from fuzzer_tool.core.exact_tests import (  # noqa: E402
     mcnemar_exact,
     wilcoxon_signed_rank,
 )
+from fuzzer_tool.core.state_store import StateStore  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 # $FUZZ_BENCH_RESULTS keeps results out of the source tree (AGENTS.md Rule 17).
@@ -317,6 +318,10 @@ ARMS: dict[str, list[str]] = {
     # Redqueen colorization (backlog open question: opt-out?). ctl is baseline again (Rule 46).
     "colorize": ["--colorize"],
     "colorize-ctl": [],
+    # Allocation-size edges (shim malloc hook). Score with --metric real_edges:
+    # the arm's own synthetic edges inflate "edges". ctl is baseline again (Rule 46).
+    "alloc-sizes": ["--alloc-sizes"],
+    "alloc-sizes-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -416,6 +421,8 @@ ARM_BASELINES: dict[str, str] = {
     "round-robin-ctl": "baseline",
     "colorize": "baseline",
     "colorize-ctl": "baseline",
+    "alloc-sizes": "baseline",
+    "alloc-sizes-ctl": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
@@ -470,7 +477,23 @@ def _parse(log: str) -> dict:
 # from its crash records. tte_<kind> scores it; a kind that never fired is
 # censored at iters + 1 (later than any exec in the budget).
 TTE_PREFIX = "tte_"
-_PLAIN_METRICS = ("edges", "corpus", "crashes", "unique", "eps", "cpu_user")
+_PLAIN_METRICS = ("edges", "real_edges", "corpus", "crashes", "unique", "eps", "cpu_user")
+
+# Synthetic edge channels (COMPCOV, dataflow, allocation sizes) set bit 31;
+# real ids never do (afl_shim.c, __AFL_SYNTH_ID_BIT).
+SYNTH_ID_BIT = 1 << 31
+
+
+def _real_edges(corpus: Path) -> int | None:
+    """Cumulative real (non-synthetic) edge ids in *corpus*'s saved state."""
+    store = StateStore(corpus)
+    if not store.path.exists():
+        return None
+    tracker = store.load().get("edge_tracker") or {}
+    edges = tracker.get("cumulative_edges")
+    if edges is None:
+        return None
+    return sum(1 for e in edges if not int(e) & SYNTH_ID_BIT)
 
 
 def _first_crash_execs(crashes: Path) -> dict[str, int]:
@@ -547,6 +570,7 @@ def run_cell(
     try:
         run = run_timed(cmd, timeout, cwd=REPO)
         tte = _first_crash_execs(crashes)
+        real = _real_edges(workdir)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     log = run.log
@@ -565,6 +589,8 @@ def run_cell(
         **_parse(log),
         "tte": tte,
     }
+    if real is not None:  # absent key: analyse skips the cell, never scores 0
+        row["real_edges"] = real
     # Short of the budget: not a result. Keep the log for diagnosis.
     if row["execs"] < iters:
         row["log"] = log
