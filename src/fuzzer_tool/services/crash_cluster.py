@@ -7,7 +7,7 @@ crash's *path*, then compares paths::
         |
         CoverageReducer: mutate, keep a mutant iff same sig and fewer edges
         |
-        wl_features -> kernel_matrix -> cluster_kernel   (core/crash_graph.py)
+        wl_features -> kernel_matrix -> cluster_kernel | cluster_spectral   (core/crash_graph.py)
         |
     root-cause clusters
 
@@ -27,7 +27,9 @@ from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.crash_graph import (
     WL_ITERS,
     CrashGraph,
+    Linkage,
     cluster_kernel,
+    cluster_spectral,
     graph_from_edges,
     graph_from_fires,
     kernel_matrix,
@@ -164,12 +166,18 @@ def cluster_inputs(
     max_execs: int = REDUCE_EXECS,
     iters: int = WL_ITERS,
     threshold: float = CLUSTER_THRESHOLD,
+    linkage: Linkage = Linkage.THRESHOLD,
 ) -> list[list[int]]:
     """Cluster crash inputs by reduced-path similarity.
 
     Returns clusters of indices into *paths*; inputs that do not reproduce
-    a crash are left out.
+    a crash are left out. *threshold* applies to ``Linkage.THRESHOLD`` only.
     """
+    # Grouping chosen once, not per call.
+    group = {
+        Linkage.THRESHOLD: lambda sim: cluster_kernel(sim, threshold),
+        Linkage.SPECTRAL: cluster_spectral,
+    }[linkage]
     reducer = CoverageReducer(probe, rng, max_execs)
     kept: list[int] = []
     feats: list[dict[int, int]] = []
@@ -184,7 +192,7 @@ def cluster_inputs(
         kept.append(i)
         feats.append(wl_features(trace.graph, iters))
 
-    groups = cluster_kernel(kernel_matrix(feats), threshold)
+    groups = group(kernel_matrix(feats))
     return [[kept[j] for j in g] for g in groups]
 
 
@@ -202,18 +210,22 @@ def crash_cluster(
     iters: int = WL_ITERS,
     threshold: float = CLUSTER_THRESHOLD,
     seed: int | None = None,
+    linkage: Linkage = Linkage.THRESHOLD,
 ) -> list[list[Path]]:
     """Cluster ``crash_*.bin`` in *crashes_dir* by root cause; print the groups."""
     paths = list(_crash_inputs(crashes_dir))
     probe = TraceProbe(target, timeout, channel, target_args)
     try:
-        groups = cluster_inputs(paths, probe, RandPool(seed), max_execs, iters, threshold)
+        groups = cluster_inputs(paths, probe, RandPool(seed), max_execs, iters, threshold, linkage)
     finally:
         probe.close()
 
     clusters = [[paths[i] for i in g] for g in groups]
     kept = sum(len(c) for c in clusters)
-    print(f"[*] {kept}/{len(paths)} crash(es) reproduced -> {len(clusters)} root-cause cluster(s)")
+    print(
+        f"[*] {kept}/{len(paths)} crash(es) reproduced -> {len(clusters)} "
+        f"root-cause cluster(s) ({linkage.value})"
+    )
     for n, members in enumerate(clusters):
         print(f"  cluster {n} ({len(members)}): " + ", ".join(p.name for p in members))
     return clusters

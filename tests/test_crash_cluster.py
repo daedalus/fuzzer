@@ -3,7 +3,7 @@
 import stat
 import sys
 
-from fuzzer_tool.core.crash_graph import graph_from_edges, graph_from_fires
+from fuzzer_tool.core.crash_graph import Linkage, graph_from_edges, graph_from_fires
 from fuzzer_tool.services.crash_cluster import (
     CoverageReducer,
     Trace,
@@ -102,6 +102,23 @@ class TestClusterInputs:
 
         assert clusters == [[0, 1], [2]]
 
+    def test_spectral_linkage(self, tmp_path):
+        traces = {
+            b"a1": Trace("S1", graph_from_fires([1, 2, 3])),
+            b"a2": Trace("S2", graph_from_fires([1, 2, 3])),
+            b"b": Trace("S3", graph_from_fires([7, 8, 9])),
+        }
+        paths = []
+        for i, data in enumerate(traces):
+            p = tmp_path / f"crash_{i}.bin"
+            p.write_bytes(data)
+            paths.append(p)
+        clusters = cluster_inputs(
+            paths, lambda d: traces[d], ScriptedRng(), max_execs=0, linkage=Linkage.SPECTRAL
+        )
+
+        assert clusters == [[0, 1], [2]]
+
 
 class TestTraceProbe:
     def test_reads_fire_log_and_signal(self, tmp_path):
@@ -141,3 +158,18 @@ class TestCli:
         assert main() == 0
         assert seen["crashes_dir"] == str(tmp_path)
         assert (seen["threshold"], seen["iters"], seen["max_execs"]) == (0.6, 2, 7)
+        assert seen["linkage"] is Linkage.THRESHOLD
+
+    def test_main_spectral_flag(self, tmp_path, monkeypatch):
+        from fuzzer_tool.cli.commands import main
+
+        seen = {}
+        monkeypatch.setattr(
+            "fuzzer_tool.services.crash_cluster.crash_cluster",
+            lambda **kw: seen.update(kw) or [],
+        )
+        argv = ["fuzzer-tool", "crash-cluster", "/bin/true", str(tmp_path), "--linkage", "spectral"]
+        monkeypatch.setattr(sys, "argv", argv)
+
+        assert main() == 0
+        assert seen["linkage"] is Linkage.SPECTRAL

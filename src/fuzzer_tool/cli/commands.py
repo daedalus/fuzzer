@@ -20,6 +20,7 @@ from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.count_items import CountItems
+from fuzzer_tool.core.crash_graph import Linkage
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
 from fuzzer_tool.core.gravity import SpliceDonor
@@ -1515,6 +1516,7 @@ def cmd_crash_cluster(args):
         iters=args.wl_iters,
         threshold=args.threshold,
         seed=args.seed,
+        linkage=Linkage(args.linkage),
     )
     return 0
 
@@ -7325,6 +7327,12 @@ def main() -> int:
         type=float,
         default=CLUSTER_THRESHOLD,
         help=f"Kernel similarity to link two crashes (default: {CLUSTER_THRESHOLD})",
+    )
+    cc_parser.add_argument(
+        "--linkage",
+        choices=[m.value for m in Linkage],
+        default=Linkage.THRESHOLD.value,
+        help="threshold: single linkage at --threshold; spectral: eigengap k + k-means (Igor)",
     )
     cc_parser.add_argument("--seed", type=int, default=None, help="RNG seed for reduction")
     cc_parser.add_argument(
