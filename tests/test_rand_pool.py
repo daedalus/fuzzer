@@ -65,10 +65,10 @@ class TestRandbytes:
         assert vals1 != vals2, "randbytes did not advance the pool"
 
     def test_exact_pool_boundary(self):
-        """randbytes(POOL_ENTRIES) consumes exactly one pool, idx resets to 0."""
+        """randbytes(POOL_ENTRIES) consumes exactly one pool, pool left spent."""
         p = RandPool()
         p.randbytes(_POOL_ENTRIES)
-        assert p._idx == 0
+        assert p._idx == _POOL_ENTRIES
 
     def test_just_under_pool_boundary(self):
         """randbytes(POOL_ENTRIES - 1) stays in fast path, idx = POOL_ENTRIES - 1."""
@@ -97,11 +97,11 @@ class TestRandbytes:
         assert p._idx == 42
 
     def test_exact_two_pools(self):
-        """randbytes(POOL_ENTRIES * 2) consumes exactly 2 pools, idx = 0."""
+        """randbytes(POOL_ENTRIES * 2) consumes exactly 2 pools, pool left spent."""
         p = RandPool()
         result = p.randbytes(_POOL_ENTRIES * 2)
         assert len(result) == _POOL_ENTRIES * 2
-        assert p._idx == 0
+        assert p._idx == _POOL_ENTRIES
 
     def test_large(self):
         """randbytes(10000) works correctly across multiple refills."""

@@ -57,6 +57,13 @@ _POOL_ENTRIES = 4096  # refill every 4K draws
 # it is. Used any time a caller passes seed=None instead of an int.
 _NO_SEED_FALLBACK = 0x5EED_5EED
 
+# SeedSequence tags: keep derived streams disjoint from plain-int seeds.
+# Negative seed s → entropy [-s, _NEG_SEED_TAG] (numpy rejects s < 0).
+# Default pool → entropy [seed, _DEFAULT_POOL_TAG], so it never mirrors a
+# RandPool(seed) built from the same campaign seed.
+_NEG_SEED_TAG = 0x4E45_4721
+_DEFAULT_POOL_TAG = 0xDEFA_0172
+
 # Opt-in Floyd path (Phase 1 / B1 of the seventeen-source survey).
 _RAND_FLOYD: bool = os.environ.get("FUZZER_RAND_FLOYD", "").strip() in ("1", "true", "yes")
 
@@ -70,6 +77,19 @@ def configure_rand_floyd(enabled: bool = False) -> None:
 def rand_floyd_enabled() -> bool:
     """Return whether Floyd sampling is currently active."""
     return _RAND_FLOYD
+
+
+def _seed_source(seed):
+    """Map a user seed to something ``np.random.default_rng`` accepts.
+
+    ``None`` → fixed fallback; negative int → tagged ``SeedSequence``;
+    anything else passes through, so existing seeded streams are unchanged.
+    """
+    if seed is None:
+        return _NO_SEED_FALLBACK
+    if isinstance(seed, int) and seed < 0:
+        return np.random.SeedSequence([-seed, _NEG_SEED_TAG])
+    return seed
 
 
 def _shannon_entropy(data: bytes) -> float:
@@ -99,12 +119,11 @@ class RandPool:
         "_pool_l",
         "_m256_l",
         "_rng",
-        "_last_entropy",
         "_min_entropy",
     )
 
     def __init__(self, seed=None, min_entropy: float | None = None) -> None:
-        self._rng = np.random.default_rng(_NO_SEED_FALLBACK if seed is None else seed)
+        self._rng = np.random.default_rng(_seed_source(seed))
         self._pool: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint32)
         self._m256: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint8)  # pre-computed % 256
         # Python-list mirrors of the pools. numpy is the right representation
@@ -119,17 +138,17 @@ class RandPool:
         self._m256_l: list[int] = []
         self._idx = _POOL_ENTRIES
         self._min_entropy = min_entropy
-        self._last_entropy: float | None = None
 
     def _generate_pool(self) -> None:
         """Fill ``_pool`` and ``_m256`` from the current generator."""
         self._pool[:] = self._rng.integers(0, 2**32, size=_POOL_ENTRIES, dtype=np.uint32)
-        np.mod(self._pool, 256, out=self._m256)
-        self._last_entropy = _shannon_entropy(self._m256.tobytes())
+        # Unsafe uint32 → uint8 cast truncates, i.e. % 256 (~16x cheaper than np.mod).
+        np.copyto(self._m256, self._pool, casting="unsafe")
 
     def _refill(self) -> None:
         self._generate_pool()
-        if self._min_entropy is not None and self._last_entropy < self._min_entropy:
+        # Entropy only when gated: ~9% of a refill, read by nobody otherwise.
+        if self._min_entropy is not None and self._entropy() < self._min_entropy:
             for _ in range(3):
                 # Derive the retry seed from the still-live (low-entropy)
                 # generator itself rather than reseeding from OS/hardware
@@ -141,15 +160,19 @@ class RandPool:
                 next_seed = int(self._rng.integers(0, 2**63))
                 self.reseed(next_seed)
                 self._generate_pool()
-                if self._last_entropy >= self._min_entropy:
+                if self._entropy() >= self._min_entropy:
                     break
             else:
                 raise RuntimeError(
-                    f"RandPool entropy starvation: {self._last_entropy:.2f} < {self._min_entropy:.2f}"
+                    f"RandPool entropy starvation: {self._entropy():.2f} < {self._min_entropy:.2f}"
                 )
         self._pool_l = self._pool.tolist()
         self._m256_l = self._m256.tolist()
         self._idx = 0
+
+    def _entropy(self) -> float:
+        """Shannon entropy (bits/byte) of the current ``_m256`` batch."""
+        return _shannon_entropy(self._m256.tobytes())
 
     def _draw(self) -> int:
         if self._idx >= _POOL_ENTRIES:
@@ -174,7 +197,7 @@ class RandPool:
         would look like a no-op.  Invalidating ``_idx`` forces a refill from
         the new stream on the next draw.
         """
-        self._rng = np.random.default_rng(_NO_SEED_FALLBACK if seed is None else seed)
+        self._rng = np.random.default_rng(_seed_source(seed))
         self._idx = _POOL_ENTRIES
 
     def inject_entropy(self, raw: bytes) -> None:
@@ -221,14 +244,17 @@ class RandPool:
     def pool_entropy(self) -> float | None:
         """Return the Shannon entropy (bits/byte) of the most recent refill.
 
-        Returns ``None`` until the first refill has completed.
+        Returns ``None`` until the first refill has completed. Computed on
+        demand from the batch still held in ``_m256``.
         """
-        return self._last_entropy
+        if not self._pool_l:
+            return None
+        return self._entropy()
 
     def measure_entropy(self, data: bytes | None = None) -> float:
         """Measure Shannon entropy (bits/byte) of bytes or the current pool."""
         if data is None:
-            if self._last_entropy is None:
+            if not self._pool_l:
                 raise RuntimeError("RandPool has not been refilled")
             data = self._m256.tobytes()
         return _shannon_entropy(data)
@@ -460,7 +486,8 @@ class RandPool:
             parts.append(self._m256[:n].tobytes())
             self._idx = n
         else:
-            self._idx = 0
+            # Last full pool is spent; rewinding to 0 replayed it.
+            self._idx = _POOL_ENTRIES
         return b"".join(parts)
 
     def choice(self, seq: list | tuple | bytes) -> object:
@@ -473,7 +500,8 @@ class RandPool:
             val = self._pool_l[self._idx]
             self._idx += 1
             return seq[val % n]
-        return seq[int(self._rng.integers(n))]
+        # Modulo bias ≤ n / 2**32: negligible for any in-memory sequence.
+        return seq[self.randrange(n)]
 
     def choice_list(self, seq: list | tuple | bytes, count: int) -> list:
         """Return *count* elements randomly chosen from *seq* (with replacement).
@@ -527,6 +555,8 @@ class RandPool:
         if k <= 0:
             return []
         total = sum(weights)
+        if total <= 0:
+            raise IndexError("weighted_choice_list: weights sum to <= 0")
         probs = [w / total for w in weights]
         indices = self._rng.choice(n, size=k, replace=True, p=probs)
         return [seq[i] for i in indices]
@@ -549,15 +579,28 @@ class RandPool:
         Draws only from the pool's own stream (``randrange``: one word while
         ``n <= 2**32``, composed words above that).  O(k) space, exactly k
         draws for ``n <= 2**32``.
+
+        Permutation variant (Bentley & Floyd 1987): a fresh ``t`` goes to the
+        front, a collision inserts ``j`` right after ``t``. The output order
+        is then a uniform random permutation; ``list(set)`` came out
+        near-sorted for small ints. Linked list via ``nxt`` keeps it O(k).
         """
-        s: set[int] = set()
+        nxt: dict[int, int] = {}
+        head = -1
         for j in range(n - k, n):
             t = self.randrange(j + 1)
-            if t in s:
-                s.add(j)
-            else:
-                s.add(t)
-        return list(s)
+            if t in nxt:
+                nxt[j] = nxt[t]
+                nxt[t] = j
+                continue
+            nxt[t] = head
+            head = t
+
+        out: list[int] = []
+        while head != -1:
+            out.append(head)
+            head = nxt[head]
+        return out
 
     def sample(self, population, k: int):
         """Return *k* unique elements from *population*.
@@ -612,7 +655,7 @@ class RandPool:
             return [a, b if b < a else b + 1]
         if _RAND_FLOYD:
             return self._floyd_indices(population, k)
-        return list(self._rng.choice(population, size=k, replace=False))
+        return self._rng.choice(population, size=k, replace=False).tolist()
 
     # ── Continuous distributions ──────────────────────────────────────
     # These delegate to numpy's C-level generators (no pool draws).
@@ -628,13 +671,14 @@ class RandPool:
         """
         if count <= 0:
             return []
-        return list(self._rng.normal(mu, sigma, size=count))
+        return self._rng.normal(mu, sigma, size=count).tolist()
 
     def expovariate(self, lambd: float = 1.0) -> float:
         """Return a random float from Exponential(rate=*lambd*).
 
-        ``random.expovariate(lambd)`` equivalent.  For *lambd* == 0
-        returns ``float('inf')`` (matches CPython behaviour).
+        Like ``random.expovariate(lambd)`` for *lambd* > 0. Unlike CPython
+        (which raises on 0 and goes negative below it), *lambd* <= 0
+        returns ``float('inf')``.
         """
         if lambd <= 0:
             return float("inf")
@@ -649,7 +693,7 @@ class RandPool:
             return []
         if lambd <= 0:
             return [float("inf")] * count
-        return list(self._rng.exponential(1.0 / lambd, size=count))
+        return self._rng.exponential(1.0 / lambd, size=count).tolist()
 
     def betavariate(self, alpha: float, beta: float) -> float:
         """Return a random float from Beta(*alpha*, *beta*).
@@ -665,7 +709,7 @@ class RandPool:
         """
         if count <= 0:
             return []
-        return list(self._rng.beta(alpha, beta, size=count))
+        return self._rng.beta(alpha, beta, size=count).tolist()
 
     def betavariate_array(self, alphas, betas) -> np.ndarray:
         """Return one Beta(alphas[i], betas[i]) draw per element, as an array.
@@ -745,14 +789,17 @@ class RandPool:
         if count <= 0:
             return []
         cum = np.cumsum(probs)
+        if cum[-1] <= 0:
+            raise IndexError("categorical: weights sum to <= 0")
         idx = np.searchsorted(cum, self._rng.random(count) * cum[-1], side="right")
         return np.minimum(idx, len(cum) - 1).tolist()
 
     def gammavariate(self, alpha: float, beta: float = 1.0) -> float:
         """Return a random float from Gamma(*alpha*, *beta*).
 
-        ``random.gammavariate(alpha, beta)`` equivalent — *beta* is the
-        rate parameter (not scale).
+        NOT ``random.gammavariate``: *beta* here is the rate (mean
+        ``alpha / beta``); CPython's is the scale (mean ``alpha * beta``).
+        Matches :meth:`gammavariate_array`. *beta* <= 0 returns 0.0.
         """
         return float(self._rng.gamma(alpha, scale=1.0 / beta) if beta > 0 else 0.0)
 
@@ -763,9 +810,10 @@ class RandPool:
         """
         if count <= 0:
             return []
-        return list(
+        draws = (
             self._rng.gamma(alpha, scale=1.0 / beta, size=count) if beta > 0 else np.zeros(count)
         )
+        return draws.tolist()
 
     def gammavariate_array(self, alphas, betas) -> np.ndarray:
         """Return one Gamma(alphas[i], rate=betas[i]) draw per element, as an array.
@@ -789,7 +837,7 @@ class RandPool:
         """
         if count <= 0:
             return []
-        return list(self._rng.lognormal(mu, sigma, size=count))
+        return self._rng.lognormal(mu, sigma, size=count).tolist()
 
 
 # ── Process-wide singleton ───────────────────────────────────────────────
@@ -855,3 +903,15 @@ def reset_default_rand_pool(seed=None) -> None:
     """
     global _default_instance
     _default_instance = RandPool(seed=seed)
+
+
+def reseed_default_rand_pool(seed=None) -> None:
+    """Reseed the shared default pool from a campaign seed.
+
+    The stream is tagged (``_DEFAULT_POOL_TAG``) so it differs from
+    ``RandPool(seed)``: reseeding both with the same seed made fallback
+    draws replay the hotpath stream at an offset.
+    """
+    base = _NO_SEED_FALLBACK if seed is None else seed
+    entropy = [-base, _NEG_SEED_TAG] if base < 0 else [base]
+    get_default_rand_pool().reseed(np.random.SeedSequence([*entropy, _DEFAULT_POOL_TAG]))

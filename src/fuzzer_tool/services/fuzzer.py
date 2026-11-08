@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
-from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.rand_pool import RandPool, reseed_default_rand_pool
 from fuzzer_tool.core.tuple_walk import TupleWalk
 
 if TYPE_CHECKING:
@@ -2425,7 +2425,7 @@ class Fuzzer:
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
         # Fallback pool for code not handed an rng: seeded here, not the global `random`.
-        get_default_rand_pool().reseed(seed)
+        reseed_default_rand_pool(seed)
         # ── Vectorized random number pool for mutation hotpath ────────
         # Generates random values in batches (one numpy C-level call per
         # batch) instead of per-call Python-level random() invocations.
@@ -8385,7 +8385,7 @@ class Fuzzer:
         """
         self._stall_reseed_count += 1
         new_seed = self._derive_stall_seed()
-        get_default_rand_pool().reseed(new_seed)
+        reseed_default_rand_pool(new_seed)
         if _HAS_NUMPY:
             self._rng.reseed(new_seed)
         self._last_stall_seed = new_seed
