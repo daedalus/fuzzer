@@ -6049,9 +6049,12 @@ class OperatorEngine:
 
     # ── Operator selection logic ───────────────────────────────────────
 
-    def build_ops(self, data: bytes) -> list[str]:
-        """Build the list of available mutation operators from the registry."""
-        return REGISTRY.available(self.f, data)
+    def build_ops(self, data: bytes, ctx: MutationContext | None = None) -> list[str]:
+        """Build the list of available mutation operators from the registry.
+
+        *ctx*: the round snapshot when called from ``mutate``; None builds one.
+        """
+        return REGISTRY.available(self.f, data, ctx)
 
     @staticmethod
     def _classify_format(data: bytes) -> str:
@@ -7290,7 +7293,7 @@ class OperatorEngine:
         if not buf:
             buf = bytearray(b"\x00" * self.ctx._rng.randint_list(1, 32, 1)[0])
 
-        ops = self.build_ops(data)
+        ops = self.build_ops(data, self._ctx_cache)
         f._last_ops_used = []
         if getattr(f, "_gravity", None) is not None:
             f._gravity.discard()
