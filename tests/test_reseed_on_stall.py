@@ -122,11 +122,15 @@ class TestDeriveStallSeed:
         assert len(set(seeds)) == len(seeds)
         assert all(abs(seeds[i] - seeds[i + 1]) > 1000 for i in range(len(seeds) - 1))
 
-    def test_unseeded_run_uses_os_entropy(self):
+    def test_unseeded_run_skips_os_entropy(self):
+        """No --seed: derived like seed UNSEEDED_STALL_BASE, never os.urandom."""
+        from fuzzer_tool.services.fuzzer import UNSEEDED_STALL_BASE
+
         f = _make_fuzzer(seed=None)
-        with patch("os.urandom", return_value=b"\x01\x02\x03\x04") as urandom:
-            assert f._derive_stall_seed() == 0x04030201
-        urandom.assert_called_once_with(4)
+        g = _make_fuzzer(seed=UNSEEDED_STALL_BASE)
+        with patch("os.urandom") as urandom:
+            assert f._derive_stall_seed() == g._derive_stall_seed()
+        urandom.assert_not_called()
 
 
 # ── Wiring ──────────────────────────────────────────────────────────────

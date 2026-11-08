@@ -6,7 +6,7 @@ Effective for text protocols, config files, command lines.
 Ported from honggfuzz mangle.c:mangle_TokenShuffle (line 1245).
 """
 
-import random as _random
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 _DELIMS = b" \t\n\r,;:|/\\=&?"
 
@@ -21,12 +21,12 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes to mutate.
-        rng: Random instance (default: module-level random).
+        rng: Random instance (default: shared default RandPool).
 
     Returns:
         Mutated bytes with two tokens swapped, or original if <2 tokens found.
     """
-    r = rng or _random
+    r = rng or get_default_rand_pool()
     n = len(data)
     if n < 4:
         return data

@@ -12,12 +12,11 @@ GZIP: 10-byte header + optional fields + DEFLATE + CRC32 + size
 
 from __future__ import annotations
 
-import random
 import struct
 import zlib
 from dataclasses import dataclass
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 ZLIB_MIN_SIZE = 6  # 2 header + 0 data + 4 trailer
 
@@ -130,7 +129,7 @@ def serialize_zlib(info: ZlibInfo) -> bytes:
 
 def _corrupt_field(data: bytearray, offset: int, size: int, rng=None) -> None:
     """Apply random corruption to a field."""
-    _r = rng or random
+    _r = rng or get_default_rand_pool()
     if size == 1:
         data[offset] = _r.randint(0, 255)
     elif size == 2:

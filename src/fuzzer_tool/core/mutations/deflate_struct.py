@@ -40,9 +40,10 @@ from __future__ import annotations
 
 import binascii
 import heapq
-import random
 import struct
 import zlib
+
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 # ── Bounds ──────────────────────────────────────────────────────────────
 _MAX_COMPRESSED_IN = 1 << 20  # 1 MiB, matches recompress.py
@@ -908,7 +909,7 @@ def mutate_deflate_structure(data: bytes, max_len: int = 4096, rng=None) -> byte
     callers can fall through to another operator, matching
     ``recompress.py``'s contract.
     """
-    r = rng or random
+    r = rng or get_default_rand_pool()
     if len(data) > _MAX_COMPRESSED_IN:
         return None
     split = _split_zlib(data)

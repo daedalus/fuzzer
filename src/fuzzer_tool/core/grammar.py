@@ -27,11 +27,10 @@ Example (HTTP request):
 
 import hashlib
 import logging
-import random
 import re
 from pathlib import Path
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 log = logging.getLogger(__name__)
 
@@ -1134,7 +1133,7 @@ class SubtreePopulation:
 
     def add(self, tree: TreeNode, rng=None) -> None:
         """Harvest every interior node of *tree* into the population."""
-        rand = rng or random
+        rand = rng or get_default_rand_pool()
         for node, node_hash in tree.collect_interior_hashes():
             rule = node.rule
             pool = self._pools.setdefault(rule, [])
@@ -1169,7 +1168,7 @@ class SubtreePopulation:
         pool = self._pools.get(rule)
         if not pool:
             return None
-        rand = rng or random
+        rand = rng or get_default_rand_pool()
         return pool[rand.randint(0, len(pool) - 1)]
 
     def __len__(self) -> int:

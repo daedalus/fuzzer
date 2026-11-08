@@ -558,6 +558,7 @@ SEED_MIX_A = 0xBF58476D1CE4E5B9
 SEED_MIX_B = 0x94D049BB133111EB
 SEED_MASK_64 = 0xFFFFFFFFFFFFFFFF
 SEED_MASK_32 = 0xFFFFFFFF  # stall seeds are 32-bit
+UNSEEDED_STALL_BASE = 0  # stall-seed base when the run has no --seed
 
 
 def _current_rss_kb() -> int | None:
@@ -8360,15 +8361,15 @@ class Fuzzer:
         When the run was given a seed, the new seed is a pure function of
         ``(self.seed, self._stall_reseed_count)`` — not of the draw history,
         which varies with target execution timing — so a seeded run stays
-        reproducible across the reseed. Without a seed there is nothing to
-        be reproducible against, so OS entropy is used.
+        reproducible across the reseed. Without a seed the base is
+        ``UNSEEDED_STALL_BASE``, never OS entropy: unseeded pools are fixed
+        too, so an unseeded run stays reproducible.
 
         Returns:
             A seed in ``[0, 2**32)``.
         """
-        if self.seed is None:
-            return int.from_bytes(os.urandom(4), "little")
-        x = (self.seed + self._stall_reseed_count * SEED_MIX_GAMMA) & SEED_MASK_64
+        base = UNSEEDED_STALL_BASE if self.seed is None else self.seed
+        x = (base + self._stall_reseed_count * SEED_MIX_GAMMA) & SEED_MASK_64
         x = ((x ^ (x >> 30)) * SEED_MIX_A) & SEED_MASK_64
         x = ((x ^ (x >> 27)) * SEED_MIX_B) & SEED_MASK_64
         x ^= x >> 31

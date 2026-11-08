@@ -8,13 +8,12 @@ gzip generation when input is not valid gzip.
 
 from __future__ import annotations
 
-import random
 import struct
 import zlib
 from dataclasses import dataclass
 
 from fuzzer_tool.core.crc32 import crc32
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 GZIP_MAGIC = b"\x1f\x8b"
 DEFLATE = 8
@@ -155,7 +154,7 @@ def serialize_gzip(info: GzipInfo) -> bytes:
 
 def _corrupt_field(data: bytearray, offset: int, size: int, rng=None) -> None:
     """Apply random corruption to a field."""
-    _r = rng or random
+    _r = rng or get_default_rand_pool()
     if size == 1:
         data[offset] = _r.randint(0, 255)
     elif size == 2:

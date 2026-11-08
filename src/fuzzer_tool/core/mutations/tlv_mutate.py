@@ -8,7 +8,7 @@ double. Falls back to inserting a random TLV-like 4-byte structure.
 Ported from honggfuzz mangle.c:mangle_TlvMutate (line 1173).
 """
 
-import random as _random
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 # Boundary values for length field mutation
 _TLV_BOUNDARIES = [0x00, 0x01, 0x7F, 0x80, 0xFF]
@@ -28,12 +28,12 @@ def tlv_mutate(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes to mutate.
-        rng: Random instance (default: module-level random).
+        rng: Random instance (default: shared default RandPool).
 
     Returns:
         Mutated bytes (same length unless fallback inserts TLV).
     """
-    r = rng or _random
+    r = rng or get_default_rand_pool()
     if len(data) < 4:
         return _insert_tlv_fallback(data, r)
 

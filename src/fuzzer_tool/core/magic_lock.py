@@ -22,6 +22,8 @@ with a literal byte string at offset 0:
 
 import random
 
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
+
 # (prefix_bytes, description) -- literal magic at offset 0, longest match wins.
 #
 # Deliberately *not* in this table:
@@ -214,7 +216,7 @@ def format_lock_havoc(data: bytes, max_len: int, rng: random.Random | None = Non
     Returns mutated bytes (truncated to *max_len*), or *None* when no
     prefix is detected (no-op).
     """
-    rng = rng or random
+    rng = rng or get_default_rand_pool()
     prefix_len = detect_magic_prefix(data)
     if prefix_len == 0:
         return None

@@ -74,6 +74,7 @@ from fuzzer_tool.core.mutations.generic import (
     INTERESTING_16,
     INTERESTING_32,
 )
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 # Field types that are deliberately never targeted for direct mutation.
 _SKIPPED_TYPES = frozenset({"magic", "padding"})
@@ -130,7 +131,7 @@ def _op_byte_flip(buf: bytearray, offset: int, width: int, rng: random.Random) -
 
 def _op_xor_byte(buf: bytearray, offset: int, width: int, rng: random.Random) -> None:
     if 0 <= offset < len(buf):
-        buf[offset] ^= rng.randrange(1, 256)
+        buf[offset] ^= rng.randint(1, 255)
 
 
 def _op_arith(buf: bytearray, offset: int, width: int, rng: random.Random) -> None:
@@ -281,7 +282,7 @@ def cold_start_seed(
     if not learned:
         return None
 
-    rng = rng or random.Random()
+    rng = rng or get_default_rand_pool()
     seed_len = max(s.offset + s.width for s in learned)
     if max_len > 0:
         seed_len = min(seed_len, max_len)
@@ -365,7 +366,7 @@ class FormatSeedGenerator:
         """``fields`` may be ``FormatLearner.hypotheses``, the ``fields``
         list from ``get_format_summary()``, or ``get_state()["hypotheses"]``."""
         self.set_fields(fields)
-        self.rng = rng or random.Random()
+        self.rng = rng or get_default_rand_pool()
         # Per-generation stats for the report's format-learning section.
         self.generator_stats: dict[str, int | float] = {
             "total_seeds_generated": 0,

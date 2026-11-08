@@ -20,6 +20,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
+
+# Seed span for the numpy Generator drawn from the default pool (63-bit, non-negative).
+_NP_SEED_SPAN = 1 << 63
+
 
 def _prefix_entropy(cum: np.ndarray, totals: np.ndarray) -> np.ndarray:
     """Shannon bits of each cumulative histogram row; 0 where the total is 0."""
@@ -56,7 +61,7 @@ def shapley_entropy(
     if n == 0:
         return np.zeros(0), np.zeros(0)
 
-    rng = rng or np.random.default_rng()
+    rng = rng or np.random.default_rng(get_default_rand_pool().randrange(_NP_SEED_SPAN))
     counts = np.asarray(counts)
     sizes = np.asarray(sizes)
 

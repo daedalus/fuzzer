@@ -821,7 +821,10 @@ class MonteCarloScheduler:
         which is not affordable even off the execution path.
         """
         # Seeded from the run's RandPool: an unseeded Generator made --seed
-        # runs diverge through the refit interval this null feeds.
+        # runs diverge through the refit interval this null feeds. None draws
+        # the seed from the default pool: default_rng(None) reads OS entropy.
+        if seed is None:
+            seed = get_default_rand_pool().randint(0, _NULL_SEED_MAX)
         rng = np.random.default_rng(seed)
         groups: dict[tuple[int, int], list[np.ndarray]] = {}
         for counts, n1, n2 in pooled:

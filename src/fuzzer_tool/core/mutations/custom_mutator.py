@@ -74,7 +74,6 @@ import contextlib
 import ctypes
 import logging
 import os
-import random
 import shutil
 import signal
 import subprocess
@@ -83,6 +82,7 @@ from pathlib import Path
 from typing import Any
 
 from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 log = logging.getLogger(__name__)
 
@@ -335,7 +335,7 @@ def havoc(data: bytes, max_size: int, rng=None) -> bytes:
     input is already longer than *max_size* it is truncated first, as
     ``LLVMFuzzerMutate`` requires ``Size <= MaxSize``.
     """
-    rng = rng if rng is not None else random.Random()
+    rng = rng if rng is not None else get_default_rand_pool()
     buf = bytearray(data[:max_size] if max_size >= 0 else data)
     original = bytes(buf)
     for _ in range(8):
@@ -351,6 +351,7 @@ def havoc(data: bytes, max_size: int, rng=None) -> bytes:
 # Host shim: exports LLVMFuzzerMutate and forwards it into Python
 # ---------------------------------------------------------------------------
 
+
 def _signal_name(num: int) -> str:
     try:
         return signal.Signals(num).name
@@ -362,7 +363,6 @@ _MUTATE_CB = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
 
 #: rng for the plugin call in flight; read by the LLVMFuzzerMutate callback.
 _current_rng: Any = None
-_fallback_rng = random.Random()
 
 
 def _on_mutate(ptr, size, max_size) -> int:
@@ -370,7 +370,7 @@ def _on_mutate(ptr, size, max_size) -> int:
     if not ptr:
         return 0
     try:
-        out = havoc(ctypes.string_at(ptr, size), max_size, _current_rng or _fallback_rng)
+        out = havoc(ctypes.string_at(ptr, size), max_size, _current_rng or get_default_rand_pool())
         ctypes.memmove(ptr, out, len(out))
         return len(out)
     except Exception:  # noqa: BLE001 - must not unwind into foreign C
@@ -470,7 +470,9 @@ class CustomMutatorPlugin:
         self.calls = 0
         if not os.path.isfile(self.path):
             raise FileNotFoundError(f"--custom-mutator: no such file: {self.path}")
-        self._host = _load_host()  # first: the plugin's undefined LLVMFuzzerMutate must resolve at dlopen
+        self._host = (
+            _load_host()
+        )  # first: the plugin's undefined LLVMFuzzerMutate must resolve at dlopen
         try:
             self._lib = ctypes.CDLL(os.path.abspath(self.path))
         except OSError as exc:
