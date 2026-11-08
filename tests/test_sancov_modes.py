@@ -280,13 +280,21 @@ class TestBuildScriptModes:
             f"trace-pc-guard,{INDIR}",
             "trace-pc-guard,trace-cmp,trace-div,trace-gep",
             f"{COUNTERS},trace-cmp",
+            "trace-pc-guard,pc-table,control-flow",
         ],
     )
     def test_supported_modes_pass(self, modes):
         assert _validate(modes) == 0
 
     @pytest.mark.parametrize(
-        "modes", ["pc-table,trace-loads", INDIR, "trace-cmp", "trace-cmp,trace-div,trace-gep"]
+        "modes",
+        [
+            "pc-table,trace-loads",
+            INDIR,
+            "trace-cmp",
+            "trace-cmp,trace-div,trace-gep",
+            "control-flow",
+        ],
     )
     def test_no_edge_mode_rejected(self, modes):
         """Falsification: pc-table/loads/indirect-calls/trace-cmp alone record no edges."""
