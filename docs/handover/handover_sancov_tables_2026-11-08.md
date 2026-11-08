@@ -13,6 +13,7 @@ below are open, ranked by value per unit of work.
 | CFG table → `FunctionCFG` (native < 4096 words, hybrid above) | `core/sancov_cfg.py` | same |
 | Stats `funcs: hit/total` | `services/stats.py::_blocks_str`, `BlockBitmapShm.covered_at` | same |
 | `--sancov=...,control-flow` accepted | `tools/build_targets.sh` | `tests/test_sancov_modes.py` |
+| Sanitizer death callback: crash flush + distance tail before the runtime's exit (edge and preload-only builds) | `afl_shim.c` (`__afl_san_death`, `__afl_crash_flush`) | `tests/test_sanitizer_death_callback.py` |
 
 ```
 module ctor ── guard_init(G) ── pcs_init(P) ── cfs_init(C)
@@ -46,24 +47,15 @@ module ctor ── guard_init(G) ── pcs_init(P) ── cfs_init(C)
   both); adversarial (MSAN built without `-fsanitize-recover`: the process
   still ends, and it is detected as a crash, not a hang).
 
-### 2. `__sanitizer_set_death_callback`: flush before the runtime dies
-- Why: a sanitizer that `_exit`s after its report skips the signal path. The
-  map, cmplog and fold points (`__afl_sancov_fold_exit`) are lost for the
-  crashing input.
-- Sketch (shim ctor, weak so non-sanitizer builds link):
-  ```c
-  extern void __sanitizer_set_death_callback(void (*)(void)) __attribute__((weak));
-  __AFL_NO_COV static void __afl_on_san_death(void) {
-      __afl_sancov_fold_exit();
-      __afl_cmplog_flush();
-  }
-  /* in __afl_auto_init: */
-  if (__sanitizer_set_death_callback) __sanitizer_set_death_callback(__afl_on_san_death);
-  ```
-- Wiring: `__afl_auto_init` only. Python already reads the map after exit.
-- Tests: an ASAN binary with `halt_on_error=1`: the edge leading to the
-  overflow is in the map (fails today); a non-sanitizer build has no symbol
-  and still links.
+### 2. ~~`__sanitizer_set_death_callback`~~ shipped (2026-11-08)
+- Open: escaping a fatal report through the guard (`siglongjmp` from the
+  callback) would make UBSAN/MSAN fatal errors recoverable in direct_lite.
+  Unsafe as is: `Die()` runs inside the runtime's report scope, which holds
+  its report lock, so the next report deadlocks. Needs the runtime's
+  cooperation (or `halt_on_error=0`, item 1).
+- Open: the runtime keeps one user callback. A target registering its own
+  replaces the shim's. Detect it with a health counter (the callback bumps it;
+  zero after a sanitizer death means it was displaced).
 
 ### 3. `__sanitizer_weak_hook_*`: compares inside interceptors
 - Why: libasan calls `__sanitizer_weak_hook_{memcmp,strcmp,strncmp,strcasecmp,strncasecmp,strstr,strcasestr,memmem}`

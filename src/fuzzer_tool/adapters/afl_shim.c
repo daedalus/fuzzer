@@ -245,6 +245,10 @@
 #include <stdarg.h>
 #include <time.h>
 
+/* Sanitizer runtime hook; weak, so builds without a runtime still link
+ * (see "Sanitizer death callback"). */
+extern void __sanitizer_set_death_callback(void (*cb)(void)) __attribute__((weak));
+
 #if __AFL_CMPLOG
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -5408,6 +5412,18 @@ void __tracecmp_flush(void) {
 __AFL_NO_COV __attribute__((visibility("default")))
 void __tracecmp_reset(void) { __cmplog_reset(); }
 
+/* Crash-time flush: the buffer and the counters of a dying process.
+ * write(2)-only, so legal in a signal handler or a sanitizer death
+ * callback. Per crash, not once: in a persistent/direct_lite loop every
+ * crash would otherwise lose up to 256KB of records, and a crashing
+ * execution's comparison profile is the one most worth having. */
+__AFL_NO_COV static void __afl_cmplog_crash_flush(void) {
+    __afl_cmplog_flush();
+    if (__afl_cmplog_mine()) __afl_cmplog_release();
+    __afl_cmp_dump_counts();
+    __afl_cmp_dump_sites();
+}
+
 __AFL_NO_COV __attribute__((visibility("default")))
 const char *__tracecmp_get_path(void) { return __cmplog_get_path(); }
 
@@ -5751,22 +5767,38 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
 #define __afl_sym_emit() ((void)0)
 #endif
 
-__AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
-    #if __AFL_CMPLOG
-    /* Flush before escaping. cmplog_shim.c installed a second handler for
-     * this and restored the previous disposition from inside it, so the
-     * comparison buffer was flushed on the FIRST crash only -- every later
-     * crash in a persistent/direct_lite loop lost up to 256KB of records.
-     * Folding it in here runs it on every crash, and __afl_cmplog_flush is
-     * write(2)-based precisely so it is legal at this point. */
-    __afl_cmplog_flush();
-    if (__afl_cmplog_mine()) __afl_cmplog_release();
-    /* Same reasoning for the counters: a crashing execution's comparison
-     * profile is the one most worth having, and the dump is write(2)-only. */
-    __afl_cmp_dump_counts();
-    __afl_cmp_dump_sites();
+/* What a dying process still owes the fuzzer: cmplog records and
+ * counters, and the inline-counter fold. Idempotent (each part drains
+ * what it wrote), so the crash handler and the death callback may both
+ * run. */
+__AFL_GCC_NO_COV static void __afl_crash_flush(void) {
+#if __AFL_CMPLOG
+    __afl_cmplog_crash_flush();
 #endif
     __afl_sancov_fold();
+}
+
+/* ── Sanitizer death callback ─────────────────────────────────────────
+ * A sanitizer that halts on a report (ASAN's default halt_on_error=1,
+ * MSAN/TSAN/UBSAN without recover) prints it and leaves through its
+ * runtime's raw exit_group: no destructor, no signal, so neither the
+ * crash handler nor the dtors run and the crashing input's buffered
+ * cmplog, inline counters and distance tail were lost.
+ *
+ *   report -> Die() -> user callback (here) -> internal _exit / abort
+ *
+ * The runtime keeps one user callback: a target registering its own
+ * later replaces this one. */
+__AFL_GCC_NO_COV static void __afl_san_death(void) {
+    __afl_crash_flush();
+#if __AFL_DISTANCE_MODE
+    __afl_write_distance_tail();
+#endif
+}
+
+__AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
+    /* Flush before escaping, on every crash (see __afl_cmplog_crash_flush). */
+    __afl_crash_flush();
     __afl_sym_capture(sig, si, uc);
     sigjmp_buf *jb = __afl_guard_jmp;
     if (jb) {
@@ -7507,6 +7539,7 @@ __AFL_GCC_NO_COV static void __afl_auto_init(void) {
     __afl_cmplog_init();
 #endif
     __afl_install_crash_handlers();
+    if (__sanitizer_set_death_callback) __sanitizer_set_death_callback(__afl_san_death);
     pthread_atfork(NULL, NULL, __afl_guard_atfork_child);
     __afl_mapping = 0;
     __afl_fast_refresh();
@@ -7568,6 +7601,7 @@ __AFL_NO_COV static void __afl_preload_crash_handler(int sig) {
 __attribute__((constructor))
 __AFL_NO_COV static void __afl_preload_init(void) {
     __afl_cmplog_init();
+    if (__sanitizer_set_death_callback) __sanitizer_set_death_callback(__afl_cmplog_crash_flush);
     struct sigaction sa;
     sa.sa_handler = __afl_preload_crash_handler;
     sigemptyset(&sa.sa_mask);
