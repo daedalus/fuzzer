@@ -1998,7 +1998,7 @@ class Fuzzer:
         # pos_consolidated.py). Appended: positional signature.
         seed_consolidated_scheduler=False,
         pos_consolidated=False,
-        clock=ClockMode.WALL,
+        clock=ClockMode.VIRTUAL,
         shm_write_guard=WriteGuard.OFF,
         touched_atomic=None,
         ctx_sensitive=None,
@@ -2575,13 +2575,6 @@ class Fuzzer:
                     "shim compilation will be attempted"
                 )
             from fuzzer_tool.core.cmplog import CmplogCollector, Preload
-
-            # The FIFO is drained by a background thread, so which records a
-            # collect sees depends on thread timing. The file sink is read
-            # synchronously: the only sink a virtual-clock replay can trust.
-            if self._clock.mode is ClockMode.VIRTUAL and cmplog_fifo_sink:
-                log.info("--clock virtual: cmplog uses the file sink, not the FIFO")
-                cmplog_fifo_sink = False
 
             self._cmplog = CmplogCollector(
                 max_tokens=cmplog_max_tokens,

@@ -331,27 +331,42 @@ class _FifoDrain:
                 return
             if not ready:
                 continue
+            # Read under the lock: a chunk held outside it could land after
+            # a drain() that already swept newer bytes, reordering execs.
+            with self._lock:
+                if not self._sweep():
+                    return
+
+    def _sweep(self) -> bool:
+        """Move every byte now in the pipe into the buffer; caller holds the lock.
+
+        Returns False on an unrecoverable read error (the fd is gone).
+        """
+        while True:
             try:
                 chunk = os.read(self._rfd, 262144)
             except OSError as e:
-                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
-                    continue
-                return
+                return e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR)
             if not chunk:
                 # Would mean every writer closed; can't happen while our
                 # own keepalive fd is open, but never busy-loop on it.
-                continue
+                return True
             if self._debug:
                 print(f"[*] Cmplog read {len(chunk)} bytes from cmplog sink")
-            with self._lock:
-                self._buf.extend(chunk)
-                overflow = len(self._buf) - self._max_buffered
-                if overflow > 0:
-                    del self._buf[:overflow]
+            self._buf.extend(chunk)
+            overflow = len(self._buf) - self._max_buffered
+            if overflow > 0:
+                del self._buf[:overflow]
 
     def drain(self) -> bytes:
-        """Return and clear everything buffered since the last drain."""
+        """Return and clear everything written since the last drain.
+
+        Sweeps the pipe first: the exec has finished writing, so what it
+        wrote is in the buffer or the pipe, never in flight. Without the
+        sweep, which records a collect saw depended on the thread's timing.
+        """
         with self._lock:
+            self._sweep()
             data = bytes(self._buf)
             self._buf.clear()
         return data
