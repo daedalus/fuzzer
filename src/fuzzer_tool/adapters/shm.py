@@ -2076,6 +2076,13 @@ class BlockBitmapShm:
         buf = (ctypes.c_uint8 * self.size_bytes).from_address(self._ptr + _BLOCK_HEAD_BYTES)
         return int(np.bitwise_count(np.frombuffer(buf, dtype=np.uint8)).sum())
 
+    def covered_at(self, indices: np.ndarray) -> int:
+        """How many of the guard *indices* fired; ones past the payload count as cold."""
+        buf = (ctypes.c_uint8 * self.size_bytes).from_address(self._ptr + _BLOCK_HEAD_BYTES)
+        bits = np.frombuffer(buf, dtype=np.uint8)
+        idx = indices[indices < self.size_bytes * 8]
+        return int(((bits[idx >> 3] >> (idx & 7).astype(np.uint8)) & 1).sum())
+
     def cleanup(self):
         if self._ptr:
             libc_shm.shmdt(self._ptr)

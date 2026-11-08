@@ -2664,8 +2664,8 @@ __AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint3
  *   module ctor ── init(start, stop) ──> region[i] = {start, stop, first, mask, salt}
  *   exec ── bytes bump ──> fold ── byte != 0 ──> __afl_map_id(mix(salt ^ (first + j)))
  *
- * pc-table maps each block to its PC for symbolizers; the edge map needs
- * none of it, so __sanitizer_cov_pcs_init only has to exist.
+ * pc-table maps each block to its PC; the edge map needs none of it, so
+ * it is only dumped (see the pc-table / control-flow dump below).
  *
  * Hidden visibility on all init callbacks: libasan ships weak no-op stubs
  * that would otherwise interpose over PLT calls (see guard callbacks). */
@@ -2712,10 +2712,120 @@ __AFL_GCC_NO_COV void __sanitizer_cov_bool_flag_init(uint8_t *start, uint8_t *st
     __afl_sancov_register(start, stop);
 }
 
+/* ── pc-table / control-flow dump ($__AFL_SANCOV_OUT) ─────────────────
+ *
+ * pc-table: one (PC, flags) pair per block, index-matched to the module's
+ * guards; flags bit 0 marks a function entry. control-flow: per block
+ * PC, successors, 0, callees (-1 = indirect), 0. Mirrors
+ * adapters/sancov_tables.py.
+ *
+ *   [u32 magic][u32 kind][u32 first guard][u32 pad][u64 bias][u64 count][count x u64]
+ *
+ * Values stay absolute; bias is the module's load bias (ELF vaddr =
+ * value - bias). first is the global guard index of pc-table entry 0, so
+ * Python can read function entries off the block bitmap.
+ *
+ * Init-time only, nothing per exec. The first process to create the file
+ * owns it (O_EXCL): one-shot runs re-run every ctor, and only the first
+ * may dump. Later modules (dlopen) append through the kept fd. */
+#include <link.h>
+
+#define __AFL_SANCOV_MAGIC    0x564f4353u   /* "SCOV" LE */
+#define __AFL_SANCOV_NO_FIRST 0xffffffffu
+#define __AFL_SANCOV_MAX_SEEN 64
+
+enum __afl_sancov_kind { __AFL_SANCOV_PCS = 1, __AFL_SANCOV_CFS = 2 };
+
+struct __afl_sancov_rec {
+    uint32_t magic;
+    uint32_t kind;
+    uint32_t first;
+    uint32_t pad;
+    uint64_t bias;
+    uint64_t count;
+};
+_Static_assert(sizeof(struct __afl_sancov_rec) == 32, "sancov_tables.py _HEAD");
+
+static int __afl_sancov_fd = -2;   /* -2 not yet opened, -1 off */
+static const uintptr_t *__afl_sancov_seen[__AFL_SANCOV_MAX_SEEN];
+static uint32_t __afl_sancov_nseen;
+static uint32_t __afl_sancov_paired;   /* guard regions already given a pc-table */
+
+__AFL_NO_COV static int __afl_sancov_open(void) {
+    if (__afl_sancov_fd != -2) return __afl_sancov_fd;
+
+    const char *p = getenv("__AFL_SANCOV_OUT");
+    __afl_sancov_fd = -1;
+    if (p && p[0])
+        __afl_sancov_fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_APPEND, 0600);
+    return __afl_sancov_fd;
+}
+
+/* Every TU's ctor passes the same linker-wide bounds: dump once. */
+__AFL_NO_COV static int __afl_sancov_first_sight(const uintptr_t *start) {
+    for (uint32_t i = 0; i < __afl_sancov_nseen; i++)
+        if (__afl_sancov_seen[i] == start) return 0;
+    if (__afl_sancov_nseen == __AFL_SANCOV_MAX_SEEN) return 0;
+
+    __afl_sancov_seen[__afl_sancov_nseen++] = start;
+    return 1;
+}
+
+__AFL_NO_COV static void __afl_sancov_write(int fd, const void *buf, size_t len) {
+    const char *b = (const char *)buf;
+    while (len) {
+        ssize_t w = write(fd, b, len);
+        if (w <= 0) return;   /* ENOSPC/EINTR: a torn tail, which the parser drops */
+        b += w;
+        len -= (size_t)w;
+    }
+}
+
+/* Load bias of the module holding p: 0 for ET_EXEC, the base for PIE/.so. */
+__AFL_NO_COV static uint64_t __afl_sancov_bias(const void *p) {
+    Dl_info info;
+    struct link_map *lm = NULL;
+    if (!dladdr1(p, &info, (void **)&lm, RTLD_DL_LINKMAP) || !lm) return 0;
+    return (uint64_t)lm->l_addr;
+}
+
+/* The module ctor calls guard_init right before pcs_init, so its guard
+ * region is the newest one; equal size confirms the index match. */
+__AFL_NO_COV static uint32_t __afl_sancov_first(uint64_t blocks) {
+    if (__afl_guard_nregions <= __afl_sancov_paired) return __AFL_SANCOV_NO_FIRST;
+
+    const struct __afl_guard_region *r = &__afl_guard_regions[__afl_guard_nregions - 1];
+    if ((uint64_t)(r->stop - r->start) != blocks) return __AFL_SANCOV_NO_FIRST;
+
+    __afl_sancov_paired = __afl_guard_nregions;
+    return r->first;
+}
+
+__AFL_NO_COV static void __afl_sancov_dump(enum __afl_sancov_kind kind, uint32_t first,
+                                           const uintptr_t *start, const uintptr_t *stop) {
+    int fd = __afl_sancov_open();
+    if (fd < 0) return;
+
+    struct __afl_sancov_rec h = {
+        __AFL_SANCOV_MAGIC, (uint32_t)kind, first, 0,
+        __afl_sancov_bias((const void *)start[0]), (uint64_t)(stop - start),
+    };
+    __afl_sancov_write(fd, &h, sizeof h);
+    __afl_sancov_write(fd, start, (size_t)(stop - start) * sizeof *start);
+}
+
 __attribute__((visibility("hidden")))
 __AFL_GCC_NO_COV void __sanitizer_cov_pcs_init(const uintptr_t *start, const uintptr_t *stop) {
-    (void)start;
-    (void)stop;
+    if (start >= stop || !__afl_sancov_first_sight(start)) return;
+
+    uint32_t first = __afl_sancov_first((uint64_t)(stop - start) / 2);
+    __afl_sancov_dump(__AFL_SANCOV_PCS, first, start, stop);
+}
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void __sanitizer_cov_cfs_init(const uintptr_t *start, const uintptr_t *stop) {
+    if (start >= stop || !__afl_sancov_first_sight(start)) return;
+    __afl_sancov_dump(__AFL_SANCOV_CFS, __AFL_SANCOV_NO_FIRST, start, stop);
 }
 
 __AFL_NO_COV static inline void __afl_sancov_mark(const struct __afl_sancov_region *r,
@@ -5027,6 +5137,33 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
     if (!__afl_const_pruned(a, 8))
         __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 8, __builtin_return_address(0), 1);
+}
+
+/* gcc trace-cmp also hooks float/double compares (clang never does). The
+ * input carries IEEE bits, so log those, not a converted value:
+ *
+ *   f == 3.25f   ->  CMP <f bits> 00005040 ... 4 0x<pc>
+ *
+ * Counted with the integer compare of the same width: a new name would
+ * resize the cmp_shm.py segment. Satisfied is float equality (-0.0 == 0.0,
+ * NaN never). */
+__AFL_CMP_VIS void __sanitizer_cov_trace_cmpf(float a, float b) {
+    __AFL_CMP_GATE();
+    uint32_t x, y;
+    memcpy(&x, &a, sizeof x);
+    memcpy(&y, &b, sizeof y);
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP4, a == b);
+    __afl_cmplog_ints(x, y, 4, __builtin_return_address(0));
+    __afl_compcov_ints(x, y, 4, __builtin_return_address(0), 0);
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_cmpd(double a, double b) {
+    __AFL_CMP_GATE();
+    uint64_t x, y;
+    memcpy(&x, &a, sizeof x);
+    memcpy(&y, &b, sizeof y);
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP8, a == b);
+    __afl_cmplog_ints(x, y, 8, __builtin_return_address(0));
+    __afl_compcov_ints(x, y, 8, __builtin_return_address(0), 0);
 }
 
 /* GCC declares this builtin as void(unsigned long, void *) and warns on the

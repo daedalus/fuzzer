@@ -42,6 +42,7 @@ from fuzzer_tool.adapters.process import (
     disable_aslr,
     reset_env_cache,
 )
+from fuzzer_tool.adapters.sancov_tables import SANCOV_ENV, SancovTables
 from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import (
     MAX_COUNT_GROWTH_FACTOR,
@@ -2729,8 +2730,10 @@ class Fuzzer:
         # Block bitmap for the stats "blocks:" field. Single target only:
         # targets sharing os.environ would share one guard index space.
         self._block_bitmap: BlockBitmapShm | None = None
+        self._sancov_tables: SancovTables | None = None
         if self.shm_cov and not self.multi_targets:
             self._block_bitmap = self._open_block_bitmap(target)
+            self._sancov_tables = self._open_sancov_tables()
 
         # --shared-virgin: one novelty store across the per-target tables.
         self._shared_virgin: SharedVirgin | None = None
@@ -5504,6 +5507,12 @@ class Fuzzer:
 
         os.environ["__AFL_BLOCK_BITMAP_ID"] = bb.env_id
         return bb
+
+    def _open_sancov_tables(self) -> SancovTables:
+        """Reserve the pc-table / control-flow dump path; the shim writes it."""
+        tables = SancovTables()
+        os.environ[SANCOV_ENV] = tables.path
+        return tables
 
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
         from fuzzer_tool.core.elf import detect_ngram_k
