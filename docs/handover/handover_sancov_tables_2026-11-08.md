@@ -14,6 +14,8 @@ below are open, ranked by value per unit of work.
 | Stats `funcs: hit/total` | `services/stats.py::_blocks_str`, `BlockBitmapShm.covered_at` | same |
 | `--sancov=...,control-flow` accepted | `tools/build_targets.sh` | `tests/test_sancov_modes.py` |
 | Sanitizer death callback: crash flush + distance tail before the runtime's exit (edge and preload-only builds) | `afl_shim.c` (`__afl_san_death`, `__afl_crash_flush`) | `tests/test_sanitizer_death_callback.py` |
+| `__sanitizer_weak_hook_*` into the layer-1 recorders; override calls muted | `afl_shim.c` (`__afl_on_*`, `__afl_hook_mute`) | `tests/test_sanitizer_weak_hooks.py` |
+| Allocation-size edges (`--alloc-sizes`) via `__sanitizer_install_malloc_and_free_hooks` | `afl_shim.c` (`__afl_alloc_*`), `core/shim_health.py` | `tests/test_alloc_size_signal.py` |
 
 ```
 module ctor ── guard_init(G) ── pcs_init(P) ── cfs_init(C)
@@ -57,7 +59,9 @@ module ctor ── guard_init(G) ── pcs_init(P) ── cfs_init(C)
   replaces the shim's. Detect it with a health counter (the callback bumps it;
   zero after a sanitizer death means it was displaced).
 
-### 3. `__sanitizer_weak_hook_*`: compares inside interceptors
+### 3. ~~`__sanitizer_weak_hook_*`~~ shipped (2026-11-08)
+- Open: hooks in a `dlopen(RTLD_LOCAL)` target stay unbound under a shared
+  runtime (libasan.so resolves them from the global scope at its own load).
 - Why: libasan calls `__sanitizer_weak_hook_{memcmp,strcmp,strncmp,strcasecmp,strncasecmp,strstr,strcasestr,memmem}`
   from its interceptors. Code that reaches libc through the interceptor
   (other DSOs, `-fno-builtin` gaps) bypasses the shim's strong overrides.
