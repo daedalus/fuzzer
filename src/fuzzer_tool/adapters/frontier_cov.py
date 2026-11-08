@@ -21,6 +21,7 @@ each call (fuzzgoat ~0.5 s, FFmpeg ~4 s).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -33,6 +34,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # llvm-cov export branch record: [line, col, end_line, end_col, true, false, ...]
 _LINE, _COL, _TRUE, _FALSE = 0, 1, 4, 5
@@ -212,6 +215,8 @@ class FrontierOracle:
         self._queued: set = set()
         self._busy = False
         self._closing = False
+        self._worker_done = False  # worker thread has exited (closed, or died)
+        self._failures = 0
 
         self._totals: Counts = {}
         self._frontier: dict[Branch, Side] = {}
@@ -255,7 +260,9 @@ class FrontierOracle:
                 pass
             return
         with self._lock:
-            while self._queue or self._busy:
+            # A worker that has exited (close(), or an escaped exception) never
+            # clears the queue: waiting on it would block forever.
+            while (self._queue or self._busy) and not self._worker_done:
                 self._wake.wait()
 
     def close(self) -> None:
@@ -308,13 +315,30 @@ class FrontierOracle:
     # -- worker -----------------------------------------------------------------
 
     def _loop(self) -> None:
-        while True:
+        try:
+            while True:
+                with self._lock:
+                    while not self._queue and not self._closing:
+                        self._wake.wait()
+                    if self._closing:
+                        return
+                try:
+                    self._step()
+                except Exception:
+                    # One seed that cannot be measured (llvm-profdata missing or
+                    # failing, a vanished workdir) must not end the worker: the
+                    # seed is already folded in as zero reach by _step.
+                    self._failures += 1
+                    log.log(
+                        logging.WARNING if self._failures == 1 else logging.DEBUG,
+                        "frontier oracle: measuring a seed failed (%d so far)",
+                        self._failures,
+                        exc_info=True,
+                    )
+        finally:
             with self._lock:
-                while not self._queue and not self._closing:
-                    self._wake.wait()
-                if self._closing:
-                    return
-            self._step()
+                self._worker_done = True
+                self._wake.notify_all()
 
     def _step(self) -> bool:
         """Measure one queued seed; False when the queue is empty."""
@@ -334,9 +358,12 @@ class FrontierOracle:
             counts = self._cov.measure(tag, data)
         finally:
             with self._lock:
-                self._fold(key, counts)
-                self._busy = False
-                self._wake.notify_all()
+                try:
+                    self._fold(key, counts)
+                finally:
+                    # Never leave busy set: drain() waits on it.
+                    self._busy = False
+                    self._wake.notify_all()
         return True
 
     def _fold(self, key, counts: Counts) -> None:
