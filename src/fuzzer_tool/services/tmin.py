@@ -6,8 +6,24 @@ import sys
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import hash_data, rehydrate_by_hash, save_crash
+from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, signal_number, stderr_crash_marker
 from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
+from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.state_store import StateStore
+
+
+def crash_sig(returncode: int, stderr: str) -> str | None:
+    """Crash signature of one run for comparison; None if it did not crash."""
+    if returncode in (-2, -1):
+        return None
+    report = SanitizerReport.parse(stderr)
+    if report and report.is_valid():
+        return report.signature
+    if returncode in SIGNAL_CRASH_CODES or returncode < 0:
+        return f"signal:{signal_number(returncode)}"
+    marker = stderr_crash_marker(returncode, stderr)
+    return f"signal:{marker}" if marker else None
+
 
 # Distinct other-bug signatures kept per run (Hard Rule 54).
 MAX_ALSO_SIGS = 64
@@ -205,14 +221,7 @@ def tmin(
 
     print(f"[*] Crash input: {len(data)} bytes, hash={hash_data(data)}")
 
-    from fuzzer_tool.adapters.process import (
-        SIGNAL_CRASH_CODES,
-        run_target_file,
-        run_target_stdin,
-        signal_number,
-        stderr_crash_marker,
-    )
-    from fuzzer_tool.core.sanitizer import SanitizerReport
+    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
 
     tmp_dir = Path("/tmp") / f"tmin_{os.getpid()}"
     if file_mode:
@@ -232,21 +241,9 @@ def tmin(
             rc, stderr, _pid = run_target_stdin(target, data_bytes, timeout, env=env)
             return rc, stderr
 
-        def _crash_signature(returncode: int, stderr: str) -> str | None:
-            """Extract a crash signature for comparison. Returns None if no crash."""
-            if returncode in (-2, -1):
-                return None
-            report = SanitizerReport.parse(stderr)
-            if report and report.is_valid():
-                return report.signature
-            if returncode in SIGNAL_CRASH_CODES or returncode < 0:
-                return f"signal:{signal_number(returncode)}"
-            marker = stderr_crash_marker(returncode, stderr)
-            return f"signal:{marker}" if marker else None
-
         def _probe(data_bytes: bytes) -> tuple[str | None, int, str]:
             returncode, stderr = _run_target(data_bytes)
-            return _crash_signature(returncode, stderr), returncode, stderr
+            return crash_sig(returncode, stderr), returncode, stderr
 
         def _is_crash(data_bytes: bytes, expected_sig: str | None = None) -> str | None:
             """Run target and return matching crash signature, or None."""

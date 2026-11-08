@@ -44,3 +44,14 @@ class CrashReward(Enum):
 
     ANY = "any"
     NOVEL = "novel"
+
+
+class InputChannel(Enum):
+    """How a spawned target receives the input (``-F/--file-mode``).
+
+    STDIN  bytes piped to stdin.
+    FILE   bytes written to a temp file, path passed via ``{file}``.
+    """
+
+    STDIN = "stdin"
+    FILE = "file"

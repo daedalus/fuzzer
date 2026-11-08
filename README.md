@@ -466,6 +466,7 @@ verify the link before tuning schedulers or dictionaries. See
 | `tmin` | Crash delta-debugging minimization |
 | `root-cause` | Isolate the minimal byte diff that turns a passing input into a crashing one |
 | `crash-bisect` | Bisect git history for the commit that introduces (or fixes) a crash |
+| `crash-cluster` | Cluster crashes by root cause: coverage reduction + WL graph kernel (Igor) |
 | `replay` | Replay a crash input |
 | `verify` | Confirm crashes with ASAN target |
 | `estimate` | Crash ETA via Chao2 incidence richness + calibration (`good_turing_estimate()` keeps its name and its old keys for compatibility; the estimator underneath is Chao2) |
