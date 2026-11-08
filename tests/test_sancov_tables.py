@@ -35,7 +35,15 @@ from fuzzer_tool.adapters.sancov_tables import (
     parse_sancov,
 )
 from fuzzer_tool.adapters.shm import BlockBitmapShm, ShmCoverage
-from fuzzer_tool.core.sancov_cfg import CFS_INDIRECT, cfs_functions
+from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.sancov_cfg import (
+    _HYBRID_MIN_WORDS,
+    CFS_INDIRECT,
+    _group,
+    _parse_hybrid,
+    _parse_native,
+    cfs_functions,
+)
 from fuzzer_tool.services.stats import StatsReporter
 from tests.conftest import requires_clang
 from tests.test_regression_shim_audit import _build, _clean_env
@@ -202,6 +210,112 @@ class TestCfsFunctions:
 
     def test_adversarial_empty(self):
         assert cfs_functions(np.zeros(0, dtype=np.uint64), 0, {}.get) == {}
+
+
+class _Spec:
+    """A random control-flow table with its ground truth, built block by block.
+
+    Every non-entry block is reached by its predecessor (no unreachable
+    blocks, as in IR); entries have no predecessors.
+    """
+
+    def __init__(self, seed: int, n_funcs: int, bias: int = 0x100000):
+        pool = RandPool(seed=seed)
+        self.bias = bias
+        self.words: list[int] = []
+        self.truth: dict[str, dict] = {}
+        self.names: dict[int, str] = {}
+        sizes = pool.randint_list(1, 8, n_funcs)
+        entries, pc = [], 0x1000
+        for size in sizes:
+            entries.append(pc)
+            pc += size * 16
+        self.names = {entry: f"f{f}" for f, entry in enumerate(entries)}
+        for f, (entry, size) in enumerate(zip(entries, sizes, strict=True)):
+            self._emit(pool, f, entry, size, entries)
+
+    def _emit(self, pool, f, entry, size, entries):
+        blocks = {}
+        for j in range(size):
+            pc = entry + j * 16
+            succ = [pc + 16] if j + 1 < size else []
+            if j + 2 < size and pool.randint(0, 1):
+                succ.append(pc + 32)
+            callees = [entries[pool.randrange(len(entries))]] * pool.randint(0, 1)
+            indirect = pool.randint(0, 9) == 0
+            raw_callees = [c + self.bias for c in callees] + [CFS_INDIRECT] * indirect
+            self.words += [pc + self.bias, *(s + self.bias for s in succ), 0, *raw_callees, 0]
+            blocks[pc] = (
+                succ,
+                {self.names.get(c, f"sub_{c:x}") for c in callees},
+                indirect,
+                j == 0,
+            )
+        self.truth[f"f{f}"] = blocks
+
+    def array(self) -> np.ndarray:
+        return np.array(self.words, dtype=np.uint64)
+
+
+def _shape(fns) -> dict[str, dict]:
+    """FunctionCFGs in the _Spec truth layout."""
+    return {
+        name: {
+            b.start: (b.successors, set(b.callees), b.indirect_call, b.is_entry)
+            for b in fn.blocks.values()
+        }
+        for name, fn in fns.items()
+    }
+
+
+def _with(parse, words, bias, names):
+    """cfs_functions on one forced parser."""
+    return _group(parse(words, bias), names.get)
+
+
+class TestHybridParse:
+    @pytest.fixture(params=[1, 2, 3])
+    def spec(self, request):
+        return _Spec(seed=request.param, n_funcs=600)
+
+    def test_table_exercises_the_hybrid_path(self, spec):
+        assert spec.array().size >= _HYBRID_MIN_WORDS
+
+    def test_control_native_against_itself(self, spec):
+        """Rule 46: the reference must agree with a second run of itself."""
+        a = _with(_parse_native, spec.array(), spec.bias, spec.names)
+        b = _with(_parse_native, spec.array(), spec.bias, spec.names)
+        assert _shape(a) == _shape(b)
+
+    @pytest.mark.parametrize("parse", [_parse_native, _parse_hybrid])
+    def test_matches_ground_truth(self, spec, parse):
+        fns = _with(parse, spec.array(), spec.bias, spec.names)
+        assert _shape(fns) == spec.truth
+
+    def test_dispatch_matches_ground_truth(self, spec):
+        assert _shape(cfs_functions(spec.array(), spec.bias, spec.names.get)) == spec.truth
+
+    @pytest.mark.parametrize("cut", [1, 2, 3])
+    def test_adversarial_torn_tail_agrees(self, spec, cut):
+        """A torn last block is dropped the same way on both paths."""
+        words = spec.array()[:-cut]
+        native = _with(_parse_native, words, spec.bias, spec.names)
+        hybrid = _with(_parse_hybrid, words, spec.bias, spec.names)
+        assert _shape(hybrid) == _shape(native)
+
+    def test_adversarial_callee_below_bias_wraps(self):
+        """Another module's callee sits below the bias: wrap, never negative."""
+        spec = _Spec(seed=4, n_funcs=600)
+        # One extra function whose block calls address 0x10 (below the bias).
+        tail = np.array([0x1000_0000 + spec.bias, 0, 0x10, 0], dtype=np.uint64)
+        words = np.concatenate([spec.array(), tail])
+        fns = _with(_parse_hybrid, words, spec.bias, spec.names)
+        wrapped = (0x10 - spec.bias) & ((1 << 64) - 1)
+        assert fns["sub_10000000"].blocks[0x1000_0000].callees == {f"sub_{wrapped:x}"}
+
+    def test_adversarial_empty_and_zero_only(self):
+        for words in (np.zeros(0, dtype=np.uint64), np.zeros(_HYBRID_MIN_WORDS, dtype=np.uint64)):
+            assert _with(_parse_hybrid, words, 0, {}) == _with(_parse_native, words, 0, {})
 
 
 # ── live shim ────────────────────────────────────────────────────────
