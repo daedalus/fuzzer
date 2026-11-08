@@ -6530,6 +6530,85 @@ __AFL_GCC_NO_COV static void __afl_ph_die(const char *msg) {
     syscall(SYS_exit_group, __AFL_PH_ABORT_RC);
 }
 
+/* ── Foreign pointers: refuse what glibc would abort on under its lock ──
+ * A free or realloc of a pointer the heap does not own (a host chunk, a
+ * wild or already-freed pointer) goes on to glibc. For a chunk in the main
+ * brk heap glibc's non-tcache, non-fastbin path takes the arena lock and
+ * only then checks the neighbours ("double free or corruption (!prev)",
+ * "(out)", "(top)"): the abort() leaves the lock held, the guard's
+ * siglongjmp cannot release it, and once the process has a second thread
+ * the host's next malloc waits forever (fuzzgoat direct_lite, 1 in 33 runs).
+ *
+ * The same checks, made here without the lock, end in __afl_ph_die: the
+ * identical SIGABRT, raised where the guard can recover. A pointer glibc
+ * accepts passes: an in-use chunk is followed by a header whose prev_inuse
+ * bit is set and that lies inside the heap. Pointers outside [heap] (mmapped
+ * chunks abort without the lock; thread arenas) are forwarded unchanged.
+ * Chunk: size field at p-8, flags in the low 3 bits (1 prev_inuse, 2 mmapped). */
+static uintptr_t __afl_ph_heap_lo;       /* start of [heap]; 0 = unknown, no check */
+
+/* Read once from /proc/self/maps: no malloc, no stdio, and no str*() (the
+ * shim overrides the compare family: this would log as target compares). */
+__AFL_GCC_NO_COV static void __afl_ph_find_heap(void) {
+    static const char tag[] = "[heap]";
+    char buf[16384];
+    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    size_t have = 0;
+    for (;;) {
+        ssize_t r = read(fd, buf + have, sizeof(buf) - have);
+        if (r <= 0) break;
+        have += (size_t)r;
+        size_t start = 0;
+        for (size_t i = 0; i < have; i++) {
+            if (buf[i] != '\n') continue;
+            if (i - start >= sizeof(tag) - 1) {
+                size_t k = 0;
+                while (k < sizeof(tag) - 1 && buf[i - (sizeof(tag) - 1) + k] == tag[k]) k++;
+                if (k == sizeof(tag) - 1) {          /* line ends in "[heap]" */
+                    uintptr_t v = 0;
+                    for (size_t j = start; j < i && buf[j] != '-'; j++) {
+                        char c = buf[j];
+                        v = (v << 4) | (uintptr_t)(c <= '9' ? c - '0' : c - 'a' + 10);
+                    }
+                    __afl_ph_heap_lo = v;
+                    close(fd);
+                    return;
+                }
+            }
+            start = i + 1;
+        }
+        have -= start;                       /* keep the partial last line */
+        for (size_t i = 0; i < have; i++) buf[i] = buf[start + i];
+        if (have == sizeof(buf)) have = 0;   /* a line longer than the buffer */
+    }
+    close(fd);
+}
+
+__AFL_GCC_NO_COV static const char *__afl_ph_foreign_err(const void *vp) {
+    static int looked;
+    if (!looked) {
+        looked = 1;
+        __afl_ph_find_heap();
+    }
+    uintptr_t p = (uintptr_t)vp, lo = __afl_ph_heap_lo;
+    if (!lo || p < lo + 16) return NULL;
+    uintptr_t hi = (uintptr_t)sbrk(0);
+    if (p >= hi) return NULL;
+
+    size_t hdr = *(const size_t *)(p - 8);
+    if (hdr & 2) return NULL;                       /* mmapped: no arena lock */
+    size_t sz = hdr & ~(size_t)7;
+    if ((p & 15) || sz < 32 || (sz & 15) || sz > hi - (p - 16))
+        return "free(): invalid pointer (private heap guard)\n";
+    uintptr_t next = p - 16 + sz;
+    if (next + 16 > hi)                             /* past the top chunk, or the top */
+        return "double free or corruption (out) (private heap guard)\n";
+    if (!(*(const size_t *)(next + 8) & 1))         /* neighbour says this chunk is free */
+        return "double free or corruption (!prev) (private heap guard)\n";
+    return NULL;
+}
+
 __AFL_GCC_NO_COV static int __afl_ph_in(const void *p) {
     if (__afl_ph.mode != __AFL_PH_READY) return 0;
     return (const char *)p >= __afl_ph.base &&
@@ -6717,6 +6796,8 @@ __AFL_GCC_NO_COV static void __afl_ph_release(void *p) {
         return;
     }
     if (__afl_ph_big_del(p)) return;
+    const char *err = __afl_ph_foreign_err(p);
+    if (err) __afl_ph_die(err);
     if (__afl_ph_resolve()) __afl_ph_rfree(p);
 }
 
@@ -6773,7 +6854,11 @@ __AFL_GCC_NO_COV void *realloc(void *p, size_t n) {
         ours = __afl_ph_big_find(p) >= 0;
         __afl_ph_unlock();
     }
-    if (!ours) return __afl_ph_resolve() ? __afl_ph_rrealloc(p, n) : NULL;
+    if (!ours) {
+        const char *err = __afl_ph_foreign_err(p);
+        if (err) __afl_ph_die(err);
+        return __afl_ph_resolve() ? __afl_ph_rrealloc(p, n) : NULL;
+    }
 
     size_t have = __afl_ph_usable(p);
     if (n <= have && n > have / 2) return p;     /* same class: keep */
