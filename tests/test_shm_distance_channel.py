@@ -248,6 +248,40 @@ class TestDirectLiteChannel:
             shm.cleanup()
             table_shm.cleanup()
 
+    def test_regression_persistent_flushes_tail(self, distance_so):
+        # The persistent loader's fork child leaves via os._exit(), which
+        # skips the shim's exit destructor: the tail stayed (0, 0) on every
+        # exec, so directed mode on .so targets never saw a distance.
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        shm, table_shm, td = _setup_channel(distance_so, "target_fn")
+        runner = InProcessRunner(
+            target=distance_so,
+            function_name="fuzz_shm_run",
+            timeout=5,
+            shm_size=8192,
+            coverage_env_id=shm.env_id,
+            cov=True,
+        )
+        try:
+            assert runner._persistent is not None, "premise: persistent loader path"
+            rc, err = runner.run_one(b"T\x05")
+            assert rc == 0, err
+            dist_sum, dist_count = shm.read_distance_tail()
+            assert dist_count >= 1
+            assert 0.0 <= dist_sum / dist_count / 100.0 <= 2.0
+
+            # Adversarial: a miss after a hit reads (0, 0) once the parent
+            # resets the map (fresh fork, nothing carried over).
+            shm.reset_edge_map()
+            rc, err = runner.run_one(b"X\x05")
+            assert rc == 0, err
+            assert shm.read_distance_tail() == (0, 0)
+        finally:
+            runner.stop()
+            shm.cleanup()
+            table_shm.cleanup()
+
 
 class TestDistanceTableLayout:
     """The Python builder must mirror the shim's open-addressed probe:

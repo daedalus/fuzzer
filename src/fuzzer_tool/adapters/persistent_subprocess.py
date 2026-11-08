@@ -89,11 +89,15 @@ def _limit_rss():
 target = None
 func = None
 lib = None
+dist_flush = None
 
 def load_target(target_path, func_name):
-    global target, func, lib
+    global target, func, lib, dist_flush
     lib = ctypes.CDLL(target_path)
     func = getattr(lib, func_name)
+    # Distance builds only: the shim writes the tail in a destructor, which
+    # the fork child's os._exit() skips. Bound once, called per child.
+    dist_flush = getattr(lib, '__afl_dist_flush', None)
     func.restype = ctypes.c_int
     func.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
 
@@ -234,6 +238,8 @@ while True:
                     lib.__tracecmp_flush()
                 except Exception:
                     pass
+            if dist_flush is not None:
+                dist_flush()
             # Negative rc from __afl_guarded_call indicates a crash
             # (the signal number negated). Encode as 128+signum so
             # the parent recognizes it as a crash (139 for SIGSEGV

@@ -192,6 +192,26 @@ FUZZGOAT_KATZ_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/fuzzgoat_read_dist.so", "-D dictionaries/json.dict"),
 ]
 
+# fuzzgoat_dir279 / fuzzgoat_dir258: ASAN trace-pc fuzzgoat (build_targets.sh
+# --distance), directed at one planted bug; read with analyse --metric tte_<kind>:
+# fuzzgoat.c:279 -> tte_bad-free (empty string), :258 -> tte_heap-buffer-overflow
+# (object length). Line numbers are fuzzgoat master as vendored by
+# tools/vendor_fuzzgoat.sh. --clock virtual makes the aflgo anneal count execs
+# (1 ms each): --t-x 0.1 min = 6k execs to exploitation.
+_FUZZGOAT_DIRECTED = "-D dictionaries/json.dict --schedule aflgo --clock virtual --t-x 0.1"
+FUZZGOAT_DIR279_TARGETS: list[tuple[str, str]] = [
+    (
+        "/root/fuzzing/builds/fuzzgoat_read_dist_asan.so",
+        f"{_FUZZGOAT_DIRECTED} --target-functions fuzzgoat.c:279",
+    ),
+]
+FUZZGOAT_DIR258_TARGETS: list[tuple[str, str]] = [
+    (
+        "/root/fuzzing/builds/fuzzgoat_read_dist_asan.so",
+        f"{_FUZZGOAT_DIRECTED} --target-functions fuzzgoat.c:258",
+    ),
+]
+
 # ffmpeg: FFmpeg 9.0.2 clang build (tools/vendor_ffmpeg.sh --top=1, then
 # tools/build_targets.sh --ffmpeg-opts=noasan); noasan for the reason above.
 # Cells start from an empty corpus like every set. Not comparable with others.
@@ -228,6 +248,8 @@ TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "fuzzgoat": FUZZGOAT_TARGETS,
     "fuzzgoat_asan": FUZZGOAT_ASAN_TARGETS,
     "fuzzgoat_katz": FUZZGOAT_KATZ_TARGETS,
+    "fuzzgoat_dir279": FUZZGOAT_DIR279_TARGETS,
+    "fuzzgoat_dir258": FUZZGOAT_DIR258_TARGETS,
     "ffmpeg": FFMPEG_TARGETS,
     "ffmpeg_asan": FFMPEG_ASAN_TARGETS,
     "ffmpeg_803": FFMPEG_803_TARGETS,

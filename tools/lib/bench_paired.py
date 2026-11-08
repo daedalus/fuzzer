@@ -187,6 +187,12 @@ ARMS: dict[str, list[str]] = {
     # Katz is on in both. ctl is elo again: the A/A control (Rule 46).
     "seed-branch": ["--elo", "--mc-bandit", "--seed-branch-scheduler"],
     "seed-branch-ctl": ["--elo", "--mc-bandit"],
+    # Directed metric (port-backlog D3): --set fuzzgoat_dir279/_dir258 carries
+    # the target and the aflgo schedule, so arms differ in the metric only.
+    # Read with --metric tte_<kind>. ctl is harmonic again: the A/A (Rule 46).
+    "dist-harmonic": ["--distance-metric", "harmonic"],
+    "dist-reach": ["--distance-metric", "reach-prob"],
+    "dist-harmonic-ctl": ["--distance-metric", "harmonic"],
     "elo-alphabeta": ["--elo", "--mc-bandit", "--lineage", "--alphabeta"],
     # bootstrap runs only inside corpus minimization, and the recorded `edges`
     # is the tracker's cumulative count, which minimization does not shrink.
@@ -337,6 +343,8 @@ GOOD_TURING_ARMS = ("elo-good-turing-seed", "elo-op-good-turing")
 
 REACTIVE_ARMS = ("elo-gradient", "elo-reactive")
 
+DIRECTED_ARMS = ("dist-harmonic", "dist-reach")
+
 # Arena subset group (pos-arena-uniform is the control the rest pair against).
 POSITION_ARENA_ARMS = (
     "pos-arena-uniform",
@@ -354,6 +362,8 @@ ARM_BASELINES: dict[str, str] = {
     "elo-mcts": "elo-lineage",
     "elo-alphabeta": "elo-lineage",
     "bootstrap": "baseline",
+    "dist-reach": "dist-harmonic",
+    "dist-harmonic-ctl": "dist-harmonic",
     "strata-a1": "strata-a0",
     "strata-a2": "strata-a1",
     "strata-a1-elo": "strata-a1",
@@ -451,6 +461,40 @@ def _parse(log: str) -> dict:
     }
 
 
+# Time to exposure: a cell's first exec_count per sanitizer error_type, read
+# from its crash records. tte_<kind> scores it; a kind that never fired is
+# censored at iters + 1 (later than any exec in the budget).
+TTE_PREFIX = "tte_"
+_PLAIN_METRICS = ("edges", "corpus", "crashes", "unique", "eps", "cpu_user")
+
+
+def _first_crash_execs(crashes: Path) -> dict[str, int]:
+    """error_type -> lowest exec_count among the crash records in *crashes*."""
+    first: dict[str, int] = {}
+    for path in crashes.glob("*.json"):
+        rec = json.loads(path.read_text())
+        kind, n = rec.get("error_type"), rec.get("exec_count")
+        if not kind or n is None:
+            continue
+        first[kind] = min(n, first.get(kind, n))
+    return first
+
+
+def _with_tte(rows: list[dict], metric: str) -> list[dict]:
+    """Rows carrying *metric* as a value: tte_<kind> censored at iters + 1."""
+    if not metric.startswith(TTE_PREFIX):
+        return rows
+    kind = metric[len(TTE_PREFIX) :]
+    return [{**r, metric: r["tte"].get(kind, r["iters"] + 1)} for r in rows if "tte" in r]
+
+
+def _metric_arg(value: str) -> str:
+    """argparse type for --metric: a plain metric or tte_<kind>."""
+    if value in _PLAIN_METRICS or (value.startswith(TTE_PREFIX) and len(value) > len(TTE_PREFIX)):
+        return value
+    raise argparse.ArgumentTypeError(f"unknown metric {value!r}: {_PLAIN_METRICS} or tte_<kind>")
+
+
 def _seed_workdir(target: str, workdir: Path) -> None:
     """Copy *target*'s seed pack (eval_set.SEED_DIRS) into *workdir*.
 
@@ -473,6 +517,8 @@ def run_cell(
     """Run one campaign and return its parsed outcome."""
     workdir = Path(tempfile.mkdtemp(prefix=f"paired_{arm}_"))
     _seed_workdir(target, workdir)
+    # Per cell: a shared crashes dir re-syncs earlier cells' signatures.
+    crashes = workdir / "crashes"
     # Via the LD_PRELOAD wrapper: an ASAN .so needs libasan preloaded; the
     # wrapper adds it only when the target imports __asan_init.
     cmd = [
@@ -483,6 +529,8 @@ def run_cell(
         target,
         "-d",
         str(workdir),
+        "--crashes",
+        str(crashes),
         "-c",
         "--max-execs",
         str(iters),
@@ -493,6 +541,7 @@ def run_cell(
     ]
     try:
         run = run_timed(cmd, timeout, cwd=REPO)
+        tte = _first_crash_execs(crashes)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     log = run.log
@@ -509,6 +558,7 @@ def run_cell(
         "cpu_user": round(run.cpu_user, 3),
         "cpu_sys": round(run.cpu_sys, 3),
         **_parse(log),
+        "tte": tte,
     }
     # Short of the budget: not a result. Keep the log for diagnosis.
     if row["execs"] < iters:
@@ -694,8 +744,8 @@ def _collapse(rows: list[dict], metric: str) -> dict[tuple[str, int], dict]:
 def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
     """Pair two arms' rows by (target, seed) and score them."""
     # Rows recorded before a metric existed (cpu_user) cannot be scored on it.
-    base = [r for r in base if metric in r]
-    test = [r for r in test if metric in r]
+    base = [r for r in _with_tte(base, metric) if metric in r]
+    test = [r for r in _with_tte(test, metric) if metric in r]
     b_by = _collapse(base, metric)
     t_by = _collapse(test, metric)
     shared = sorted(b_by.keys() & t_by.keys())
@@ -703,7 +753,7 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
     deltas, dropped_base, dropped_test = _paired_deltas(b_by, t_by, shared, metric)
 
     # Lower-is-better metrics score base - test: a positive delta is a win.
-    if metric in LOWER_IS_BETTER:
+    if metric in LOWER_IS_BETTER or metric.startswith(TTE_PREFIX):
         deltas = [-d for d in deltas]
     wins = sum(1 for d in deltas if d > 0)
     losses = sum(1 for d in deltas if d < 0)
@@ -1141,8 +1191,10 @@ def main() -> int:
     a.add_argument(
         "--metric",
         default="edges",
-        choices=("edges", "corpus", "crashes", "unique", "eps", "cpu_user"),
-        help="cpu_user: child user CPU seconds; a win is a cell where test used less CPU",
+        type=_metric_arg,
+        help="edges, corpus, crashes, unique, eps, cpu_user (child user CPU seconds; a win "
+        "is a cell where test used less CPU), or tte_<sanitizer kind> (first exec of that "
+        "crash kind, e.g. tte_bad-free; censored at iters + 1; lower wins)",
     )
     a.add_argument(
         "--by-target",
