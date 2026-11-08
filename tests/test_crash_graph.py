@@ -8,6 +8,7 @@ import pytest
 
 from fuzzer_tool.core.crash_graph import (
     cluster_kernel,
+    cluster_spectral,
     graph_from_edges,
     graph_from_fires,
     kernel_matrix,
@@ -127,3 +128,54 @@ class TestCluster:
 
     def test_empty(self):
         assert cluster_kernel(np.zeros((0, 0)), 0.5) == []
+
+
+def _blocks(sizes, inside, across):
+    """Block similarity matrix: *inside* within a block, *across* between."""
+    n = sum(sizes)
+    sim = np.full((n, n), across, dtype=float)
+    lo = 0
+    for m in sizes:
+        sim[lo : lo + m, lo : lo + m] = inside
+        lo += m
+    np.fill_diagonal(sim, 1.0)
+    return sim
+
+
+class TestSpectral:
+    def test_two_clean_blocks(self):
+        assert cluster_spectral(_blocks([3, 3], 1.0, 0.0)) == [[0, 1, 2], [3, 4, 5]]
+
+    def test_falsification_bridge_splits_where_linkage_chains(self):
+        # One cross pair above the threshold chains linkage; spectral keeps the blocks.
+        sim = _blocks([4, 4], 0.9, 0.0)
+        sim[3, 4] = sim[4, 3] = 0.75
+
+        assert cluster_kernel(sim, 0.7) == [list(range(8))]
+        assert cluster_spectral(sim) == [[0, 1, 2, 3], [4, 5, 6, 7]]
+
+    def test_smoke_matrix(self):
+        # Kernel from the 6-crash ASAN smoke run: pairs at 1.0, 0.25 across.
+        assert cluster_spectral(_blocks([2, 2, 2], 1.0, 0.25)) == [[0, 1], [2, 3], [4, 5]]
+
+    def test_uniform_background_many_groups(self):
+        # Eigengap alone picks k=1 here (gap .549 at k=1 > .44 at k=10).
+        g = np.arange(50) % 10
+        sim = np.where(g[:, None] == g[None, :], 0.9, 0.1)
+        np.fill_diagonal(sim, 1.0)
+
+        expected = [list(range(j, 50, 10)) for j in range(10)]
+        assert cluster_spectral(sim) == expected
+
+    def test_adversarial_no_similarity_is_all_singletons(self):
+        # Empty graphs: similar to nothing.
+        assert cluster_spectral(np.eye(4)) == [[0], [1], [2], [3]]
+
+    def test_adversarial_uniform_is_one_cluster(self):
+        # No structure to split: every split scores silhouette 0.
+        assert cluster_spectral(np.ones((5, 5))) == [list(range(5))]
+        assert cluster_spectral(_blocks([5], 0.5, 0.5)) == [list(range(5))]
+
+    def test_tiny(self):
+        assert cluster_spectral(np.zeros((0, 0))) == []
+        assert cluster_spectral(np.ones((1, 1))) == [[0]]

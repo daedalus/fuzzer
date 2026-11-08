@@ -12,6 +12,7 @@ graphs are linked::
         |
         v
     count vectors -> cosine matrix -> threshold single linkage
+                                   +-> spectral: Laplacian embedding, k-means, silhouette k
 
 Shim edge ids are hashes, so (src, dst) blocks are not recoverable from the
 coverage map; arcs come only from the ordered fire log of a
@@ -21,6 +22,7 @@ kernel reduces to edge-set cosine.
 
 from collections import Counter
 from collections.abc import Iterable
+from enum import Enum
 from itertools import islice
 
 import numpy as np
@@ -30,6 +32,23 @@ WL_ITERS = 3
 MAX_FIRES = 1 << 22
 # Pair-product elements materialized per np.add.at batch (memory bound).
 _PAIR_CHUNK = 1 << 20
+# Laplacian eigenvalue below which a mode is a connected component.
+_ZERO_EIG = 1e-9
+# Lloyd iterations cap; well-separated embeddings settle in a few.
+KMEANS_ITERS = 100
+# Largest eigengaps tried as k; each costs one k-means + one O(n^2) silhouette.
+SPECTRAL_CANDIDATES = 8
+
+
+class Linkage(Enum):
+    """How crashes are grouped from the kernel matrix (``--linkage``).
+
+    THRESHOLD  single linkage at ``--threshold``; one bridge pair chains groups.
+    SPECTRAL   Igor's choice: normalized-Laplacian embedding, k-means, k by silhouette.
+    """
+
+    THRESHOLD = "threshold"
+    SPECTRAL = "spectral"
 
 
 class CrashGraph:
@@ -171,7 +190,125 @@ def cluster_kernel(sim: np.ndarray, threshold: float) -> list[list[int]]:
         if ri != rj:
             parent[max(ri, rj)] = min(ri, rj)
 
+    return _groups([find(i) for i in range(n)])
+
+
+def _groups(keys: list[int]) -> list[list[int]]:
+    """Indices grouped by key, groups ordered by first member."""
     groups: dict[int, list[int]] = {}
-    for i in range(n):
-        groups.setdefault(find(i), []).append(i)
+    for i, key in enumerate(keys):
+        groups.setdefault(key, []).append(i)
     return list(groups.values())
+
+
+def _candidates(lam: np.ndarray) -> tuple[int, list[int]]:
+    """(components, candidate k) from ascending Laplacian eigenvalues.
+
+    Zero modes count connected components: k never goes below them. The
+    largest eigengaps above that propose k; the silhouette decides. Eigengap
+    alone fails on a uniform background: 10 groups at 0.9 inside, 0.1
+    across give 0, .549 x9, .989, ... -- the k=1 gap beats the k=10 one.
+    """
+    n = lam.size
+    comps = max(1, int((lam < _ZERO_EIG).sum()))
+    lo = max(2, comps)
+    if lo >= n:
+        return comps, []
+
+    # gaps[j] = lam[j] - lam[j-1] is the gap that ends k = j clusters.
+    gaps = np.diff(lam)[lo - 1 :]
+    top = np.argsort(-gaps, kind="stable")[:SPECTRAL_CANDIDATES] + lo
+    return comps, sorted({comps, *top.tolist()} - {1})
+
+
+def _kmeans(x: np.ndarray, k: int) -> np.ndarray:
+    """Lloyd k-means on rows of *x*; deterministic farthest-first seeding.
+
+    Rows are unit vectors (NJW embedding), so the farthest point is never
+    an outlier far off the sphere.
+    """
+    n = x.shape[0]
+    idx = [0]
+    d2 = ((x - x[0]) ** 2).sum(axis=1)
+
+    # Farthest-first: each new center is the point worst served so far.
+    for _ in range(1, k):
+        far = int(np.argmax(d2))
+        if d2[far] <= 0:
+            break  # fewer distinct points than k
+        idx.append(far)
+        d2 = np.minimum(d2, ((x - x[far]) ** 2).sum(axis=1))
+
+    c = x[idx].copy()
+    labels = np.full(n, -1)
+    for _ in range(KMEANS_ITERS):
+        # |x - c|^2 up to the per-row |x|^2 constant: n x k, no n x k x d tensor.
+        new = ((c**2).sum(axis=1) - 2 * x @ c.T).argmin(axis=1)
+        if (new == labels).all():
+            break
+        labels = new
+
+        counts = np.bincount(labels, minlength=len(c))
+        sums = np.zeros_like(c)
+        np.add.at(sums, labels, x)
+        live = counts > 0  # an emptied center keeps its place
+        c[live] = sums[live] / counts[live, None]
+
+    return labels
+
+
+def _silhouette(dist: np.ndarray, labels: np.ndarray) -> float:
+    """Mean silhouette of *labels* under *dist*; singletons score 0."""
+    k = int(labels.max()) + 1
+    onehot = np.zeros((labels.size, k))
+    onehot[np.arange(labels.size), labels] = 1.0
+    sums = dist @ onehot
+    counts = onehot.sum(axis=0)
+    rows = np.arange(labels.size)
+
+    # a: mean distance to the own cluster's others; b: nearest other cluster.
+    own = counts[labels] - 1
+    a = np.divide(sums[rows, labels], own, out=np.zeros(labels.size), where=own > 0)
+    other = np.divide(sums, counts, out=np.full_like(sums, np.inf), where=counts > 0)
+    other[rows, labels] = np.inf
+    b = other.min(axis=1)
+
+    top = np.maximum(a, b)
+    s = np.divide(b - a, top, out=np.zeros(labels.size), where=(top > 0) & (own > 0))
+    return float(s.mean())
+
+
+def cluster_spectral(sim: np.ndarray) -> list[list[int]]:
+    """Spectral clusters (Ng-Jordan-Weiss) of a similarity matrix.
+
+    Unlike threshold linkage, one similar pair does not merge two dense
+    groups: the bridge barely moves the Laplacian's low eigenvectors.
+    k: eigengap candidates scored by silhouette on ``1 - sim``; one cluster
+    only when no split scores above 0. Ties take the larger k: merging
+    hides distinct bugs. Returns clusters ordered by first member.
+    """
+    n = sim.shape[0]
+    if n == 0:
+        return []
+
+    # L = I - D^-1/2 S D^-1/2; the diagonal of S is 1, so degrees are >= 1.
+    inv = 1.0 / np.sqrt(sim.sum(axis=1))
+    lap = np.eye(n) - inv[:, None] * sim * inv[None, :]
+    lam, vec = np.linalg.eigh(lap)
+
+    comps, ks = _candidates(lam)
+    if comps >= n:
+        return [[i] for i in range(n)]
+
+    dist = np.clip(1.0 - sim, 0.0, None)
+    best, best_s = np.zeros(n, dtype=int), 0.0 if comps == 1 else -np.inf
+
+    # Rows of the k low eigenvectors, unit length, are the points to split.
+    for k in ks:
+        emb = vec[:, :k] / np.linalg.norm(vec[:, :k], axis=1, keepdims=True)
+        labels = _kmeans(emb, k)
+        score = _silhouette(dist, labels)
+        if score >= best_s and (score > 0 or comps > 1):
+            best, best_s = labels, score
+
+    return _groups(best.tolist())
