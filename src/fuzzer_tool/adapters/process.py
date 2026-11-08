@@ -760,7 +760,11 @@ def _get_fast_path_file() -> str:
     if _fast_path_fd is None:
         with _fast_path_lock:
             if _fast_path_fd is None:
-                _fast_path_fd, _fast_path_name = tempfile.mkstemp(prefix="fuzz_fast_")
+                fd, name = tempfile.mkstemp(prefix="fuzz_fast_")
+                # Name first: the fd is the unlocked fast-path guard above, so a
+                # thread that sees it set must already find the name.
+                _fast_path_name = name
+                _fast_path_fd = fd
     return _fast_path_name
 
 
