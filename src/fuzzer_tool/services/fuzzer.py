@@ -52,6 +52,7 @@ from fuzzer_tool.adapters.shm import (
     unstable_slots,
 )
 from fuzzer_tool.core import z3_budget
+from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
@@ -1554,6 +1555,8 @@ class Fuzzer:
         # (core/distance.py::TargetDistance). 0.0 (default) reproduces
         # exact prior BFS-only distances; see --gate-bonus help text.
         gate_bonus=0.0,
+        # In-function block fitness for directed mode; see --distance-metric.
+        distance_metric=DistanceMetric.HARMONIC,
         adaptive_timeout=False,
         resume=False,
         trace_crashes=True,
@@ -4590,6 +4593,7 @@ class Fuzzer:
         self._distance_targets = targets
         self._use_cfg_cache = use_cfg_cache
         self._gate_bonus = gate_bonus
+        self._distance_metric = distance_metric
         self._trace_crashes_requested = trace_crashes
 
         # Crash MI tracker, length-edge tracker, transfer entropy, occupation,

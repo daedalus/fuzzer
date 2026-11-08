@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Reaching-probability directed metric** (`--distance-metric reach-prob`, `core/analyzers/analyzer_distance.py`): SelectFuzz (S&P '23) block fitness, P(b) = mean P over distinct successors, scored as `-log2 P`; replaces the in-function harmonic CFG distance only. Postorder Gauss-Seidel (exact on DAGs), numpy Jacobi for loops. Unmeasured. `tests/test_distance_reach_prob.py`.
+
 - **`tlul_mutate` op** (`core/mutations/tlul.py`, category `format`): instruction-level edits on TL-UL Hardware Fuzzing streams (wait/read/write, LE, variable frames); output always decodes. `tests/test_tlul_mutate.py`.
 - **Probe-table simulator** (`tools/sim_funnel_probe.py`): linear (the shim's bounded probe), funnel and elastic hashing (arXiv 2501.02305) and a line-aligned hybrid; modes `load`, `growth` (replays `recommended_map_size`), `hot` (Zipf-weighted hits), `real` (measured weights). Verdict: no shim change, trigger stays 0.7 `docs/handover/handover_funnel_elastic_hashing_2026-11-05.md`. `tests/test_sim_funnel_probe.py`.
 - **Edge hit spectrum** (`tools/edge_hit_spectrum.py`): replays a corpus oldest first, sums per-edge shim counts, fits Zipf s and the discovery-order slope; pickles the spectrum for `sim_funnel_probe.py --mode real`. `tests/test_edge_hit_spectrum.py`.

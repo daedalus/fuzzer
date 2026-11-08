@@ -43,6 +43,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Strata seed arm (`--strata`, `--op-strata`) | Family-stratified pick | U | hit criterion ~0; E-1 then `strata-a0..a4` |
 | Target arena (`--target-arena`, `auction`) | Elo over target schedules + Gale-Shapley | U | vs `--target-schedule weighted`, ≥ 2 targets |
 | Cost in eviction ordering | Cost per retained edge in `_maybe_prune` | U | design + A/B (changes which seeds exist) |
+| Reaching probability (`--distance-metric reach-prob`) | SelectFuzz `-log2 P` block fitness vs AFLGo harmonic distance | U | fuzzgoat `--target-functions` + `--schedule aflgo`, time-to-target vs `harmonic`, A/A control |
 
 ## Operator scheduling
 
