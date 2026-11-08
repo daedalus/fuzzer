@@ -182,6 +182,7 @@ from fuzzer_tool.core.shim_health import (
     Attach,
     ShimWatch,
     WriteGuard,
+    export_alloc_sizes,
     export_ctx_sensitive,
     export_stack_depth,
     export_touched_atomic,
@@ -2092,6 +2093,8 @@ class Fuzzer:
         # B = A Aᵀ, matrix-free. Off by default. Appended.
         seed_gram_scheduler=False,
         seed_gram_mode="peripheral",
+        # --alloc-sizes: shim allocation-size edges (__AFL_ALLOC_SIZES). Appended.
+        alloc_sizes=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2111,6 +2114,8 @@ class Fuzzer:
         export_ctx_sensitive(ctx_sensitive)
         # Stack-depth sampling: --honggfuzz is its only reader; read at attach.
         export_stack_depth(honggfuzz)
+        # Allocation-size edges (--alloc-sizes); read at attach.
+        export_alloc_sizes(alloc_sizes)
         # In-process modes dlopen the target; an executable cannot be.
         # Run it in exec mode instead (--hail-mary forces in-process).
         if (inprocess or inprocess_direct) and is_elf_executable(target):

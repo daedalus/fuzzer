@@ -871,6 +871,7 @@ def cmd_fuzz(args):
         ),
         touched_atomic=getattr(args, "touched_atomic", None),
         ctx_sensitive=getattr(args, "ctx_sensitive", None),
+        alloc_sizes=getattr(args, "alloc_sizes", False),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
         crash_tmin_execs=getattr(args, "crash_tmin_execs", 0),
@@ -2826,6 +2827,9 @@ def cmd_sweep(args):
 #
 # touched_atomic (--touched-atomic / --no-touched-atomic) is excluded: a shim
 # build knob, not a strategy; plain OR is unsafe for threaded targets.
+#
+# alloc_sizes (--alloc-sizes) is excluded: it adds edges, so --hail-mary
+# would stop being comparable to any other run.
 #
 # ctx_sensitive (--ctx-sensitive / --no-ctx-sensitive) is excluded: it changes
 # every edge id, so --hail-mary would stop being comparable to any other run.
@@ -5912,6 +5916,17 @@ def main() -> int:
             "ASLR handling and the resume contract follow. Corpus state written "
             "with context on will not resume under this flag. Passed to the shim "
             "as __AFL_CTX_SENSITIVE=0."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--alloc-sizes",
+        action="store_true",
+        help=(
+            "Count each log2 allocation-size class as an edge, so an input that "
+            "reaches a new allocation size is new coverage (MemLock-style). "
+            "Needs a sanitizer allocator (ASAN/MSAN/TSAN build); inert otherwise. "
+            "In-process, only the guarded target thread's allocations count. "
+            "Passed to the shim as __AFL_ALLOC_SIZES=1."
         ),
     )
     fuzz_parser.add_argument(

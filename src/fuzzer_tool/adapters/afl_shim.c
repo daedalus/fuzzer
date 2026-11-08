@@ -4017,18 +4017,19 @@ __AFL_NO_COV static void __afl_cmp_site_count(uint32_t id, int satisfied, void *
 
 /* The fd doubles as the enable flag: no output file, no counting. */
 #define __AFL_CMP_COUNT(id, satisfied)                                   \
+    /* Expanded inside the interceptor, so frame 0's return address is   \
+     * the call site in the target. */                                   \
+    __AFL_CMP_COUNT_AT((id), (satisfied), __builtin_return_address(0))
+
+/* Same, with the call site given: the weak hooks get it from the runtime. */
+#define __AFL_CMP_COUNT_AT(id, satisfied, pc)                            \
     do {                                                                 \
         if (__AFL_CMP_COUNTS_ON) {                                       \
             __afl_cmp_fired[(id)]++;                                     \
             if (satisfied) __afl_cmp_hit[(id)]++;                        \
         }                                                                \
-        if (__AFL_CMP_SITES_ON) {                                        \
-            /* Expanded inside the interceptor, so frame 0's return       \
-             * address is the call site in the target. Every interceptor  \
-             * already invokes this macro; none needed editing. */        \
-            __afl_cmp_site_count((id), (satisfied),                      \
-                                 __builtin_return_address(0));           \
-        }                                                                \
+        if (__AFL_CMP_SITES_ON)                                          \
+            __afl_cmp_site_count((id), (satisfied), (pc));               \
     } while (0)
 
 __AFL_NO_COV static void __afl_cmplog_new_scope(void);
@@ -4721,12 +4722,76 @@ __AFL_NO_COV static void *__afl_fb_memrchr(const void *s, int c, size_t n) {
         }                                                           \
     } while (0)
 
+/* ── Override vs weak hook: one compare, one record ───────────────────
+ * The overrides forward to __interceptor_<name> when one resolves, and
+ * that interceptor reports the same compare to __sanitizer_weak_hook_<name>
+ * (see "Sanitizer weak hooks" below):
+ *
+ *   memcmp (override) -- mute=1 --> __interceptor_memcmp --> hook: muted
+ *   __interceptor_memcmp (direct, other DSO) ------------> hook: records
+ *
+ * The mute is per thread: another thread's direct call still records.
+ * Default TLS model: initial-exec would move the shim's whole TLS segment
+ * into static TLS, which a dlopen'ed .so cannot get ("cannot allocate
+ * memory in static TLS block"). */
+static __thread int __afl_hook_mute;
+
+/* Evaluate a forwarded call with the hooks muted. */
+#define __AFL_MUTED(call)                                           \
+    ({                                                              \
+        __afl_hook_mute = 1;                                        \
+        __typeof__(call) __afl_r = (call);                          \
+        __afl_hook_mute = 0;                                        \
+        __afl_r;                                                    \
+    })
+
+/* Post-call recorders shared by the overrides and the weak hooks. pc is
+ * the target's call site: the override's return address, or the hook's
+ * called_pc. */
+__AFL_NO_COV static inline void __afl_on_memcmp(const void *a, const void *b, size_t n,
+                                                int r, void *pc, int site) {
+    __AFL_CMP_COUNT_AT(site, r == 0, pc);
+    __afl_cmplog_bytes(a, b, n, r);
+    __afl_compcov_bytes(a, b, n, pc, COMPCOV_MEM);
+}
+
+__AFL_NO_COV static inline void __afl_on_strcmp(const char *a, const char *b, int r, void *pc) {
+    __AFL_CMP_COUNT_AT(__AFL_CMP_STRCMP, r == 0, pc);
+    if (__afl_cmplog_fd < 0 && __afl_compcov_level < 2) return;
+
+    size_t na = __afl_safe_len(a), nb = __afl_safe_len(b), n = na < nb ? na : nb;
+    if (n == 0) return;
+    __afl_cmplog_bytes(a, b, n + 1, r);
+    __afl_compcov_bytes(a, b, n + 1, pc, COMPCOV_STR);
+}
+
+__AFL_NO_COV static inline void __afl_on_strncmp(const char *a, const char *b, size_t n,
+                                                 int r, void *pc) {
+    __AFL_CMP_COUNT_AT(__AFL_CMP_STRNCMP, r == 0, pc);
+    if (n == 0) return;
+    __afl_cmplog_bytes(a, b, n, r);
+    __afl_compcov_bytes(a, b, n, pc, COMPCOV_STR);
+}
+
+__AFL_NO_COV static inline void __afl_on_strcasecmp(const char *a, const char *b, int r,
+                                                    void *pc) {
+    __AFL_CMP_COUNT_AT(__AFL_CMP_STRCASECMP, r == 0, pc);
+    if (__afl_cmplog_fd < 0) return;
+
+    size_t na = __afl_safe_len(a), nb = __afl_safe_len(b), n = na < nb ? na : nb;
+    if (n > 0) __afl_cmplog_bytes(a, b, n + 1, r);
+}
+
+__AFL_NO_COV static inline void __afl_on_strncasecmp(const char *a, const char *b, size_t n,
+                                                     int r, void *pc) {
+    __AFL_CMP_COUNT_AT(__AFL_CMP_STRNCASECMP, r == 0, pc);
+    if (n > 0) __afl_cmplog_bytes(a, b, n, r);
+}
+
 __AFL_NO_COV int memcmp(const void *a, const void *b, size_t n) {
     __AFL_RESOLVE(real_memcmp, afl_cmp_fn, "memcmp", __afl_fb_memcmp);
-    int result = real_memcmp(a, b, n);
-    __AFL_CMP_COUNT(__AFL_CMP_MEMCMP, result == 0);
-    __afl_cmplog_bytes(a, b, n, result);
-    __afl_compcov_bytes(a, b, n, __builtin_return_address(0), COMPCOV_MEM);
+    int result = __AFL_MUTED(real_memcmp(a, b, n));
+    __afl_on_memcmp(a, b, n, result, __builtin_return_address(0), __AFL_CMP_MEMCMP);
     return result;
 }
 __AFL_NO_COV int afl_cmp_memcmp(const void *a, const void *b, size_t n)
@@ -4734,14 +4799,8 @@ __AFL_NO_COV int afl_cmp_memcmp(const void *a, const void *b, size_t n)
 
 __AFL_NO_COV int strcmp(const char *a, const char *b) {
     __AFL_RESOLVE(real_strcmp, afl_str_cmp_fn, "strcmp", __afl_fb_strcmp);
-    int result = real_strcmp(a, b);
-    __AFL_CMP_COUNT(__AFL_CMP_STRCMP, result == 0);
-    if (__afl_cmplog_fd < 0 && __afl_compcov_level < 2) return result;
-    size_t na = __afl_safe_len(a), nb = __afl_safe_len(b), n = na < nb ? na : nb;
-    if (n > 0) {
-        __afl_cmplog_bytes(a, b, n + 1, result);
-        __afl_compcov_bytes(a, b, n + 1, __builtin_return_address(0), COMPCOV_STR);
-    }
+    int result = __AFL_MUTED(real_strcmp(a, b));
+    __afl_on_strcmp(a, b, result, __builtin_return_address(0));
     return result;
 }
 __AFL_NO_COV int afl_cmp_strcmp(const char *a, const char *b)
@@ -4749,12 +4808,8 @@ __AFL_NO_COV int afl_cmp_strcmp(const char *a, const char *b)
 
 __AFL_NO_COV int strncmp(const char *a, const char *b, size_t n) {
     __AFL_RESOLVE(real_strncmp, afl_strn_cmp_fn, "strncmp", __afl_fb_strncmp);
-    int result = real_strncmp(a, b, n);
-    __AFL_CMP_COUNT(__AFL_CMP_STRNCMP, result == 0);
-    if (n > 0) {
-        __afl_cmplog_bytes(a, b, n, result);
-        __afl_compcov_bytes(a, b, n, __builtin_return_address(0), COMPCOV_STR);
-    }
+    int result = __AFL_MUTED(real_strncmp(a, b, n));
+    __afl_on_strncmp(a, b, n, result, __builtin_return_address(0));
     return result;
 }
 __AFL_NO_COV int afl_cmp_strncmp(const char *a, const char *b, size_t n)
@@ -4784,11 +4839,8 @@ __AFL_NO_COV void * afl_cmp_memchr(const void *s, int c, size_t n)
 
 __AFL_NO_COV int strcasecmp(const char *a, const char *b) {
     __AFL_RESOLVE(real_strcasecmp, afl_str_cmp_fn, "strcasecmp", __afl_fb_strcasecmp);
-    int result = real_strcasecmp(a, b);
-    __AFL_CMP_COUNT(__AFL_CMP_STRCASECMP, result == 0);
-    if (__afl_cmplog_fd < 0) return result;
-    size_t na = __afl_safe_len(a), nb = __afl_safe_len(b), n = na < nb ? na : nb;
-    if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
+    int result = __AFL_MUTED(real_strcasecmp(a, b));
+    __afl_on_strcasecmp(a, b, result, __builtin_return_address(0));
     return result;
 }
 __AFL_NO_COV int afl_cmp_strcasecmp(const char *a, const char *b)
@@ -4796,9 +4848,8 @@ __AFL_NO_COV int afl_cmp_strcasecmp(const char *a, const char *b)
 
 __AFL_NO_COV int strncasecmp(const char *a, const char *b, size_t n) {
     __AFL_RESOLVE(real_strncasecmp, afl_strn_cmp_fn, "strncasecmp", __afl_fb_strncasecmp);
-    int result = real_strncasecmp(a, b, n);
-    __AFL_CMP_COUNT(__AFL_CMP_STRNCASECMP, result == 0);
-    if (n > 0) __afl_cmplog_bytes(a, b, n, result);
+    int result = __AFL_MUTED(real_strncasecmp(a, b, n));
+    __afl_on_strncasecmp(a, b, n, result, __builtin_return_address(0));
     return result;
 }
 __AFL_NO_COV int afl_cmp_strncasecmp(const char *a, const char *b, size_t n)
@@ -4833,10 +4884,9 @@ static inline const void *__afl_launder_ptr(const void *p) {
     return p;
 }
 
-__AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
-    __AFL_RESOLVE(real_memmem, afl_memmem_fn, "memmem", __afl_fb_memmem);
-    void *result = real_memmem(h, hl, n, nl);
-    __AFL_CMP_COUNT(__AFL_CMP_MEMMEM, result != NULL);
+__AFL_NO_COV static inline void __afl_on_memmem(const void *h, size_t hl, const void *n,
+                                                size_t nl, int found, void *pc) {
+    __AFL_CMP_COUNT_AT(__AFL_CMP_MEMMEM, found, pc);
     /* input-to-state needs one half from the buffer and one to plant;
      * log haystack-vs-needle, not needle-vs-itself.
      *
@@ -4852,11 +4902,32 @@ __AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
     /* h was previously unguarded here even though __afl_cmplog_bytes reads it:
      * memmem is __nonnull((1,3)), so a NULL haystack is just as reachable from
      * a buggy target as a NULL needle, and it dereferences one line later. */
-    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(n) && __afl_launder_ptr(h) &&
-        nl > 0 && nl <= CMPLOG_MAX_OPERAND && hl > 0) {
-        size_t k = hl < nl ? hl : nl;
-        __afl_cmplog_bytes(h, n, k, result ? 0 : -1);
-    }
+    if (__afl_cmplog_fd < 0 || !__afl_launder_ptr(n) || !__afl_launder_ptr(h)) return;
+    if (nl == 0 || nl > CMPLOG_MAX_OPERAND || hl == 0) return;
+
+    size_t k = hl < nl ? hl : nl;
+    __afl_cmplog_bytes(h, n, k, found ? 0 : -1);
+}
+
+/* strstr / strcasestr: same min(strnlen(h, nl), nl) rule as memmem. A
+ * haystack shorter than the needle is the case worth planting into, not
+ * the case to skip. */
+__AFL_NO_COV static inline void __afl_on_strstr(const char *h, const char *n, int found,
+                                                void *pc, int site) {
+    __AFL_CMP_COUNT_AT(site, found, pc);
+    if (__afl_cmplog_fd < 0 || !__afl_launder_ptr(n) || !__afl_launder_ptr(h)) return;
+
+    size_t nl = __afl_fb_len(n);
+    size_t k = 0;
+    while (k < nl && h[k]) k++;
+    if (k > 0 && nl <= CMPLOG_MAX_OPERAND)
+        __afl_cmplog_bytes(h, n, k, found ? 0 : -1);
+}
+
+__AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
+    __AFL_RESOLVE(real_memmem, afl_memmem_fn, "memmem", __afl_fb_memmem);
+    void *result = __AFL_MUTED(real_memmem(h, hl, n, nl));
+    __afl_on_memmem(h, hl, n, nl, result != NULL, __builtin_return_address(0));
     return result;
 }
 __AFL_NO_COV void * afl_cmp_memmem(const void *h, size_t hl, const void *n, size_t nl)
@@ -4864,17 +4935,8 @@ __AFL_NO_COV void * afl_cmp_memmem(const void *h, size_t hl, const void *n, size
 
 __AFL_NO_COV char *strstr(const char *h, const char *n) {
     __AFL_RESOLVE(real_strstr, afl_str_str_fn, "strstr", __afl_fb_strstr);
-    char *result = real_strstr(h, n);
-    __AFL_CMP_COUNT(__AFL_CMP_STRSTR, result != NULL);
-    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(n) && __afl_launder_ptr(h)) {
-        size_t nl = __afl_fb_len(n);
-        /* min(strnlen(h, nl), nl): see memmem. A haystack shorter than the
-         * needle is the case worth planting into, not the case to skip. */
-        size_t k = 0;
-        while (k < nl && h[k]) k++;
-        if (k > 0 && nl <= CMPLOG_MAX_OPERAND)
-            __afl_cmplog_bytes(h, n, k, result ? 0 : -1);
-    }
+    char *result = __AFL_MUTED(real_strstr(h, n));
+    __afl_on_strstr(h, n, result != NULL, __builtin_return_address(0), __AFL_CMP_STRSTR);
     return result;
 }
 __AFL_NO_COV char * afl_cmp_strstr(const char *h, const char *n)
@@ -4882,15 +4944,8 @@ __AFL_NO_COV char * afl_cmp_strstr(const char *h, const char *n)
 
 __AFL_NO_COV char *strcasestr(const char *h, const char *n) {
     __AFL_RESOLVE(real_strcasestr, afl_str_str_fn, "strcasestr", __afl_fb_strcasestr);
-    char *result = real_strcasestr(h, n);
-    __AFL_CMP_COUNT(__AFL_CMP_STRCASESTR, result != NULL);
-    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(n) && __afl_launder_ptr(h)) {
-        size_t nl = __afl_fb_len(n);
-        size_t k = 0;
-        while (k < nl && h[k]) k++;
-        if (k > 0 && nl <= CMPLOG_MAX_OPERAND)
-            __afl_cmplog_bytes(h, n, k, result ? 0 : -1);
-    }
+    char *result = __AFL_MUTED(real_strcasestr(h, n));
+    __afl_on_strstr(h, n, result != NULL, __builtin_return_address(0), __AFL_CMP_STRCASESTR);
     return result;
 }
 __AFL_NO_COV char * afl_cmp_strcasestr(const char *h, const char *n)
@@ -4906,10 +4961,8 @@ __AFL_NO_COV char * afl_cmp_strcasestr(const char *h, const char *n)
 
 __AFL_NO_COV int bcmp(const void *a, const void *b, size_t n) {
     __AFL_RESOLVE(real_bcmp, int (*)(const void *, const void *, size_t), "bcmp", __afl_fb_bcmp);
-    int result = real_bcmp(a, b, n);
-    __AFL_CMP_COUNT(__AFL_CMP_BCMP, result == 0);
-    __afl_cmplog_bytes(a, b, n, result);
-    __afl_compcov_bytes(a, b, n, __builtin_return_address(0), COMPCOV_MEM);
+    int result = __AFL_MUTED(real_bcmp(a, b, n));
+    __afl_on_memcmp(a, b, n, result, __builtin_return_address(0), __AFL_CMP_BCMP);
     return result;
 }
 __AFL_NO_COV int afl_cmp_bcmp(const void *a, const void *b, size_t n)
@@ -5053,6 +5106,78 @@ __AFL_NO_COV void *memrchr(const void *s, int c, size_t n) {
 }
 __AFL_NO_COV void * afl_cmp_memrchr(const void *s, int c, size_t n)
     __attribute__((weak, alias("memrchr")));
+
+/* ── Sanitizer weak hooks ─────────────────────────────────────────────
+ * The overrides above see direct calls only. A compare that lands on the
+ * runtime's interceptor without passing through them -- another DSO bound
+ * to libasan's memcmp, a direct __interceptor_* call -- is reported by
+ * the runtime to these hooks after the real call, with its result:
+ *
+ *   caller -> __interceptor_strcmp -> REAL(strcmp) -> hook(pc, a, b, r)
+ *
+ * Same recorders as the overrides, so records, counters and COMPCOV
+ * marks are indistinguishable by route; a forwarded override call is
+ * muted (see __afl_hook_mute). bcmp reports through the memcmp hook.
+ *
+ * Default visibility: the runtime looks them up. A static runtime binds
+ * them at link time; a shared one (libasan.so) only sees definitions in
+ * the global scope, so a dlopen(RTLD_LOCAL) target's hooks stay unbound
+ * and only its overrides record. ASAN, MSAN and TSAN share the
+ * interceptors; a build with no runtime never calls them. */
+#define __AFL_HOOK_GATE()                                                 \
+    do {                                                                  \
+        if (__afl_hook_mute || __builtin_expect(!__afl_cmp_on, 1)) return; \
+    } while (0)
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __sanitizer_weak_hook_memcmp(void *pc, const void *a, const void *b, size_t n, int r) {
+    __AFL_HOOK_GATE();
+    __afl_on_memcmp(a, b, n, r, pc, __AFL_CMP_MEMCMP);
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __sanitizer_weak_hook_strcmp(void *pc, const char *a, const char *b, int r) {
+    __AFL_HOOK_GATE();
+    __afl_on_strcmp(a, b, r, pc);
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __sanitizer_weak_hook_strncmp(void *pc, const char *a, const char *b, size_t n, int r) {
+    __AFL_HOOK_GATE();
+    __afl_on_strncmp(a, b, n, r, pc);
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __sanitizer_weak_hook_strcasecmp(void *pc, const char *a, const char *b, int r) {
+    __AFL_HOOK_GATE();
+    __afl_on_strcasecmp(a, b, r, pc);
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __sanitizer_weak_hook_strncasecmp(void *pc, const char *a, const char *b, size_t n,
+                                       int r) {
+    __AFL_HOOK_GATE();
+    __afl_on_strncasecmp(a, b, n, r, pc);
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __sanitizer_weak_hook_strstr(void *pc, const char *h, const char *n, char *r) {
+    __AFL_HOOK_GATE();
+    __afl_on_strstr(h, n, r != NULL, pc, __AFL_CMP_STRSTR);
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __sanitizer_weak_hook_strcasestr(void *pc, const char *h, const char *n, char *r) {
+    __AFL_HOOK_GATE();
+    __afl_on_strstr(h, n, r != NULL, pc, __AFL_CMP_STRCASESTR);
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __sanitizer_weak_hook_memmem(void *pc, const void *h, size_t hl, const void *n, size_t nl,
+                                  void *r) {
+    __AFL_HOOK_GATE();
+    __afl_on_memmem(h, hl, n, nl, r != NULL, pc);
+}
 
 /* ── Layer 2: Clang -fsanitize-coverage=trace-cmp callbacks ───────────
  *
@@ -7521,6 +7646,85 @@ __AFL_GCC_NO_COV static int __afl_fuzz_len(void) {
 #define __AFL_FUZZ_TESTCASE_BUF __AFL_FUZZ_TEST_CASE_BUF
 #define __AFL_FUZZ_TESTCASE_LEN __AFL_FUZZ_TEST_CASE_LEN
 
+/* ── Allocation-size channel ──────────────────────────────────────────
+ * Edges say which code ran, not how much memory it asked for: an input
+ * that turns malloc(16) into malloc(1 MB) on the same path is no new
+ * coverage, yet size is what reaches allocation-size-too-big, OOM and
+ * size-overflow bugs (MemLock's signal). With $__AFL_ALLOC_SIZES=1 the
+ * sanitizer's malloc hook marks one synthetic edge per log2 size class:
+ *
+ *   malloc(n) -> runtime -> __afl_alloc_hook(p, n) -> edge(class(n))
+ *   class = bit length of n: 0 -> 0, 1 -> 1, 16..31 -> 5, 1 MB -> 21
+ *
+ * Hit counts bucket per class like any edge, so "more 4 KB blocks" counts
+ * too. No call site: the hook runs inside the runtime.
+ *
+ * Only the target's allocations count. In its own executable everything
+ * is the target; a dlopen'ed .so shares the process with the host, so
+ * there only the guarded thread's allocations count, while
+ * __afl_guarded_call runs.
+ *
+ * Needs a sanitizer allocator (ASAN/MSAN/TSAN); without one the weak
+ * installer is NULL and the env is inert. Hooks cannot be removed, so
+ * they are installed once, at attach. */
+#define AFL_ALLOC_CLASSES 65                 /* bit lengths 0..64 */
+#define AFL_ALLOC_SALT    0x414c4c4f43535a45ULL /* "ALLOCSZE" */
+
+extern int __sanitizer_install_malloc_and_free_hooks(
+    void (*malloc_hook)(const volatile void *, size_t),
+    void (*free_hook)(const volatile void *)) __attribute__((weak));
+
+static uint32_t __afl_alloc_ids[AFL_ALLOC_CLASSES];
+static int __afl_alloc_exe = 0;   /* shim lives in the main executable */
+
+/* This thread runs the guarded target. No TLS: the hook runs inside malloc,
+ * and a dlopen'ed module's first dynamic-TLS access in a thread mallocs,
+ * re-entering the hook until the stack faults. pthread_self() reads the
+ * thread pointer and allocates nothing. */
+__AFL_NO_COV static inline int __afl_alloc_guarded(void) {
+    return __afl_guards_active && pthread_equal(__afl_guard_owner, pthread_self());
+}
+
+__AFL_NO_COV static void __afl_alloc_hook(const volatile void *p, size_t n) {
+    (void)p;
+    if (!__afl_area) return;
+    if (!__afl_alloc_exe && !__afl_alloc_guarded()) return;   /* host, not target */
+
+    unsigned cls = n ? 64u - (unsigned)__builtin_clzll((unsigned long long)n) : 0;
+    __afl_map_id(__afl_alloc_ids[cls]);
+}
+
+/* Required by the installer (it refuses a NULL pair); frees carry no size. */
+__AFL_NO_COV static void __afl_free_hook(const volatile void *p) { (void)p; }
+
+/* The main executable's link map has an empty name. */
+__AFL_NO_COV static int __afl_in_main_exe(void) {
+    Dl_info info;
+    struct link_map *lm = NULL;
+    if (!dladdr1((const void *)__afl_in_main_exe, &info, (void **)&lm, RTLD_DL_LINKMAP))
+        return 0;
+    return lm && lm->l_name && lm->l_name[0] == '\0';
+}
+
+__AFL_NO_COV static void __afl_alloc_init(void) {
+    /* Not strcmp: that is our own override, and would count as a target
+     * comparison in every run that sets the env. */
+    const char *on = getenv("__AFL_ALLOC_SIZES");
+    if (!on || on[0] != '1' || on[1] != '\0') return;
+    if (!__sanitizer_install_malloc_and_free_hooks) return;
+
+    /* Ids precomputed: the hook is on every malloc. FNV-1a, salted apart
+     * from the COMPCOV / dataflow channels. */
+    for (uint32_t c = 0; c < AFL_ALLOC_CLASSES; c++) {
+        uint64_t h = 1469598103934665603ULL;
+        h = (h ^ AFL_ALLOC_SALT) * 1099511628211ULL;
+        h = (h ^ c) * 1099511628211ULL;
+        __afl_alloc_ids[c] = __AFL_SYNTH_ID(h >> 32);
+    }
+    __afl_alloc_exe = __afl_in_main_exe();
+    __sanitizer_install_malloc_and_free_hooks(__afl_alloc_hook, __afl_free_hook);
+}
+
 /* Auto-attach when loaded */
 __attribute__((constructor))
 __AFL_GCC_NO_COV static void __afl_auto_init(void) {
@@ -7540,6 +7744,7 @@ __AFL_GCC_NO_COV static void __afl_auto_init(void) {
 #endif
     __afl_install_crash_handlers();
     if (__sanitizer_set_death_callback) __sanitizer_set_death_callback(__afl_san_death);
+    __afl_alloc_init();
     pthread_atfork(NULL, NULL, __afl_guard_atfork_child);
     __afl_mapping = 0;
     __afl_fast_refresh();

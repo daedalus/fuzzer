@@ -188,6 +188,8 @@ _EXCLUDED_OPT_IN = frozenset(
         "touched_atomic",
         # Changes every edge id (context term on/off), not a strategy.
         "ctx_sensitive",
+        # Adds allocation-size edges: changes the edge set, not a strategy.
+        "alloc_sizes",
         # Coverage-accounting mode, multi-target only: not a strategy, and it
         # changes what every other strategy is rewarded for.
         "shared_virgin",

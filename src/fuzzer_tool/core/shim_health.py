@@ -49,6 +49,10 @@ TOUCHED_ATOMIC_ENV = "__AFL_TOUCHED_ATOMIC"
 # offset 0 stays 0). Unset keeps the shim's default (on).
 STACK_DEPTH_ENV = "__AFL_STACK_DEPTH"
 
+# Read by the shim at attach; "1" marks one synthetic edge per log2 size
+# class of each sanitizer-served allocation. Unset = off.
+ALLOC_SIZES_ENV = "__AFL_ALLOC_SIZES"
+
 
 class ShimField(IntEnum):
     """Index of each counter in ``__afl_shim_health()``'s output (C ABI)."""
@@ -106,6 +110,17 @@ def export_stack_depth(on: bool) -> None:
     Always set: the run knows whether anything reads the depth.
     """
     os.environ[STACK_DEPTH_ENV] = "1" if on else "0"
+
+
+def export_alloc_sizes(on: bool) -> None:
+    """Ask the shim for allocation-size edges (True) or none (False).
+
+    Off clears an inherited value: the channel changes the edge set.
+    """
+    if on:
+        os.environ[ALLOC_SIZES_ENV] = "1"
+        return
+    os.environ.pop(ALLOC_SIZES_ENV, None)
 
 
 def export_ctx_sensitive(on: bool | None) -> None:
