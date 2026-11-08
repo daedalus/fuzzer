@@ -1391,7 +1391,11 @@ def _first_imm(insn: _DisasmInsn) -> tuple[int, int] | None:
     return None
 
 
-def _add_imm_constants(constants: set[bytes], imm_value: int, imm_size: int) -> None:
+# Cap on disassembly constants, bounding the dictionary they seed.
+_MAX_DISASM_CONSTANTS = 256
+
+
+def _add_imm_constants(constants: dict[bytes, None], imm_value: int, imm_size: int) -> None:
     """Pack an immediate little-endian at its width, plus 2/4-byte sub-words."""
     unsigned = imm_value & ((1 << (imm_size * 8)) - 1)
     packed = unsigned.to_bytes(imm_size, "little")
@@ -1451,9 +1455,14 @@ def extract_constants_pure(target: str) -> list[bytes]:
         _INS_CMPXCHG,
     }
 
-    constants: set[bytes] = set()
+    # Insertion-ordered set: the cap keeps the first constants in code order.
+    # A set kept a PYTHONHASHSEED-dependent subset, so every profile build
+    # of the same binary seeded a different dictionary.
+    constants: dict[bytes, None] = {}
 
     for insn in _decode_x86_64(text_data, text_vaddr):
+        if len(constants) >= _MAX_DISASM_CONSTANTS:
+            break  # later insns cannot enter the capped list
         imm = _first_imm(insn)
         if imm is None:
             continue
@@ -1470,8 +1479,7 @@ def extract_constants_pure(target: str) -> list[bytes]:
         if insn.insn_id in TARGET_IDS:
             _add_imm_constants(constants, imm_value, imm_size)
 
-    # Cap at 256 entries to bound dictionary size
-    result = list(constants)[:256]
+    result = list(constants)[:_MAX_DISASM_CONSTANTS]
     if result:
         log.info("Disassembly constants: extracted %d values from %s", len(result), target)
     return result
@@ -1514,7 +1522,7 @@ def _is_noise_immediate(value: int, size: int) -> bool:
     return size == 8 and unsigned > 0x7FFFFFFFFFFF and unsigned % 0x1000 == 0
 
 
-def _maybe_add_constant(constants: set[bytes], data: bytes):
+def _maybe_add_constant(constants: dict[bytes, None], data: bytes):
     """Add *data* to *constants* if it looks like a useful dictionary token."""
     if not data or len(data) < 2:
         return
@@ -1528,7 +1536,7 @@ def _maybe_add_constant(constants: set[bytes], data: bytes):
     # Skip if already present
     if data in constants:
         return
-    constants.add(data)
+    constants[data] = None
 
 
 # ── Coverage map sizing ─────────────────────────────────────────────────
