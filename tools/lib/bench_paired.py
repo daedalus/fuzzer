@@ -314,6 +314,9 @@ ARMS: dict[str, list[str]] = {
     # (~n*H_n picks to try all). ctl is baseline again (Rule 46).
     "round-robin": ["--round-robin"],
     "round-robin-ctl": [],
+    # Redqueen colorization (backlog open question: opt-out?). ctl is baseline again (Rule 46).
+    "colorize": ["--colorize"],
+    "colorize-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -411,6 +414,8 @@ ARM_BASELINES: dict[str, str] = {
     "field-hmm-ctl": "baseline",
     "round-robin": "baseline",
     "round-robin-ctl": "baseline",
+    "colorize": "baseline",
+    "colorize-ctl": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

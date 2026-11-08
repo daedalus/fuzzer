@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
-from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.rand_pool import RandPool, reseed_default_rand_pool
 from fuzzer_tool.core.tuple_walk import TupleWalk
 
 if TYPE_CHECKING:
@@ -42,6 +42,7 @@ from fuzzer_tool.adapters.process import (
     disable_aslr,
     reset_env_cache,
 )
+from fuzzer_tool.adapters.sancov_tables import SANCOV_ENV, SancovTables
 from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import (
     MAX_COUNT_GROWTH_FACTOR,
@@ -2001,7 +2002,7 @@ class Fuzzer:
         # pos_consolidated.py). Appended: positional signature.
         seed_consolidated_scheduler=False,
         pos_consolidated=False,
-        clock=ClockMode.WALL,
+        clock=ClockMode.VIRTUAL,
         shm_write_guard=WriteGuard.OFF,
         touched_atomic=None,
         ctx_sensitive=None,
@@ -2428,7 +2429,7 @@ class Fuzzer:
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
         # Fallback pool for code not handed an rng: seeded here, not the global `random`.
-        get_default_rand_pool().reseed(seed)
+        reseed_default_rand_pool(seed)
         # ── Vectorized random number pool for mutation hotpath ────────
         # Generates random values in batches (one numpy C-level call per
         # batch) instead of per-call Python-level random() invocations.
@@ -2578,13 +2579,6 @@ class Fuzzer:
                     "shim compilation will be attempted"
                 )
             from fuzzer_tool.core.cmplog import CmplogCollector, Preload
-
-            # The FIFO is drained by a background thread, so which records a
-            # collect sees depends on thread timing. The file sink is read
-            # synchronously: the only sink a virtual-clock replay can trust.
-            if self._clock.mode is ClockMode.VIRTUAL and cmplog_fifo_sink:
-                log.info("--clock virtual: cmplog uses the file sink, not the FIFO")
-                cmplog_fifo_sink = False
 
             self._cmplog = CmplogCollector(
                 max_tokens=cmplog_max_tokens,
@@ -2739,8 +2733,10 @@ class Fuzzer:
         # Block bitmap for the stats "blocks:" field. Single target only:
         # targets sharing os.environ would share one guard index space.
         self._block_bitmap: BlockBitmapShm | None = None
+        self._sancov_tables: SancovTables | None = None
         if self.shm_cov and not self.multi_targets:
             self._block_bitmap = self._open_block_bitmap(target)
+            self._sancov_tables = self._open_sancov_tables()
 
         # --shared-virgin: one novelty store across the per-target tables.
         self._shared_virgin: SharedVirgin | None = None
@@ -5515,6 +5511,12 @@ class Fuzzer:
 
         os.environ["__AFL_BLOCK_BITMAP_ID"] = bb.env_id
         return bb
+
+    def _open_sancov_tables(self) -> SancovTables:
+        """Reserve the pc-table / control-flow dump path; the shim writes it."""
+        tables = SancovTables()
+        os.environ[SANCOV_ENV] = tables.path
+        return tables
 
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
         from fuzzer_tool.core.elf import detect_ngram_k
@@ -8396,7 +8398,7 @@ class Fuzzer:
         """
         self._stall_reseed_count += 1
         new_seed = self._derive_stall_seed()
-        get_default_rand_pool().reseed(new_seed)
+        reseed_default_rand_pool(new_seed)
         if _HAS_NUMPY:
             self._rng.reseed(new_seed)
         self._last_stall_seed = new_seed

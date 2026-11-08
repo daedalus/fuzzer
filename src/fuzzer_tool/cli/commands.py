@@ -864,7 +864,7 @@ def cmd_fuzz(args):
         inprocess_direct=args.inprocess_direct,
         inprocess_func=args.inprocess_func,
         seed=args.seed,
-        clock=ClockMode(getattr(args, "clock", ClockMode.WALL.value)),
+        clock=ClockMode(getattr(args, "clock", ClockMode.VIRTUAL.value)),
         shm_write_guard=WriteGuard[getattr(args, "shm_write_guard", "off").upper()],
         input_placement=InputPlacement(
             getattr(args, "input_placement", InputPlacement.EXACT.value)
@@ -6627,10 +6627,10 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--clock",
         choices=[m.value for m in ClockMode],
-        default=ClockMode.WALL.value,
-        help="Decision clock: 'wall' (host time) or 'virtual' (1 ms per exec), "
-        "which makes --seed runs replay exactly. Timeouts stay on host time. "
-        "Default: wall.",
+        default=ClockMode.VIRTUAL.value,
+        help="Decision clock: 'virtual' (1 ms per exec), which makes --seed runs "
+        "replay exactly, or 'wall' (host time; rewards scaled by op cost). "
+        "Timeouts stay on host time. Default: virtual.",
     )
     fuzz_parser.add_argument(
         "--plot-graph",

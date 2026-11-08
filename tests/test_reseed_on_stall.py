@@ -161,12 +161,12 @@ class TestReseedOnStallWiring:
         assert before != after
 
     def test_reseed_applies_to_default_pool_too(self):
-        from fuzzer_tool.core.rand_pool import get_default_rand_pool
+        from fuzzer_tool.core.rand_pool import get_default_rand_pool, reseed_default_rand_pool
 
         f = _stalled_fuzzer(reseed_on_stall=True, seed=42)
         f._maybe_trigger_stall_recovery(400)
         observed = [get_default_rand_pool().random() for _ in range(4)]
-        get_default_rand_pool().reseed(f._last_stall_seed)
+        reseed_default_rand_pool(f._last_stall_seed)
         assert [get_default_rand_pool().random() for _ in range(4)] == observed
 
     def test_not_reseeded_when_stall_is_rejected(self):

@@ -461,7 +461,7 @@ sancov_needs_cmplog() {
 
 validate_sancov_modes() {
     local edge="trace-pc-guard inline-8bit-counters inline-bool-flag"
-    local extra="pc-table trace-loads trace-stores indirect-calls"
+    local extra="pc-table control-flow trace-loads trace-stores indirect-calls"
     local cmp m has_edge=0
     cmp=$(sancov_cmp_modes)
     for m in ${1//,/ }; do

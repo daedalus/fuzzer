@@ -170,6 +170,7 @@ def _cov_fuzzer(block_bitmap) -> MagicMock:
         "saturation": 0.7,
     }
     f._block_bitmap = block_bitmap
+    f._sancov_tables = None
     return f
 
 

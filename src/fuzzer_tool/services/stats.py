@@ -1178,7 +1178,14 @@ class StatsReporter:
         total = bb.total()
         if not total:
             return ""
-        return f" blocks: {bb.covered()}/{total}"
+
+        # pc-table builds: function entries are guard sites too.
+        s = f" blocks: {bb.covered()}/{total}"
+        tables = f._sancov_tables
+        entries = tables.entry_indices() if tables is not None else None
+        if entries is not None and entries.size:
+            s += f" funcs: {bb.covered_at(entries)}/{entries.size}"
+        return s
 
     def _print_stats_density_str(self, f) -> str:
         """Format map density string with optional collision-induced resize."""

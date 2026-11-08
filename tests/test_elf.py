@@ -358,42 +358,42 @@ class TestMaybeAddConstant:
     def test_adds_valid(self):
         from fuzzer_tool.core.elf import _maybe_add_constant
 
-        s: set[bytes] = set()
+        s: dict[bytes, None] = {}
         _maybe_add_constant(s, b"\x7fELF")
         assert b"\x7fELF" in s
 
     def test_skips_short(self):
         from fuzzer_tool.core.elf import _maybe_add_constant
 
-        s: set[bytes] = set()
+        s: dict[bytes, None] = {}
         _maybe_add_constant(s, b"a")
         assert len(s) == 0
 
     def test_skips_empty(self):
         from fuzzer_tool.core.elf import _maybe_add_constant
 
-        s: set[bytes] = set()
+        s: dict[bytes, None] = {}
         _maybe_add_constant(s, b"")
         assert len(s) == 0
 
     def test_skips_all_zeros(self):
         from fuzzer_tool.core.elf import _maybe_add_constant
 
-        s: set[bytes] = set()
+        s: dict[bytes, None] = {}
         _maybe_add_constant(s, b"\x00\x00")
         assert len(s) == 0
 
     def test_skips_all_ff(self):
         from fuzzer_tool.core.elf import _maybe_add_constant
 
-        s: set[bytes] = set()
+        s: dict[bytes, None] = {}
         _maybe_add_constant(s, b"\xff\xff")
         assert len(s) == 0
 
     def test_dedup(self):
         from fuzzer_tool.core.elf import _maybe_add_constant
 
-        s: set[bytes] = set()
+        s: dict[bytes, None] = {}
         _maybe_add_constant(s, b"\x01\x02")
         _maybe_add_constant(s, b"\x01\x02")
         assert len(s) == 1

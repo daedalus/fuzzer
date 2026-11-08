@@ -802,6 +802,8 @@ Source quality varies sharply and should govern how much weight each prior gets.
   per-site PC keys make the candidate filter sharper than AFL++'s callback-level
   one. Measure the exec cost against the `--colorize` budget on a real target
   first. This is the single most actionable item the 2026-08-28 survey produced.
+  **Measured 2026-11-07 (ledger #113-#115): VOID** — fuzzgoat noasan has no
+  trace-cmp, cmplog empty, so only the cost was measured. Rerun on a cmplog target.
 - Entropic and our Chao2 rewrite (`good_turing_estimate`) come from the same
   STADS framework and should be reasoned about together rather than as two
   unrelated estimators. Nobody has.
