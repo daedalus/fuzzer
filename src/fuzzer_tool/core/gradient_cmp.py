@@ -9,8 +9,9 @@ Ported from honggfuzz mangle.c:mangle_GradientCmp (line 1328).
 """
 
 import heapq
-import random as _random
 from itertools import groupby
+
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 # Last pool's byte -> ascending pair indices, keyed like scanner_for_pairs
 # (owner identity + length).
@@ -34,12 +35,12 @@ def gradient_cmp(
         data: Input bytes to mutate.
         cmp_values: List of (operand_a, operand_b) pairs from cmplog tracing.
             These are the values the target compared against.
-        rng: Random instance (default: module-level random).
+        rng: Random instance (default: shared default RandPool).
 
     Returns:
         Mutated bytes, or original if no partial match found.
     """
-    r = rng or _random
+    r = rng or get_default_rand_pool()
     if not data or not cmp_values:
         return data
 

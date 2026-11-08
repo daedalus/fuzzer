@@ -34,9 +34,10 @@ performs fine; nothing here has been tuned for hundreds of parameters.
 from __future__ import annotations
 
 import itertools
-import random
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 # One row: a value per parameter, in parameter order.
 Row = tuple[Any, ...]
@@ -319,9 +320,8 @@ def generate(
             greater than ``len(value_sets)`` are clamped down to it.
         rng: anything with ``.choice(list)`` (``RandPool``) or
             ``.randint(a, b)`` (stdlib ``random.Random``). Defaults to
-            a fresh ``random.Random()`` -- callers that need
-            reproducibility across a fuzzing campaign must pass the
-            fuzzer's own seeded rng.
+            the shared default ``RandPool`` (deterministic); pass the
+            fuzzer's own rng to share its stream.
         candidate_pool: random candidate rows considered per row
             picked; higher trades build cost for a smaller array.
         max_rows: stop early after this many rows even if some tuples
@@ -359,7 +359,7 @@ def generate(
 
     value_sets, constraints = _normalise_forbidden(value_sets, forbidden)
     t = _effective_t(k, t)
-    rng = rng if rng is not None else random.Random()
+    rng = rng if rng is not None else get_default_rand_pool()
 
     param_subsets = _param_subsets(k, t)
     needed = _required_tuples(value_sets, param_subsets, constraints)

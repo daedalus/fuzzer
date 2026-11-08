@@ -8,11 +8,10 @@ when input is not valid JPEG.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 # JPEG marker constants
 SOI = 0xD8
@@ -710,7 +709,7 @@ def _find_marker_index(markers: list[JpegMarker], marker: int) -> int | None:
 
 def _corrupt_value(val: int, max_val: int = 0xFFFF, rng=None) -> int:
     """Apply a random corruption to an integer value."""
-    _r = rng or random
+    _r = rng or get_default_rand_pool()
     method = _r.randint(0, 4)
     if method == 0:  # bit flip
         bit = _r.randint(0, min(15, val.bit_length() or 1))

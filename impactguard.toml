@@ -100,4 +100,7 @@ suppress = [
     # to each list, none removed.
     "tests/test_sancov_modes.py:TestBuildScriptModes.test_supported_modes_pass",
     "tests/test_sancov_modes.py:TestBuildScriptModes.test_no_edge_mode_rejected",
+    # Pinned the os.urandom stall seed that the PRNG-bypass fix removed;
+    # replaced by test_unseeded_run_skips_os_entropy.
+    "tests/test_reseed_on_stall.py:TestDeriveStallSeed.test_unseeded_run_uses_os_entropy",
 ]

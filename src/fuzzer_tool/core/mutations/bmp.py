@@ -8,11 +8,10 @@ BMP generation when input is not valid BMP.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 # BMP signatures
 BMP_SIGNATURE = b"BM"
@@ -190,7 +189,7 @@ def _corrupt_u32(data: bytearray, offset: int, method: int, _r) -> None:
 
 def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False, rng=None) -> None:
     """Apply random corruption to a field in the header."""
-    _r = rng or random
+    _r = rng or get_default_rand_pool()
     method = _r.randint(0, 4)
     if size == 2:
         _corrupt_u16(data, offset, method, _r)
