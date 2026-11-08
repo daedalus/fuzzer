@@ -47,11 +47,24 @@ BFS proximity. When enabled, their harmonic-BFS value is scaled down by
 ``gate_bonus`` so they outrank BFS-equidistant non-gate blocks. This is
 a new signal, not a validated replacement for BFS distance — treat it as
 experimental until measured against a real target.
+
+Optional reaching-probability metric (``DistanceMetric.REACH_PROB``,
+SelectFuzz, IEEE S&P '23) replaces the in-function CFG distance::
+
+    P(t) = 1 for target blocks
+    P(b) = mean of P(s) over b's distinct successors s (exits, out-of-function
+           successors: 0)
+
+  i.e. the chance a uniform random CFG walk from b hits a target. Stored as
+  surprisal ``-log2 P`` (bits of branch luck needed) so "lower is closer"
+  holds for every consumer: a 4-way switch one hop away costs 2 bits, a
+  straight line of any length costs 0. Function-level fallback unchanged.
 """
 
 import bisect
 import enum
 import logging
+import math
 import multiprocessing
 import re
 import struct
@@ -88,6 +101,13 @@ class CfgPool(enum.Enum):
 
 _MAX_CFG_BLOCKS = 4096  # skip harmonic distance for huge CFGs
 _MAX_TARGET_BLOCKS = 512  # cap target-block count for the harmonic BFS
+
+# Reaching-probability fixed point: iteration stops when no block rises more
+# than _REACH_TOL. Two postorder Gauss-Seidel sweeps settle (and confirm) any
+# DAG; loops then go to vectorized Jacobi, capped at _REACH_MAX_SWEEPS.
+_REACH_TOL = 1e-12
+_REACH_GS_SWEEPS = 2
+_REACH_MAX_SWEEPS = 10_000
 
 # Distance reported for seeds that never hit a valued block.
 _NO_VALUE_DISTANCE = 20.0
@@ -224,6 +244,136 @@ def _harmonic_bfs(preds: dict, tbbs: set[int]) -> tuple[dict[int, float], dict[i
     return sum_inv, count
 
 
+def _harmonic_values(cfg: FunctionCFG, tbbs: set[int]) -> dict[int, float]:
+    """AFLGo value per block that can reach a target: count / sum 1/(1+d).
+
+    Walks the *reversed* CFG (predecessor edges) from each target block, so
+    d(b,t) is the shortest *forward* path from b to t.
+    """
+    sum_inv, count = _harmonic_bfs(predecessors(cfg), tbbs)
+    return {b: count[b] / sum_inv[b] for b in count}
+
+
+def _live_blocks(cfg: FunctionCFG, tbbs: set[int]) -> set[int]:
+    """Blocks with a forward path to a target — exactly those with P > 0."""
+    preds = predecessors(cfg)
+    live = set(tbbs)
+    stack = list(tbbs)
+    while stack:
+        for pred in preds.get(stack.pop(), ()):
+            if pred not in live:
+                live.add(pred)
+                stack.append(pred)
+    return live
+
+
+def _postorder(succ: dict[int, tuple[int, ...]]) -> list[int]:
+    """Iterative DFS postorder over *succ*: successors before predecessors.
+
+    Visiting in this order makes one Gauss-Seidel sweep exact on a DAG.
+    """
+    seen: set[int] = set()
+    out: list[int] = []
+    for root in succ:
+        if root in seen:
+            continue
+        seen.add(root)
+        stack = [(root, iter(succ[root]))]
+        while stack:
+            node, it = stack[-1]
+            nxt = next((s for s in it if s in succ and s not in seen), None)
+            if nxt is None:
+                stack.pop()
+                out.append(node)
+                continue
+            seen.add(nxt)
+            stack.append((nxt, iter(succ[nxt])))
+    return out
+
+
+def _gs_sweep(p: dict[int, float], succ: dict[int, tuple[int, ...]], order: list[int]) -> float:
+    """One in-place Gauss-Seidel sweep; returns the largest rise."""
+    delta = 0.0
+    for b in order:
+        s = succ[b]
+        v = sum(p.get(x, 0.0) for x in s) / len(s)
+        delta = max(delta, v - p[b])
+        p[b] = v
+    return delta
+
+
+def _jacobi(p: dict[int, float], succ: dict[int, tuple[int, ...]], name: str) -> dict[int, float]:
+    """Vectorized Jacobi iteration from *p* (a lower bound, so it only rises).
+
+    Loops make Gauss-Seidel crawl in Python; a numpy sweep is one bincount.
+    """
+    import numpy as np
+
+    nodes = list(p)
+    idx = {b: k for k, b in enumerate(nodes)}
+    rows, cols, wts = [], [], []
+    for b, s in succ.items():
+        w = 1.0 / len(s)
+        for x in s:
+            if x in idx:
+                rows.append(idx[b])
+                cols.append(idx[x])
+                wts.append(w)
+
+    r = np.array(rows, dtype=np.int64)
+    c = np.array(cols, dtype=np.int64)
+    w = np.array(wts)
+    fixed = np.array([b not in succ for b in nodes])  # target blocks
+    cur = np.fromiter(p.values(), dtype=np.float64, count=len(nodes))
+    for _ in range(_REACH_MAX_SWEEPS):
+        nxt = np.bincount(r, weights=w * cur[c], minlength=len(nodes))
+        nxt[fixed] = 1.0
+        done = float(np.max(nxt - cur)) < _REACH_TOL
+        cur = nxt
+        if done:
+            break
+    else:
+        log.debug("reach-prob: %s not converged after %d sweeps", name, _REACH_MAX_SWEEPS)
+    return dict(zip(nodes, cur.tolist(), strict=True))
+
+
+def _reach_probs(cfg: FunctionCFG, tbbs: set[int]) -> dict[int, float]:
+    """SelectFuzz reaching probability for every block that can reach a target.
+
+    Iterating from P = 0 rises to the minimal fixed point, so a cycle that
+    never reaches a target stays at 0 (excluded up front by ``_live_blocks``).
+    Postorder Gauss-Seidel settles a DAG in one sweep; loops go to numpy.
+    """
+    live = _live_blocks(cfg, tbbs)
+    succ = {b: tuple(set(cfg.blocks[b].successors)) for b in live - tbbs}
+    order = _postorder(succ)
+
+    p = dict.fromkeys(live, 0.0)
+    p.update(dict.fromkeys(tbbs, 1.0))
+    for _ in range(_REACH_GS_SWEEPS):
+        if _gs_sweep(p, succ, order) < _REACH_TOL:
+            return p
+    return _jacobi(p, succ, cfg.name)
+
+
+def _reach_values(cfg: FunctionCFG, tbbs: set[int]) -> dict[int, float]:
+    """Reaching probability as surprisal -log2 P (0 = certain to reach)."""
+    return {b: max(0.0, -math.log2(pb)) for b, pb in _reach_probs(cfg, tbbs).items() if pb > 0.0}
+
+
+class DistanceMetric(enum.Enum):
+    """In-function block fitness for directed mode."""
+
+    HARMONIC = "harmonic"  # AFLGo harmonic CFG distance
+    REACH_PROB = "reach-prob"  # SelectFuzz reaching probability, as -log2 P
+
+
+_METRIC_VALUES = {
+    DistanceMetric.HARMONIC: _harmonic_values,
+    DistanceMetric.REACH_PROB: _reach_values,
+}
+
+
 class TargetDistance:
     """Compute call-graph and CFG distances from basic blocks to targets.
 
@@ -240,6 +390,7 @@ class TargetDistance:
         use_cfg_cache: bool = True,
         debug: bool = False,
         gate_bonus: float = 0.0,
+        metric: DistanceMetric = DistanceMetric.HARMONIC,
     ):
         self.target = target
         self.target_names: list[str] = targets or []
@@ -256,6 +407,10 @@ class TargetDistance:
         if not 0.0 <= gate_bonus <= 1.0:
             raise ValueError(f"gate_bonus must be in [0, 1], got {gate_bonus}")
         self._gate_bonus = gate_bonus
+
+        # Per-function block valuer, bound once (no per-function branching).
+        self._metric = metric
+        self._block_values = _METRIC_VALUES[metric]
 
         # Function table: name -> (start_addr, end_addr)
         self.functions: dict[str, tuple[int, int]] = {}
@@ -781,7 +936,8 @@ class TargetDistance:
         """Compute AFLGo BB-level distances for the target functions.
 
         Target blocks get 0; other blocks in a target function get the
-        harmonic CFG distance to that function's target blocks; blocks
+        harmonic CFG distance to that function's target blocks (or the
+        reaching-probability surprisal under ``DistanceMetric.REACH_PROB``); blocks
         elsewhere fall back to the 0-based function-level distance
         (d_cg(func) - 1), looked up lazily in ``bb_distance``.
 
@@ -809,18 +965,15 @@ class TargetDistance:
             if len(cfg.blocks) > _MAX_CFG_BLOCKS:
                 continue
 
-            # Reverse BFS from each target block over predecessor edges
-            # (see the docstring above): for every block b, accumulate
-            # 1/(1 + d(b,t)) and the reachable-target count, where d(b,t)
-            # is the shortest *forward* path from b to t.
-            sum_inv, count = _harmonic_bfs(predecessors(cfg), tbbs)
+            # Value every block that can reach a target, by the bound metric.
+            values = self._block_values(cfg, tbbs)
 
             for bs, blk in cfg.blocks.items():
                 if bs in tbbs:
                     self._bb_value[bs] = 0.0
                     self._target_bb_ranges.add((blk.start, blk.end))
-                elif bs in count:
-                    self._bb_value[bs] = count[bs] / sum_inv[bs]
+                elif bs in values:
+                    self._bb_value[bs] = values[bs]
 
             if self._gate_bonus:
                 self._discount_gates(cfg, tbbs)

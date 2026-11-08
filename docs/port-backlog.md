@@ -173,7 +173,7 @@ estimating per-seed new-path reward probability against observed average cost;
 reported −32% execs at equal coverage. A scheduler arm plus a `SeedScorer`
 schedule. **Effort L.**
 
-**D3. Reaching-probability directed mode** (`#11`, SelectFuzz IEEE S&P '23) —
+**D3. Reaching-probability directed mode (partial 2026-11-08: `--distance-metric reach-prob`, unmeasured; selective instrumentation open)** (`#11`, SelectFuzz IEEE S&P '23) —
 block fitness as averaged successor reaching probability instead of graph
 distance, instrumenting only target-relevant blocks (<2% of reachable BBs) so
 irrelevant coverage never pollutes feedback. `core/analyzers/analyzer_distance.py` math plus one LLVM

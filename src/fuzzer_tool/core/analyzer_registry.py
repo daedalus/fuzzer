@@ -621,7 +621,7 @@ REGISTRY.register(
 def _activate_distance(f: FuzzerLike) -> None:
     import os
 
-    from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
+    from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric, TargetDistance
 
     f._distance = TargetDistance(
         f.target,
@@ -629,6 +629,7 @@ def _activate_distance(f: FuzzerLike) -> None:
         use_cfg_cache=f._use_cfg_cache,
         debug=f.debug,
         gate_bonus=getattr(f, "_gate_bonus", 0.0),
+        metric=getattr(f, "_distance_metric", DistanceMetric.HARMONIC),
     )
     f._dist_table_shm = None
     if f._distance.load():

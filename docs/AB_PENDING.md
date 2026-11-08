@@ -43,6 +43,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Strata seed arm (`--strata`, `--op-strata`) | Family-stratified pick | U | hit criterion ~0; E-1 then `strata-a0..a4` |
 | Target arena (`--target-arena`, `auction`) | Elo over target schedules + Gale-Shapley | U | vs `--target-schedule weighted`, ≥ 2 targets |
 | Cost in eviction ordering | Cost per retained edge in `_maybe_prune` | U | design + A/B (changes which seeds exist) |
+| Reaching probability (`--distance-metric reach-prob`) | SelectFuzz `-log2 P` block fitness vs AFLGo harmonic distance | N | fuzzgoat:279 `tte_bad-free` null (ledger 118: 9/11, p=0.82; A/A 2/0/18). Owed: `--set fuzzgoat_dir258` (`tte_heap-buffer-overflow`, first hit ~21k: needs >= 30k execs), a deeper target than fuzzgoat |
 
 ## Operator scheduling
 

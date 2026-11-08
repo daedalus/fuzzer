@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 
 from fuzzer_tool.core import z3_budget
+from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric
 from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.chaos import InertiaMode
@@ -791,6 +792,9 @@ def cmd_fuzz(args):
         targets=getattr(args, "target_functions", None),
         use_cfg_cache=not getattr(args, "no_cfg_cache", False),
         gate_bonus=getattr(args, "gate_bonus", 0.0),
+        distance_metric=DistanceMetric(
+            getattr(args, "distance_metric", DistanceMetric.HARMONIC.value)
+        ),
         anneal_budget=getattr(args, "anneal_budget", 0),
         boltzmann=getattr(args, "boltzmann", False),
         tang=getattr(args, "tang", False),
@@ -2779,6 +2783,9 @@ def cmd_sweep(args):
 # comment exists so the exclusion is a documented decision rather than an
 # accident of argparse type that silently breaks if gate_bonus ever grows a
 # boolean on/off form.
+#
+# distance_metric (--distance-metric) is excluded: a choice dest, inert
+# without --target-functions, and unmeasured (gate_bonus's reasons 1 and 2).
 #
 # lst_revisit (--lst-revisit) is excluded: a float dest like gate_bonus,
 # and unmeasured -- P3-3 step 6 still owes its replicated A/B.
@@ -5405,6 +5412,15 @@ def main() -> int:
         "target; see docs/handover/handover_dominator_gate_2026-09-15.md. "
         "Not force-enabled by --hail-mary (inert without --target-functions, "
         "and unvalidated — see the comment above _HAIL_MARY_FLAGS).",
+    )
+    fuzz_parser.add_argument(
+        "--distance-metric",
+        choices=[m.value for m in DistanceMetric],
+        default=DistanceMetric.HARMONIC.value,
+        help="Directed mode only (requires --target-functions): in-function "
+        "block fitness. 'harmonic' (default): AFLGo harmonic CFG distance. "
+        "'reach-prob': SelectFuzz reaching probability (mean over successors), "
+        "scored as -log2 P. Unmeasured; not in --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--anneal-budget",
