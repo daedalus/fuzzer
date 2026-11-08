@@ -150,7 +150,13 @@ def detached_env(prefixes: tuple[str, ...] = SHIM_CHANNEL_PREFIXES) -> dict[str,
 # leaked pid from any mode is the same bug.
 
 _TRACKED_PIDS: set[int] = set()
-_TRACKED_PIDS_LOCK = threading.Lock()
+# Reentrant: ``_kill_children`` (SIGTERM/SIGINT handler, services/fuzzer.py)
+# calls ``_child_pids()`` on the main thread, and the signal can land while
+# that same thread is inside ``_track``/``_untrack``/``_child_pids`` holding
+# this lock. A plain Lock would then wait on itself and the fuzzer would
+# ignore Ctrl-C. Each critical section is a single set call, so re-entering
+# mid-section never sees a half-applied update.
+_TRACKED_PIDS_LOCK = threading.RLock()
 
 # Cap on retained stderr, matching what this path used to read in one call.
 # Bytes past the cap are still read and discarded -- the read is what keeps

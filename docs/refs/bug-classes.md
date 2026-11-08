@@ -21,6 +21,7 @@ widely-used return-value APIs, or test mocks.
 ## Concurrency & resource cleanup
 
 - **Release threads, fds, and temp resources in `finally` — but don't assume setup succeeded before scheduling cleanup.** A `thread.join()` in `finally` raises `NameError` if `fork()`/thread creation failed before the variable was assigned. Guard the cleanup call, or initialize the variable to `None` first.
+- **Never take a plain `threading.Lock` from a signal handler that the interrupted code can also hold.** Python runs handlers on the main thread between bytecodes, so a handler (`_kill_children` → `_child_pids()`) that locks while the main thread is inside the same critical section waits on itself forever. Use an `RLock` (or no lock for single-call set/dict ops), and test it by firing the signal while holding the lock in a subprocess with a timeout.
 - **Kill processes before detaching their shared memory.** Detaching SHM while the target is still writing to it can cause SEGV in the target. Always SIGKILL → waitpid → detach SHM, not the reverse.
 - **Never use `tempfile.mktemp()`.** It's a TOCTOU/symlink race by construction. Use `mkstemp()`/`mkdtemp()`.
 - **Namespace any filesystem path shared across parallel workers by PID.** Compiled shim/loader binaries and other on-disk artifacts written under `-j N` must embed `os.getpid()` (or equivalent), or concurrent workers race to compile/clean up the same file.
