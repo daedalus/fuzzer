@@ -27,7 +27,7 @@ from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD
-from fuzzer_tool.core.run_mode import InputPlacement, RunMode, Switch
+from fuzzer_tool.core.run_mode import InputChannel, InputPlacement, RunMode, Switch
 from fuzzer_tool.core.sanitizer import STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
@@ -37,6 +37,7 @@ from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST
 from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
+from fuzzer_tool.services.crash_cluster import CLUSTER_THRESHOLD, REDUCE_EXECS, WL_ITERS
 from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, Fuzzer
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
@@ -1495,6 +1496,26 @@ def cmd_root_cause(args):
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(result["report"])
         print(f"[+] Report saved to {args.output}")
+    return 0
+
+
+def cmd_crash_cluster(args):
+    """Igor root-cause crash clustering subcommand (E4)."""
+    _validate_target(args.target)
+    from fuzzer_tool.services.crash_cluster import crash_cluster
+
+    channel = InputChannel.FILE if args.file_mode else InputChannel.STDIN
+    crash_cluster(
+        target=args.target,
+        crashes_dir=args.crashes_dir,
+        timeout=args.timeout,
+        channel=channel,
+        target_args=args.target_args,
+        max_execs=args.reduce_execs,
+        iters=args.wl_iters,
+        threshold=args.threshold,
+        seed=args.seed,
+    )
     return 0
 
 
@@ -7279,6 +7300,40 @@ def main() -> int:
     )
     cb_parser.add_argument("-O", "--output", default=None, help="Save the report to a file")
     cb_parser.set_defaults(func=cmd_crash_bisect)
+
+    # --- crash-cluster (E4, Igor) ---
+    cc_parser = subparsers.add_parser(
+        "crash-cluster", help="Cluster crashes by root cause (coverage reduction + WL kernel)"
+    )
+    cc_parser.add_argument("target", help="Path to target binary")
+    cc_parser.add_argument("crashes_dir", help="Directory holding crash_*.bin")
+    cc_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
+    cc_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    cc_parser.add_argument(
+        "--reduce-execs",
+        type=int,
+        default=REDUCE_EXECS,
+        help=f"Coverage-reduction execs per crash (default: {REDUCE_EXECS})",
+    )
+    cc_parser.add_argument(
+        "--wl-iters", type=int, default=WL_ITERS, help=f"WL relabel rounds (default: {WL_ITERS})"
+    )
+    cc_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=CLUSTER_THRESHOLD,
+        help=f"Kernel similarity to link two crashes (default: {CLUSTER_THRESHOLD})",
+    )
+    cc_parser.add_argument("--seed", type=int, default=None, help="RNG seed for reduction")
+    cc_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    cc_parser.set_defaults(func=cmd_crash_cluster)
 
     # --- minimize ---
     min_parser = subparsers.add_parser(
