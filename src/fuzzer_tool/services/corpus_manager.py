@@ -1159,6 +1159,9 @@ class CorpusManager:
 
         _label_fault(meta, getattr(f, "_inprocess_runner", None))
 
+        if getattr(f, "scan_gadgets", False):
+            self._attach_gadgets(meta)
+
         # Populate error_type from return code for subprocess/inprocess
         # mode where ptrace isn't available and sanitizer reports are absent.
         if not meta.error_type:
@@ -1171,6 +1174,26 @@ class CorpusManager:
         if getattr(f, "_crash_gdb", None) is None:
             meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
         return meta
+
+    def _attach_gadgets(self, meta) -> None:
+        """Record the target's ROP gadget inventory on *meta* (--rop-gadgets).
+
+        The scan is identical for every crash on the same binary, so it is run
+        once and cached on the fuzzer. Best-effort: a parse failure must never
+        lose the crash.
+        """
+        f = self.f
+        if not hasattr(f, "_gadget_report"):
+            try:
+                from fuzzer_tool.core.gadgets import scan_target
+
+                f._gadget_report = scan_target(f.target)
+            except Exception:
+                log.warning("rop gadget scan failed", exc_info=True)
+                f._gadget_report = None
+
+        if f._gadget_report is not None:
+            meta.gadgets = f._gadget_report.to_dict()
 
     def _mail_crash(self, result, returncode: int, stderr: str) -> None:
         """Send the crash e-mail; a mail failure never kills the campaign."""

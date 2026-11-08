@@ -1172,6 +1172,7 @@ def cmd_fuzz(args):
         continue_until_crash=getattr(args, "continue_until_crash", False),
         isolate_crash_fields=getattr(args, "isolate_crash_fields", False),
         crash_symbolize=getattr(args, "crash_symbolize", False),
+        scan_gadgets=getattr(args, "rop_gadgets", False),
         abort_is_crash=getattr(args, "abort_is_crash", False),
         rss_limit_mb=getattr(args, "rss_limit_mb", 0),
         calibrate=getattr(args, "calibrate", 0),
@@ -2846,6 +2847,7 @@ def cmd_sweep(args):
 _HAIL_MARY_FLAGS = (
     "isolate_crash_fields",
     "crash_symbolize",
+    "rop_gadgets",
     "deep_coverage",
     "ptrace",
     "adaptive_timeout",
@@ -3307,6 +3309,15 @@ def main() -> int:
         "(__sanitizer_symbolize_pc; needs a sanitizer runtime in the target, "
         "otherwise the raw PC is recorded) and hydrate the crash sidecar "
         "(shim_symbol, and frames/rip/fault_addr when otherwise empty). "
+        "Enabled by --hail-mary.",
+    )
+    fuzz_parser.add_argument(
+        "--rop-gadgets",
+        action="store_true",
+        help="For each novel crash, statically scan the target binary's .text for "
+        "ROP gadgets (pop-reg, syscall, stack-pivot, ...) and record the inventory "
+        "plus syscall-chain feasibility in the crash sidecar as `gadgets`. Scanned "
+        "once per target; nothing is executed. Exploitability triage aid. "
         "Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
