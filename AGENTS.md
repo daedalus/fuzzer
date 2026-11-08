@@ -100,6 +100,7 @@ fuzzer, not just the target.
     - Closing a `docs/AB_PENDING.md` row requires its ledger row. `tests/test_ab_ledger.py` enforces the format.
 60. **Evidence over assumptions. Verification over confidence.**
 61. Always run `fuzzer-tool fuzz` with `--push-on-crash https://ntfy.sh/daedalus_fuzzer`.
+62. Doc-only changes (`*.md`, comments, docstrings) run no tests. Commit and push.
 
 ## Corpus Rules
 
