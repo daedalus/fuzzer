@@ -33,7 +33,7 @@ import tempfile
 import threading
 import time
 
-from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
+from fuzzer_tool.adapters.pipe_reader import PipeReader
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +41,9 @@ log = logging.getLogger(__name__)
 _STDERR_MARK = "\x7ffuzz-run-end\x7f"
 # Upper bound on waiting for the drain thread to reach a run's marker.
 _STDERR_SYNC_TIMEOUT = 1.0
+# Seconds the loader gets to dlopen the target and answer READY. A target whose
+# constructor (or loader lock) blocks would otherwise hang start() forever.
+_INIT_TIMEOUT = 30.0
 
 
 def _close_streams(proc: subprocess.Popen) -> None:
@@ -424,7 +427,15 @@ class PersistentLoader:
         self._proc.stdin.write(init.encode())
         self._proc.stdin.flush()
 
-        resp = self._reader.readline(NO_DEADLINE)
+        resp = self._reader.readline(time.monotonic() + _INIT_TIMEOUT)
+        if resp is None:
+            # Kill the hung loader: start() early-returns True while the old
+            # process is alive, which would leave _ready False for good.
+            log.warning(
+                "Persistent loader did not answer INIT within %.0fs: %s", _INIT_TIMEOUT, self.target
+            )
+            self.stop()
+            return False
         if resp.strip() == b"READY":
             self._ready = True
             log.info("Persistent loader started: %s", self.target)
