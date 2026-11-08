@@ -114,6 +114,11 @@ class CrashMetadata:
     # Exploitability
     exploitability: str = "UNKNOWN"
 
+    # Static ROP gadget inventory of the target's .text (--rop-gadgets), as
+    # produced by core.gadgets.GadgetReport.to_dict. Empty when the scan is off
+    # or the target cannot be parsed. Triage only -- nothing is executed.
+    gadgets: dict = field(default_factory=dict)
+
     # Cluster ID
     cluster_id: str = ""
     stack_hash: str = ""  # --crash-blocklist entry (sanitizer.STACK_HASH_TAG)
@@ -238,6 +243,7 @@ class CrashMetadata:
             lines.append("")
 
         self._sidecar_registers(lines)
+        self._sidecar_gadgets(lines)
 
         # GDB crash replay (backtrace/registers/fault) — part of the report
         if self.gdb_replay:
@@ -329,6 +335,33 @@ class CrashMetadata:
         lines.append(f"  RBP: {self.rbp:#x}")
         if self.instruction_bytes:
             lines.append(f"  instruction: {self.instruction_bytes}")
+        lines.append("")
+
+    def _sidecar_gadgets(self, lines: list[str]) -> None:
+        """Static ROP gadget inventory and syscall-chain feasibility."""
+        g = self.gadgets
+        if not g or not g.get("total"):
+            return
+
+        suffix = " (.text clipped)" if g.get("truncated") else ""
+        lines.append(f"=== rop gadgets{suffix} ===")
+        lines.append(f"  total:    {g['total']}")
+
+        cats = g.get("categories") or {}
+        if cats:
+            lines.append("  by kind:  " + ", ".join(f"{k}={v}" for k, v in sorted(cats.items())))
+
+        reg_ctl = g.get("reg_control") or {}
+        if reg_ctl:
+            lines.append("  pop-controllable: " + ", ".join(f"{r}@{a}" for r, a in reg_ctl.items()))
+        if g.get("syscall_sites"):
+            lines.append(f"  syscall sites: {len(g['syscall_sites'])}")
+        if g.get("pivot_sites"):
+            lines.append(f"  stack pivots:  {len(g['pivot_sites'])}")
+
+        lines.append(f"  chain: {g.get('chain_note', '')}")
+        for role, addr in g.get("chain_skeleton") or []:
+            lines.append(f"    {role:8s} {addr}")
         lines.append("")
 
     def _sidecar_nearest(self, lines: list[str]) -> None:
@@ -445,6 +478,7 @@ class CrashMetadata:
             "access_size": self.access_size,
             "shadow_info": self.shadow_info,
             "exploitability": self.exploitability,
+            "gadgets": dict(self.gadgets),
             "cluster_id": self.cluster_id,
             "stack_hash": self.stack_hash,
             "returncode": self.returncode,

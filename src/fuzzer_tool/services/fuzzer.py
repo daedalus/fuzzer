@@ -1764,6 +1764,7 @@ class Fuzzer:
         continue_until_crash=False,
         isolate_crash_fields=False,
         crash_symbolize=False,
+        scan_gadgets=False,
         abort_is_crash=False,
         rss_limit_mb=0,
         multi_targets=None,
@@ -2256,6 +2257,11 @@ class Fuzzer:
         self.dictionary = dictionary or []
         self.file_mode = file_mode
         self.isolate_crash_fields = isolate_crash_fields
+        # --rop-gadgets: on each novel crash, statically scan the target's
+        # .text for ROP gadgets and record the inventory + syscall-chain
+        # feasibility in the crash sidecar. Scanned once per target (cached on
+        # the corpus manager). Static triage only -- nothing is executed.
+        self.scan_gadgets = scan_gadgets
         # Shim crash record (PCs + backtrace per crash), always on: a signal
         # crash without a sanitizer report (plain target, or a fault the
         # shim's guard catches first) is named by its PCs. --crash-symbolize
