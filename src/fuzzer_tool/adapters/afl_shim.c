@@ -4024,12 +4024,16 @@ __AFL_NO_COV static void __afl_cmp_site_count(uint32_t id, int satisfied, void *
 /* Same, with the call site given: the weak hooks get it from the runtime. */
 #define __AFL_CMP_COUNT_AT(id, satisfied, pc)                            \
     do {                                                                 \
+        /* Each argument is evaluated once: a caller may pass a call. */ \
+        const unsigned __afl_cid = (unsigned)(id);                       \
+        const int __afl_csat = (satisfied) ? 1 : 0;                      \
+        void *const __afl_cpc = (void *)(pc);                            \
         if (__AFL_CMP_COUNTS_ON) {                                       \
-            __afl_cmp_fired[(id)]++;                                     \
-            if (satisfied) __afl_cmp_hit[(id)]++;                        \
+            __afl_cmp_fired[__afl_cid]++;                                \
+            if (__afl_csat) __afl_cmp_hit[__afl_cid]++;                  \
         }                                                                \
         if (__AFL_CMP_SITES_ON)                                          \
-            __afl_cmp_site_count((id), (satisfied), (pc));               \
+            __afl_cmp_site_count(__afl_cid, __afl_csat, __afl_cpc);      \
     } while (0)
 
 __AFL_NO_COV static void __afl_cmplog_new_scope(void);
@@ -4736,12 +4740,16 @@ __AFL_NO_COV static void *__afl_fb_memrchr(const void *s, int c, size_t n) {
  * memory in static TLS block"). */
 static __thread int __afl_hook_mute;
 
-/* Evaluate a forwarded call with the hooks muted. */
+/* Evaluate a forwarded call with the hooks muted. The previous value is
+ * restored, not cleared: a nested forwarded call must not unmute its
+ * caller. A siglongjmp out of the call skips the restore; the guard puts
+ * the value back on landing (__afl_guard_run). */
 #define __AFL_MUTED(call)                                           \
     ({                                                              \
+        const int __afl_mute_prev = __afl_hook_mute;                \
         __afl_hook_mute = 1;                                        \
         __typeof__(call) __afl_r = (call);                          \
-        __afl_hook_mute = 0;                                        \
+        __afl_hook_mute = __afl_mute_prev;                          \
         __afl_r;                                                    \
     })
 
@@ -6913,7 +6921,7 @@ __AFL_GCC_NO_COV uintptr_t __afl_last_fault_addr(void) {
  * signal cannot end a later call. Residual: a worker that exits while the
  * owner is already joining it stays unjoined (its stack is not freed). */
 __AFL_GCC_NO_COV static void __afl_guard_enter(void) {
-    __afl_guard_owner = pthread_self();
+    __atomic_store_n(&__afl_guard_owner, pthread_self(), __ATOMIC_RELAXED);
     __afl_exit_pending = 0;
     __afl_guards_active = 1;
 }
@@ -6991,7 +6999,7 @@ __AFL_GCC_NO_COV static void __afl_worker_exit(int status) {
     if (!__afl_guards_active || !__afl_exit_sig_ready()) return;
     __afl_exit_pending = __AFL_JMP_EXIT | (status & 0xFF);
     pthread_detach(pthread_self());
-    pthread_kill(__afl_guard_owner, __AFL_EXIT_SIG);
+    pthread_kill(__atomic_load_n(&__afl_guard_owner, __ATOMIC_RELAXED), __AFL_EXIT_SIG);
     pthread_exit(NULL);
 }
 
@@ -7033,6 +7041,11 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
         __afl_guard_enter();
     }
 
+    /* An escape from inside a forwarded libc compare skips __AFL_MUTED's
+     * restore and would leave this thread's weak hooks muted for good. */
+#if __AFL_CMPLOG
+    int mute_prev = __afl_hook_mute;
+#endif
     int code = sigsetjmp(jb, 1);
     if (code == 0) {
         /* A frame nested in a timed one stays under the outer budget: a
@@ -7054,6 +7067,7 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
 
     __afl_wguard_land(wg_prev);
 #if __AFL_CMPLOG
+    __afl_hook_mute = mute_prev;
     /* A timeout tick can land mid-record; a lock left held drops every
      * later record as REENTRANT. pos only advances on complete records. */
     if (__afl_cmplog_mine()) __afl_cmplog_release();
@@ -7682,7 +7696,8 @@ static int __afl_alloc_exe = 0;   /* shim lives in the main executable */
  * re-entering the hook until the stack faults. pthread_self() reads the
  * thread pointer and allocates nothing. */
 __AFL_NO_COV static inline int __afl_alloc_guarded(void) {
-    return __afl_guards_active && pthread_equal(__afl_guard_owner, pthread_self());
+    return __afl_guards_active &&
+           pthread_equal(__atomic_load_n(&__afl_guard_owner, __ATOMIC_RELAXED), pthread_self());
 }
 
 __AFL_NO_COV static void __afl_alloc_hook(const volatile void *p, size_t n) {
@@ -7722,7 +7737,12 @@ __AFL_NO_COV static void __afl_alloc_init(void) {
         __afl_alloc_ids[c] = __AFL_SYNTH_ID(h >> 32);
     }
     __afl_alloc_exe = __afl_in_main_exe();
-    __sanitizer_install_malloc_and_free_hooks(__afl_alloc_hook, __afl_free_hook);
+    /* The runtime keeps a small fixed table and returns 0 when it is full
+     * (several shim copies each installing one). A silent miss would look
+     * like a target with no allocation signal. */
+    if (!__sanitizer_install_malloc_and_free_hooks(__afl_alloc_hook, __afl_free_hook))
+        fputs("[afl_shim] --alloc-sizes: sanitizer malloc hook table full; "
+              "allocation-size edges disabled\n", stderr);
 }
 
 /* Auto-attach when loaded */
