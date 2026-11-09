@@ -9314,7 +9314,11 @@ class Fuzzer:
                 )
             returncode, stderr = self._run_target(seed)
             if self._is_crash(returncode, stderr):
-                self.crash_count += 1
+                # The replay pass in run() already counted and saved this
+                # seed's crash; counting it again reported 2 crashes for 1
+                # execution. save_crash dedups by signature, so calling it
+                # here only matters when a replay missed the crash.
+                self.save_crash(seed, returncode, stderr)
                 self._seed_crash_path()
                 continue
             if returncode == -1:  # timeout sentinel

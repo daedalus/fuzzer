@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -195,3 +196,31 @@ class TestPersistentStderr:  # 3
             rc, err = pr.run_one(b"X")
         assert rc == 1
         assert _runner().is_crash(rc, err)
+
+
+class TestCrashingSeed:  # 6
+    """A crashing seed is saved once and counted once.
+
+    Calibration used to count it again without saving, so 1 execution
+    reported 2 crashes. (Seeds are read from corpus/seeds/ only; a seed at
+    the corpus root is ignored and replaced by the AAAAAAAA default.)
+    """
+
+    def test_seed_crash_saved_and_counted_once(self, build, tmp_path):
+        exe = build(0)
+        corpus, out = tmp_path / "corpus", tmp_path / "out"
+        (corpus / "seeds").mkdir(parents=True)
+        (corpus / "seeds" / "seed").write_bytes(b"X" + b"A" * 15)
+        code = (
+            "import sys; from fuzzer_tool.cli.commands import main; "
+            "sys.argv = ['fuzzer-tool', 'fuzz', sys.argv[1], '-d', sys.argv[2], "
+            "'-o', sys.argv[3], '--max-execs', '1']; main()"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code, exe, str(corpus), str(out)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert len(list(out.glob("*.bin"))) == 1, r.stdout[-800:]
+        assert "crashes: 1" in r.stdout and "crashes: 2" not in r.stdout
