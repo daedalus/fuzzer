@@ -5633,6 +5633,7 @@ static int __afl_guard_signals[] = {
 static __thread sigjmp_buf *volatile __afl_guard_jmp = NULL;
 static __thread volatile sig_atomic_t __afl_guard_timed = 0;  /* active frame is timed */
 static volatile sig_atomic_t __afl_handlers_live = 0;
+static int __afl_guard_index(int sig);
 /* A guarded call is in flight, process-wide, and the thread running it.
  * Dispositions and exit() are process-wide; a worker the entry spawned has
  * no frame, so these route its exit() to the owner. Plain stores, not a
@@ -5929,6 +5930,40 @@ __AFL_GCC_NO_COV static void __afl_san_death(void) {
 #endif
 }
 
+/* ── Swallowed-signal marker ──────────────────────────────────────────
+ * A target that installs its own SIGSEGV/SIGABRT/... handler and then
+ * exits normally (a crash reporter, an AntiFuzz guard) turns a fault into
+ * exit 0 or exit 1: no signal death for the fuzzer to see. The shim keeps
+ * its own handler first in line and chains to the target's (see sigaction()
+ * below); before chaining it writes this line to stderr, and the runner
+ * reads it as a crash whatever the exit code. Async-signal-safe: write(2)
+ * of a stack buffer, no stdio. */
+#define __AFL_SWALLOW_MARK "__AFL_SHIM_FATAL_SIGNAL: "
+
+__AFL_GCC_NO_COV static void __afl_report_swallowed(int sig) {
+    char buf[64];
+    char *p = buf;
+    for (const char *m = __AFL_SWALLOW_MARK; *m; m++) *p++ = *m;
+    char digits[8];
+    int n = 0;
+    for (unsigned v = (unsigned)sig; v && n < 7; v /= 10) digits[n++] = (char)('0' + v % 10);
+    if (!n) digits[n++] = '0';
+    while (n) *p++ = digits[--n];
+    *p++ = '\n';
+    ssize_t r = write(2, buf, (size_t)(p - buf));
+    (void)r;
+}
+
+/* The target owns a real handler for the signal (not SIG_DFL/SIG_IGN):
+ * the one case where a death by the signal can be hidden from the parent. */
+__AFL_GCC_NO_COV static int __afl_target_handles(int sig) {
+    int i = __afl_guard_index(sig);
+    if (i < 0) return 0;
+    const struct sigaction *o = &__afl_old_handlers[i];
+    if (o->sa_flags & SA_SIGINFO) return o->sa_sigaction != NULL;
+    return o->sa_handler != SIG_DFL && o->sa_handler != SIG_IGN;
+}
+
 __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
     /* Flush before escaping, on every crash (see __afl_cmplog_crash_flush). */
     __afl_crash_flush();
@@ -5957,6 +5992,7 @@ __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *u
      * anything else (kill, abort, seccomp) is re-raised and delivered once
      * this handler returns. __afl_guarded_call re-arms later. */
     __afl_health[__AFL_HEALTH_STRAY_SIGNALS]++;
+    if (__afl_target_handles(sig)) __afl_report_swallowed(sig);
     __afl_restore_crash_handlers();
     if (__afl_is_hw_fault(sig, si))
         return;
@@ -6029,7 +6065,12 @@ __AFL_GCC_NO_COV static int __afl_guard_index(int sig) {
 __attribute__((visibility("hidden")))
 __AFL_GCC_NO_COV int (sigaction)(int sig, const struct sigaction *act, struct sigaction *old) {
     int i = __afl_guard_index(sig);
-    if (i < 0 || !__afl_guards_active || !__afl_handlers_live)
+    /* Not gated on a guard being active: a one-shot or forkserver child
+     * never enters one, and the target's handler then replaced ours, so a
+     * fault it swallowed (exit 0 / exit 1) was invisible to the parent.
+     * Kept as the previous owner instead; the crash handler reports the
+     * signal and chains to it. */
+    if (i < 0 || !__afl_handlers_live)
         return __afl_real_sigaction(sig, act, old);
 
     if (old) *old = __afl_old_handlers[i];

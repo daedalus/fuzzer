@@ -150,13 +150,18 @@ def test_regression_timeout_with_report_is_crash():
     assert TargetRunner(_fake_fuzzer()).is_crash(-1, REPORT)
 
 
+def test_infrastructure_failure_with_report_is_crash():
+    # rc -2 alone is noise, but a valid report that reached stderr first is
+    # the target's own crash; dropping it hid crashes behind ptrace failures.
+    assert TargetRunner(_fake_fuzzer()).is_crash(-2, REPORT)
+
+
 @pytest.mark.parametrize(
     "rc, stderr",
     [
         (-1, "timeout"),  # plain hang
         (-1, ""),  # forkserver hang sentinel
         (-1, "AddressSanitizer"),  # keyword without an error type
-        (-2, REPORT),  # infrastructure failure never vouches for a crash
     ],
 )
 def test_timeout_without_valid_report_is_not_crash(rc, stderr):

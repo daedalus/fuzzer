@@ -68,7 +68,39 @@ def signal_number(returncode: int) -> int:
 
 
 # Fault names a shell, libc or sanitizer prints when a process dies.
-CRASH_STDERR_MARKERS = ("SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS", "Segmentation fault", "Aborted")
+CRASH_STDERR_MARKERS = (
+    "SIGSEGV",
+    "SIGABRT",
+    "SIGFPE",
+    "SIGBUS",
+    "Segmentation fault",
+    "Aborted",
+    # A runtime CHECK failure (shadow-map mapping, bad rlimit, internal
+    # invariant) dies with exit 1 and no ERROR/SUMMARY header, so the report
+    # parser never sees it.
+    "Sanitizer CHECK failed",
+)
+
+# Written by the shim's crash handler (afl_shim.c __afl_report_swallowed)
+# just before it chains to a handler the target installed itself. Such a
+# handler may exit 0 or 1, so the exit code cannot be trusted to show the
+# fault; the marker can, unlike the free-form markers above, because the
+# shim only writes it from inside a real fatal signal.
+SHIM_FATAL_MARKER = "__AFL_SHIM_FATAL_SIGNAL: "
+
+
+def shim_fatal_signal(stderr: str) -> int | None:
+    """Signal number the shim saw the target swallow, or None."""
+    if SHIM_FATAL_MARKER not in stderr:
+        return None
+    tail = stderr.rsplit(SHIM_FATAL_MARKER, 1)[1]
+    digits = ""
+    for ch in tail:
+        if not ch.isdigit():
+            break
+        digits += ch
+    return int(digits) if digits else None
+
 
 # Adapter sentinels: -1 timeout, -2 infrastructure failure.
 _SENTINEL_CODES = (-1, -2)

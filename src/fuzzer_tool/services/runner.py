@@ -30,6 +30,7 @@ from fuzzer_tool.adapters.process import (
     run_target_fast,
     run_target_file,
     run_target_stdin,
+    shim_fatal_signal,
     signal_rc,
     stderr_crash_marker,
 )
@@ -805,7 +806,9 @@ class TargetRunner:
                     os.waitpid(pid, 0)
                 return -1, "timeout"
         except ChildProcessError:
-            return -2, ""
+            # Fall through: the finally below reads stderr, and a sanitizer
+            # report printed before the child vanished must not be dropped.
+            returncode = -2
         finally:
             stderr = b""
             try:
@@ -837,24 +840,30 @@ class TargetRunner:
             report = SanitizerReport.parse(stderr)
             if report and report.is_valid():
                 return True
+        if shim_fatal_signal(stderr) is not None:
+            return True
         return stderr_crash_marker(returncode, stderr) is not None
 
     def is_crash(self, returncode: int, stderr: str) -> bool:
         f = self.f
         f.last_report = None
-        if returncode == -2:
-            return False
 
-        # Parsed before the timeout check: a report that reached stderr
+        # Parsed before the sentinel checks: a report that reached stderr
         # before the deadline is a crash, not a hang (a masked crash whose
         # wrapper outlived the deadline -- Chalmers "Escaping the Fuzz"
-        # §5.3.1 saw these as AFL hangs).
-        report = SanitizerReport.parse(stderr)
+        # §5.3.1 saw these as AFL hangs), and one that reached stderr before
+        # an infrastructure failure (-2) is a crash, not noise.
+        report = SanitizerReport.parse(stderr) if stderr else None
         if report and report.is_valid():
             f.last_report = report
             return True
 
-        if returncode == -1:
+        # The shim saw a fatal signal and chained to the target's own
+        # handler, which may have exited 0 or 1 (blind to every check below).
+        if shim_fatal_signal(stderr) is not None:
+            return True
+
+        if returncode in (-1, -2):
             return False
 
         if returncode in SIGNAL_CRASH_CODES or returncode in f.extra_crash_codes:

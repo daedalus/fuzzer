@@ -23,11 +23,13 @@ Protocol:
   - Runner reads result from SHM, resumes target with SIGCONT
 """
 
+import contextlib
 import ctypes
 import logging
 import os
 import signal
 import struct
+import tempfile
 import time
 
 from fuzzer_tool.adapters import libc_shm
@@ -37,6 +39,9 @@ log = logging.getLogger(__name__)
 
 IPC_RMID = libc_shm.IPC_RMID
 IPC_PRIVATE = libc_shm.IPC_PRIVATE
+
+# Most stderr kept per iteration; a sanitizer report fits well inside this.
+_STDERR_TAIL = 64 * 1024
 
 
 class PersistentRunner:
@@ -57,6 +62,24 @@ class PersistentRunner:
         self.shm_id: int | None = None
         self.shm_ptr: int = 0
         self._started = False
+        # Target stderr lands here, not in /dev/null: an ASAN report followed
+        # by exit(1) (abort_on_error=0) is otherwise indistinguishable from
+        # a clean exit, since the exit code alone carries no crash signal.
+        self._err = None
+        self._err_off = 0
+
+    def _read_stderr(self) -> str:
+        """Stderr the target wrote since the current iteration began."""
+        if self._err is None:
+            return ""
+        try:
+            size = os.fstat(self._err.fileno()).st_size
+            start = max(self._err_off, size - _STDERR_TAIL)
+            if size <= start:
+                return ""
+            return os.pread(self._err.fileno(), size - start, start).decode(errors="replace")
+        except OSError:
+            return ""
 
     def start(self) -> bool:
         if self._started:
@@ -82,6 +105,9 @@ class PersistentRunner:
         env["__AFL_SHM_ID"] = str(self.shm_id)
 
         stdin_r, stdin_w = os.pipe()
+        self._err = tempfile.TemporaryFile()  # noqa: SIM115 - closed in _cleanup_shm
+        self._err_off = 0
+        err_fd = self._err.fileno()
         pid = os.fork()
         if pid == 0:
             # Everything here runs in the forked child, which shares the
@@ -98,7 +124,7 @@ class PersistentRunner:
                 os.close(stdin_w)
                 devnull = os.open(os.devnull, os.O_WRONLY)
                 os.dup2(devnull, 1)
-                os.dup2(devnull, 2)
+                os.dup2(err_fd, 2)
                 os.close(devnull)
                 os.execve(self.target, [self.target], env)
             except BaseException:
@@ -140,6 +166,9 @@ class PersistentRunner:
         data_len = min(len(data), self.map_size - self.HEADER_SIZE - 4)
         buf = struct.pack("<I", data_len) + b"\x00" * 4 + data[:data_len]
         ctypes.memmove(self.shm_ptr, buf, len(buf))
+        if self._err is not None:
+            with contextlib.suppress(OSError):
+                self._err_off = os.fstat(self._err.fileno()).st_size
 
         try:
             os.kill(self.pid, signal.SIGUSR1)
@@ -155,10 +184,10 @@ class PersistentRunner:
 
             if os.WIFEXITED(status):
                 self._started = False
-                return os.WEXITSTATUS(status), "target exited"
+                return os.WEXITSTATUS(status), self._read_stderr() or "target exited"
             if os.WIFSIGNALED(status):
                 self._started = False
-                return signal_rc(os.WTERMSIG(status)), ""
+                return signal_rc(os.WTERMSIG(status)), self._read_stderr()
             if os.WIFSTOPPED(status):
                 sig = os.WSTOPSIG(status)
                 if sig in (signal.SIGSTOP, signal.SIGTRAP):
@@ -168,11 +197,12 @@ class PersistentRunner:
                         ctypes.POINTER(ctypes.c_int),
                     )
                     returncode = rc_ptr.contents.value
+                    err = self._read_stderr()
                     os.kill(self.pid, signal.SIGCONT)
-                    return returncode, ""
+                    return returncode, err
                 else:
                     self._started = False
-                    return -sig, ""
+                    return -sig, self._read_stderr()
 
         # Timeout: SIGKILL and reap
         try:
@@ -181,7 +211,7 @@ class PersistentRunner:
         except (ProcessLookupError, ChildProcessError):
             pass
         self._started = False
-        return -1, "timeout"
+        return -1, self._read_stderr() or "timeout"
 
     def stop(self):
         """Stop the target. SIGUSR2 is dead code for __AFL_LOOP targets — just SIGKILL."""
@@ -213,6 +243,9 @@ class PersistentRunner:
         if self.shm_id is not None:
             libc_shm.shmctl_rmid(self.shm_id)
             self.shm_id = None
+        if self._err is not None:
+            self._err.close()
+            self._err = None
 
     def __enter__(self):
         self.start()
