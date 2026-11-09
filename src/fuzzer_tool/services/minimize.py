@@ -35,6 +35,7 @@ from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.sdr import distinct_reps, reps_report
 from fuzzer_tool.core.seed_cut import seed_cut_report
+from fuzzer_tool.core.seed_knn import seed_knn_report
 from fuzzer_tool.core.set_cover import min_cover
 from fuzzer_tool.core.state_store import UnsafeStateError, safe_load
 
@@ -388,6 +389,7 @@ def minimize_corpus(
     edge_hist: Switch = Switch.OFF,
     edge_components: Switch = Switch.OFF,
     seed_cut: int = 0,
+    seed_knn: int = 0,
     count_items: CountItems = CountItems.OFF,
     hall: Switch = Switch.OFF,
     max_seed_bytes: int = 0,
@@ -425,6 +427,8 @@ def minimize_corpus(
             matrix after stripping near-universal edges; coverage mode only.
         seed_cut: K >= 2 prints a max-K-cut of the seed overlap graph (see
             core/seed_cut.py); 0=off; coverage mode only.
+        seed_knn: K >= 1 prints an approximate K-nearest-neighbour graph of the
+            seeds (see core/seed_knn.py); 0=off; coverage mode only.
         hall: ON adds a distinct seed per rare edge to the kept set (Hall
             matching, core/sdr.py) and prints the report; coverage mode only.
         max_seed_bytes: Seeds larger than this are kept unreplayed (0=off);
@@ -482,6 +486,7 @@ def minimize_corpus(
             edge_hist=edge_hist,
             edge_components=edge_components,
             seed_cut=seed_cut,
+            seed_knn=seed_knn,
             count_items=count_items,
             hall=hall,
             max_seed_bytes=max_seed_bytes,
@@ -558,6 +563,7 @@ def _minimize_with_coverage(
     edge_hist: Switch = Switch.OFF,
     edge_components: Switch = Switch.OFF,
     seed_cut: int = 0,
+    seed_knn: int = 0,
     count_items: CountItems = CountItems.OFF,
     hall: Switch = Switch.OFF,
     max_seed_bytes: int = 0,
@@ -685,6 +691,9 @@ def _minimize_with_coverage(
 
     if seed_cut:
         print(seed_cut_report({k: _edge_ids(e) for k, e in book.edges.items()}, seed_cut))
+
+    if seed_knn:
+        print(seed_knn_report({k: _edge_ids(e) for k, e in book.edges.items()}, seed_knn))
 
     # Unmeasured, so kept as-is.
     return _commit_results(

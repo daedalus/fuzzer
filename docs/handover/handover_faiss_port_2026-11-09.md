@@ -1,7 +1,7 @@
 # faiss: what can the fuzzer port? (analysis only)
 
-**Status (2026-11-09, master 0bc9d23f):** analysis, no code change, no
-layout bump. Nothing is implemented; the ranking below is a proposal.
+**Status (2026-11-09, master 0bc9d23f):** analysis, no layout bump. #1 was
+implemented afterwards (section at the end); #2 to #5 are not.
 
 ## Trigger
 
@@ -126,7 +126,48 @@ of this kind (`np.lexsort` in `_prune_edges`) were -8% and discarded.
 
 ## Open items
 
-- [ ] #1: paired comparison of exact `--edge-components` vs kNN-graph
-  components on fuzzgoat.
+- [x] #1: `--seed-knn` shipped; fuzzgoat comparison below.
 - [ ] #2: report-only DP buckets vs fixed ladder on real hit-count data.
 - [ ] #4: decide on a build route for faiss under sancov.
+
+## #1 implemented: `minimize -c --seed-knn K` (2026-11-09)
+
+`core/seed_knn.py`, tests `tests/test_seed_knn.py` (20). Report only.
+
+- **Premise corrected.** The analysis said a kNN graph is a cheaper input
+  for `seed_cut`, `edge_components` and the Fiedler code. Reading them
+  again: `edge_components` propagates labels over the seed-edge incidence and
+  `seed_cut` keeps an edge x group table; neither builds S x S. The graph is
+  a separate view (Jaccard-weighted, K nearest), not a speedup for them.
+- **Method.** MinHash (64 perms, hash of `dense id + 1`) after the
+  `STRIP_FRAC` strip; NN-descent rounds over neighbours, 5 reverse
+  neighbours and their neighbours; exact scan at <= 2048 seeds.
+- **Bug found by the tests.** Hashing the raw dense id gave 0 for id 0 in
+  every perm, so every seed holding that edge matched every other (sim = all
+  perms). Fixed with `id + 1`; `test_estimate_tracks_exact_jaccard` caught it.
+- **Fuzzgoat** (clang 18, 250 seeds -> 110 after twin collapse, 328 edges,
+  exhaustive mode, `STRIP_FRAC` 10%): exact components 14.
+
+  | K | graph components | exact comps split | seeds off main piece |
+  |---|---|---|---|
+  | 1 | 39 | 1 | 82 (75%) |
+  | 2 | 18 | 1 | 25 (23%) |
+  | 3 | 17 | 1 | 25 (23%) |
+  | 5 | 15 | 1 | 10 (9%) |
+  | 10 | 14 | 0 | 0 |
+
+  K >= 10 reproduces the exact components here; small K fragments them.
+  Edge ids are not reproducible between replays, so the K=5 percentage moved
+  between 9.1% and 9.2% across two runs.
+- **Synthetic, descent mode** (numpy 2.5, K=10, one core): 20,000 seeds x
+  ~290 edges: 6.5 s, 11 rounds, recall 96%, peak RSS 417 MB. 100,000 seeds x
+  ~190 edges: 38.8 s, hit the 12-round cap (0.33% changed), recall 86.3%,
+  peak RSS 1.25 GB (mostly the synthetic book). In the 20k case the exact
+  graph is one component (random edges bridge clusters) while the kNN graph
+  recovers the 50 planted clusters; the report's "off main piece" figure
+  reads 98% there and is not a loss.
+- **Not measured:** descent mode on a real corpus; png_read and ffmpeg; any
+  consumer of the graph; estimate error beyond the 512-perm test (mean
+  abs error < 0.03).
+- Rule 41: opt-in report, no per-exec path touched. Rule 44:
+  `architecture.png` not updated.

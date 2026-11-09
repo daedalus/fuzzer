@@ -1719,6 +1719,13 @@ def cmd_minimize(args):
     if seed_cut and not args.coverage:
         print("[!] --seed-cut needs -c/--coverage: no edge data without it", file=sys.stderr)
 
+    seed_knn = getattr(args, "seed_knn", 0) or 0
+    if seed_knn < 0:
+        print("[!] --seed-knn needs K >= 1: ignored", file=sys.stderr)
+        seed_knn = 0
+    if seed_knn and not args.coverage:
+        print("[!] --seed-knn needs -c/--coverage: no edge data without it", file=sys.stderr)
+
     hall = Switch.ON if getattr(args, "hall", False) else Switch.OFF
     if hall is Switch.ON and not args.coverage:
         print("[!] --hall needs -c/--coverage: no edge data without it", file=sys.stderr)
@@ -1747,6 +1754,7 @@ def cmd_minimize(args):
         edge_hist=edge_hist,
         edge_components=edge_comp,
         seed_cut=seed_cut,
+        seed_knn=seed_knn,
         count_items=count_mode,
         hall=hall,
         max_seed_bytes=args.max_seed_bytes,
@@ -7455,6 +7463,15 @@ def main() -> int:
         metavar="K",
         help="With -c: split the seeds into K >= 2 groups so that seeds sharing edges land in "
         "different groups (max-K-cut of the overlap graph) and print the cut weight",
+    )
+    min_parser.add_argument(
+        "--seed-knn",
+        type=int,
+        default=0,
+        metavar="K",
+        help="With -c: build the approximate K-nearest-neighbour graph of the seeds "
+        "(MinHash + NN-descent, no NxN matrix) and print its recall and how its components "
+        "compare with the exact ones",
     )
     min_parser.add_argument(
         "--hall",
