@@ -79,6 +79,10 @@ CRASH_STDERR_MARKERS = (
     # invariant) dies with exit 1 and no ERROR/SUMMARY header, so the report
     # parser never sees it.
     "Sanitizer CHECK failed",
+    # Runtimes that report a fatal error and exit with an ordinary code: Rust
+    # panic=unwind (101), Go panic (2). Needs a nonzero exit like the rest.
+    "panicked at ",
+    "goroutine 1 [running]",
 )
 
 # Written by the shim's crash handler (afl_shim.c __afl_report_swallowed)
