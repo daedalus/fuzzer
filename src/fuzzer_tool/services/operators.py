@@ -7380,6 +7380,10 @@ class OperatorEngine:
         if f._frameshift.relations:
             f._frameshift.apply_to_buffer(buf)
         self._learn_restore(data, buf)
+        # Digests first: a checksum may cover a rebuilt root.
+        merkle = getattr(f, "_merkle_sites", None)
+        if merkle is not None:
+            merkle.apply(data, buf, self.ctx._rng)
         # Last, so the checksum covers every edit this round made.
         sites = getattr(f, "_cksum_sites", None)
         if sites is not None:

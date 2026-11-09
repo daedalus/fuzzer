@@ -1251,6 +1251,7 @@ def cmd_fuzz(args):
         op_line_code=getattr(args, "op_line_code", False),
         rq_xor_key=getattr(args, "rq_xor_key", False),
         checksum_sites=getattr(args, "checksum_sites", False),
+        merkle_sites=getattr(args, "merkle_sites", False),
         grimoire=getattr(args, "grimoire", False),
         grimoire_max_execs=getattr(args, "grimoire_max_execs", 512),
         zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
@@ -3026,6 +3027,7 @@ _HAIL_MARY_FLAGS = (
     "op_line_code",
     "rq_xor_key",
     "checksum_sites",
+    "merkle_sites",
     "grimoire",
     "op_afl_det",
     "grammar_boltzmann",
@@ -7125,6 +7127,15 @@ def main() -> int:
             "Locate checksum fields (CRC-32, Adler-32, CRC-16, Fletcher-16, "
             "16-bit sum) on each seed and recompute them in every mutant "
             "(TaintScope-style repair). Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--merkle-sites",
+        action="store_true",
+        help=(
+            "Locate Merkle links (SHA-256 / SHA-256d, optional RFC 6962 tags, "
+            "odd node self-paired, body digests) on each seed and rebuild them "
+            "in every mutant of the same length. Off by default."
         ),
     )
     fuzz_parser.add_argument(

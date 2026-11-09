@@ -747,6 +747,27 @@ REGISTRY.register(
 )
 
 
+def _activate_merkle_sites(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.merkle_sites import MerkleBook
+
+    f._merkle_sites = MerkleBook()
+
+
+def _deactivate_merkle_sites(f: FuzzerLike) -> None:
+    f._merkle_sites = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="merkle_sites",
+        category="format_recovery",
+        activate=_activate_merkle_sites,
+        deactivate=_deactivate_merkle_sites,
+        available=lambda f: bool(getattr(f, "merkle_sites", False)),
+    )
+)
+
+
 def _activate_grimoire(f: FuzzerLike) -> None:
     from fuzzer_tool.services.grimoire import GrimoireStage
 

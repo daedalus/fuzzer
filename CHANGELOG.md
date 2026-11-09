@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--merkle-sites`: Merkle link repair** (`core/merkle_sites.py`, `analyzer_registry` spec `merkle_sites`): finds 32-byte fields equal to SHA-256 / SHA-256d of a region (LEAF) or of two 32-byte fields (NODE; RFC 6962 tags, self-paired odd node, body digest at either end) on each seed, and rebuilds them bottom-up in every same-length mutant (`REPAIR_P=0.9`). Runs before `--checksum-sites`. Off by default; in `--hail-mary`.
 - **Directed A/B harness** (`tools/lib/bench_paired.py`, `tools/lib/eval_set.py`): `--metric tte_<kind>` (first `exec_count` of a sanitizer crash kind per cell, censored at `iters + 1`, lower wins), arms `dist-harmonic`/`dist-reach`/`dist-harmonic-ctl`, sets `fuzzgoat_dir279`/`fuzzgoat_dir258`. Every cell now gets its own `--crashes` dir: the shared `~/fuzzing/<target>/crashes` re-synced earlier cells' signatures. `tests/test_bench_paired_directed.py`.
 
 - **Reaching-probability directed metric** (`--distance-metric reach-prob`, `core/analyzers/analyzer_distance.py`): SelectFuzz (S&P '23) block fitness, P(b) = mean P over distinct successors, scored as `-log2 P`; replaces the in-function harmonic CFG distance only. Postorder Gauss-Seidel (exact on DAGs), numpy Jacobi for loops. Unmeasured. `tests/test_distance_reach_prob.py`.

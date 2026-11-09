@@ -1843,6 +1843,7 @@ class Fuzzer:
         op_line_code=False,
         rq_xor_key=False,
         checksum_sites=False,
+        merkle_sites=False,
         grimoire=False,
         grimoire_max_execs=512,
         # AFL deterministic sweep as an arbitrated arm (T1-1, core/mutations/afl_det.py)
@@ -2427,6 +2428,7 @@ class Fuzzer:
 
         set_xor_key_stage(XorKeyStage.ON if rq_xor_key else XorKeyStage.OFF)
         self.checksum_sites = checksum_sites
+        self.merkle_sites = merkle_sites
         self.grimoire = grimoire
         self.grimoire_max_execs = grimoire_max_execs
         self.op_afl_det = op_afl_det

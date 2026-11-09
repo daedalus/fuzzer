@@ -272,6 +272,7 @@
 - [ ] **`sql_mutate` sniffer misses leading comments** — `-- x\nSELECT 1` is SQL but not claimed; the 2% bootstrap trickle is its only path there.
 
 - [ ] **A/B `--checksum-sites`** (2026-10-04) — shipped unmeasured on a real target. Needs a target that rejects bad CRCs (png/zlib/gzip decoder): paired run vs previous commit, compare edges behind the check and the share of mutants passing it. 8-bit XOR/sum/neg-sum tail fields shipped 2026-10-08 (`TestChecksum8`); open: ASCII-hex LRC (NMEA `*hh`, Intel HEX, Modbus ASCII), non-tail 8-bit fields, nested/size-dependent regions, hints on later locates, sites for `FrameShift`-style length edits before a HEAD+PREFIX field.
+- [ ] **A/B `--merkle-sites`** (2026-11-09) — shipped unmeasured on a real target. Needs a target that verifies a hash tree or digest trailer (torrent v2 piece layers, CT/RFC 6962 proofs, Bitcoin block txs): paired run vs previous commit, compare edges behind the check and the share of mutants passing it. Open: SHA-512 / BLAKE / keccak, non-adjacent children, off-grid leaves, length-changing edits (rebuild layers), a digest-like prefilter on node windows to cut locate time.
 
 - [ ] **A/B `--grimoire`** (2026-10-04) — shipped unmeasured. Needs a paired run (`tools/lib/bench_paired.py` arm) on a text/structured target (grep/sqlite/js-like) vs previous commit; also persist the book across `--resume`, and a grammar export (backlog P3-6) for the Boltzmann sampler.
 

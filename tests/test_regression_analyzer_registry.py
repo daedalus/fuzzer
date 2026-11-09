@@ -52,6 +52,7 @@ _FLAG_GATED = {
     "pll",
     "recurrence",
     "checksum_sites",
+    "merkle_sites",
     "grimoire",
     "byte_interaction",
     "field_hmm",
@@ -275,6 +276,10 @@ class TestFlagGatedAnalyzers:
     def test_checksum_sites_on_when_requested(self):
         f = _build_fuzzer(checksum_sites=True)
         assert type(f._cksum_sites).__name__ == "SiteBook"
+
+    def test_merkle_sites_on_when_requested(self):
+        f = _build_fuzzer(merkle_sites=True)
+        assert type(f._merkle_sites).__name__ == "MerkleBook"
 
     def test_pll_on_when_requested(self):
         f = _build_fuzzer(pll=True)
