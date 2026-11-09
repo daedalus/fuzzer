@@ -29,7 +29,12 @@ import numpy as np
 WEIGHTINGS = ("binary", "rarity", "core_stripped")
 DEFAULT_CORE_FRAC = 0.9
 DEFAULT_TOL = 1e-10
-DEFAULT_MAX_ITER = 1000
+DEFAULT_MAX_ITER = 200  # Lanczos steps; basis memory is steps x n_seeds floats
+LANCZOS_CHECK_EVERY = 3
+LANCZOS_CHECK_EARLY = 8  # steps checked every time: big-gap operators stop here
+BREAKDOWN_REL = 1e-12
+MAX_ROUNDS = 16
+GOLDEN = 0.6180339887498949
 
 
 def compact_columns(rows: Sequence[np.ndarray]) -> tuple[list[np.ndarray], int]:
@@ -143,6 +148,68 @@ def column_weights(
     return w
 
 
+def _start_vec(n: int, rnd: int, locked: np.ndarray) -> np.ndarray:
+    """Deterministic generic start, deflated against ``locked`` (n x p)."""
+    v = np.cos(np.pi * (np.arange(n) + 0.5) * (rnd + 1) * GOLDEN)
+    v -= locked @ (locked.T @ v)
+    nrm = float(np.linalg.norm(v))
+    return v / nrm if nrm > BREAKDOWN_REL else np.zeros(n)
+
+
+def _lanczos(
+    mv,
+    start: np.ndarray,
+    locked: np.ndarray,
+    want: int,
+    tol: float,
+    max_steps: int,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Top ``want`` Ritz pairs of symmetric ``mv`` on span(start) \\ locked.
+
+    One-pass Lanczos with full reorthogonalisation: the basis lives in one
+    ``(steps+1) x n`` array (steps <= ``max_steps``), so memory stays
+    bounded. Stops when the top ``want`` Ritz residuals ``|β_j s_last|`` are
+    <= ``tol`` x the largest Ritz value, or on breakdown (invariant
+    subspace, Ritz pairs exact). Returns ``(values desc, vectors as
+    columns, steps)``; ``steps`` is the matvec count.
+    """
+    n = start.shape[0]
+    cap = max(1, min(max_steps, n - locked.shape[1]))
+    basis = np.empty((cap + 1, n))
+    basis[0] = start
+    alpha = np.zeros(cap)
+    beta = np.zeros(cap)
+    for j in range(cap):
+        q = basis[j]
+        w = mv(q)
+        alpha[j] = float(q @ w)
+        w -= alpha[j] * q
+        if j:
+            w -= beta[j - 1] * basis[j - 1]
+        w -= basis[: j + 1].T @ (basis[: j + 1] @ w)
+        w -= locked @ (locked.T @ w)
+        beta[j] = float(np.linalg.norm(w))
+        steps = j + 1
+        scale = float(np.abs(alpha[:steps]).max())
+        broke = beta[j] <= BREAKDOWN_REL * max(scale, 1e-300)
+        due = steps <= LANCZOS_CHECK_EARLY or steps % LANCZOS_CHECK_EVERY == 0
+        if not (broke or steps == cap or due):
+            basis[j + 1] = w / beta[j]
+            continue
+        t = np.diag(alpha[:steps])
+        if steps > 1:
+            off = beta[: steps - 1]
+            t += np.diag(off, 1) + np.diag(off, -1)
+        theta, s = np.linalg.eigh(t)
+        top = np.argsort(theta)[::-1][:want]
+        theta, s = theta[top], s[:, top]
+        res = beta[j] * np.abs(s[-1])
+        if broke or steps == cap or bool(np.all(res <= tol * max(abs(theta[0]), 1e-300))):
+            return theta, basis[:steps].T @ s, steps
+        basis[j + 1] = w / beta[j]
+    raise AssertionError("unreachable: the last step always returns")
+
+
 def top_eigenpair(
     inc: Incidence,
     power: int = 1,
@@ -151,29 +218,22 @@ def top_eigenpair(
 ) -> tuple[float, np.ndarray, int]:
     """Dominant eigenpair of ``B`` (``power=1``) or ``C`` (``power=2``).
 
-    Power iteration from the all-ones vector (no RNG: ``B`` is non-negative,
-    so the start has a component along the Perron vector unless ``B`` is
-    zero). Returns ``(eigenvalue, unit eigenvector >= 0, iterations)``; the
-    eigenvector is the eigenvector-centrality score of each seed.
+    Lanczos from the all-ones vector (no RNG: ``B`` is non-negative, so the
+    start has a component along the Perron vector unless ``B`` is zero).
+    ``max_iter`` caps the Lanczos steps (= matvecs). Returns ``(eigenvalue,
+    unit eigenvector >= 0, steps)``; the eigenvector is the
+    eigenvector-centrality score of each seed.
     """
     mv = inc.matvec_c if power == 2 else inc.matvec_b
     n = inc.n_seeds
-    v = np.full(n, 1.0 / np.sqrt(n)) if n else np.zeros(0)
-    lam = 0.0
-    for it in range(1, max_iter + 1):
-        w = mv(v)
-        nrm = float(np.linalg.norm(w))
-        if nrm == 0.0:
-            return 0.0, np.zeros(n), it
-        w /= nrm
-        lam_new = float(w @ mv(w))
-        done = abs(lam_new - lam) <= tol * max(abs(lam_new), 1.0) and float(
-            np.linalg.norm(w - v)
-        ) <= np.sqrt(tol)
-        v, lam = w, lam_new
-        if done:
-            return lam, v, it
-    return lam, v, max_iter
+    if n == 0:
+        return 0.0, np.zeros(0), 0
+    none = np.zeros((n, 0))
+    theta, vecs, steps = _lanczos(mv, np.full(n, 1.0 / np.sqrt(n)), none, 1, tol, max_iter)
+    if theta[0] <= 0.0:
+        return 0.0, np.zeros(n), steps
+    v = np.maximum(vecs[:, 0] * (1.0 if vecs[:, 0].sum() >= 0.0 else -1.0), 0.0)
+    return float(theta[0]), v / np.linalg.norm(v), steps
 
 
 def top_k_eigenpairs(
@@ -182,35 +242,35 @@ def top_k_eigenpairs(
     tol: float = 1e-9,
     max_iter: int = 300,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Top-``k`` eigenpairs of ``B`` by block subspace iteration + Rayleigh-Ritz.
+    """Top-``k`` eigenpairs of ``B`` by Lanczos with deflation rounds.
 
-    The start block is a deterministic, non-degenerate pattern (columns of a
-    cosine basis), so results are reproducible without an RNG. Memory is
-    O(S·k) and each iteration costs ``k`` matvecs. Returns ``(eigenvalues
-    descending, eigenvectors as columns)``. ``k`` is clipped to ``n_seeds``.
+    One Krylov space sees each distinct eigenvalue once, so round ``r`` runs
+    Lanczos from a fresh deterministic start orthogonal to every pair found
+    so far; the loop ends when a round's best value no longer beats the
+    current ``k``-th (repeated eigenvalues are caught this way, up to
+    ``max(MAX_ROUNDS, k)`` rounds). Memory is O(S·steps + S·found). Returns
+    ``(eigenvalues descending, eigenvectors as columns)``; ``k`` is clipped
+    to ``n_seeds``.
     """
     n = inc.n_seeds
     k = max(0, min(int(k), n))
     if k == 0:
         return np.zeros(0), np.zeros((n, 0))
-    idx = (np.arange(n)[:, None] + 0.5) * np.arange(k)[None, :]
-    q, _ = np.linalg.qr(np.cos(np.pi * idx / n))
-    prev = np.zeros(k)
-    vals = prev
-    for _ in range(max_iter):
-        z = np.column_stack([inc.matvec_b(q[:, j]) for j in range(k)])
-        q, _ = np.linalg.qr(z)
-        t = np.column_stack([inc.matvec_b(q[:, j]) for j in range(k)])
-        small = q.T @ t
-        small = (small + small.T) / 2.0
-        vals, vecs = np.linalg.eigh(small)
-        order = np.argsort(vals)[::-1]
-        vals, vecs = vals[order], vecs[:, order]
-        q = q @ vecs
-        if np.all(np.abs(vals - prev) <= tol * np.maximum(np.abs(vals), 1.0)):
+    locked = np.zeros((n, 0))
+    found = np.zeros(0)
+    for rnd in range(max(MAX_ROUNDS, k)):
+        start = _start_vec(n, rnd, locked)
+        if not start.any():
             break
-        prev = vals
-    return vals, q
+        vals, vecs, _ = _lanczos(inc.matvec_b, start, locked, k, tol, max_iter)
+        kth = np.sort(found)[::-1][k - 1] if found.size >= k else -np.inf
+        beaten = float(vals[0]) > kth + tol * max(abs(float(vals[0])), 1e-300)
+        locked = np.column_stack([locked, vecs])
+        found = np.concatenate([found, vals])
+        if not beaten or locked.shape[1] >= n:
+            break
+    order = np.argsort(found)[::-1][:k]
+    return found[order], locked[:, order]
 
 
 def hub_scores(inc: Incidence) -> tuple[np.ndarray, np.ndarray]:
