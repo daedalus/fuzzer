@@ -14,11 +14,15 @@ from fuzzer_tool.core.byte_pca import (
     DROP_LEADING,
     MAX_COMPONENTS,
     MAX_ROWS,
+    MIN_AGREEMENT,
     MIN_ROWS,
     SKETCH_COLS,
+    adjusted_rand,
     byte_groups,
+    group_stability,
     sketch_row,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 
 BASE = np.arange(1, 1500)
 REJECT = np.arange(50_000, 50_300)
@@ -140,3 +144,74 @@ class TestAdversarial:
         offs, rows, _ = _fields(per_field=MAX_ROWS // 2, reject=0, n_fields=3)
         assert rows.shape[0] > MAX_ROWS
         assert byte_groups(offs, rows) is None
+
+
+class TestAdjustedRand:
+    def test_identical_partitions_score_one_under_relabelling(self):
+        a = np.array([0, 0, 1, 1, 2, 2])
+        assert adjusted_rand(a, np.array([5, 5, 9, 9, 7, 7])) == 1.0
+
+    def test_trivial_partitions(self):
+        assert adjusted_rand(np.zeros(5, int), np.zeros(5, int)) == 1.0
+        assert adjusted_rand(np.arange(5), np.arange(5)) == 1.0
+        assert adjusted_rand(np.zeros(5, int), np.arange(5)) == 0.0
+
+    def test_hand_computed_value(self):
+        # a = {0,1}{2,3}  b = {0,1,2}{3}: sum_ij=1 sum_a=2 sum_b=3 total=6
+        # expected = 2*3/6 = 1; top = 2.5 -> (1-1)/(2.5-1) = 0
+        assert adjusted_rand(np.array([0, 0, 1, 1]), np.array([0, 0, 0, 1])) == 0.0
+
+    def test_length_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            adjusted_rand(np.zeros(3, int), np.zeros(4, int))
+
+
+class TestGroupStability:
+    def test_declines_exactly_when_byte_groups_declines(self):
+        offs, rows, _ = _fields(per_field=1, reject=0, n_fields=MIN_ROWS - 1)
+        assert group_stability(offs, rows, RandPool(seed=1)) is None
+
+    def test_planted_fields_are_stable(self):
+        offs, rows, _ = _fields()
+        st = group_stability(offs, rows, RandPool(seed=3))
+        assert st is not None and st.stable and st.agreement >= MIN_AGREEMENT
+
+    def test_noise_rows_are_unstable(self):
+        """Structure-free rows must not be called stable: the bootstrap
+        regroups them differently every time."""
+        rng = np.random.default_rng(0)
+        rows = rng.integers(-5, 5, size=(40, SKETCH_COLS)).astype(np.int16)
+        st = group_stability(np.arange(40), rows, RandPool(seed=3))
+        assert st is not None and not st.stable and st.agreement < MIN_AGREEMENT
+
+    def test_gaps_match_the_eigenvalues(self):
+        offs, rows, _ = _fields()
+        st = group_stability(offs, rows, RandPool(seed=3), resamples=0)
+        y = rows.astype(np.float64)
+        y -= y.mean(axis=0)
+        w = np.sort(np.linalg.eigvalsh(y @ y.T))[::-1]
+        start = DROP_LEADING
+        want = (w[start : start + st.gaps.size] - w[start + 1 : start + 1 + st.gaps.size]) / w[
+            start : start + st.gaps.size
+        ]
+        assert np.allclose(st.gaps, want, atol=1e-9)
+        assert st.resamples == 0 and st.agreement == 1.0
+
+    def test_degenerate_only_counts_components_that_hold_bytes(self):
+        offs, rows, _ = _fields()
+        st = group_stability(offs, rows, RandPool(seed=3))
+        used = {int(c) // 2 for c in byte_groups(offs, rows).comp}
+        assert set(st.degenerate) <= used
+
+    def test_does_not_change_byte_groups(self):
+        offs, rows, _ = _fields()
+        before = byte_groups(offs, rows)
+        group_stability(offs, rows, RandPool(seed=3))
+        after = byte_groups(offs, rows)
+        assert (before.offsets == after.offsets).all() and (before.comp == after.comp).all()
+
+    def test_same_seed_same_result(self):
+        offs, rows, _ = _fields(keep=0.5)
+        a = group_stability(offs, rows, RandPool(seed=11))
+        b = group_stability(offs, rows, RandPool(seed=11))
+        assert a.agreement == b.agreement and (a.gaps == b.gaps).all()
