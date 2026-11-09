@@ -1455,8 +1455,15 @@ __AFL_GCC_NO_COV uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
  * call site in the binary), so a slot collision just costs one redundant
  * dladdr() call on the next hit; it is never a correctness problem, since
  * the `ra` tag check catches the mismatch and re-resolves. */
-//#define __AFL_CTX_CACHE_SIZE 256
-#define __AFL_CTX_CACHE_SIZE 65536
+/* Slot count, a power of two (the index is a mask). Only used when
+ * FUZZER_KEEP_ASLR=1 selects base-relative mode; the default raw-address
+ * mode never reaches dladdr(). 16384 slots (256 KiB of BSS) sits on the EPS
+ * plateau measured on ffmpeg 9.0.2 (clang): ~1% above the collision-free
+ * dladdr() count, while 256-1024 lose 10-22% EPS and larger tables only add
+ * page-fault cost. Scale to ~16x the target's distinct call sites. */
+#define __AFL_CTX_CACHE_SIZE 16384
+_Static_assert((__AFL_CTX_CACHE_SIZE & (__AFL_CTX_CACHE_SIZE - 1)) == 0,
+               "__AFL_CTX_CACHE_SIZE must be a power of two");
 
 static struct {
     uintptr_t ra;
@@ -1468,9 +1475,7 @@ __AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
     /* Return addresses are instruction-aligned (>=2 bytes on every arch
      * this shim targets), so the low bits never disambiguate two distinct
      * call sites -- drop them before folding into a slot index. */
-    /* uint32_t slot = (uint32_t)((key >> 2) % __AFL_CTX_CACHE_SIZE); */
-    uint32_t slot = (uint32_t)((key >> 2) & (__AFL_CTX_CACHE_SIZE-1));
-
+    uint32_t slot = (uint32_t)((key >> 2) & (__AFL_CTX_CACHE_SIZE - 1));
     if (__afl_ctx_base_cache[slot].ra == key) return __afl_ctx_base_cache[slot].base;
     Dl_info info;
     uintptr_t base = 0;
