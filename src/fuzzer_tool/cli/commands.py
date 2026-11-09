@@ -1712,6 +1712,13 @@ def cmd_minimize(args):
     if edge_comp is Switch.ON and not args.coverage:
         print("[!] --edge-components needs -c/--coverage: no edge data without it", file=sys.stderr)
 
+    seed_cut = getattr(args, "seed_cut", 0) or 0
+    if seed_cut == 1 or seed_cut < 0:
+        print("[!] --seed-cut needs K >= 2: ignored", file=sys.stderr)
+        seed_cut = 0
+    if seed_cut and not args.coverage:
+        print("[!] --seed-cut needs -c/--coverage: no edge data without it", file=sys.stderr)
+
     hall = Switch.ON if getattr(args, "hall", False) else Switch.OFF
     if hall is Switch.ON and not args.coverage:
         print("[!] --hall needs -c/--coverage: no edge data without it", file=sys.stderr)
@@ -1739,6 +1746,7 @@ def cmd_minimize(args):
         rng=rng,
         edge_hist=edge_hist,
         edge_components=edge_comp,
+        seed_cut=seed_cut,
         count_items=count_mode,
         hall=hall,
         max_seed_bytes=args.max_seed_bytes,
@@ -7439,6 +7447,14 @@ def main() -> int:
         action="store_true",
         help="With -c: print connected components of the seed Gram matrix "
         "(seeds sharing an edge) after stripping edges held by >10%% of seeds",
+    )
+    min_parser.add_argument(
+        "--seed-cut",
+        type=int,
+        default=0,
+        metavar="K",
+        help="With -c: split the seeds into K >= 2 groups so that seeds sharing edges land in "
+        "different groups (max-K-cut of the overlap graph) and print the cut weight",
     )
     min_parser.add_argument(
         "--hall",
