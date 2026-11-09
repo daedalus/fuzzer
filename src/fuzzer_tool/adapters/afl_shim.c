@@ -1455,7 +1455,9 @@ __AFL_GCC_NO_COV uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
  * call site in the binary), so a slot collision just costs one redundant
  * dladdr() call on the next hit; it is never a correctness problem, since
  * the `ra` tag check catches the mismatch and re-resolves. */
-#define __AFL_CTX_CACHE_SIZE 256
+//#define __AFL_CTX_CACHE_SIZE 256
+#define __AFL_CTX_CACHE_SIZE 65536
+
 static struct {
     uintptr_t ra;
     uintptr_t base;
@@ -1466,7 +1468,9 @@ __AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
     /* Return addresses are instruction-aligned (>=2 bytes on every arch
      * this shim targets), so the low bits never disambiguate two distinct
      * call sites -- drop them before folding into a slot index. */
-    uint32_t slot = (uint32_t)((key >> 2) % __AFL_CTX_CACHE_SIZE);
+    /* uint32_t slot = (uint32_t)((key >> 2) % __AFL_CTX_CACHE_SIZE); */
+    uint32_t slot = (uint32_t)((key >> 2) & (__AFL_CTX_CACHE_SIZE-1));
+
     if (__afl_ctx_base_cache[slot].ra == key) return __afl_ctx_base_cache[slot].base;
     Dl_info info;
     uintptr_t base = 0;
