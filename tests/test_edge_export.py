@@ -143,7 +143,11 @@ def test_running_stats(tmp_path, monkeypatch, capsys):
 
 
 def test_reports_avg_and_max_edges_per_seed(tmp_path, monkeypatch, capsys):
-    """Summary line: mean and peak edges per replayed seed, from the ids written."""
+    """Summary line: mean and peak edges of any ONE seed, from the ids written.
+
+    Falsification for cumulative accounting: counts 3, 1, 4 -> max 4, not the
+    running total 8.
+    """
     seeds = {"a": b"abc", "b": b"zz", "c": b"\x01\x02\x03\x04"}
     corpus, out = _setup(tmp_path, monkeypatch, seeds)
 
@@ -153,7 +157,8 @@ def test_reports_avg_and_max_edges_per_seed(tmp_path, monkeypatch, capsys):
     line = capsys.readouterr().out.split("\r")[-1]
     assert f"avg {sum(counts) / len(counts):.1f}" in line
     assert f"max {max(counts)}" in line
-    assert f"({len(seeds)} seeds)" in line
+    assert f"max {sum(counts)}" not in line
+    assert f"(over {len(seeds)} seeds)" in line
 
 
 def test_avg_counts_edgeless_seeds_and_ignores_skipped(tmp_path, monkeypatch, capsys):
@@ -169,7 +174,7 @@ def test_avg_counts_edgeless_seeds_and_ignores_skipped(tmp_path, monkeypatch, ca
     line = capsys.readouterr().out.split("\r")[-1]
     assert "avg 2.0" in line
     assert "max 4" in line
-    assert "(2 seeds)" in line
+    assert "(over 2 seeds)" in line
 
 
 def test_table_sized_by_target_and_touched_scan_past_crossover(tmp_path, monkeypatch):

@@ -366,8 +366,8 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
     # Only a measured run has a figure: an all-edgeless corpus is the blackout guard's case.
     if total_ids:
         print(
-            f"[*] Edges per seed: avg {total_ids / len(done):.1f}, "
-            f"max {max_ids} ({len(done)} seeds)"
+            f"[*] Per-seed edges: avg {total_ids / len(done):.1f}, "
+            f"max {max_ids} (over {len(done)} seeds)"
         )
     if skipped:
         print(f"[*] Already exported: {skipped} seeds skipped")
