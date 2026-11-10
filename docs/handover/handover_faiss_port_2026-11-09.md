@@ -127,7 +127,7 @@ of this kind (`np.lexsort` in `_prune_edges`) were -8% and discarded.
 ## Open items
 
 - [x] #1: `--seed-knn` shipped; fuzzgoat comparison below.
-- [ ] #2: report-only DP buckets vs fixed ladder on real hit-count data.
+- [x] #2: `tools/count_buckets.py` shipped; fuzzgoat result below. png_read/ffmpeg still open.
 - [ ] #4: decide on a build route for faiss under sancov.
 
 ## #1 implemented: `minimize -c --seed-knn K` (2026-11-09)
@@ -171,3 +171,39 @@ of this kind (`np.lexsort` in `_prune_edges`) were -8% and discarded.
   abs error < 0.03).
 - Rule 41: opt-in report, no per-exec path touched. Rule 44:
   `architecture.png` not updated.
+
+## #2 implemented: `tools/count_buckets.py` (2026-11-09)
+
+`core/kmeans1d.py` (DP, `optimal_buckets`, `partition_cost`) + the tool. Tests
+`tests/test_kmeans1d.py` (42, vs brute force over every partition) and
+`tests/test_count_buckets.py` (19). Report only.
+
+- **Data.** Per-exec count of every (edge, exec) pair, saturated at 255; not
+  the summed spectrum of `edge_hit_spectrum.py`, which mixes execs.
+  `replay` got an optional `tap`.
+- **Fuzzgoat** (clang 18 sancov, `fuzzgoat_read_noasan`, 250 inputs, 24,407
+  pairs, 82 distinct counts, max 233, 92.6% of pairs at count <= 3). Control:
+  two replays give identical histograms.
+
+  | scale | ladder unexplained | DP (k=9) unexplained | k_match |
+  |---|---|---|---|
+  | log | 0.695% | 0.368% | 8 |
+  | linear | 3.717% | 1.660% | 7 |
+
+  DP boundaries (log): `1 2 3 4-5 6-8 9-14 15-29 30-68 71-233`. On log, DP
+  needs 7 buckets for 0.77% and 5 for 2.4%.
+- **Reading.** The ladder spends 9 buckets and the DP matches its error with
+  8 (log): one bucket saved, not a different shape. The DP puts its cuts
+  lower (4-5, 6-8 vs 4-7, 8-15) because this corpus has little mass above 30.
+  That is a property of one small target.
+- **Bugs found.** (1) `-o` on an existing file kept the old data
+  (`EdgePickleWriter` skips keys already on disk): a first, failed run left an
+  all-zero histogram that two later runs reloaded. `save` now replaces the
+  file. (2) `k_match` used an absolute tolerance; singleton buckets cost
+  ~1e-13 from rounding, so it is now relative to total variance.
+  (3) `.json` files are skipped by `discover_seed_files`
+  (`_SEED_SKIP_SUFFIXES`); `tools/corpus_fuzzgoat.py` writes `.json`, so the
+  replay found 0 inputs until the corpus was staged as `seeds/id_*`.
+- **Not measured:** png_read, ffmpeg or any corpus with high counts; any
+  effect on discovery (no fuzz run, so no `AB_LEDGER` row); `--count-aware`
+  with other boundaries. Rule 44: `architecture.png` not updated (report tool).

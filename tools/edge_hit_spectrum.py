@@ -112,13 +112,35 @@ def collect(
     return sp
 
 
+def tapped(
+    counts: Callable[[], dict[int, int]],
+    tap: Callable[[dict[int, int]], None] | None,
+) -> Callable[[], dict[int, int]]:
+    """*counts* that also hands each exec's counts to *tap*; unchanged if None."""
+    if tap is None:
+        return counts
+
+    def read() -> dict[int, int]:
+        got = counts()
+        tap(got)
+        return got
+
+    return read
+
+
 def _corpus(corpus: Path) -> list[bytes]:
     """Corpus bytes, oldest first: mtime is the fuzzer's discovery order."""
     files = sorted(_discover_corpus_files(corpus), key=lambda p: p.stat().st_mtime_ns)
     return [p.read_bytes() for p in files]
 
 
-def replay(target: str, corpus: Path, timeout: float, ctx: Ctx) -> Spectrum:
+def replay(
+    target: str,
+    corpus: Path,
+    timeout: float,
+    ctx: Ctx,
+    tap: Callable[[dict[int, int]], None] | None = None,
+) -> Spectrum:
     """Spawn *target* per input on one SHM segment; file-mode input."""
     disable_aslr()  # caller-context ids hash return addresses
     shm = ShmCoverage(estimate_map_size(target))
@@ -137,7 +159,7 @@ def replay(target: str, corpus: Path, timeout: float, ctx: Ctx) -> Spectrum:
         return run_target_file(target, data, timeout, tmp, [], env=env)
 
     try:
-        return collect(_corpus(corpus), run, shm.get_edge_counts)
+        return collect(_corpus(corpus), run, tapped(shm.get_edge_counts, tap))
     finally:
         shm.cleanup()
         shutil.rmtree(tmp, ignore_errors=True)
