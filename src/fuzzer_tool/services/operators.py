@@ -1663,6 +1663,29 @@ class OperatorEngine:
             bit_idx = bit_offset & 7
             buf[byte_idx] ^= 1 << bit_idx
 
+    # ── zzuf -r: ratio-driven bit flips, one arm per decade ────────────
+    def _op_ratio_flip_e5(self, buf, _byte_idx, _data):
+        return self._ratio_flip(buf, "ratio_flip_e5")
+
+    def _op_ratio_flip_e4(self, buf, _byte_idx, _data):
+        return self._ratio_flip(buf, "ratio_flip_e4")
+
+    def _op_ratio_flip_e3(self, buf, _byte_idx, _data):
+        return self._ratio_flip(buf, "ratio_flip_e3")
+
+    def _op_ratio_flip_e2(self, buf, _byte_idx, _data):
+        return self._ratio_flip(buf, "ratio_flip_e2")
+
+    def _ratio_flip(self, buf, bucket):
+        """Flip Binomial(8n, r) bits, r log-uniform in *bucket*'s decade."""
+        from fuzzer_tool.core.mutations.ratio_flip import RATIO_BUCKETS, ratio_flip
+
+        if not buf:
+            return None
+        lo, hi = RATIO_BUCKETS[bucket]
+        # Length-preserving: no max_len clamp needed.
+        return bytearray(ratio_flip(bytes(buf), self.ctx._rng, lo, hi))
+
     def _op_simd_boundary(self, buf, _byte_idx, _data):
         """Resize buffer to SIMD boundary lengths (AVX2: 32, SSE2: 16)."""
         rng = self.ctx._rng

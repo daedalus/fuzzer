@@ -802,16 +802,25 @@ class TestCoinFlipRewrite:
     def test_only_two_operators_remain_genuinely_continuous(self):
         """Regression floor: a coin flip reappearing here should fail loudly.
 
-        ``block_shuffle_variable`` draws real ``expovariate`` gap lengths
-        and ``webm_chunk_mutate`` packs ``random() * 10`` into an IEEE
-        double for a WEBM float field -- both are genuine continuous
-        values, not probability thresholds, so neither is rewritten.
+        Name kept for history: the set outgrew "two". ``block_shuffle_variable``
+        draws real ``expovariate`` gap lengths, ``webm_chunk_mutate`` packs
+        ``random() * 10`` into an IEEE double for a WEBM float field, and the
+        ``ratio_flip_*`` arms draw a log-uniform flip density ``r`` -- all
+        genuine continuous values, not probability thresholds, so none is
+        rewritten.
         """
         names = _operator_names()
         continuous = [
             n for n in names if _enumerate_operator(n, self.SEED, self.MAX_LEN)[0] == "continuous"
         ]
-        assert set(continuous) == {"block_shuffle_variable", "webm_chunk_mutate"}
+        assert set(continuous) == {
+            "block_shuffle_variable",
+            "webm_chunk_mutate",
+            "ratio_flip_e2",
+            "ratio_flip_e3",
+            "ratio_flip_e4",
+            "ratio_flip_e5",
+        }
 
 
 class TestMaxLenEscapes:

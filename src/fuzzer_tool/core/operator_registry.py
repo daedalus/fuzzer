@@ -48,6 +48,11 @@ _CATEGORIES: dict[str, set[str]] = {
         "bit_shift",
         "span_invert",
         "bit_repack",
+        # zzuf -r: one arm per decade of flip ratio, 1e-5 .. 1e-1
+        "ratio_flip_e5",
+        "ratio_flip_e4",
+        "ratio_flip_e3",
+        "ratio_flip_e2",
         "bit_swap_8",
         "bit_swap_16",
         "bit_swap_32",
