@@ -142,6 +142,36 @@ def test_running_stats(tmp_path, monkeypatch, capsys):
         assert field in line
 
 
+def test_reports_avg_and_max_edges_per_seed(tmp_path, monkeypatch, capsys):
+    """Summary line: mean and peak edges per replayed seed, from the ids written."""
+    seeds = {"a": b"abc", "b": b"zz", "c": b"\x01\x02\x03\x04"}
+    corpus, out = _setup(tmp_path, monkeypatch, seeds)
+
+    edge_export.export_edges("t", str(corpus), [str(out)])
+
+    counts = [len(_expected(d)) for d in seeds.values()]
+    line = capsys.readouterr().out.split("\r")[-1]
+    assert f"avg {sum(counts) / len(counts):.1f}" in line
+    assert f"max {max(counts)}" in line
+    assert f"({len(seeds)} seeds)" in line
+
+
+def test_avg_counts_edgeless_seeds_and_ignores_skipped(tmp_path, monkeypatch, capsys):
+    """Adversarial: an edgeless seed is one replayed seed (avg 2.0, not 4.0); an
+    already-exported seed is not replayed, so it must not move the average."""
+    corpus, out = _setup(tmp_path, monkeypatch, {"a": b"abc"})
+    edge_export.export_edges("t", str(corpus), [str(out)])
+
+    (corpus / "seeds" / "e").write_bytes(b"")
+    (corpus / "seeds" / "f").write_bytes(b"wxyz")
+    edge_export.export_edges("t", str(corpus), [str(out)])
+
+    line = capsys.readouterr().out.split("\r")[-1]
+    assert "avg 2.0" in line
+    assert "max 4" in line
+    assert "(2 seeds)" in line
+
+
 def test_table_sized_by_target_and_touched_scan_past_crossover(tmp_path, monkeypatch):
     """Perf regression: a target-sized table makes the per-seed full-table walk
     the dominant cost (edge-dump 1647 -> 864 seeds/s at 524288 entries), so past

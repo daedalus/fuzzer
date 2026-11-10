@@ -317,6 +317,8 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
         n, done_of = _progress_basis(limit, seeds.total, done)
         start_time = time.time()
         unique: set[int] = set()
+        total_ids = 0
+        max_ids = 0
         peak_rss_kb = _maxrss_kb()
         i = -1
         for i, data in enumerate(seeds):
@@ -333,6 +335,9 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
             ids = shm.edge_id_array()
             out.add(key, ids)
             unique.update(ids.tolist())
+            total_ids += ids.size
+            if ids.size > max_ids:
+                max_ids = ids.size
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
 
             if (i + 1) % _TRIM_EVERY == 0:
@@ -358,6 +363,12 @@ def _replay_all(seeds, target, timeout, file_mode, target_args, exec_mode, func,
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     print()
+    # Only a measured run has a figure: an all-edgeless corpus is the blackout guard's case.
+    if total_ids:
+        print(
+            f"[*] Edges per seed: avg {total_ids / len(done):.1f}, "
+            f"max {max_ids} ({len(done)} seeds)"
+        )
     if skipped:
         print(f"[*] Already exported: {skipped} seeds skipped")
     if timeouts:
