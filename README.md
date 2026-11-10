@@ -10,7 +10,7 @@
 
 ## Architecture
 
-![fuzzer-tool subsystem architecture](docs/images/architecture.png)
+![fuzzer-tool subsystem architecture](docs/images/architecture.svg)
 
 The campaign loop runs down the dark spine — pick a seed, mutate it, execute it, measure what
 came back — and the coloured edges on the right are the return paths that close it:

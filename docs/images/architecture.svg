@@ -17,27 +17,27 @@
 <g id="clust2" class="cluster">
 <title>cluster_sched</title>
 <path fill="#f2f8f4" stroke="#bcd0c4" stroke-width="1.3" d="M196,-787.5C196,-787.5 1436,-787.5 1436,-787.5 1442,-787.5 1448,-793.5 1448,-799.5 1448,-799.5 1448,-882.5 1448,-882.5 1448,-888.5 1442,-894.5 1436,-894.5 1436,-894.5 196,-894.5 196,-894.5 190,-894.5 184,-888.5 184,-882.5 184,-882.5 184,-799.5 184,-799.5 184,-793.5 190,-787.5 196,-787.5"/>
-<text text-anchor="middle" x="288.5" y="-881.7" font-family="Helvetica Bold" font-size="11.00" fill="#33604a">1 · Scheduling &#160;&#160;— &#160;&#160;what to fuzz next</text>
+<text text-anchor="middle" x="288" y="-881.7" font-family="Helvetica Bold" font-size="11.00" fill="#33604a">1 · Scheduling &#160;&#160;— &#160;&#160;what to fuzz next</text>
 </g>
 <g id="clust3" class="cluster">
 <title>cluster_mut</title>
 <path fill="#f4f4fa" stroke="#c3c6da" stroke-width="1.3" d="M621,-649.5C621,-649.5 1436,-649.5 1436,-649.5 1442,-649.5 1448,-655.5 1448,-661.5 1448,-661.5 1448,-744.5 1448,-744.5 1448,-750.5 1442,-756.5 1436,-756.5 1436,-756.5 621,-756.5 621,-756.5 615,-756.5 609,-750.5 609,-744.5 609,-744.5 609,-661.5 609,-661.5 609,-655.5 615,-649.5 621,-649.5"/>
-<text text-anchor="middle" x="738.5" y="-743.7" font-family="Helvetica Bold" font-size="11.00" fill="#454a75">2 · Mutation &#160;&#160;— &#160;&#160;250+ operators / 9 categories</text>
+<text text-anchor="middle" x="738" y="-743.7" font-family="Helvetica Bold" font-size="11.00" fill="#454a75">2 · Mutation &#160;&#160;— &#160;&#160;250+ operators / 9 categories</text>
 </g>
 <g id="clust4" class="cluster">
 <title>cluster_exec</title>
 <path fill="#fbf4f4" stroke="#d9c2c2" stroke-width="1.3" d="M1468,-449.5C1468,-449.5 1720,-449.5 1720,-449.5 1726,-449.5 1732,-455.5 1732,-461.5 1732,-461.5 1732,-1031.5 1732,-1031.5 1732,-1037.5 1726,-1043.5 1720,-1043.5 1720,-1043.5 1468,-1043.5 1468,-1043.5 1462,-1043.5 1456,-1037.5 1456,-1031.5 1456,-1031.5 1456,-461.5 1456,-461.5 1456,-455.5 1462,-449.5 1468,-449.5"/>
-<text text-anchor="middle" x="1498.5" y="-1030.7" font-family="Helvetica Bold" font-size="11.00" fill="#7a4a4a">3 · Execution</text>
+<text text-anchor="middle" x="1498" y="-1030.7" font-family="Helvetica Bold" font-size="11.00" fill="#7a4a4a">3 · Execution</text>
 </g>
 <g id="clust5" class="cluster">
 <title>cluster_fb</title>
 <path fill="#f2f7fa" stroke="#b9cbd8" stroke-width="1.3" d="M1891,-8C1891,-8 2607,-8 2607,-8 2613,-8 2619,-14 2619,-20 2619,-20 2619,-871.5 2619,-871.5 2619,-877.5 2613,-883.5 2607,-883.5 2607,-883.5 1891,-883.5 1891,-883.5 1885,-883.5 1879,-877.5 1879,-871.5 1879,-871.5 1879,-20 1879,-20 1879,-14 1885,-8 1891,-8"/>
-<text text-anchor="middle" x="1976.5" y="-870.7" font-family="Helvetica Bold" font-size="11.00" fill="#37596e">4 · Feedback &#160;&#160;— &#160;&#160;what came back</text>
+<text text-anchor="middle" x="1976" y="-870.7" font-family="Helvetica Bold" font-size="11.00" fill="#37596e">4 · Feedback &#160;&#160;— &#160;&#160;what came back</text>
 </g>
 <g id="clust6" class="cluster">
 <title>cluster_corpus</title>
 <path fill="#f7f4fa" stroke="#cfc6d8" stroke-width="1.3" d="M1611,-129.5C1611,-129.5 1821,-129.5 1821,-129.5 1827,-129.5 1833,-135.5 1833,-141.5 1833,-141.5 1833,-213.5 1833,-213.5 1833,-219.5 1827,-225.5 1821,-225.5 1821,-225.5 1611,-225.5 1611,-225.5 1605,-225.5 1599,-219.5 1599,-213.5 1599,-213.5 1599,-141.5 1599,-141.5 1599,-135.5 1605,-129.5 1611,-129.5"/>
-<text text-anchor="middle" x="1657.5" y="-212.7" font-family="Helvetica Bold" font-size="11.00" fill="#5a4a6b">5 · Corpus lifecycle</text>
+<text text-anchor="middle" x="1657" y="-212.7" font-family="Helvetica Bold" font-size="11.00" fill="#5a4a6b">5 · Corpus lifecycle</text>
 </g>
 <g id="clust7" class="cluster">
 <title>cluster_crash</title>

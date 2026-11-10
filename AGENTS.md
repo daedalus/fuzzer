@@ -69,7 +69,7 @@ fuzzer, not just the target.
 41. Always check that the new features implemented or bug fixes do not introduce speed penalty regressions.
 42. When implementing new features always think of edge cases for the tests.
 43. Always maintain succinct, brief, down to the point and updated documentation.
-44. When adding, removing or wiring a new subsystem update `architecture.png`.
+44. When adding, removing or wiring a new subsystem update `architecture.svg`.
 45. Every time a new source `file.py` is created run `lizard --CCN=15 file.py` and fix warnings.
 46. **Always run the control against itself; it's what exposes a broken oracle.** Whenever a test compares an implementation against a reference — two samples, two policies, old code as oracle — also compare the reference against a second run of *itself*, and assert that control passes first. A control that fails means the comparison is wrong, not the code.
     - Measured here: comparing two Thompson selection policies with `stats.chisquare(obs, exp)` treats one sample's counts as fixed frequencies, halves the variance and roughly doubles chi2. It reported `chi2=526` on 264 arms (df 264, p=0.0000) for two implementations that were in fact identical.
@@ -160,7 +160,7 @@ fuzzer, not just the target.
 | `vulture --min-confidence 80 .` | Find duplicated code |
 | `tools/find_dup_tests.py [PATH ...]` | Identical-body tests (AST, docstrings ignored); cross-file hits may bind different per-file names |
 | `fuzzer-tool fuzz <target> -d <corpus> --max-execs <n> --profile-hotpath [--profile-mode cprofile\|sample\|perf] [--profile-out PATH]` | Hotpath profile of the fuzz run: cProfile tables (default), low-overhead stack sampler (collapsed stacks), or perf trampoline; dump defaults to `/tmp/fuzzer_hotpath.prof` |
-| `dot -Tpng -Gdpi=130 docs/architecture.dot -o docs/images/architecture.png && dot -Tsvg docs/architecture.dot -o docs/images/architecture.svg` | Rebuild the architecture png/svg |
+| `dot -Tsvg docs/architecture.dot -o docs/images/architecture.svg` | Rebuild the architecture svg |
 
 ## Layout
 

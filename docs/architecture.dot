@@ -1,8 +1,7 @@
 // fuzzer-tool subsystem architecture.
 //
 // Regenerate with:
-//   dot -Tpng -Gdpi=130 docs/architecture.dot -o docs/images/architecture.png
-//   dot -Tsvg            docs/architecture.dot -o docs/images/architecture.svg
+//   dot -Tsvg docs/architecture.dot -o docs/images/architecture.svg
 //
 // Node labels carry the real module paths under src/fuzzer_tool/, so the
 // diagram can be checked against the tree rather than trusted. Boxes are
