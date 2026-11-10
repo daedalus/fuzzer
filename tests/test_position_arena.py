@@ -41,6 +41,7 @@ from fuzzer_tool.core.schedulers.pos_cmplog import PositionCmplogScheduler
 from fuzzer_tool.core.schedulers.pos_consolidated import PositionConsolidatedScheduler
 from fuzzer_tool.core.schedulers.pos_context import PositionContextScheduler
 from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
+from fuzzer_tool.core.schedulers.pos_emeans import PositionEMeansScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_good_turing import PositionGoodTuringScheduler
@@ -606,6 +607,7 @@ def _arena(
     saliency=None,
     harmonic=None,
     kadane=None,
+    emeans=None,
     learn=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
@@ -636,6 +638,7 @@ def _arena(
         saliency=saliency,
         harmonic=harmonic,
         kadane=kadane,
+        emeans=emeans,
         learn=learn,
     )
 
@@ -1029,6 +1032,7 @@ class TestPool:
             saliency=PositionSaliencyScheduler(RandPool(seed=1), lambda: []),
             harmonic=PositionHarmonicScheduler(RandPool(seed=1)),
             kadane=PositionKadaneScheduler(RandPool(seed=1)),
+            emeans=PositionEMeansScheduler(RandPool(seed=1)),
             learn=PositionLearnScheduler(RandPool(seed=1), moved=lambda d: None, emit_tokens=list),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
@@ -1251,6 +1255,21 @@ class TestSettle:
         arena2 = PositionArena(f, region_fn=lambda d, n: 55, kadane=arm, arms=["uniform"])
         arena2.settle(SEED, [700], Outcome.GAIN, weight=1.0, score=1.0)
         assert arm.scores(SEED, len(SEED)) is None
+
+    def test_emeans_is_credited_off_policy(self):
+        arm = PositionEMeansScheduler(RandPool(seed=1))
+        f, arena = self._played(emeans=arm)
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert arm.centroids(SEED) is None  # a miss carries no point
+        arena.settle(SEED, [700], Outcome.GAIN, weight=1.0, score=1.0)
+        assert arm.centroids(SEED)[0][0] == 700
+
+    def test_emeans_left_out_of_subset_is_not_credited(self):
+        arm = PositionEMeansScheduler(RandPool(seed=1))
+        f, _ = _arena(emeans=arm)
+        arena2 = PositionArena(f, region_fn=lambda d, n: 55, emeans=arm, arms=["uniform"])
+        arena2.settle(SEED, [700], Outcome.GAIN, weight=1.0, score=1.0)
+        assert arm.centroids(SEED) is None
 
     def test_learn_is_credited_off_policy(self):
         # The picker was sensitivity, not learn; a kept path still unfreezes.
@@ -1737,6 +1756,16 @@ class TestRealConstruction:
         f = self._build(tmp_path, elo="all", position_arena=True, pos_kadane=True)
         assert isinstance(f._pos_kadane, PositionKadaneScheduler)
         assert "kadane" in f._position_arena.pool()
+
+    def test_position_arena_does_not_imply_emeans(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert f._pos_emeans is None
+        assert "emeans" not in f._position_arena.pool()
+
+    def test_pos_emeans_builds_and_joins_the_arena(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_emeans=True)
+        assert isinstance(f._pos_emeans, PositionEMeansScheduler)
+        assert "emeans" in f._position_arena.pool()
 
     def test_position_arena_does_not_imply_learn(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True)

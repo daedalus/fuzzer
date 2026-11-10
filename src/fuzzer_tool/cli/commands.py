@@ -932,6 +932,7 @@ def cmd_fuzz(args):
         packed_edges=getattr(args, "packed_edges", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
+        pos_emeans=getattr(args, "pos_emeans", False),
         pos_pca=getattr(args, "pos_pca", False),
         pos_learn=getattr(args, "pos_learn", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
@@ -2755,6 +2756,10 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the Kadane
 # window arm has only a synthetic check, no paired run on a real target.
 #
+# pos_emeans (--pos-emeans) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the e-means
+# codebook arm has only a synthetic check, no paired run on a real target.
+#
 # pos_pca (--pos-pca) is excluded as unmeasured (see
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the PCA group arm
 # has only a synthetic planted-group check, no paired run on a real target.
@@ -4247,6 +4252,15 @@ def main() -> int:
         "contiguous run of bins holding the most gains above the seed's pooled gain "
         "rate (core/schedulers/pos_kadane.py). Opt-in: NOT implied by --position-arena "
         "or --hail-mary (unmeasured). Joins the arena pool when --position-arena is on.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-emeans",
+        action="store_true",
+        help="Enable the position-arena e-means scheduler: offsets drawn from an "
+        "EMA-trained 1-D codebook of the offsets that gained (cosine-annealed step, "
+        "arXiv:2611.09501; core/schedulers/pos_emeans.py). Opt-in: NOT implied by "
+        "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
+        "--position-arena is on.",
     )
     fuzz_parser.add_argument(
         "--pos-learn",

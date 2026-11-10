@@ -268,6 +268,8 @@ ARMS: dict[str, list[str]] = {
     "pos-arena-harmonic": _ARENA + ["--pos-harmonic", "--pos-arena-arms", "uniform,harmonic"],
     # Kadane is opt-in like saliency: --pos-kadane plus the subset that admits it.
     "pos-arena-kadane": _ARENA + ["--pos-kadane", "--pos-arena-arms", "uniform,kadane"],
+    # e-means codebook is opt-in like kadane: --pos-emeans plus the subset that admits it.
+    "pos-arena-emeans": _ARENA + ["--pos-emeans", "--pos-arena-arms", "uniform,emeans"],
     # PCA is opt-in like kadane; the byteflip pass it reads is on by default.
     "pos-arena-pca": _ARENA + ["--pos-pca", "--pos-arena-arms", "uniform,pca"],
     # LearnAFL path mask is opt-in like kadane.
@@ -402,6 +404,7 @@ ARM_BASELINES: dict[str, str] = {
     "pos-arena-centroid-j90": "pos-arena-uniform",
     "pos-arena-harmonic": "pos-arena-uniform",
     "pos-arena-kadane": "pos-arena-uniform",
+    "pos-arena-emeans": "pos-arena-uniform",
     "pos-arena-pca": "pos-arena-uniform",
     "pos-arena-learn": "pos-arena-uniform",
     "splice-gravity": "baseline",

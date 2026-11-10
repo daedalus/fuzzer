@@ -104,6 +104,10 @@ Arms::
                  bins with the most gain above the seed's pooled rate
                  (Kadane over per-bin excess; opt-in, --pos-kadane, NOT
                  implied by --position-arena; see core/schedulers/pos_kadane.py)
+    emeans       PositionEMeansScheduler, offsets from an EMA-trained 1-D
+                 codebook of the seed's gain offsets (e-means, arXiv:2611.09501;
+                 opt-in, --pos-emeans, NOT implied by --position-arena; see
+                 core/schedulers/pos_emeans.py)
     learn        PositionLearnScheduler, LearnAFL's path mask: frozen bytes while
                  the mask changes, mutable bytes (frozen ones restored) once
                  stable (opt-in, --pos-learn, NOT implied by --position-arena;
@@ -132,7 +136,7 @@ served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
 ``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci``,
-``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask``, ``centroid``, ``good_turing``, ``saliency``, ``harmonic``, ``kadane``, ``learn`` and ``consolidated`` are each
+``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask``, ``centroid``, ``good_turing``, ``saliency``, ``harmonic``, ``kadane``, ``emeans``, ``learn`` and ``consolidated`` are each
 credited off-policy on every settled round, whoever served the positions, like
 ``seed_canary`` on the seed side.
 """
@@ -182,6 +186,7 @@ POSITION_STRATEGY_NAMES = (
     "saliency",
     "harmonic",
     "kadane",
+    "emeans",
     "consolidated",
     "learn",
 )
@@ -241,6 +246,7 @@ class PositionArena:
         saliency: PositionScheduler | None = None,
         harmonic: PositionScheduler | None = None,
         kadane: PositionScheduler | None = None,
+        emeans: PositionScheduler | None = None,
         learn: PositionScheduler | None = None,
     ) -> None:
         self._f = f
@@ -277,6 +283,7 @@ class PositionArena:
         self._saliency = saliency if self.allows("saliency") else None
         self._harmonic = harmonic if self.allows("harmonic") else None
         self._kadane = kadane if self.allows("kadane") else None
+        self._emeans = emeans if self.allows("emeans") else None
         self._learn = learn if self.allows("learn") else None
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
@@ -301,6 +308,7 @@ class PositionArena:
                 self._saliency,
                 self._harmonic,
                 self._kadane,
+                self._emeans,
                 self._learn,
                 self._consolidated,
             )

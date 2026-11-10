@@ -954,6 +954,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("harmonic")
     if getattr(f, "_pos_kadane", None) is not None:
         names.append("kadane")
+    if getattr(f, "_pos_emeans", None) is not None:
+        names.append("emeans")
     if getattr(f, "_pos_learn", None) is not None:
         names.append("learn")
     if getattr(f, "_pos_consolidated", None) is not None:
@@ -2097,6 +2099,10 @@ class Fuzzer:
         seed_gram_mode="peripheral",
         # --alloc-sizes: shim allocation-size edges (__AFL_ALLOC_SIZES). Appended.
         alloc_sizes=False,
+        # Position-arena e-means arm (core/schedulers/pos_emeans.py): EMA codebook
+        # of gain offsets. Opt-in, not implied by position_arena or --hail-mary.
+        # Appended.
+        pos_emeans=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3779,6 +3785,16 @@ class Fuzzer:
 
             self._pos_kadane = PositionKadaneScheduler(self._rng)
             log.info("Position kadane scheduling enabled")
+        # Position-arena e-means: offsets from an EMA-trained 1-D codebook of the
+        # gain offsets (arXiv:2611.09501). Opt-in only (unmeasured): neither
+        # position_arena nor --hail-mary builds it. Needs only the rng. Off-policy
+        # extra, not persisted.
+        self._pos_emeans = None
+        if pos_emeans:
+            from fuzzer_tool.core.schedulers.pos_emeans import PositionEMeansScheduler
+
+            self._pos_emeans = PositionEMeansScheduler(self._rng)
+            log.info("Position emeans scheduling enabled")
         # Position-arena LearnAFL arm (core/schedulers/pos_learn.py): path mask
         # from kept-path rounds. Opt-in only (unmeasured). Off-policy extra,
         # not persisted; frozen runs feed the auto-dictionary.
@@ -3852,6 +3868,7 @@ class Fuzzer:
                 saliency=self._pos_saliency,
                 harmonic=self._pos_harmonic,
                 kadane=self._pos_kadane,
+                emeans=self._pos_emeans,
                 learn=self._pos_learn,
                 finch=self._pos_finch,
                 pca=self._pos_pca,
