@@ -124,6 +124,7 @@ _CATEGORIES: dict[str, set[str]] = {
     },
     "structural": {
         "seq_mutate",
+        "seq_rule",
         "splice",
         "splice_diff_located",
         "bit_cross",
@@ -972,6 +973,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "region_shuffle": _region_sized,
     # sequence edits need a message-boundary model; sniffed from the input
     "seq_mutate": _has_msgs,
+    "seq_rule": _has_msgs,
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
     "gradient_descent": _has_cmplog_pairs,

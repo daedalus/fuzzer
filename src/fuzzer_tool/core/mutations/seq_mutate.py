@@ -29,7 +29,7 @@ _DELIMS = (
     (b"\n", MIN_MSGS_WEAK),
 )
 
-_MODES = ("swap", "dup", "drop", "splice")
+_MODES = ("swap", "dup", "drop", "splice", "flood", "id_shift", "replay")
 
 
 def _walk_frames(data: bytes, fmt: str, width: int, inclusive: bool) -> list[bytes] | None:
@@ -125,7 +125,86 @@ def _splice(msgs, rng, donor):
     return msgs
 
 
-_APPLY = {"swap": _swap, "dup": _dup, "drop": _drop, "splice": _splice}
+def _flood(msgs, rng, _donor):
+    """Duplicate one message N times (5Greplay's nb_copies flood)."""
+    src = rng.randint(0, len(msgs) - 1)
+    copies = rng.randint(1, 8)  # nb_copies: 1-8 copies
+    dst = rng.randint(0, len(msgs))
+    for _ in range(copies):
+        msgs.insert(dst, msgs[src])
+    return msgs
+
+
+def _id_shift(msgs, rng, _donor):
+    """Find a repeated value across messages and rewrite it consistently.
+
+    5Greplay's rule 6 does `ran_ue_id + 100`. This finds any byte sequence
+    that appears in at least 2 messages and shifts it by a delta.
+    """
+    if len(msgs) < 2:
+        return None
+
+    # Find common byte sequences (4-8 bytes) across messages
+    # Use a simple approach: look for identical substrings in multiple messages
+    candidates = []
+    for _i, msg in enumerate(msgs):
+        for j in range(len(msg) - 3):
+            substr = msg[j : j + 4]
+            if len(substr) == 4:
+                count = sum(1 for m in msgs if substr in m)
+                if count >= 2:
+                    candidates.append((substr, j, count))
+
+    if not candidates:
+        return None
+
+    # Pick a candidate that appears in multiple messages
+    substr, offset, _ = rng.choice(candidates)
+
+    # Generate a shift delta (±1 to ±255)
+    delta = rng.randint(-255, 255)
+    if delta == 0:
+        delta = 1
+
+    # Apply the shift to all occurrences in all messages
+    for i in range(len(msgs)):
+        pos = msgs[i].find(substr)
+        while pos >= 0:
+            old_val = int.from_bytes(msgs[i][pos : pos + 4], "big")
+            new_val = (old_val + delta) & 0xFFFFFFFF
+            msgs[i] = msgs[i][:pos] + new_val.to_bytes(4, "big") + msgs[i][pos + 4 :]
+            pos = msgs[i].find(substr, pos + 4)
+
+    return msgs
+
+
+def _replay(msgs, rng, _donor):
+    """Insert an earlier message later in the stream (NAS security-mode replay).
+
+    5Greplay's rule 4 replays NAS Security Mode COMPLETE after COMMAND.
+    This picks a message from earlier in the stream and re-inserts it later.
+    """
+    if len(msgs) < 3:
+        return None
+
+    # Pick a source message from the first half
+    src_idx = rng.randint(0, len(msgs) // 2)
+    # Pick a destination position in the second half
+    dst_idx = rng.randint(len(msgs) // 2 + 1, len(msgs))
+
+    msgs.insert(dst_idx, msgs[src_idx])
+    return msgs
+
+
+_APPLY = {
+    "swap": _swap,
+    "dup": _dup,
+    "drop": _drop,
+    "splice": _splice,
+    "flood": _flood,
+    "id_shift": _id_shift,
+    "replay": _replay,
+}
 
 
 def seq_mutate(data: bytes, rng, max_len: int, donor: bytes | None = None) -> bytes | None:

@@ -16,7 +16,7 @@ integrity check passes and the mutant reaches the code behind it.
 patches only a trailing field; this module locates the field and the region.
 
 Limits (all deliberate):
-- Fixed algorithms only: CRC-32, Adler-32, CRC-16 (CCITT-false, XMODEM),
+- Fixed algorithms only: CRC-32, Adler-32, CRC-32C (Castagnoli), CRC-16 (CCITT-false, XMODEM),
   Fletcher-16, 16-bit sum, and 8-bit XOR (LRC), sum, negated sum.
 - 8-bit fields match by chance 1 in 256, so they are tried only at the tail,
   only over ``STARTS8`` or after a found field, and only when a nonzero
@@ -54,6 +54,7 @@ class Algo(Enum):
     XOR8 = "xor8"  # LRC: ISO 7816 TCK, many serial frames
     SUM8 = "sum8"
     NEG8 = "neg8"  # two's-complement sum: Modbus ASCII / Intel HEX LRC
+    CRC32C = "crc32c"  # Castagnoli polynomial 0x1EDC6F41 (reflected: 0x82F63B78)
 
 
 class Endian(Enum):
@@ -74,6 +75,7 @@ class Anchor(Enum):
 WIDTH = {
     Algo.CRC32: 4,
     Algo.ADLER32: 4,
+    Algo.CRC32C: 4,
     Algo.CRC16: 2,
     Algo.CRC16_XMODEM: 2,
     Algo.FLETCHER16: 2,
@@ -83,7 +85,7 @@ WIDTH = {
     Algo.NEG8: 1,
 }
 # Specific first: on a tie the earlier algorithm owns the field.
-_ALGOS_32 = (Algo.CRC32, Algo.ADLER32)
+_ALGOS_32 = (Algo.CRC32, Algo.ADLER32, Algo.CRC32C)
 _ALGOS_16 = (Algo.CRC16, Algo.CRC16_XMODEM, Algo.FLETCHER16, Algo.SUM16)
 _ALGOS_8 = (Algo.XOR8, Algo.SUM8, Algo.NEG8)
 
@@ -139,6 +141,7 @@ def _xor8(data: bytes) -> int:
 _FUNCS: dict[Algo, Callable[[bytes], int]] = {
     Algo.CRC32: zlib.crc32,
     Algo.ADLER32: zlib.adler32,
+    Algo.CRC32C: lambda d: _crc32c_calc(d),
     Algo.CRC16: lambda d: binascii.crc_hqx(d, _CRC16_CCITT_INIT),
     Algo.CRC16_XMODEM: lambda d: binascii.crc_hqx(d, 0),
     Algo.FLETCHER16: _fletcher16,
@@ -147,6 +150,27 @@ _FUNCS: dict[Algo, Callable[[bytes], int]] = {
     Algo.SUM8: lambda d: sum(d) & _BYTE,
     Algo.NEG8: lambda d: -sum(d) & _BYTE,
 }
+
+
+_CRC32C_TABLE = []
+_poly = 0x82F63B78
+for _i in range(256):
+    _crc = _i
+    for _ in range(8):
+        if _crc & 1:
+            _crc = (_crc >> 1) ^ _poly
+        else:
+            _crc >>= 1
+    _CRC32C_TABLE.append(_crc & 0xFFFFFFFF)
+
+
+def _crc32c_calc(data: bytes) -> int:
+    """CRC-32C (Castagnoli) table-driven, reflected poly 0x82F63B78."""
+    crc = 0xFFFFFFFF
+    table = _CRC32C_TABLE
+    for byte in data:
+        crc = table[(crc ^ byte) & 0xFF] ^ (crc >> 8)
+    return crc ^ 0xFFFFFFFF
 
 
 def checksum(algo: Algo, data: bytes) -> int:

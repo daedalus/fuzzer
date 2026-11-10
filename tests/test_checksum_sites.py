@@ -69,6 +69,7 @@ class TestAlgorithms:
     def test_known_check_values(self):
         assert checksum(Algo.CRC32, b"123456789") == 0xCBF43926
         assert checksum(Algo.ADLER32, b"Wikipedia") == 0x11E60398
+        assert checksum(Algo.CRC32C, b"123456789") == 0xE3069283
         assert checksum(Algo.FLETCHER16, b"abcde") == 0xC8F0
         assert checksum(Algo.CRC16, b"123456789") == 0x29B1
         assert checksum(Algo.CRC16_XMODEM, b"123456789") == 0x31C3
@@ -89,6 +90,7 @@ class TestAlgorithms:
 
     def test_widths(self):
         assert cs.WIDTH[Algo.CRC32] == cs.WIDTH[Algo.ADLER32] == 4
+        assert cs.WIDTH[Algo.CRC32C] == 4
         assert cs.WIDTH[Algo.FLETCHER16] == cs.WIDTH[Algo.SUM16] == 2
 
 

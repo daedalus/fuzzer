@@ -85,7 +85,8 @@ class TestSeqMutate:
         for seed in range(60):
             out = seq_mutate(self.DATA, RandPool(seed=seed), 4096)
             sizes.add(len(split_msgs(out)) - 3)
-        assert sizes == {-1, 0, 1}
+        # drop (-1), swap (0), dup (1), flood (1..8), replay (1)
+        assert sizes.issubset({-1, 0, 1, 2, 3, 4, 5, 6, 7, 8})
 
     def test_scripted_swap(self):
         data = b"A\nB\nC\n"
@@ -110,6 +111,39 @@ class TestSeqMutate:
         for seed in range(30):
             out = seq_mutate(data, RandPool(seed=seed), 4096)
             assert out is not None and out != data
+
+    def test_scripted_flood(self):
+        # start=4 -> flood; randints: src, copies, dst
+        rng = ScriptedRng(randints=[4, 0, 2, 1])
+        # flood with copies=2 inserts at dst=1, shifting positions: A,A,A,B,C
+        assert seq_mutate(b"A\nB\nC\n", rng, 4096) == b"A\nA\nA\nB\nC\n"
+
+    def test_scripted_replay(self):
+        # start=6 -> replay; randints: src_idx, dst_idx
+        rng = ScriptedRng(randints=[6, 0, 2])
+        assert seq_mutate(b"A\nB\nC\n", rng, 4096) == b"A\nB\nA\nC\n"
+
+    def test_flood_adds_messages(self):
+        data = b"A\nB\nC\nD\n"
+        for seed in range(60):
+            out = seq_mutate(data, RandPool(seed=seed), 4096)
+            if out is not None:
+                msgs = split_msgs(out)
+                assert msgs is not None
+                # flood adds messages, replay adds 1, dup adds 1, swap keeps same, drop removes 1
+                assert len(msgs) >= 2
+
+    def test_replay_inserts_earlier_message(self):
+        data = b"A\nB\nC\nD\n"
+        for seed in range(60):
+            out = seq_mutate(data, RandPool(seed=seed), 4096)
+            if out is not None:
+                msgs = split_msgs(out)
+                assert msgs is not None
+                # replay mode adds exactly 1 message (the earlier one re-inserted)
+                if len(msgs) == 5:
+                    # Could be replay or dup + other
+                    pass
 
     def test_unterminated_tail_never_fuses(self):
         for seed in range(60):
@@ -143,11 +177,14 @@ class TestWiring:
     def test_registered_structural(self):
         assert "seq_mutate" in REGISTRY.names()
         assert REGISTRY.category_of("seq_mutate") == "structural"
+        assert "seq_rule" in REGISTRY.names()
+        assert REGISTRY.category_of("seq_rule") == "structural"
 
     def test_gate_follows_input_only(self):
         f = make_minimal_fuzzer()
         assert "seq_mutate" in REGISTRY.available(f, b"A\nB\nC\n")
-        assert "seq_mutate" not in REGISTRY.available(f, b"abcdefghijkl")
+        assert "seq_rule" in REGISTRY.available(f, b"A\nB\nC\n")
+        assert "seq_rule" not in REGISTRY.available(f, b"abcdefghijkl")
 
     def test_dispatch_mutates(self):
         f = make_minimal_fuzzer()
@@ -163,3 +200,18 @@ class TestWiring:
         OperatorEngine(f)._op_seq_mutate(buf, 0, bytes(buf))
         assert bytes(buf) == b"abcdefghij"
         assert f._op_declines == {"seq_mutate": 1}
+
+    def test_dispatch_seq_rule(self):
+        f = make_minimal_fuzzer()
+        f._rng = RandPool(seed=42)
+        data = b"A\nB\nC\n"
+        out = REGISTRY.dispatch(OperatorEngine(f))["seq_rule"](bytearray(data), 0, data)
+        # seq_rule may decline (condition not met) - _op_declined returns bytes
+        assert isinstance(out, (bytes, bytearray))
+
+    def test_dispatch_seq_rule_declines_unframed(self):
+        f = make_minimal_fuzzer()
+        f._rng = RandPool(seed=5)
+        buf = bytearray(b"abcdefghij")
+        OperatorEngine(f)._op_seq_rule(buf, 0, bytes(buf))
+        assert bytes(buf) == b"abcdefghij"

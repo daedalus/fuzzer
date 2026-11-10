@@ -4953,6 +4953,50 @@ class OperatorEngine:
             return self._op_declined("seq_mutate", buf)
         return bytearray(out)
 
+    def _op_seq_rule(self, buf, _byte_idx, data):
+        """Conditional mutation: when message k has field F=v, mutate G in message k+1.
+
+        Simple byte-position implementation: pick random message k, check if
+        byte at cond_pos equals cond_val, if so set byte at mut_pos in message k+1
+        to mut_val. This is a minimal DSL over split_msgs boundaries.
+        """
+        from fuzzer_tool.core.mutations.seq_mutate import _delim_of, split_msgs
+
+        rng = self.ctx._rng
+        msgs = split_msgs(data)
+        if not msgs or len(msgs) < 2:
+            return self._op_declined("seq_rule", buf)
+
+        # Pick random message k (not the last one, since we need k+1)
+        k = rng.randint(0, len(msgs) - 2)
+        msg_k = msgs[k]
+        msg_k1 = msgs[k + 1]
+
+        # Condition: byte at cond_pos == cond_val (random positions/values)
+        cond_pos = rng.randint(0, max(0, len(msg_k) - 1))
+        cond_val = rng.randint(0, 255)
+        if msg_k[cond_pos] != cond_val:
+            return self._op_declined("seq_rule", buf)
+
+        # Mutation: set byte at mut_pos in msg_k1 to mut_val
+        mut_pos = rng.randint(0, max(0, len(msg_k1) - 1))
+        mut_val = rng.randint(0, 255)
+
+        # Create mutated messages
+        new_msgs = list(msgs)
+        new_msg_k1 = bytearray(msg_k1)
+        new_msg_k1[mut_pos] = mut_val
+        new_msgs[k + 1] = bytes(new_msg_k1)
+
+        # Rejoin with delimiter
+        delim = _delim_of(msgs)
+        blob = b"".join(new_msgs)
+        if blob.endswith(delim):
+            blob = blob[: -len(delim)]
+        if blob == data or len(blob) > self.ctx.max_len:
+            return self._op_declined("seq_rule", buf)
+        return bytearray(blob)
+
     def _der_mutate(self, op: str, method: str, buf, byte_idx, data):
         """Shared driver for the BER/DER operators (png-handler pattern)."""
         from fuzzer_tool.core.mutations.der import DerMutator, parse_der
