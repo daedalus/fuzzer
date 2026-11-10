@@ -1518,10 +1518,7 @@ __AFL_NO_COV __attribute__((always_inline))
 static inline void *__afl_raw_load(void *const *p) {
     void *v;
 #if defined(__x86_64__)
-    /* "m", not an address in a register: a global then loads rip-relative in
-     * one instruction instead of lea + mov (-5% Ir on a 150-call all-miss
-     * chain, clang), and the compiler knows the asm reads *p. */
-    __asm__("movq %1, %0" : "=r"(v) : "m"(*p));
+    __asm__("movq (%1), %0" : "=r"(v) : "r"(p));
 #elif defined(__aarch64__)
     __asm__("ldr %0, [%1]" : "=r"(v) : "r"(p));
 #else
