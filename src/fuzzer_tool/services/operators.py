@@ -1686,6 +1686,25 @@ class OperatorEngine:
         # Length-preserving: no max_len clamp needed.
         return bytearray(ratio_flip(bytes(buf), self.ctx._rng, lo, hi))
 
+    # ── zzuf set / unset: monotone bit edits ───────────────────────────
+    def _op_bit_set(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.monotone_bits import bit_set
+
+        out = bit_set(bytes(buf), byte_idx, self.ctx._rng)
+        return self._op_declined("bit_set", buf) if out is None else bytearray(out)
+
+    def _op_bit_clear(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.monotone_bits import bit_clear
+
+        out = bit_clear(bytes(buf), byte_idx, self.ctx._rng)
+        return self._op_declined("bit_clear", buf) if out is None else bytearray(out)
+
+    def _op_or_mask(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.monotone_bits import or_mask
+
+        out = or_mask(bytes(buf), byte_idx, self.ctx._rng)
+        return self._op_declined("or_mask", buf) if out is None else bytearray(out)
+
     def _op_simd_boundary(self, buf, _byte_idx, _data):
         """Resize buffer to SIMD boundary lengths (AVX2: 32, SSE2: 16)."""
         rng = self.ctx._rng

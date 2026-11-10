@@ -53,6 +53,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "ratio_flip_e4",
         "ratio_flip_e3",
         "ratio_flip_e2",
+        # zzuf set / unset modes: monotone (0->1 only, 1->0 only), content-gated
+        "bit_set",
+        "bit_clear",
+        "or_mask",
         "bit_swap_8",
         "bit_swap_16",
         "bit_swap_32",
