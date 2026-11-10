@@ -1511,6 +1511,8 @@ Replays every live seed once and pickles `dict[str, np.ndarray]`: `hash_data(see
 
 **`--push-on-finish [URL]`** (repeatable): one push when the run ends, done or failed (`push.edge_dump_message`: target, corpus, seeds, outputs, elapsed, host). Bare flag reads `$FUZZER_PUSH_URL`; without the flag nothing is pushed even if the variable is set. URLs are parsed before replay (bad URL: exit 2). A failed push is printed and never changes the exit code.
 
+**`--ensure-format-ids`**: rename every loose seed file read into the canonical `seeds/<hh>/id_<hash>` layout. The corpus is read once, each file is moved to its content-keyed home (`hash_data(seed)`), and a one-line summary reports the result: `renamed to seeds/<hh>/id_<h>`, `duplicates removed` (same bytes already canonicalized), `twins` (different bytes sharing a key16, kept as `id_<h>~n`). Sidecar `.txt` metadata files are migrated alongside their seed. Archives (`seeds.zip`, `seeds.tar.gz`) are read-only: their members are not renamed but are still exported. Duplicates are detected by comparing bytes, so a forged key16 collision is not silently dropped. This flag does not change the edge dump output — seed ids remain `hash_data(seed)` — but guarantees the corpus on disk matches the IDs the dump records, so downstream tools like `full-cover` find all seeds.
+
 Tests: `tests/test_edge_export.py`, `test_edge_sqlite.py`, `test_edge_export_incremental.py`, `test_edge_export_inprocess.py`, `test_edge_export_streaming.py`, `test_adaptive_batch.py`, `test_edge_dump_push.py`.
 
 ### Full cover (`services/full_cover.py`)

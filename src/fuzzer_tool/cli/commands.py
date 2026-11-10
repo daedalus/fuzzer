@@ -1834,6 +1834,7 @@ def cmd_edge_dump(args):
         inprocess_func=args.inprocess_func,
         max_seed_bytes=args.max_seed_bytes,
         max_seeds=args.max_seeds,
+        ensure_format_ids=args.ensure_format_ids,
     )
     rc = 0 if n else 1
 
@@ -7558,6 +7559,11 @@ def main() -> int:
         "(edges(edge_id PK, n_seeds) + edge_seeds). Repeat for both",
     )
     ed_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
+    ed_parser.add_argument(
+        "--ensure-format-ids",
+        action="store_true",
+        help="Rename every file being read to its final format: seeds/<hh>/id_<hash> (canonical layout)",
+    )
     ed_parser.add_argument(
         "-c",
         "--coverage",

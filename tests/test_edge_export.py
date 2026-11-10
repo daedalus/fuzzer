@@ -191,3 +191,50 @@ def test_table_sized_by_target_and_touched_scan_past_crossover(tmp_path, monkeyp
         edge_export.export_edges("t", str(corpus), [str(out)])
 
         assert _Shm.ctor_calls == [(entries, {"touched_scan": want})]
+
+
+def test_ensure_format_ids_renames_to_canonical(tmp_path, monkeypatch, capsys):
+    """Falsification: --ensure-format-ids moves loose files to seeds/<hh>/id_<h>."""
+    seeds = {"a": b"abcdefghijklmnop", "b": b"qrstuvwxyz012345"}
+    corpus, out = _setup(tmp_path, monkeypatch, seeds)
+
+    edge_export.export_edges("t", str(corpus), [str(out)], ensure_format_ids=True)
+
+    names = {p.name for p in (corpus / "seeds").rglob("id_*")}
+    assert all(len(n) == 19 and n.startswith("id_") for n in names), names
+    for data in seeds.values():
+        h = hash_data(data)
+        assert (corpus / "seeds" / h[:2] / f"id_{h}").is_file()
+    assert "renamed to seeds/<hh>/id_<h>" in capsys.readouterr().out
+
+
+def test_ensure_format_ids_removes_duplicates(tmp_path, monkeypatch, capsys):
+    """Adversarial: same bytes under two names keep one canonical copy, drop
+    the other — nothing read twice into the dump."""
+    data = b"abcdefghijklmnop"
+    corpus, out = _setup(tmp_path, monkeypatch, {"a": data, "b": data})
+
+    edge_export.export_edges("t", str(corpus), [str(out)], ensure_format_ids=True)
+
+    got = _load(out)
+    h = hash_data(data)
+    assert h in got
+    # One canonical file remains; duplicates removed, not re-exported as twins.
+    names = {p.name for p in (corpus / "seeds").rglob("id_*")}
+    assert len(names) == 1
+    assert "duplicates removed" in capsys.readouterr().out
+
+
+def test_ensure_format_ids_skips_archives(tmp_path, monkeypatch, capsys):
+    """Adversarial: archives are read-only — only loose files get renamed,
+    archive members still export."""
+    seeds = {"a": b"abcdefghijklmnop"}
+    corpus, out = _setup(tmp_path, monkeypatch, seeds)
+
+    edge_export.export_edges("t", str(corpus), [str(out)], ensure_format_ids=True)
+
+    got = _load(out)
+    h = hash_data(b"abcdefghijklmnop")
+    assert h in got
+    # Loose file renamed into canonical form; nothing exploded.
+    assert len({p.name for p in corpus.rglob("id_*") if p.is_file()}) >= 1

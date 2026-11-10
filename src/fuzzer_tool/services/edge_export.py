@@ -9,6 +9,7 @@ Results are written in batches as they arrive: memory holds one batch, and
 a killed run keeps every written batch. Replay backends are minimize's.
 """
 
+import contextlib
 import os
 import pickle
 import shutil
@@ -23,7 +24,12 @@ import numpy as np
 
 from fuzzer_tool.adapters.edge_pickle import EdgePickleWriter
 from fuzzer_tool.adapters.edge_sqlite import EdgeSqliteWriter
-from fuzzer_tool.adapters.filesystem import count_archive_seeds, hash_data, iter_archive_seeds
+from fuzzer_tool.adapters.filesystem import (
+    count_archive_seeds,
+    free_slot,
+    hash_data,
+    iter_archive_seeds,
+)
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import TOUCHED_SCAN_MIN_ENTRIES, ShmCoverage
 from fuzzer_tool.core.adaptive_batch import AdaptiveBatch
@@ -65,6 +71,77 @@ _MAX_ROWS = 1 << 20
 _EMPTY = np.empty(0, dtype=np.uint32)
 
 
+def _ensure_final(corpus_dir: Path, path: Path, data: bytes) -> str:
+    """Rename *path* to canonical ``seeds/<hh>/id_<hash>`` if not already there.
+
+    Returns:
+        "renamed"   - file moved to its canonical home
+        "already"   - already canonical, nothing to do
+        "duplicate" - same bytes live under canonical name already; *path* removed
+        "twin"      - different bytes share the key16; kept as ``id_<h>~n``
+    """
+    h = hash_data(data)
+    dest_dir = corpus_dir / "seeds" / h[:2]
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"id_{h}"
+
+    try:
+        is_already = path.resolve() == dest.resolve()
+    except OSError:
+        is_already = path == dest
+    if is_already:
+        return "already"
+
+    # Migrate .txt sidecar: source has *.txt sibling, move to dest with .txt suffix
+    meta = path.with_suffix(".txt")
+    if meta.exists():
+        dest_meta = dest.with_suffix(".txt")
+        if dest_meta.exists():
+            try:
+                if dest_meta.read_bytes() == meta.read_bytes():
+                    meta.unlink()
+                    meta = None
+                else:
+                    shutil.move(str(meta), str(dest_meta))
+                    meta = None
+            except OSError:
+                pass
+
+    if dest.exists():
+        try:
+            if dest.read_bytes() == data:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                if meta is not None:
+                    with contextlib.suppress(OSError):
+                        meta.unlink()
+                return "duplicate"
+            final = free_slot(dest, data)
+            path.rename(final)
+            if meta is not None:
+                dest_meta = final.with_suffix(".txt")
+                if dest_meta.exists():
+                    with contextlib.suppress(OSError):
+                        meta.unlink()
+                else:
+                    with contextlib.suppress(OSError):
+                        shutil.move(str(meta), str(dest_meta))
+            return "twin"
+        except OSError:
+            return "already"
+
+    path.rename(dest)
+    if meta is not None:
+        dest_meta = dest.with_suffix(".txt")
+        if dest_meta.exists():
+            with contextlib.suppress(OSError):
+                meta.unlink()
+        else:
+            with contextlib.suppress(OSError):
+                shutil.move(str(meta), str(dest_meta))
+    return "renamed"
+
+
 class _CorpusSeeds:
     """Live seeds: loose files, then seeds.zip / seeds.tar.gz members; size-capped.
 
@@ -73,12 +150,18 @@ class _CorpusSeeds:
     are final after iteration. ``total`` is None when a tar makes it unknown.
     """
 
-    def __init__(self, corpus_dir: Path, max_seed_bytes: int) -> None:
+    def __init__(
+        self, corpus_dir: Path, max_seed_bytes: int, ensure_format_ids: bool = False
+    ) -> None:
         self._corpus = corpus_dir
         self._max = max_seed_bytes
+        self._ensure = ensure_format_ids
         self._files, over = _split_oversized(_discover_corpus_files(corpus_dir), max_seed_bytes)
         self.oversized = len(over)
         self.seen = 0
+        self.renamed = 0
+        self.duplicates = 0
+        self.twins = 0
         archived = count_archive_seeds(corpus_dir)
         self.total = None if archived is None else len(self._files) + archived
 
@@ -88,7 +171,16 @@ class _CorpusSeeds:
                 print(f"[!] Skipping missing seed: {fpath}")
                 continue
             self.seen += 1
-            yield fpath.read_bytes()
+            data = fpath.read_bytes()
+            if self._ensure:
+                result = _ensure_final(self._corpus, fpath, data)
+                if result == "duplicate":
+                    self.duplicates += 1
+                elif result == "twin":
+                    self.twins += 1
+                elif result == "renamed":
+                    self.renamed += 1
+            yield data
 
         for data in iter_archive_seeds(self._corpus):
             if self._max and len(data) > self._max:
@@ -185,6 +277,7 @@ def export_edges(
     inprocess_func: str = DEFAULT_INPROCESS_FUNC,
     max_seed_bytes: int = 0,
     max_seeds: int = 0,
+    ensure_format_ids: bool = False,
 ) -> int:
     """Export ``{seed_id: sorted uint32 edge ids}`` for every live seed.
 
@@ -216,7 +309,7 @@ def export_edges(
     # Known only if every output holds it, e.g. pkl {a,b} + sqlite {a} -> skip {a}.
     known = set.intersection(*(s.prior for s in sinks))
 
-    seeds = _CorpusSeeds(Path(corpus_dir), max_seed_bytes)
+    seeds = _CorpusSeeds(Path(corpus_dir), max_seed_bytes, ensure_format_ids)
     if seeds.total == 0 and not seeds.oversized:
         print(f"[-] Corpus is empty: {corpus_dir}", file=sys.stderr)
         return 0
@@ -239,6 +332,12 @@ def export_edges(
         # Written batches and the buffered tail survive a crash or Ctrl-C.
         exported = collector.close()
 
+    # Report format normalization when the flag was used.
+    if ensure_format_ids and (seeds.renamed or seeds.duplicates or seeds.twins):
+        print(
+            f"[*] Format IDs: {seeds.renamed} renamed to seeds/<hh>/id_<h>, "
+            f"{seeds.duplicates} duplicates removed, {seeds.twins} twins"
+        )
     if seeds.oversized:
         print(f"[*] Skipped: {seeds.oversized} seeds over {max_seed_bytes} bytes")
     if not ok:
