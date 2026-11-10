@@ -946,6 +946,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--sensitivity` | Per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting |
 | `--region-profile` | Statistical region profiling for mutation targeting (labels seed windows incompressible/tabular/textual/repetitive) |
 | `--joint-liveness` | Probe pairs of coverage-dead regions together; restore weight of pairs that move coverage jointly (needs `--region-profile`) |
+| `--influence` | Window influence map: refill 8-byte windows, score undetermined trace fraction; replaces the per-byte tracker (implies `--sensitivity`) |
 | `--byte-interaction` | Second-order sensitivity: find byte pairs that only move coverage together; `coupled_pair` op mutates them jointly (implies `--sensitivity`) |
 | `--secretary` | Secretary-problem stopping ranks for seeds/operators/corpus — display only, does not reweight or minimize |
 | `--bayesian` | Bayesian methods: Thompson-sampled seed selection, hierarchical operator priors, Bayesian coverage growth model |
@@ -2418,6 +2419,10 @@ FFmpeg harnesses bind each decoder's API from `codec->type` (`fuzz_decode_api` i
 
 MIT
 
+
+### Window influence (2026-11-10)
+
+`--influence` (`core/analyzers/analyzer_influence.py`). Paper: Chattopadhyay-Zuckerman, *Explicit Two-Source Extractors and Resilient Functions*, Def. 1.6: `I_Q(f)` = P[f undetermined | outside Q fixed, Q random]. Here f is the trace, Q an 8-byte window, outside = the seed (local, not the paper's random outside). Score = `|U \ I| / |U|` over the original and 2 refills. Costs `2 x windows sampled` execs; `get_weighted_position` is inherited. Unmeasured: A/B vs `--sensitivity` pending. Paper's monotone two-exec trick does not apply (execution is not monotone).
 
 ### Second-order byte interaction (2026-10-22)
 

@@ -2105,6 +2105,9 @@ class Fuzzer:
         pos_emeans=False,
         # Revival threshold tau of that arm (0 = off; the paper's value is 0.1).
         pos_emeans_tau=0.0,
+        # Window influence tracker (core/analyzers/analyzer_influence.py):
+        # replaces the per-byte tracker; implies sensitivity. Appended.
+        influence=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3106,7 +3109,7 @@ class Fuzzer:
         # (via the "early" analyzer_registry phase, before
         # _init_seed_metadata) so load_state (resume) can restore
         # sensitivity.json — it crashed with AttributeError otherwise.
-        self._use_sensitivity = sensitivity or byte_interaction
+        self._use_sensitivity = sensitivity or byte_interaction or influence
         self._use_byte_interaction = byte_interaction
         self._use_field_hmm = field_hmm
         self._field_hmm_states = field_hmm_states
@@ -3114,6 +3117,12 @@ class Fuzzer:
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
         _ANALYZER_REGISTRY.wire_all(self, phase="early")
+        if influence:
+            from fuzzer_tool.core.analyzers.analyzer_influence import WindowInfluenceTracker
+
+            self._sensitivity = WindowInfluenceTracker(
+                max_seeds=50, max_bytes=self.max_len, sample_rate=0.02
+            )
 
         # Statistical region profiling (randomness.profile_buffer): labels
         # each window of a seed incompressible / tabular / textual /

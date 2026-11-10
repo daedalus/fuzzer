@@ -925,6 +925,7 @@ def cmd_fuzz(args):
         pos_harmonic=getattr(args, "pos_harmonic", False),
         joint_liveness=getattr(args, "joint_liveness", False),
         byte_interaction=getattr(args, "byte_interaction", False),
+        influence=getattr(args, "influence", False),
         field_hmm=getattr(args, "field_hmm", False),
         field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
@@ -5218,6 +5219,15 @@ def main() -> int:
         "--sensitivity",
         action="store_true",
         help="Enable per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting",
+    )
+    fuzz_parser.add_argument(
+        "--influence",
+        action="store_true",
+        help=(
+            "Window influence map: refill 8-byte windows, score the fraction of trace "
+            "edges left undetermined (core/analyzers/analyzer_influence.py). Replaces the "
+            "per-byte tracker; implies --sensitivity. Opt-in: unmeasured, NOT part of --hail-mary."
+        ),
     )
     fuzz_parser.add_argument(
         "--region-profile",
