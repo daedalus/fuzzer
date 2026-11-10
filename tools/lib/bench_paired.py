@@ -270,6 +270,9 @@ ARMS: dict[str, list[str]] = {
     "pos-arena-kadane": _ARENA + ["--pos-kadane", "--pos-arena-arms", "uniform,kadane"],
     # e-means codebook is opt-in like kadane: --pos-emeans plus the subset that admits it.
     "pos-arena-emeans": _ARENA + ["--pos-emeans", "--pos-arena-arms", "uniform,emeans"],
+    # Same arm with dead-slot revival at the paper's tau = 0.1 (off in the arm above).
+    "pos-arena-emeans-revive": _ARENA
+    + ["--pos-emeans", "--pos-emeans-tau", "0.1", "--pos-arena-arms", "uniform,emeans"],
     # PCA is opt-in like kadane; the byteflip pass it reads is on by default.
     "pos-arena-pca": _ARENA + ["--pos-pca", "--pos-arena-arms", "uniform,pca"],
     # LearnAFL path mask is opt-in like kadane.
@@ -405,6 +408,7 @@ ARM_BASELINES: dict[str, str] = {
     "pos-arena-harmonic": "pos-arena-uniform",
     "pos-arena-kadane": "pos-arena-uniform",
     "pos-arena-emeans": "pos-arena-uniform",
+    "pos-arena-emeans-revive": "pos-arena-uniform",
     "pos-arena-pca": "pos-arena-uniform",
     "pos-arena-learn": "pos-arena-uniform",
     "splice-gravity": "baseline",

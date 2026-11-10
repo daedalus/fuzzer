@@ -2103,6 +2103,8 @@ class Fuzzer:
         # of gain offsets. Opt-in, not implied by position_arena or --hail-mary.
         # Appended.
         pos_emeans=False,
+        # Revival threshold tau of that arm (0 = off; the paper's value is 0.1).
+        pos_emeans_tau=0.0,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3793,7 +3795,7 @@ class Fuzzer:
         if pos_emeans:
             from fuzzer_tool.core.schedulers.pos_emeans import PositionEMeansScheduler
 
-            self._pos_emeans = PositionEMeansScheduler(self._rng)
+            self._pos_emeans = PositionEMeansScheduler(self._rng, unused_threshold=pos_emeans_tau)
             log.info("Position emeans scheduling enabled")
         # Position-arena LearnAFL arm (core/schedulers/pos_learn.py): path mask
         # from kept-path rounds. Opt-in only (unmeasured). Off-policy extra,

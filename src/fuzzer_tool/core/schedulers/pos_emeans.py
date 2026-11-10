@@ -3,9 +3,10 @@
 Every other arm turns gain evidence into a per-bin *rate* and draws a bin from
 it. This one treats the offsets that gained as a 1-D point cloud and keeps a
 small codebook (``K`` centroids) of it, trained the way the e-means paper
-(Bessa et al., arXiv:2611.09501, ``faiss/contrib/e_means``) trains k-means:
+(Bessa et al., arXiv:2611.09501; code in ``faiss/contrib/e_means``) trains
+k-means (equation, section and table numbers below are the paper's):
 
-* **EMA update.** Each settled gain round is a mini-batch. Every slot's mass
+* **EMA update** (Eq. 2-4). Each settled gain round is a mini-batch. Every slot's mass
   decays by ``gamma = 1 - alpha`` and a slot that received points moves::
 
       N_new = gamma * N + alpha * n_j
@@ -13,11 +14,12 @@ small codebook (``K`` centroids) of it, trained the way the e-means paper
 
   so a centroid is a recency-weighted mean and an idle slot only loses mass.
   Stale gain regions fade without a sliding-window buffer.
-* **Cosine step.** ``alpha`` anneals from ``ALPHA0`` to ``0.1 * ALPHA0`` over
+* **Cosine step** (Eq. 5, floor 0.1). ``alpha`` anneals from ``ALPHA0`` to ``0.1 * ALPHA0`` over
   ``HORIZON`` gain rounds of that seed, then holds (``_scheduled_alpha`` in
   the reference).
 * **Initial mass 2**-16.** A freshly seeded slot snaps to its first batch mean.
-* **Revival by proportional split** (opt-in, ``UNUSED_THRESHOLD > 0``): every
+* **Revival by proportional split** (App. H; opt-in here, ``UNUSED_THRESHOLD > 0``,
+  CLI ``--pos-emeans-tau``): every
   ``REVIVE_EVERY`` updates, a slot below ``tau * mean(N)`` is replaced by a split
   of a donor drawn in proportion to mass (Gumbel top-k), mass halved. The dead
   slot's residual mass (below the threshold) is dropped, as in the reference.
@@ -28,19 +30,28 @@ default bin). ``EXPLORE`` of draws are uniform escapes.
 
 Where this departs from the reference, on purpose:
 
-* **No scaling laws.** ``alpha0`` and the batch size come from laws fitted at
-  ``n >= 1e5`` points; a seed has tens of gain rounds. ``ALPHA0`` is a plain
-  constant and is untuned.
-* **Revival is off by default.** The reference turns it off for ``d <= 2``
-  (reviving cost 7-10% held-out error on 2-D data); offsets are 1-D. The
-  split code is kept, tested, and reachable through ``unused_threshold=``.
+* **No scaling laws** (Eq. 6-7, Table 2). ``alpha0`` and the batch size come
+  from laws fitted at ``n >= 1e5``, ``k >= 256``; a seed has tens of gain
+  rounds and ``K = 8``, and the paper lists low dimension as a limitation.
+  ``ALPHA0`` is a plain constant and is untuned.
+* **Revival is off by default, on a code comment, not on the paper.** The paper
+  uses ``tau = 0.1`` and shows it matters (Table 1: +3.0% train / +2.2% test
+  error without it; Table 14: 47 dead clusters with it, 4,313 without), but
+  only at d >= 96. faiss's ``_NO_REVIVAL_MAX_D`` comment says revival cost
+  7-10% held-out error on 2-D geo data and turns it off for ``d <= 2``;
+  offsets are 1-D, so that default is followed here. Unverified for this use:
+  bench arms ``pos-arena-emeans`` and ``pos-arena-emeans-revive``
+  (``--pos-emeans-tau 0.1``) settle it.
 * **1-D splits are +-sigma apart, not 1e-4 relative.** In 1-D an
   epsilon split ties on ``argmin`` and the child starves.
 * **Empty slots are seeded leader-style** (a point farther than ``SEED_SEP``
   floors from every live slot takes the next empty one) in place of sampling
   ``K`` data points up front; the stream has no up-front data.
-* **No finalization pass** (last-epoch unweighted means): the stream has no
-  last epoch.
+* **No finalization pass** (last-epoch unweighted means, Sec. 3.2): the stream
+  has no last epoch.
+* **Different problem.** The paper minimizes MSE on a fixed dataset over a known
+  epoch budget (the cosine decay assumes it). Here the gain stream drifts and
+  never ends, so none of its speedup results carry over, only the update rule.
 
 Known bias: evidence is the offsets of gaining rounds only (misses carry no
 point), so a region that is proposed more also gains more. ``EXPLORE`` and the

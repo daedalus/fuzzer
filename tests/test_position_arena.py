@@ -1767,6 +1767,15 @@ class TestRealConstruction:
         assert isinstance(f._pos_emeans, PositionEMeansScheduler)
         assert "emeans" in f._position_arena.pool()
 
+    def test_pos_emeans_tau_reaches_the_scheduler(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_emeans=True)
+        assert f._pos_emeans._tau == 0.0
+        (tmp_path / "g").mkdir()
+        g = self._build(
+            tmp_path / "g", elo="all", position_arena=True, pos_emeans=True, pos_emeans_tau=0.1
+        )
+        assert g._pos_emeans._tau == 0.1
+
     def test_position_arena_does_not_imply_learn(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True)
         assert f._pos_learn is None

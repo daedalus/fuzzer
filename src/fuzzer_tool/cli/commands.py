@@ -933,6 +933,7 @@ def cmd_fuzz(args):
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
         pos_emeans=getattr(args, "pos_emeans", False),
+        pos_emeans_tau=getattr(args, "pos_emeans_tau", 0.0),
         pos_pca=getattr(args, "pos_pca", False),
         pos_learn=getattr(args, "pos_learn", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
@@ -4261,6 +4262,15 @@ def main() -> int:
         "arXiv:2611.09501; core/schedulers/pos_emeans.py). Opt-in: NOT implied by "
         "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
         "--position-arena is on.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-emeans-tau",
+        type=float,
+        default=0.0,
+        metavar="TAU",
+        help="Dead-slot revival threshold of --pos-emeans: every 5 updates, slots whose "
+        "EMA mass is below TAU x the mean are refilled by splitting a mass-weighted donor "
+        "(0 = off, the default; the e-means paper uses 0.1). No effect without --pos-emeans.",
     )
     fuzz_parser.add_argument(
         "--pos-learn",

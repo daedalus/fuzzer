@@ -166,6 +166,16 @@ def test_emeans_arm_differs_from_control_by_its_flag_and_subset_only(monkeypatch
     assert ARM_BASELINES["pos-arena-emeans"] == "pos-arena-uniform"
 
 
+def test_emeans_revive_arm_differs_from_emeans_by_tau_only(monkeypatch):
+    base = vars(_parse(monkeypatch, ARMS["pos-arena-emeans"]))
+    test = vars(_parse(monkeypatch, ARMS["pos-arena-emeans-revive"]))
+    changed = {k for k in base if k != "func" and base[k] != test[k]}
+    assert changed == {"pos_emeans_tau"}
+    assert base["pos_emeans_tau"] == 0.0
+    assert test["pos_emeans_tau"] == 0.1
+    assert ARM_BASELINES["pos-arena-emeans-revive"] == "pos-arena-uniform"
+
+
 def test_learn_arm_differs_from_control_by_its_flag_and_subset_only(monkeypatch):
     ctl = vars(_parse(monkeypatch, ARMS["pos-arena-uniform"]))
     test = vars(_parse(monkeypatch, ARMS["pos-arena-learn"]))
