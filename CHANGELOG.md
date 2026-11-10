@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Shim guard loads use a memory operand on x86-64** (`afl_shim.c`): `__afl_raw_load` took its address in a register, so every global load was `lea` + `mov`. With `"m"` it is one rip-relative `mov`. Wall vs HEAD (clang, min of 40 interleaved rounds, A/A ≤1.6%): hit-heavy const -6.8%, junk -6.6%, healthy -3.6%; all-miss chain Ir -5.6% healthy, -5.0% const. Numbers: `docs/handover/handover_shim_ab_perf_2026-11-02.md`.
+- **Shim guard loads use a memory operand on x86-64** (`afl_shim.c`): `__afl_raw_load` took its address in a register, so every global load was `lea` + `mov`; with `"m"` it is one rip-relative `mov`. Instructions per run drop 5% on the all-miss chain and hit-healthy (clang, 150 guards). Wall time did not improve across 8 code layouts (mean +0.1% to +6.7%): `docs/handover/handover_shim_ab_perf_2026-11-02.md` §9.
 
 ### Fixed
 

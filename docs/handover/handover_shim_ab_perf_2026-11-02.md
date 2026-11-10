@@ -1,5 +1,7 @@
 # Handover: afl_shim.c guard-path A/B, `ba6cf7e` → `735ea314`
 
+> **Errata 2026-11-10:** the single-layout wall numbers below (P1 "-6.8% hit-const", HEAD "+9% hit-const/junk") did not replicate across code layouts. Instruction counts (Ir) stand. Layout-averaged results and revised proposals: section 9.
+
 **Date:** 2026-11-02. **Verified against:** `735ea314` (HEAD at the time). **Status:** one change applied (section 6, P1), the rest proposed or rejected.
 **Question:** is the current shim slower than `ba6cf7e`, and which commit costs what.
 **Answer:** yes on 3 of 6 cases (wall, clang). Patch P1 recovers most of the hit-path loss. The all-miss loss from `8539822a` remains.
@@ -31,6 +33,8 @@ Ir is deterministic (zero variance). Wall is not: see section 3.
 | chain-junk | as above, `rbp` clobbered | +3.4% | +4.0% | +0.6% (inside noise) |
 
 Negative = faster = better. Source: section 4.1.
+
+The wall columns come from one code layout. Layout-averaged values: section 9.
 
 ## 3. Method
 
@@ -140,7 +144,7 @@ V1 to V3 were measured in 25 to 40 round runs on a drifting host and without the
 
 | ID | Change | Status | Evidence / expected effect | Risk |
 |---|---|---|---|---|
-| P1 | `__afl_raw_load` (x86-64): `"m"(*p)` operand instead of `"r"(p)` | **applied** in this patch | wall vs HEAD: hit-const -6.8%, hit-junk -6.6%, hit-healthy -3.6% (A/A ≤0.5%); Ir: chain-healthy -5.6%, chain-const -5.0%; static insns 154 → 144 | low: builds clang + gcc; compiler now sees the read (fixes reorder freedom of the old form) |
+| P1 | `__afl_raw_load` (x86-64): `"m"(*p)` operand instead of `"r"(p)` | applied (merged as `e83c85db`); **wall gain did not replicate, see section 9** | wall vs HEAD: hit-const -6.8%, hit-junk -6.6%, hit-healthy -3.6% (A/A ≤0.5%); Ir: chain-healthy -5.6%, chain-const -5.0%; static insns 154 → 144 | low: builds clang + gcc; compiler now sees the read (fixes reorder freedom of the old form) |
 | P2 | Same change for aarch64: `"Q"`-style operand for `ldr %0, %1` | proposed | untested (no aarch64 host). Expected: one less address materialisation per global | medium: operand syntax differs between clang and gcc |
 | P3 | Backoff for the cfp gate: after N consecutive gate misses, skip the gate for M guards (or `-D__AFL_CFP_CACHE=0` for known miss-heavy builds) | proposed | targets `8539822a`: +18 Ir/guard, +8.3% wall on chain-healthy (still +6.9% with P1). Untested; the miss counter costs a store | medium: adds state |
 | P4 | Drop `cur >= main_lo` from the cfp gate (V1) | not applied | -3.0 Ir/guard, wall mixed (section 4.5) | stack-switching code: `cur` could sit below the main stack while `cfp` is on it |
@@ -171,4 +175,64 @@ cp ../../../src/fuzzer_tool/adapters/afl_shim.c /tmp/patched.c
 OUT=/tmp/shim_ab ROUNDS=40 ./run.sh /tmp/old.c /tmp/patched.c
 ```
 
+For wall conclusions use the layout-randomized A/B (section 9): `python3 layout_ab.py $OUT 15 old old=/tmp/old.c new=/tmp/patched.c` after `run.sh` has built `$OUT`.
+
 Needs clang, valgrind, python3. Add an identical copy of one shim as an A/A arm. Not measured: gcc wall (only compile-checked), `-D__AFL_CTX_CHECK=0` on the fast path, aarch64, real targets (`ffmpeg_read`), multi-threaded targets.
+
+## 9. Errata and layout-averaged results (2026-11-10)
+
+**Why:** on the new HEAD (`089b92d3`, P1 merged) an interleaved run showed P1 *slower* than the same shim without it: wall-min +4% to +12% on all six cases, against a 0.0% to 2.4% A/A. Section 6 had P1 at -3.6% to -6.8% on hit paths. The sign flipped between two builds of the same two arms, so I re-measured at 8 code layouts: the shim is prefixed by 0, 8, ... 56 bytes of nop padding in the same translation unit, which shifts every function address.
+
+**Method:** clang 18.1.3, leaf fast path (`__afl_fast = 1`), 150 guards/run, 15 interleaved rounds per layout, wall-min per layout, paired against the base arm. Statistic: delta % of wall-min ns/run (lower is better, negative = faster). Ir (instructions per `run()`, lower is better) is deterministic and layout-independent. Harness: `shim_ab_bench/layout_ab.py`. 1 vCPU host, no `perf`.
+
+**Layout alone moves wall time by -14% to +22%** for identical code. A single-layout wall A/B is not evidence.
+
+### 9.1 P1 (memory operand) vs the same HEAD shim without it, 8 layouts
+
+| Case | Ir/run without P1 | Ir/run with P1 | Ir Δ% (lower better) | wall Δ% mean | median | min..max | layouts where P1 is worse |
+|---|---|---|---|---|---|---|---|
+| chain-healthy | 22216 | 21119 | -4.9 | +1.2 | +3.5 | -9.6..+10.8 | 5/8 |
+| chain-const | 15040 | 14285 | -5.0 | +6.7 | +9.2 | -2.2..+11.6 | 6/8 |
+| chain-junk | 12457 | 12447 | -0.1 | +4.5 | +6.7 | -2.1..+10.1 | 6/8 |
+| hit-healthy | 14334 | 13528 | -5.6 | +0.1 | +2.8 | -13.6..+7.1 | 6/8 |
+| hit-const | 11491 | 11481 | -0.1 | +0.9 | +2.0 | -4.6..+5.6 | 5/8 |
+| hit-junk | 11492 | 11482 | -0.1 | +0.1 | +1.7 | -9.6..+5.7 | 5/8 |
+
+P1 lowers instructions on the miss paths and on hit-healthy, and does not lower wall time. On chain-const and chain-junk it is worse on average (+6.7%, +4.5%).
+
+### 9.2 Old `ba6cf7e` vs HEAD, 8 layouts (wall Δ% of wall-min, negative better)
+
+| Case | HEAD without P1: mean | worse in | HEAD with P1: mean | worse in |
+|---|---|---|---|---|
+| chain-healthy | **+10.6** | 8/8 | **+12.6** | 8/8 |
+| chain-const | -3.5 | 1/8 | +2.2 | 6/8 |
+| chain-junk | -2.6 | 1/8 | +1.3 | 6/8 |
+| hit-healthy | +0.6 | 3/8 | -2.1 | 3/8 |
+| hit-const | +1.2 | 6/8 | +1.8 | 5/8 |
+| hit-junk | +1.8 | 8/8 | +1.5 | 5/8 |
+
+Ir/run, old / HEAD without P1 / HEAD with P1: chain-healthy 19036 / 22216 / 21119; chain-const 15779 / 15040 / 14285; chain-junk 12310 / 12457 / 12447; hit-healthy 15085 / 14334 / 13528; hit-const 11344 / 11491 / 11481; hit-junk 11345 / 11492 / 11482.
+
+### 9.3 What stands, what is withdrawn
+
+| Claim | Status |
+|---|---|
+| `8539822a` makes the all-miss chain slower: Ir +16.7%, wall +10.6% mean, 8/8 layouts | **stands** (the one robust regression) |
+| Detector `04ac45dd` costs Ir, fixed by `2c6db238` | stands (Ir) |
+| Hit-heavy const/junk wall +9% at HEAD | **withdrawn**: +1.2% to +1.8% mean over 8 layouts |
+| P1 gives -3.6% to -6.8% wall on hit paths | **withdrawn**: +0.1% to +0.9% mean |
+| P1 lowers Ir by 5% on the all-miss chain and hit-healthy | stands |
+| Per-commit wall steps in section 4.3 and V1 to V3 wall in section 4.5 | **unreliable**: one layout each, no pairing |
+| `aligned(64)` and packed-globals are null | stands for Ir; their wall nulls were single-layout |
+
+### 9.4 Revised proposals
+
+| ID | Change | Status |
+|---|---|---|
+| P1 | Memory-operand `__afl_raw_load` | **revert or hold**: Ir only, wall mean +0.1% to +6.7%, fails Hard Rule 58 on chain-const/junk. Optional revert patch provided. Keep only if a real-target EPS A/B (ffmpeg) shows a gain |
+| P3 | Backoff or compile-time gate for the cfp cache (`8539822a`) | **priority**: it is the only wall regression that survives layout averaging (+10.6%, 8/8). Measure with `layout_ab.py` |
+| P9 | Every wall A/B uses `layout_ab.py` (≥8 layouts, paired, A/A arm) | applied in the harness |
+| P5 | `perf stat` on bare metal | still open |
+
+### 9.5 Not measured
+Real targets (`ffmpeg_read` EPS), gcc, aarch64, multi-threaded targets, more than 8 layouts (the layout spread suggests 8 is the minimum, not enough to resolve effects under ~3%).
