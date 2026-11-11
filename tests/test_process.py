@@ -153,7 +153,7 @@ class TestRunTargetWithPerfCounters:
         # /bin/true can exit before open_for_pid(pid) attaches (race).
         # Non-zero instructions confirms the mechanism; empty deltas
         # just means the child was too fast.
-        if pc.available and deltas:
+        if pc.has_pmu and deltas:
             assert deltas.get("instructions", 0) > 0, (
                 f"/bin/true attached but got zero instructions: {deltas}"
             )
@@ -168,7 +168,7 @@ class TestRunTargetWithPerfCounters:
         assert rc == 0
         deltas = pc.read_and_reset()
         pc.close()
-        if pc.available and deltas:
+        if pc.has_pmu and deltas:
             assert deltas.get("instructions", 0) > 0, (
                 f"/bin/true attached but got zero instructions: {deltas}"
             )
@@ -186,7 +186,7 @@ class TestRunTargetWithPerfCounters:
         # /bin/true can exit before open_for_pid(pid) attaches (race).
         # Non-zero instructions confirm the mechanism works; empty deltas
         # just mean the child was too fast — valid on a loaded system.
-        if pc.available and deltas:
+        if pc.has_pmu and deltas:
             assert deltas.get("instructions", 0) > 0, (
                 f"/bin/true attached but got zero instructions: {deltas}"
             )

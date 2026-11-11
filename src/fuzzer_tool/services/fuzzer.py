@@ -1578,6 +1578,7 @@ class Fuzzer:
         save_smaller=False,
         honggfuzz=False,
         hw_perf=False,
+        hw_perf_counters=None,
         intel_pt=False,
         intel_pt_mode="block",
         lbr=False,
@@ -2954,7 +2955,9 @@ class Fuzzer:
         self.crash_allowlist: set[str] = crash_allowlist or set()
         self.save_smaller: bool = save_smaller
         self.honggfuzz: bool = honggfuzz
-        self.hw_perf: bool = hw_perf
+        # A counter list implies --hw-perf.
+        self.hw_perf: bool = hw_perf or bool(hw_perf_counters)
+        self._hw_perf_counters: list[str] | None = hw_perf_counters
         self.intel_pt: bool = intel_pt
         self.intel_pt_mode: str = intel_pt_mode
         self.lbr: bool = lbr
@@ -3073,7 +3076,7 @@ class Fuzzer:
         if self.hw_perf:
             from fuzzer_tool.adapters.perf_event import PerfCounters
 
-            self._perf_counters = PerfCounters()
+            self._perf_counters = PerfCounters(counter_names=self._hw_perf_counters)
             if not self._perf_counters.available:
                 log.warning("Hardware perf counters not available (needs CAP_PERFMON or root)")
                 self._perf_counters = None

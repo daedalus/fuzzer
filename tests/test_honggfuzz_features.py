@@ -655,7 +655,7 @@ class TestPerfCounters:
         from fuzzer_tool.adapters.perf_event import PerfCounters
 
         pc = PerfCounters()
-        if not pc.available:
+        if not pc.has_pmu:
             pytest.skip("hardware perf counters not available on this system")
 
         assert pc.open_for_pid(0), "open_for_pid(0) should succeed"
@@ -677,7 +677,7 @@ class TestPerfCounters:
         from fuzzer_tool.adapters.perf_event import PerfCounters
 
         pc = PerfCounters()
-        if not pc.available:
+        if not pc.has_pmu:
             pytest.skip("hardware perf counters not available on this system")
 
         pid = os.fork()
