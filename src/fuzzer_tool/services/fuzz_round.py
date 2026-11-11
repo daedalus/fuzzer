@@ -128,6 +128,7 @@ class FuzzRound:
         "_scanned_shm",
         "_has_new_coverage",
         "_is_new_max",
+        "_is_hw_max",
         "_is_cmp_progress",
         "_is_new_valid_coverage",
         "_ltl_new",
@@ -157,6 +158,7 @@ class FuzzRound:
         self._scanned_shm = None
         self._has_new_coverage = False
         self._is_new_max = False
+        self._is_hw_max = False
         self._is_cmp_progress = False
         self._is_new_valid_coverage = False
         self._ltl_new = False
@@ -909,6 +911,7 @@ class FuzzRound:
             return
         self._is_crash = self._is_crash and explorer.observe(self._edges_now())
         self._is_interesting = self._has_new_coverage = self._is_new_max = False
+        self._is_hw_max = False
         self._is_cmp_progress = self._is_new_valid_coverage = self._is_slow = False
 
     # ── Side signals ─────────────────────────────────────────────────
@@ -955,6 +958,11 @@ class FuzzRound:
         self._is_new_max = new_max_edges > 0
         if self._is_new_max:
             f._perf_novelty_hits += 1
+
+        # --hw-perf: more instructions/branches than any input before it
+        # (honggfuzz perfFeedback). Truncated runs skipped as above.
+        hw_max = f._hw_max
+        self._is_hw_max = bool(clean and hw_max is not None and hw_max.observe(f._last_perf_deltas))
 
     def _cmp_progress(self) -> None:
         # Comparison progress: a callback family this input satisfied more
@@ -1532,6 +1540,7 @@ class FuzzRound:
             or self._has_new_coverage
             or self._is_slow
             or self._is_new_max
+            or self._is_hw_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
         )
@@ -2095,6 +2104,7 @@ class FuzzRound:
             self._is_interesting
             or self._has_new_coverage
             or self._is_new_max
+            or self._is_hw_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
             or self._ltl_new

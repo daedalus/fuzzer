@@ -171,8 +171,12 @@ class ForkserverRunner:
         function_name: str = "LLVMFuzzerTestOneInput",
         timeout: float = 5.0,
         env: dict[str, str] | None = None,
+        perf_counters=None,
     ):
         self.target = target
+        # Attached to the loader before INIT, inherited by every child it
+        # forks: an exited child's counts fold into the loader's counters.
+        self._perf_counters = perf_counters
         self.function_name = function_name
         self.timeout = timeout
         # Environment overlaid on os.environ when the loader is spawned.
@@ -222,6 +226,8 @@ class ForkserverRunner:
             env=env,
         )
         self._reader = PipeReader(self._proc.stdout.fileno())
+        if self._perf_counters is not None:
+            self._perf_counters.open_for_pid(self._proc.pid)
 
         # Drain stderr in background.
         #

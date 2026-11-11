@@ -270,10 +270,12 @@ class TargetRunner:
                 f.pt_cov.reset_edge_map()
             if f.branch_cov:
                 f.branch_cov.reset_edge_map()
-            # Open perf counters on current process (pid=0, no extra perms needed)
-            # so in-process target calls (direct/direct_lite) are counted.
+            # Counters on the process running the target, opened once:
+            # this thread (pid 0) in direct modes, else the loader.
             if f._perf_counters:
-                f._perf_counters.open_for_pid(0)
+                pid = f._inprocess_runner.perf_pid()
+                if pid is not None:
+                    f._perf_counters.ensure_open(pid)
             rc, err = f._inprocess_runner.run_one(data)
             f._last_fault_addr = f._inprocess_runner._last_fault_addr
             f._last_regs = f._inprocess_runner._last_regs or {}
@@ -307,6 +309,7 @@ class TargetRunner:
             rc, err = f._persistent_runner.run_one(data)
             if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
+                self._spend_faults(f._last_perf_deltas.get("page_faults", 0))
             return rc, err
 
         if f.ptrace_cov:
@@ -320,9 +323,27 @@ class TargetRunner:
             # must see this execution only.
             if shm:
                 shm.reset_edge_map()
-            return f._forkserver.run_one(data)
+            rc, err = f._forkserver.run_one(data)
+            if f._perf_counters:
+                f._last_perf_deltas = f._perf_counters.read_and_reset()
+            return rc, err
 
         return self._run_spawn(data, shm)
+
+    def _spend_faults(self, faults: int) -> None:
+        """Restart the persistent target once it faulted in its budget.
+
+        A leaking loop faults in fresh heap every iteration; a restart hands
+        the memory back before the OOM killer or the RSS limit does.
+        """
+        f = self.f
+        if not f._fault_budget.spend(faults):
+            return
+
+        print("[*] Persistent: page-fault budget spent (leak?), restarting target")
+        f._fault_budget.reset()
+        f._persistent_runner.stop()
+        f._persistent_runner.start()
 
     def _run_spawn(self, data: bytes, shm) -> tuple[int, str]:
         """Fresh-process execution: reset maps, build env, spawn via stdin/file/fast path."""
@@ -466,6 +487,8 @@ class TargetRunner:
         """
         with tempfile.TemporaryFile() as err:
             rc, msg = self._ptrace_run(data, err.fileno())
+            if self.f._perf_counters:
+                self.f._last_perf_deltas = self.f._perf_counters.read_and_reset()
             size = os.fstat(err.fileno()).st_size
             err.seek(max(0, size - _PTRACE_STDERR_CAP))
             stderr = err.read().decode(errors="replace")
@@ -503,6 +526,10 @@ class TargetRunner:
             early = self._ptrace_first_stop(pid, libc)
             if early is not None:
                 return early
+
+            # Stopped right after exec: the counters see the whole run.
+            if f._perf_counters:
+                f._perf_counters.open_for_pid(pid)
 
             cov.install_breakpoints(pid)
             libc.ptrace(PTRACE_CONT, pid, None, None)

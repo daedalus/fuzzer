@@ -36,13 +36,20 @@ int main(int argc, char **argv) {
 """
 
 
+# One fixed edge whatever the input: coverage saturates on the first exec.
+_FLAT = r"""
+#include <stdint.h>
+int main(int argc, char **argv) {
+    uint32_t guard = 1;
+    __sanitizer_cov_trace_pc_guard(&guard);
+    return 0;
+}
+"""
+
+
 def _instr(data: bytes) -> int:
     """Instruction count the fake reports for *data*: unique per input."""
     return 1000 + zlib.crc32(data) % 1_000_000
-
-
-def _branches(data: bytes) -> int:
-    return 1 + _instr(data) // 2
 
 
 class _InputPerf:
@@ -50,24 +57,26 @@ class _InputPerf:
 
     counter_names = ["instructions", "branches"]
 
-    def __init__(self):
+    def __init__(self, instr=None):
         self.data = b""
         self._read_count = 0
+        self.instr = instr or _instr
 
     def open_for_pid(self, pid):
         return True
 
     def read_and_reset(self):
         self._read_count += 1
-        return {"instructions": _instr(self.data), "branches": _branches(self.data)}
+        n = self.instr(self.data)
+        return {"instructions": n, "branches": 1 + n // 2}
 
     def close(self):
         return None
 
 
-def _fuzzer(tmp_path) -> Fuzzer:
+def _fuzzer(tmp_path, driver=_DRIVER, instr=None) -> Fuzzer:
     src, exe = tmp_path / "drv.c", tmp_path / "drv"
-    src.write_text(_DRIVER)
+    src.write_text(driver)
     r = subprocess.run(
         ["clang", "-O1", "-include", SHIM, "-o", str(exe), str(src)],
         capture_output=True,
@@ -88,7 +97,7 @@ def _fuzzer(tmp_path) -> Fuzzer:
         use_coverage=True,
         file_mode=True,
     )
-    perf = _InputPerf()
+    perf = _InputPerf(instr)
     f._perf_counters = perf
     f._ran = {}
     run = f._runner.run_target
@@ -148,3 +157,18 @@ def test_regression_score_reads_picked_seed(tmp_path):
     assert measured, "no scored pick had recorded counts"
     for got, want in measured:
         assert got == want
+
+
+@pytest.mark.skipif(shutil.which("clang") is None, reason="no clang")
+def test_hw_max_input_is_admitted(tmp_path):
+    """--hw-perf novelty end to end: the campaign-max input is in the corpus."""
+    from fuzzer_tool.core.hw_signals import HwMax
+
+    # Flat coverage: only the instruction count (input length) can admit.
+    f = _fuzzer(tmp_path, driver=_FLAT, instr=lambda d: 1000 + 100 * len(d))
+    f._hw_max = HwMax()
+    f.run(iterations=100_000, max_execs=400)
+
+    assert f._hw_max.hits > 0
+    top = f._hw_max._max["instructions"]
+    assert top in f._edge_tracker.seed_hw_instructions.values()

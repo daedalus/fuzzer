@@ -27,6 +27,7 @@ class _FakeFuzzer:
         self._last_child_pid = None
         self._last_fault_addr = None
         self._last_regs = {}
+        self._perf_counters = None
 
 
 def _run(tmp_path, body: str) -> tuple[int, str]:

@@ -1126,6 +1126,7 @@ class EdgeTracker:
         self.seed_hw_instructions: dict[str, int] = {}
         self.seed_hw_branches: dict[str, int] = {}
         self.seed_hw_branch_misses: dict[str, int] = {}
+        self.seed_hw_cycles: dict[str, int] = {}
 
     def record_edges(
         self,
@@ -1734,6 +1735,7 @@ class EdgeTracker:
             self.seed_hw_instructions.pop(key, None)
             self.seed_hw_branches.pop(key, None)
             self.seed_hw_branch_misses.pop(key, None)
+            self.seed_hw_cycles.pop(key, None)
             self.seed_cost.pop(key, None)
             self._minhash.remove(key)
 
@@ -3539,12 +3541,16 @@ class EdgeTracker:
             deltas.get("branches", 0),
             deltas.get("branch_misses", 0),
         )
+        cycles = deltas.get("cpu_cycles", 0)
+        if cycles > 0:
+            self.seed_hw_cycles[seed_key] = cycles
 
     def seed_hw(self, seed_key: str) -> dict[str, int]:
-        """Scorer kwargs: the seed's own instruction and branch counts."""
+        """Scorer kwargs: the seed's own instruction, branch and cycle counts."""
         return {
             "hw_instructions": self.seed_hw_instructions.get(seed_key, 0),
             "hw_branches": self.seed_hw_branches.get(seed_key, 0),
+            "hw_cycles": self.seed_hw_cycles.get(seed_key, 0),
         }
 
     def rare_edge_count(self, seed_key: str, threshold: int = 4) -> int:
@@ -3991,6 +3997,7 @@ class EdgeTracker:
             "seed_hw_instructions": self.seed_hw_instructions,
             "seed_hw_branches": self.seed_hw_branches,
             "seed_hw_branch_misses": self.seed_hw_branch_misses,
+            "seed_hw_cycles": self.seed_hw_cycles,
         }
 
     def from_dict(self, data: dict) -> None:
@@ -4046,6 +4053,7 @@ class EdgeTracker:
         self.seed_hw_instructions = data.get("seed_hw_instructions", {})
         self.seed_hw_branches = data.get("seed_hw_branches", {})
         self.seed_hw_branch_misses = data.get("seed_hw_branch_misses", {})
+        self.seed_hw_cycles = data.get("seed_hw_cycles", {})
         self._corpus_sig = None
         self._restore_minhash(data.get("minhash_sigs", {}))
 

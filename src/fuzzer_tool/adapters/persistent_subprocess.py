@@ -352,10 +352,14 @@ class PersistentLoader:
         function_name: str = "LLVMFuzzerTestOneInput",
         timeout: float = 5.0,
         use_ptrace: bool = False,
+        perf_counters=None,
     ):
         self.target = target
         self.function_name = function_name
         self.timeout = timeout
+        # Attached to the loader at spawn; the child it forks per call
+        # inherits them and folds its counts back on exit.
+        self._perf_counters = perf_counters
         # Off by default: PTRACE_TRACEME on every forked call adds per-exec
         # overhead and can be blocked by yama ptrace_scope. Opt in with
         # --ptrace when fault-address/register capture is worth the cost.
@@ -417,6 +421,8 @@ class PersistentLoader:
             env=env,
         )
         self._reader = PipeReader(self._proc.stdout.fileno())
+        if self._perf_counters is not None:
+            self._perf_counters.open_for_pid(self._proc.pid)
 
         # Drain stderr in background — prevents pipe-buffer deadlock when
         # ASAN/instrumented targets write diagnostic output to stderr.

@@ -1661,6 +1661,9 @@ class StatsReporter:
         perf_counters = getattr(f, "_perf_counters", None)
         if perf_counters and perf_counters._read_count > 0:
             stats = perf_counters.stats
+            # No PMU: the sw: field reports; zeros here would only mislead.
+            if stats["total_instructions"] + stats["total_branches"] <= 0:
+                return ""
             perf_str = (
                 f" | perf: {stats['total_instructions']:,}i "
                 f"{stats['total_branches']:,}b "
@@ -1695,6 +1698,33 @@ class StatsReporter:
             f"{stats['total_l1d_read_miss']:,}m "
             f"{stats['l1d_miss_rate'] * 100:.2f}%"
         )
+
+    def _print_stats_sw_str(self, f) -> str:
+        """Software events: target CPU time, minor page faults, switches."""
+        perf_counters = getattr(f, "_perf_counters", None)
+        if not perf_counters or perf_counters._read_count <= 0:
+            return ""
+        s = perf_counters.stats
+        cpu_ns = s["total_task_clock"]
+        faults = s["total_page_faults"]
+        switches = s["total_context_switches"]
+        if cpu_ns + faults + switches <= 0:
+            return ""
+        return f" | sw: {cpu_ns / 1e6:.1f}ms {faults:,}pf {switches:,}cs"
+
+    def _print_stats_cache_str(self, f) -> str:
+        """LLC read accesses/misses and TLB read misses (data, instruction)."""
+        perf_counters = getattr(f, "_perf_counters", None)
+        if not perf_counters or perf_counters._read_count <= 0:
+            return ""
+        s = perf_counters.stats
+        llc_r, llc_m = s["total_llc_read_access"], s["total_llc_read_miss"]
+        dtlb, itlb = s["total_dtlb_read_miss"], s["total_itlb_read_miss"]
+        # Not opened (no PMU, or not requested): print nothing, not zeros.
+        if llc_r + llc_m + dtlb + itlb <= 0:
+            return ""
+        rate = llc_m / llc_r * 100 if llc_r else 0.0
+        return f" | llc: {llc_r:,}r {llc_m:,}m {rate:.2f}% tlb: {dtlb:,}d {itlb:,}i"
 
     def _print_stats_pt_str(self, f) -> str:
         """Intel PT block/trace/lost bytes."""
@@ -2020,7 +2050,12 @@ class StatsReporter:
         ent_str = self._print_stats_ent_str(f)
         rate_str = self._print_stats_rate_str(f)
         fmt_str = self._print_stats_fmt_str(f)
-        perf_str = self._print_stats_perf_str(f) + self._print_stats_d1_str(f)
+        perf_str = (
+            self._print_stats_perf_str(f)
+            + self._print_stats_d1_str(f)
+            + self._print_stats_cache_str(f)
+            + self._print_stats_sw_str(f)
+        )
         pt_str = self._print_stats_pt_str(f)
         lbr_str = self._print_stats_lbr_str(f)
         qea_str = self._print_stats_qea_str(f)

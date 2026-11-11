@@ -1579,6 +1579,7 @@ class Fuzzer:
         honggfuzz=False,
         hw_perf=False,
         hw_perf_counters=None,
+        hw_instr_limit=0,
         intel_pt=False,
         intel_pt_mode="block",
         lbr=False,
@@ -2955,8 +2956,9 @@ class Fuzzer:
         self.crash_allowlist: set[str] = crash_allowlist or set()
         self.save_smaller: bool = save_smaller
         self.honggfuzz: bool = honggfuzz
-        # A counter list implies --hw-perf.
-        self.hw_perf: bool = hw_perf or bool(hw_perf_counters)
+        # A counter list or an instruction limit implies --hw-perf.
+        self.hw_perf: bool = hw_perf or bool(hw_perf_counters) or hw_instr_limit > 0
+        self._hw_instr_limit: int = hw_instr_limit
         self._hw_perf_counters: list[str] | None = hw_perf_counters
         self.intel_pt: bool = intel_pt
         self.intel_pt_mode: str = intel_pt_mode
@@ -3081,6 +3083,20 @@ class Fuzzer:
                 log.warning("Hardware perf counters not available (needs CAP_PERFMON or root)")
                 self._perf_counters = None
                 self.hw_perf = False
+
+        # Counter-driven signals; None/0 without counters (ifs up: the
+        # per-exec sites test one attribute).
+        self._hw_max = None
+        self._fault_budget = None
+        if self._perf_counters:
+            from fuzzer_tool.core.hw_signals import DEFAULT_FAULT_BUDGET_MB, FaultBudget, HwMax
+
+            self._hw_max = HwMax()
+            self._fault_budget = FaultBudget(self._rss_limit_mb or DEFAULT_FAULT_BUDGET_MB)
+        counts_instr = self._perf_counters is not None and self._perf_counters.has_pmu
+        if self._hw_instr_limit and not counts_instr:
+            print("[!] --hw-instr-limit: no instruction counter (no PMU); limit ignored")
+            self._hw_instr_limit = 0
 
         # Doppler samples SHM hit counts only: without SHM it would score
         # nothing and silently act as 'base' while reported as enabled.
@@ -5047,7 +5063,9 @@ class Fuzzer:
         if self.persistent:
             from fuzzer_tool.adapters.persistent_signal import PersistentRunner
 
-            self._persistent_runner = PersistentRunner(target=self.target, timeout=self.timeout)
+            self._persistent_runner = PersistentRunner(
+                target=self.target, timeout=self.timeout, perf_counters=self._perf_counters
+            )
             if self._persistent_runner.start():
                 print("[*] Persistent mode: target started")
             else:
@@ -5248,6 +5266,7 @@ class Fuzzer:
                 capture_stderr=target_is_asan or target_is_ubsan,
                 use_ptrace=self.use_ptrace,
                 placement=self.input_placement,
+                perf_counters=self._perf_counters,
             )
             if use_direct_lite and self._rss_limit_mb > 0:
                 # The target shares this process: no per-target cap exists.
@@ -5345,6 +5364,7 @@ class Fuzzer:
                 capture_stderr=target_is_asan or target_is_ubsan,
                 use_ptrace=self.use_ptrace,
                 placement=self.input_placement,
+                perf_counters=self._perf_counters,
             )
             mode = "direct ctypes" if direct_ok else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
@@ -5445,9 +5465,7 @@ class Fuzzer:
         persistent, ptrace) or needs per-execution setup the
         loader's environment is fixed against (cmplog's file sink truncates
         its log per run; the FIFO sink is run-invariant, and the shim zeroes
-        its counters before forking; perf counters must be opened on the
-        child pid we never see;
-        file_mode/target_args build their own argv; multi-target needs more
+        its counters before forking; file_mode/target_args build their own argv; multi-target needs more
         than one binary).
         """
         if (
@@ -5458,7 +5476,6 @@ class Fuzzer:
             or self.file_mode
             or self.target_args
             or (self._cmplog and not self._cmplog.fifo_sink)
-            or self._perf_counters
             or self._pt_session
             or self._lbr_session
         ):
@@ -5479,7 +5496,9 @@ class Fuzzer:
         if self._cmplog:
             env = self._cmplog.setup_env({**os.environ, **env})
 
-        runner = ForkserverRunner(self.target, timeout=self.timeout, env=env)
+        runner = ForkserverRunner(
+            self.target, timeout=self.timeout, env=env, perf_counters=self._perf_counters
+        )
         if runner.start():
             self._forkserver = runner
             print(f"[*] Forkserver: fork+exec from a loaded process ({self.target})")
@@ -6056,6 +6075,8 @@ class Fuzzer:
         t0 = time.perf_counter_ns()
         result = self._runner.run_target(data)
         self._exec_timer.add_target(time.perf_counter_ns() - t0)
+        if self._hw_instr_limit:
+            result = self._instr_verdict(result)
 
         # Shim health, inlined: this runs on every execution. Empty stderr
         # short-circuits; counters are read once per SHIM_HEALTH_PERIOD.
@@ -6067,6 +6088,17 @@ class Fuzzer:
             self._shim_countdown = SHIM_HEALTH_PERIOD
             self._read_shim_counters()
         return result
+
+    def _instr_verdict(self, result: tuple[int, str]) -> tuple[int, str]:
+        """--hw-instr-limit: a clean run past the budget is a hang (rc -1).
+
+        Deterministic, unlike wall time: the same input gets the same
+        verdict on a loaded box. Crashes keep their rc.
+        """
+        rc, err = result
+        if rc < 0 or self._last_perf_deltas.get("instructions", 0) <= self._hw_instr_limit:
+            return result
+        return -1, err
 
     def _init_shim_watch(self) -> None:
         """Per-run shim health state: issue dedup and the counter-read clock.

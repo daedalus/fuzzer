@@ -897,6 +897,7 @@ def cmd_fuzz(args):
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
         hw_perf_counters=getattr(args, "hw_perf_counters", None),
+        hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
         intel_pt_mode=getattr(args, "intel_pt_mode", "block"),
         lbr=getattr(args, "lbr", False),
@@ -6611,6 +6612,14 @@ def main() -> int:
         metavar="NAME[,NAME...]",
         help="Counters to open instead of the --hw-perf defaults (implies --hw-perf), "
         "e.g. instructions,llc_read_miss,dtlb_read_miss,page_faults.",
+    )
+    fuzz_parser.add_argument(
+        "--hw-instr-limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Treat a clean run of more than N instructions as a hang: a "
+        "deterministic timeout (implies --hw-perf; needs a PMU). 0 = off.",
     )
     fuzz_parser.add_argument(
         "--intel-pt",
