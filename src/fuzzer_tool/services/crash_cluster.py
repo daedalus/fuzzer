@@ -37,6 +37,7 @@ from fuzzer_tool.core.crash_graph import (
 )
 from fuzzer_tool.core.elf import estimate_map_size
 from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
 from fuzzer_tool.core.run_mode import InputChannel
 from fuzzer_tool.services.tmin import crash_sig
 
@@ -113,26 +114,60 @@ class TraceProbe:
 class CoverageReducer:
     """Coverage-reduction fuzzing: shrink the path, keep the bug.
 
-    A mutant replaces the current input iff it crashes with the same
-    signature and touches fewer edges (equal edges: shorter input).
+    A candidate replaces the current input iff it crashes with the same
+    signature and touches fewer edges (equal edges: shorter input). Two
+    phases share one exec budget:
+
+        shrink  ChunkPass deletions to a fixpoint (core/reducer.py)
+        mutate  random cut / byte / truncate on what is left
     """
 
     def __init__(self, probe: Callable[[bytes], Trace], rng, max_execs: int = REDUCE_EXECS):
         self._probe = probe
         self._rng = rng
         self._max_execs = max_execs
+        self._left = max_execs
         self._ops = (self._cut, self._byte, self._trunc)
 
     def reduce(self, data: bytes, trace: Trace) -> tuple[bytes, Trace]:
         """Reduce *data* (whose run is *trace*) within the exec budget."""
+        self._left = self._max_execs
+        data, trace = self._shrink(data, trace)
+        return self._mutate(data, trace)
+
+    def _run(self, cand: bytes) -> Trace | None:
+        """One budgeted exec; None once the budget is spent."""
+        if self._left <= 0:
+            return None
+        self._left -= 1
+        return self._probe(cand)
+
+    def _shrink(self, data: bytes, trace: Trace) -> tuple[bytes, Trace]:
+        """Systematic chunk deletion.
+
+        Random cuts stall on structured input: on fuzzgoat JSON nearly every
+        cut breaks the parse, and one `[]` UAF kept 142 edges where 26 do.
+        The edge bound only falls, so the oracle's verdict cache stays valid.
+        """
+        best = [data, trace]
+
+        def judge(cand: bytes) -> Verdict:
+            got = self._run(cand)
+            if got is None or got.sig != trace.sig or got.graph.size > best[1].graph.size:
+                return Verdict.FAIL
+            best[:] = [cand, got]  # Reducer keeps every PASS: it is the new current
+            return Verdict.PASS
+
+        Reducer(Oracle(judge), [(Phase.MAIN, ChunkPass())]).run(data)
+        return best[0], best[1]
+
+    def _mutate(self, data: bytes, trace: Trace) -> tuple[bytes, Trace]:
+        """Random mutations on the remaining budget."""
         last = len(self._ops) - 1
 
-        for _ in range(self._max_execs):
-            if not data:
-                break
-
+        while data and self._left > 0:
             cand = self._ops[self._rng.randint(0, last)](data)
-            got = self._probe(cand)
+            got = self._run(cand)
             if got.sig != trace.sig:
                 continue
 

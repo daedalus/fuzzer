@@ -1,5 +1,6 @@
 """Igor crash clustering service: coverage reduction, probe driver, CLI (E4)."""
 
+import itertools
 import stat
 import sys
 
@@ -22,13 +23,71 @@ def _probe(data: bytes) -> Trace:
     return Trace(sig, graph_from_edges(range(len(data))))
 
 
+def _json_probe(data: bytes) -> Trace:
+    """Crashes iff bracketed and holding b"BUG": a cut mostly breaks the format."""
+    ok = data[:1] == b"[" and data[-1:] == b"]" and b"BUG" in data
+    return Trace("S" if ok else None, graph_from_edges(range(len(data))))
+
+
+# Mutation phase that only ever proposes the empty input (always rejected).
+def _idle_rng():
+    return ScriptedRng(randints=itertools.cycle([_TRUNC, 0]))
+
+
+class TestShrink:
+    def test_regression_reaches_format_minimum(self):
+        # Random cuts stalled on fuzzgoat JSON (one `[]` UAF kept 142 of 26 edges).
+        data = b"[xx,BUG,yy]"
+
+        out, trace = CoverageReducer(_json_probe, _idle_rng(), max_execs=200).reduce(
+            data, _json_probe(data)
+        )
+
+        assert out == b"[BUG]"
+        assert trace.graph.size == len(out)
+
+    def test_equal_edges_shorter_is_kept(self):
+        def probe(d):
+            return Trace(_json_probe(d).sig, graph_from_edges([1, 2]))
+
+        out, _ = CoverageReducer(probe, _idle_rng(), max_execs=200).reduce(
+            b"[xBUGx]", probe(b"[xBUGx]")
+        )
+
+        assert out == b"[BUG]"
+
+    def test_falsification_more_edges_is_rejected(self):
+        # Shorter input, more edges: never a coverage reduction.
+        def probe(d):
+            return Trace(_json_probe(d).sig, graph_from_edges(range(100 - len(d))))
+
+        out, _ = CoverageReducer(probe, _idle_rng(), max_execs=200).reduce(
+            b"[xBUGx]", probe(b"[xBUGx]")
+        )
+
+        assert out == b"[xBUGx]"
+
+    def test_adversarial_budget_caps_shrink(self):
+        calls = []
+
+        def probe(d):
+            calls.append(d)
+            return _json_probe(d)
+
+        CoverageReducer(probe, _idle_rng(), max_execs=3).reduce(
+            b"[xx,BUG,yy]", _json_probe(b"[xx,BUG,yy]")
+        )
+
+        assert len(calls) == 3
+
+
 class TestReducer:
     def test_cut_with_fewer_edges_is_kept(self):
         data = b"BUG" + b"x" * 5
         start, ln = 3, 5
         rng = ScriptedRng(randints=[_CUT, start, ln])
 
-        out, trace = CoverageReducer(_probe, rng, max_execs=1).reduce(data, _probe(data))
+        out, trace = CoverageReducer(_probe, rng, max_execs=1)._mutate(data, _probe(data))
 
         assert out == data[:start] + data[start + ln :]
         assert trace.graph.size == len(out)
@@ -37,7 +96,7 @@ class TestReducer:
         data = b"BUG" + b"x" * 5
         rng = ScriptedRng(randints=[_TRUNC, 1])  # -> b"B", no crash
 
-        out, _ = CoverageReducer(_probe, rng, max_execs=1).reduce(data, _probe(data))
+        out, _ = CoverageReducer(_probe, rng, max_execs=1)._mutate(data, _probe(data))
 
         assert out == data
 
@@ -48,7 +107,7 @@ class TestReducer:
 
         rng = ScriptedRng(randints=[_TRUNC, 3])
 
-        out, _ = CoverageReducer(probe, rng, max_execs=1).reduce(b"BUGxx", probe(b"BUGxx"))
+        out, _ = CoverageReducer(probe, rng, max_execs=1)._mutate(b"BUGxx", probe(b"BUGxx"))
 
         assert out == b"BUGxx"
 
@@ -56,7 +115,7 @@ class TestReducer:
         data = b"BUGxx"
         rng = ScriptedRng(randints=[_BYTE, 4, ord("y")])
 
-        out, _ = CoverageReducer(_probe, rng, max_execs=1).reduce(data, _probe(data))
+        out, _ = CoverageReducer(_probe, rng, max_execs=1)._mutate(data, _probe(data))
 
         assert out == data
 
@@ -68,7 +127,7 @@ class TestReducer:
             return _probe(d)
 
         rng = ScriptedRng(randints=[_TRUNC, 4, _TRUNC, 3])
-        CoverageReducer(probe, rng, max_execs=2).reduce(b"BUGxx", _probe(b"BUGxx"))
+        CoverageReducer(probe, rng, max_execs=2)._mutate(b"BUGxx", _probe(b"BUGxx"))
 
         assert len(calls) == 2
 
