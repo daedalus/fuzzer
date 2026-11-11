@@ -43,6 +43,9 @@ PERF_COUNT_HW_CACHE_MISSES = 3
 PERF_COUNT_HW_BRANCH_INSTRUCTIONS = 4
 PERF_COUNT_HW_BRANCH_MISSES = 5
 PERF_COUNT_HW_BUS_CYCLES = 6
+PERF_COUNT_HW_STALLED_CYCLES_FRONTEND = 7
+PERF_COUNT_HW_STALLED_CYCLES_BACKEND = 8
+PERF_COUNT_HW_REF_CPU_CYCLES = 9
 
 # PERF_TYPE_HW_CACHE config = cache_id | (op << 8) | (result << 16)
 PERF_COUNT_HW_CACHE_L1D = 0
@@ -56,9 +59,15 @@ def _hw_cache_config(cache_id: int, op: int, result: int) -> int:
 
 
 # perf_sw_config values (for PERF_TYPE_SOFTWARE)
+# include/uapi/linux/perf_event.h: enum perf_sw_ids. 1 is TASK_CLOCK and 2 is
+# the total PAGE_FAULTS; the minor/major split lives at 5 and 6.
 PERF_COUNT_SW_CPU_CLOCK = 0
-PERF_COUNT_SW_PAGE_FAULTS_MIN = 1
-PERF_COUNT_SW_PAGE_FAULTS_MAJ = 2
+PERF_COUNT_SW_TASK_CLOCK = 1
+PERF_COUNT_SW_PAGE_FAULTS = 2
+PERF_COUNT_SW_CONTEXT_SWITCHES = 3
+PERF_COUNT_SW_CPU_MIGRATIONS = 4
+PERF_COUNT_SW_PAGE_FAULTS_MIN = 5
+PERF_COUNT_SW_PAGE_FAULTS_MAJ = 6
 
 # perf_event_attr flags
 PERF_FLAG_FD_CLOEXEC = 8
@@ -146,7 +155,12 @@ COUNTER_DEFS = {
     "cpu_cycles": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, True),
     "cache_refs": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_REFERENCES, True),
     "cache_misses": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, True),
+    "stalled_cycles_frontend": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND, True),
+    "stalled_cycles_backend": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_BACKEND, True),
+    "ref_cycles": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, True),
     "page_faults": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN, False),
+    "page_faults_major": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MAJ, False),
+    "context_switches": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, False),
     "l1d_read_access": (
         PERF_TYPE_HW_CACHE,
         _hw_cache_config(
@@ -165,6 +179,7 @@ COUNTER_DEFS = {
 
 DEFAULT_COUNTERS = [
     "instructions",
+    "cpu_cycles",
     "branches",
     "branch_misses",
     "l1d_read_access",
@@ -180,7 +195,7 @@ class PerfCounters:
 
     Args:
         counter_names: Which counters to enable. Default: DEFAULT_COUNTERS (instructions,
-            branches, branch_misses, l1d_read_access, l1d_read_miss).
+            cpu_cycles, branches, branch_misses, l1d_read_access, l1d_read_miss).
         exclude_kernel: If True, exclude kernel-space events (default False;
             forced on where perf_event_paranoid leaves no choice).
         inherit: If True, inherit counters to child threads (default True).
@@ -212,6 +227,9 @@ class PerfCounters:
         self._paranoid = self._read_paranoid()
         self._available = self._check_available()
         self._total_instructions = 0
+        self._total_cpu_cycles = 0
+        self._total_stalled_frontend = 0
+        self._total_stalled_backend = 0
         self._total_branches = 0
         self._total_branch_misses = 0
         self._total_l1d_read_access = 0
@@ -404,6 +422,9 @@ class PerfCounters:
 
         # Accumulate totals for stats
         self._total_instructions += deltas.get("instructions", 0)
+        self._total_cpu_cycles += deltas.get("cpu_cycles", 0)
+        self._total_stalled_frontend += deltas.get("stalled_cycles_frontend", 0)
+        self._total_stalled_backend += deltas.get("stalled_cycles_backend", 0)
         self._total_branches += deltas.get("branches", 0)
         self._total_branch_misses += deltas.get("branch_misses", 0)
         self._total_l1d_read_access += deltas.get("l1d_read_access", 0)
@@ -453,9 +474,29 @@ class PerfCounters:
                 else 0
             ),
             "read_count": self._read_count,
+            "total_cpu_cycles": self._total_cpu_cycles,
+            "total_stalled_cycles_frontend": self._total_stalled_frontend,
+            "total_stalled_cycles_backend": self._total_stalled_backend,
+            # Instructions per cycle: 0 when cycles were not counted.
             "ipc": (
-                self._total_instructions / max(1, self._total_branches)
+                self._total_instructions / self._total_cpu_cycles
+                if self._total_cpu_cycles > 0
+                else 0
+            ),
+            # Instructions per branch (what "ipc" used to report).
+            "ipb": (
+                self._total_instructions / self._total_branches
                 if self._total_branches > 0
+                else 0
+            ),
+            "stall_frontend_rate": (
+                self._total_stalled_frontend / self._total_cpu_cycles
+                if self._total_cpu_cycles > 0
+                else 0
+            ),
+            "stall_backend_rate": (
+                self._total_stalled_backend / self._total_cpu_cycles
+                if self._total_cpu_cycles > 0
                 else 0
             ),
         }

@@ -1666,8 +1666,18 @@ class StatsReporter:
                 f"{stats['total_branches']:,}b "
                 f"{stats['total_branch_misses']:,}bm "
                 f"{stats['branch_miss_rate'] * 100:.2f}% "
-                f"ipc:{stats['ipc']:.2f}"
+                f"ipb:{stats['ipb']:.2f}"
             )
+            # Real IPC needs the cycles counter, which VMs often lack: omit
+            # it then rather than print ipc:0.00.
+            if stats["total_cpu_cycles"] > 0:
+                perf_str += f" ipc:{stats['ipc']:.2f}"
+            stall = stats["total_stalled_cycles_frontend"] + stats["total_stalled_cycles_backend"]
+            if stall > 0:
+                perf_str += (
+                    f" stall:{stats['stall_frontend_rate'] * 100:.0f}%f"
+                    f"/{stats['stall_backend_rate'] * 100:.0f}%b"
+                )
         return perf_str
 
     def _print_stats_d1_str(self, f) -> str:

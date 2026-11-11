@@ -34,4 +34,5 @@ def test_perf_field_shows_branch_miss_rate():
     pc._total_branches = 2_000
     pc._total_branch_misses = 50
     line = StatsReporter._print_stats_perf_str(None, SimpleNamespace(_perf_counters=pc))
-    assert "50bm 2.50% " in line
+    assert "50bm 2.50% ipb:5.00" in line
+    assert "ipc:" not in line  # no cycles counted
