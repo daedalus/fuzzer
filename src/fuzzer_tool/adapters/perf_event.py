@@ -440,6 +440,11 @@ class PerfCounters:
             "total_instructions": self._total_instructions,
             "total_branches": self._total_branches,
             "total_branch_misses": self._total_branch_misses,
+            "branch_miss_rate": (
+                self._total_branch_misses / self._total_branches
+                if self._total_branches > 0
+                else 0
+            ),
             "total_l1d_read_access": self._total_l1d_read_access,
             "total_l1d_read_miss": self._total_l1d_read_miss,
             "l1d_miss_rate": (

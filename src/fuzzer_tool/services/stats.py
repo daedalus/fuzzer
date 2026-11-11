@@ -1665,6 +1665,7 @@ class StatsReporter:
                 f" | perf: {stats['total_instructions']:,}i "
                 f"{stats['total_branches']:,}b "
                 f"{stats['total_branch_misses']:,}bm "
+                f"{stats['branch_miss_rate'] * 100:.2f}% "
                 f"ipc:{stats['ipc']:.2f}"
             )
         return perf_str
