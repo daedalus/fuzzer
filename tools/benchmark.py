@@ -37,6 +37,7 @@ _REGISTRY: dict[str, tuple[str, str]] = {
     "group": ("bench_group_testing.py", "group testing vs binary splitting, oracle calls"),
     "seedzip": ("bench_seed_zip.py", "loose seed files vs --zip-seed-corpus, write/read"),
     "periodicity_null": ("bench_periodicity_null.py", "periodicity false positives, nulls"),
+    "crashcluster": ("bench_crash_cluster.py", "crash-cluster vs fuzzgoat ground truth, ARI"),
 }
 
 BENCHMARKS: dict[str, str] = {name: script for name, (script, _) in _REGISTRY.items()}
