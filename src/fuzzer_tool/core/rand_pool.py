@@ -52,6 +52,11 @@ import numpy as np
 
 _POOL_ENTRIES = 4096  # refill every 4K draws
 
+# ``draw % n`` has statistical distance (n % 2**32)*... from uniform: <= 1e-7
+# for n <= 2**20 but up to ~1/3 near n = 2/3 * 2**32.  Above this bound the
+# scalar/list range APIs rejection-sample (_randbelow) instead.
+_MODULO_SAFE_MAX = 1 << 30
+
 # Fixed replacement for "seed from OS/hardware entropy". Arbitrary but
 # constant -- what matters is that it never changes between runs, not what
 # it is. Used any time a caller passes seed=None instead of an int.
@@ -92,6 +97,12 @@ def _seed_source(seed):
     return seed
 
 
+def _min_entropy(data: bytes) -> float:
+    """Empirical min-entropy H_inf = -log2(max_x freq(x)) in bits/byte."""
+    counts = np.bincount(np.frombuffer(data, dtype=np.uint8), minlength=256)
+    return float(-np.log2(counts.max() / len(data)))
+
+
 def _shannon_entropy(data: bytes) -> float:
     """Compute Shannon entropy in bits/byte from a byte string."""
     counts = np.bincount(np.frombuffer(data, dtype=np.uint8), minlength=256).astype(np.float64)
@@ -120,9 +131,15 @@ class RandPool:
         "_m256_l",
         "_rng",
         "_min_entropy",
+        "_min_hinf",
     )
 
-    def __init__(self, seed=None, min_entropy: float | None = None) -> None:
+    def __init__(
+        self,
+        seed=None,
+        min_entropy: float | None = None,
+        min_hinf: float | None = None,
+    ) -> None:
         self._rng = np.random.default_rng(_seed_source(seed))
         self._pool: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint32)
         self._m256: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint8)  # pre-computed % 256
@@ -138,6 +155,9 @@ class RandPool:
         self._m256_l: list[int] = []
         self._idx = _POOL_ENTRIES
         self._min_entropy = min_entropy
+        # Min-entropy (not Shannon) gate; a 4096-byte uniform batch has an
+        # empirical H_inf of ~7.2 bits/byte, so thresholds belong near 7.0.
+        self._min_hinf = min_hinf
 
     def _generate_pool(self) -> None:
         """Fill ``_pool`` and ``_m256`` from the current generator."""
@@ -148,6 +168,17 @@ class RandPool:
     def _refill(self) -> None:
         self._generate_pool()
         # Entropy only when gated: ~9% of a refill, read by nobody otherwise.
+        if self._min_hinf is not None and self.pool_min_entropy_now() < self._min_hinf:
+            for _ in range(3):
+                self.reseed(int(self._rng.integers(0, 2**63)))
+                self._generate_pool()
+                if self.pool_min_entropy_now() >= self._min_hinf:
+                    break
+            else:
+                raise RuntimeError(
+                    f"RandPool min-entropy starvation: {self.pool_min_entropy_now():.2f}"
+                    f" < {self._min_hinf:.2f}"
+                )
         if self._min_entropy is not None and self._entropy() < self._min_entropy:
             for _ in range(3):
                 # Derive the retry seed from the still-live (low-entropy)
@@ -169,6 +200,10 @@ class RandPool:
         self._pool_l = self._pool.tolist()
         self._m256_l = self._m256.tolist()
         self._idx = 0
+
+    def pool_min_entropy_now(self) -> float:
+        """Empirical min-entropy (bits/byte) of the current ``_m256`` batch."""
+        return _min_entropy(self._m256.tobytes())
 
     def _entropy(self) -> float:
         """Shannon entropy (bits/byte) of the current ``_m256`` batch."""
@@ -269,7 +304,7 @@ class RandPool:
         """
         if n <= 0 or count <= 0:
             return []
-        if n > 1 << 32:
+        if n > _MODULO_SAFE_MAX:
             return [self.randrange(n) for _ in range(count)]
         # _take spans refills; a bare slice truncated for count > _POOL_ENTRIES
         # (and still advanced _idx by the full count).
@@ -347,7 +382,7 @@ class RandPool:
         width = b - a + 1
         if width <= 0 or count <= 0:
             return []
-        if width > 1 << 32:
+        if width > _MODULO_SAFE_MAX:
             return [self.randint(a, b) for _ in range(count)]
         # Fast path: pre-computed % 256 array, only while the request fits
         # in the current pool -- the spanning path has no matching _m256 run.
@@ -378,7 +413,7 @@ class RandPool:
         """
         if n <= 0:
             return 0
-        if n <= 1 << 32:
+        if n <= _MODULO_SAFE_MAX:
             return self._draw() % n
         return self._randbelow(n)
 
@@ -393,7 +428,7 @@ class RandPool:
         width = b - a + 1
         if width <= 0:
             return a
-        if width <= 1 << 32:
+        if width <= _MODULO_SAFE_MAX:
             if self._idx >= _POOL_ENTRIES:
                 self._refill()
             pos = self._idx
