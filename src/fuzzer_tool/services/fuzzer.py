@@ -10412,8 +10412,6 @@ class Fuzzer:
                             rare_edge_count=rare_edges,
                             timed_out=timed_out,
                             max_cov=max(1, self._edge_tracker.get_cumulative_edge_count()),
-                            hw_instructions=self._last_perf_deltas.get("instructions", 0),
-                            hw_branches=self._last_perf_deltas.get("branches", 0),
                             stack_depth=stack_depth,
                         )
 
@@ -10450,6 +10448,8 @@ class Fuzzer:
                             else 0.0
                         ),
                         **hf_kwargs,
+                        # The picked seed's own counts, not the last execution's.
+                        **self._edge_tracker.seed_hw(seed_key),
                     )
                 elif staged is None:
                     # Markov-generated or synthetic seed: reset to neutral multiplier

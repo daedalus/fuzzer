@@ -3529,6 +3529,24 @@ class EdgeTracker:
         """Get hardware branch miss count for a seed."""
         return self.seed_hw_branch_misses.get(seed_key, 0)
 
+    def record_hw(self, seed_key: str, deltas: dict[str, int]) -> None:
+        """Store *seed_key*'s perf counts, measured on its own execution."""
+        self._record_seed_meta(
+            seed_key,
+            0,
+            0,
+            deltas.get("instructions", 0),
+            deltas.get("branches", 0),
+            deltas.get("branch_misses", 0),
+        )
+
+    def seed_hw(self, seed_key: str) -> dict[str, int]:
+        """Scorer kwargs: the seed's own instruction and branch counts."""
+        return {
+            "hw_instructions": self.seed_hw_instructions.get(seed_key, 0),
+            "hw_branches": self.seed_hw_branches.get(seed_key, 0),
+        }
+
     def rare_edge_count(self, seed_key: str, threshold: int = 4) -> int:
         """Count how many edges hit by this seed are 'rare' (seen by <threshold seeds).
 

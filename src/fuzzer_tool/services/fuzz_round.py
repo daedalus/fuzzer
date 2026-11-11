@@ -1294,9 +1294,6 @@ class FuzzRound:
             hit_counts=hit_counts,
             stack_depth=stack_depth,
             path_hash=path_hash,
-            hw_instructions=f._last_perf_deltas.get("instructions", 0),
-            hw_branches=f._last_perf_deltas.get("branches", 0),
-            hw_branch_misses=f._last_perf_deltas.get("branch_misses", 0),
             exec_s=self._t_elapsed,
         )
 
@@ -2118,6 +2115,9 @@ class FuzzRound:
             if meta is not None:
                 meta["valid"] = self._validity is Validity.VALID
         f._record_lineage_insert(mutated, data, _corpus_len_before)
+        # The counts are this execution's: the child's, under the child's key.
+        if f._last_perf_deltas:
+            f._edge_tracker.record_hw(f._seed_key(mutated), f._last_perf_deltas)
         self._note_novelty()
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
         self._feed_population()
