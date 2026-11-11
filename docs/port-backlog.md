@@ -255,7 +255,7 @@ paper, do not oversell it: minimized-corpus *size* differences did not translate
 to statistically significant bug or coverage differences — the win is iteration
 rate.**
 
-**E4. Root-cause crash clustering (implemented 2026-11-08, `crash-cluster`; threshold uncalibrated)** (`#26`, Igor CCS '21) — minimize PoC traces
+**E4. Root-cause crash clustering (implemented 2026-11-08, `crash-cluster`; fuzzgoat calibration negative 2026-11-11, stack signature wins)** (`#26`, Igor CCS '21) — minimize PoC traces
 via coverage-reduction fuzzing, cluster by CFG similarity (Weisfeiler-Lehman
 kernel). Kept 39 real bugs distinct where stack hashes inflate counts 10–100×.
 Goes beyond the stack-hash dedup already shipped; reuses edge maps plus E2.
