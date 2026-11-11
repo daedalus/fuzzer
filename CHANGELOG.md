@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **L1D counters in the perf adapter and a `d1:` stats field** (`adapters/perf_event.py`, `services/stats.py`): `l1d_read_access` and `l1d_read_miss` (`PERF_TYPE_HW_CACHE`, config `L1D | OP_READ<<8 | ACCESS/MISS<<16`) join the default `--hw-perf` set; `PerfCounters.stats` gains `total_l1d_read_access`, `total_l1d_read_miss`, `l1d_miss_rate`. The status line prints ` | d1: <reads>r <misses>m <rate>%` after `perf:`, and omits it when no L1D access was counted (VMs without HW cache events). Five default counters can exceed the PMU's general-purpose slots; reads are not scaled for multiplexing. Not run on real hardware (sandbox has no PMU). `tests/test_perf_l1d.py`.
 - **E-value diagnostic next to McNemar** (`core/exact_tests.py::mixture_e_value`, `tools/lib/bench_paired.py`): `compare()` returns `e_value` and the pooled and per-target tables show an `E` column. It is the uniform-mixture likelihood ratio on the win/loss counts, `2^n b! c! / (n+1)!`, so `1/E` is an anytime-valid p-value (Ville) that does not depend on pair order or on when you stop. Diagnostic only: Holm, the strata verdict and every promotion rule still read McNemar. Kuszmaul (arXiv 2610.19239) is the reason the bet is a capped mixture and not an all-in: with leverage the bound weakens from 1/r to r^(-1/L). No A/B involved.
 
 ### Changed

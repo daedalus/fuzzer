@@ -956,7 +956,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--enable-smt-z3` | Z3-based SMT solving for arithmetic constraint solving on cmplog pairs |
 | `--smt-query-cap MS` | Longest single z3 query (default 30). Applies to every z3 call (`core/z3_budget.py`) |
 | `--smt-round-budget MS` | z3 wall time all queries of one fuzz round share (default 10); spent: z3 skipped, path-negation frontier kept |
-| `--hw-perf` | Hardware performance counters via perf_event_open (instructions, branches, misses) |
+| `--hw-perf` | Hardware performance counters via perf_event_open (instructions, branches, misses, L1D read access/misses) |
 | `--schedule base\|fast\|coe\|rare\|mopt\|lin\|quad\|go\|aflgo\|entropic\|doppler` | AFL++ power schedule (`aflgo` = exact AFLGo distance annealing, `entropic` = libFuzzer `-entropic`, log-scaled rare-feature energy, `doppler` = power Doppler flow energy) |
 | `--aflgo-cooling exp\|log\|lin\|quad` | Cooling schedule for the `aflgo` power factor (default exp) |
 | `--t-x MINUTES` | AFLGo time-to-exploitation in minutes; temperature cools to 1/20 over this window |

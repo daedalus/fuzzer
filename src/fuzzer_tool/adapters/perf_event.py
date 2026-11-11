@@ -33,6 +33,7 @@ NR_PERF_EVENT_OPEN = 298
 # perf_type values
 PERF_TYPE_HARDWARE = 0
 PERF_TYPE_SOFTWARE = 1
+PERF_TYPE_HW_CACHE = 3
 
 # perf_hw_config values (for PERF_TYPE_HARDWARE)
 PERF_COUNT_HW_CPU_CYCLES = 0
@@ -42,6 +43,17 @@ PERF_COUNT_HW_CACHE_MISSES = 3
 PERF_COUNT_HW_BRANCH_INSTRUCTIONS = 4
 PERF_COUNT_HW_BRANCH_MISSES = 5
 PERF_COUNT_HW_BUS_CYCLES = 6
+
+# PERF_TYPE_HW_CACHE config = cache_id | (op << 8) | (result << 16)
+PERF_COUNT_HW_CACHE_L1D = 0
+PERF_COUNT_HW_CACHE_OP_READ = 0
+PERF_COUNT_HW_CACHE_RESULT_ACCESS = 0
+PERF_COUNT_HW_CACHE_RESULT_MISS = 1
+
+
+def _hw_cache_config(cache_id: int, op: int, result: int) -> int:
+    return cache_id | (op << 8) | (result << 16)
+
 
 # perf_sw_config values (for PERF_TYPE_SOFTWARE)
 PERF_COUNT_SW_CPU_CLOCK = 0
@@ -135,7 +147,29 @@ COUNTER_DEFS = {
     "cache_refs": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_REFERENCES, True),
     "cache_misses": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, True),
     "page_faults": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN, False),
+    "l1d_read_access": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_L1D, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_ACCESS
+        ),
+        True,
+    ),
+    "l1d_read_miss": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_L1D, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_MISS
+        ),
+        True,
+    ),
 }
+
+DEFAULT_COUNTERS = [
+    "instructions",
+    "branches",
+    "branch_misses",
+    "l1d_read_access",
+    "l1d_read_miss",
+]
 
 
 class PerfCounters:
@@ -145,7 +179,8 @@ class PerfCounters:
     and provides deltas between reads.
 
     Args:
-        counter_names: Which counters to enable. Default: ["instructions", "branches", "branch_misses"].
+        counter_names: Which counters to enable. Default: DEFAULT_COUNTERS (instructions,
+            branches, branch_misses, l1d_read_access, l1d_read_miss).
         exclude_kernel: If True, exclude kernel-space events (default False;
             forced on where perf_event_paranoid leaves no choice).
         inherit: If True, inherit counters to child threads (default True).
@@ -158,7 +193,7 @@ class PerfCounters:
         inherit: bool = True,
     ):
         if counter_names is None:
-            counter_names = ["instructions", "branches", "branch_misses"]
+            counter_names = list(DEFAULT_COUNTERS)
         self.counter_names = [n for n in counter_names if n in COUNTER_DEFS]
         self.exclude_kernel = exclude_kernel
         self.inherit = inherit
@@ -179,6 +214,8 @@ class PerfCounters:
         self._total_instructions = 0
         self._total_branches = 0
         self._total_branch_misses = 0
+        self._total_l1d_read_access = 0
+        self._total_l1d_read_miss = 0
         self._read_count = 0
 
     @staticmethod
@@ -369,6 +406,8 @@ class PerfCounters:
         self._total_instructions += deltas.get("instructions", 0)
         self._total_branches += deltas.get("branches", 0)
         self._total_branch_misses += deltas.get("branch_misses", 0)
+        self._total_l1d_read_access += deltas.get("l1d_read_access", 0)
+        self._total_l1d_read_miss += deltas.get("l1d_read_miss", 0)
         self._read_count += 1
 
         return deltas
@@ -401,6 +440,13 @@ class PerfCounters:
             "total_instructions": self._total_instructions,
             "total_branches": self._total_branches,
             "total_branch_misses": self._total_branch_misses,
+            "total_l1d_read_access": self._total_l1d_read_access,
+            "total_l1d_read_miss": self._total_l1d_read_miss,
+            "l1d_miss_rate": (
+                self._total_l1d_read_miss / self._total_l1d_read_access
+                if self._total_l1d_read_access > 0
+                else 0
+            ),
             "read_count": self._read_count,
             "ipc": (
                 self._total_instructions / max(1, self._total_branches)

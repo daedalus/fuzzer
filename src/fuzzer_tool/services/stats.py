@@ -1669,6 +1669,22 @@ class StatsReporter:
             )
         return perf_str
 
+    def _print_stats_d1_str(self, f) -> str:
+        """L1D read accesses, read misses and the miss rate."""
+        perf_counters = getattr(f, "_perf_counters", None)
+        if not perf_counters or perf_counters._read_count <= 0:
+            return ""
+        stats = perf_counters.stats
+        # No accesses counted: the events did not open (many VMs have no
+        # HW cache events), so a 0r 0m 0.00% field would only mislead.
+        if stats["total_l1d_read_access"] <= 0:
+            return ""
+        return (
+            f" | d1: {stats['total_l1d_read_access']:,}r "
+            f"{stats['total_l1d_read_miss']:,}m "
+            f"{stats['l1d_miss_rate'] * 100:.2f}%"
+        )
+
     def _print_stats_pt_str(self, f) -> str:
         """Intel PT block/trace/lost bytes."""
         pt_str = ""
@@ -1993,7 +2009,7 @@ class StatsReporter:
         ent_str = self._print_stats_ent_str(f)
         rate_str = self._print_stats_rate_str(f)
         fmt_str = self._print_stats_fmt_str(f)
-        perf_str = self._print_stats_perf_str(f)
+        perf_str = self._print_stats_perf_str(f) + self._print_stats_d1_str(f)
         pt_str = self._print_stats_pt_str(f)
         lbr_str = self._print_stats_lbr_str(f)
         qea_str = self._print_stats_qea_str(f)
