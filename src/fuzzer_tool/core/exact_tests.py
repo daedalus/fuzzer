@@ -1,4 +1,4 @@
-"""Exact paired tests, no scipy (Hard Rule 51): McNemar, Fisher, Wilcoxon signed-rank.
+"""Exact paired tests, no scipy (Hard Rule 51): McNemar, Fisher, Wilcoxon signed-rank, plus an e-value diagnostic.
 
 Single home for the statistics ``tools/lib/bench_paired.py`` promotes on.
 Exact rather than asymptotic because paired benchmark matrices are small:
@@ -50,6 +50,35 @@ def mcnemar_exact(b: int, c: int) -> float:
     k = min(b, c)
     tail = sum(math.comb(n, i) for i in range(k + 1)) / (2**n)
     return min(1.0, 2 * tail)
+
+
+def mixture_e_value(b: int, c: int) -> float:
+    """Anytime-valid e-value against "wins and losses are a fair coin" (diagnostic).
+
+    Uniform-mixture likelihood ratio on the discordant counts *b* (wins) and
+    *c* (losses)::
+
+        E = int_0^1 p^b (1-p)^c dp / 0.5^(b+c) = 2^n * b! c! / (n+1)!    (n = b + c)
+
+    Under the null E is a non-negative martingale with mean 1, so by Ville's
+    inequality P(E ever >= 1/alpha) <= alpha at ANY stopping time: ``1/E`` is a
+    valid p-value after peeking, and the order of the pairs does not matter
+    (the mixture is exchangeable). Wealth never goes negative, i.e. no
+    leverage: with L-fold leverage the bound weakens from 1/r to r^(-1/L)
+    (Kuszmaul, arXiv 2610.19239), which is why the bet is the mixture and not
+    an all-in. The mixture is two-sided; read the direction from b vs c.
+
+    Costs power against :func:`mcnemar_exact` at a fixed n (expect E ~ 1/p or
+    worse); it buys valid early stopping. ``mixture_e_value(0, 0)`` = 1.
+
+    Raises:
+        ValueError: on a negative count.
+    """
+    if b < 0 or c < 0:
+        raise ValueError(f"negative discordant count ({b}, {c})")
+    n = b + c
+    log_e = n * math.log(2) + math.lgamma(b + 1) + math.lgamma(c + 1) - math.lgamma(n + 2)
+    return math.exp(min(log_e, 700.0))  # exp(700) ~ 1e304: finite for any n
 
 
 def fisher_exact(a: int, b: int, c: int, d: int) -> float:

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **E-value diagnostic next to McNemar** (`core/exact_tests.py::mixture_e_value`, `tools/lib/bench_paired.py`): `compare()` returns `e_value` and the pooled and per-target tables show an `E` column. It is the uniform-mixture likelihood ratio on the win/loss counts, `2^n b! c! / (n+1)!`, so `1/E` is an anytime-valid p-value (Ville) that does not depend on pair order or on when you stop. Diagnostic only: Holm, the strata verdict and every promotion rule still read McNemar. Kuszmaul (arXiv 2610.19239) is the reason the bet is a capped mixture and not an all-in: with leverage the bound weakens from 1/r to r^(-1/L). No A/B involved.
+
 ### Changed
 
 - **Gram eigensolvers use Lanczos** (`core/gram_matrixfree.py`): `top_eigenpair` (power iteration, two matvecs per step, the second a repeat of the next step's first) and `top_k_eigenpairs` (block subspace iteration) are one-pass Lanczos with full reorthogonalisation and a Ritz-residual stop. `top_k_eigenpairs` adds deflation rounds so repeated eigenvalues are still counted. `DEFAULT_MAX_ITER` 1000 -> 200 (it now caps basis rows, S x steps floats). Synthetic seed-gram operator (`core_stripped`, the weighting `--seed-gram-scheduler` uses): top-1 3.6-13.7x faster (S=6..10000), top-6 17-60x; `binary`/`rarity` weighting 0.5-2x (small S, big spectral gap: +0.1-0.2 ms). Eigenvalues agree with the old code to ~1e-9. Two-pass Lanczos (lukefleed.xyz, 2025-11) not used: the S x 20-40 basis is small, and it measured ~2x slower. No fuzz-run measurement.

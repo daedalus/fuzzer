@@ -57,6 +57,7 @@ from eval_set import DEFAULT_ITERS, SEED_DIRS, SEEDS, TARGET_SETS, cells  # noqa
 from fuzzer_tool.core.exact_tests import (  # noqa: E402
     fisher_exact,
     mcnemar_exact,
+    mixture_e_value,
     wilcoxon_signed_rank,
 )
 from fuzzer_tool.core.state_store import StateStore  # noqa: E402
@@ -815,6 +816,9 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
         "losses": losses,
         "ties": ties,
         "mcnemar_p": _mcnemar_exact(wins, losses),
+        # Diagnostic only (never promoted on): anytime-valid, 1/E is a p-value
+        # that survives peeking. E >= 20 is the alpha=0.05 line.
+        "e_value": mixture_e_value(wins, losses),
         "fisher_p": _fisher_exact(wins, ties + losses, losses, ties + wins),
         "wilcoxon_stat": wilcoxon_stat,
         "wilcoxon_p": wilcoxon_p,
@@ -959,7 +963,7 @@ def _print_pooled(arm: str, r: dict) -> None:
     """One pooled comparison row, plus the coverage-drop (MCAR) note when cells were dropped."""
     print(
         f"{arm:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} {r['losses']:>4} "
-        f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['holm_p']:>9.3g} {r['fisher_p']:>9.3g} "
+        f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['holm_p']:>9.3g} {r['fisher_p']:>9.3g} {r['e_value']:>8.3g} "
         f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
     )
     if not r["dropped_no_coverage"]:
@@ -993,7 +997,7 @@ def _print_by_target(baseline: str, results: list[tuple[str, str, dict]]) -> Non
     _add_holm([r for _, _, r in results])
     sub = (
         f"{'target':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
-        f"{'McNemar':>9} {'Holm':>9} {'Wilcox':>8} {'med Δ':>7} {'noise':>6}"
+        f"{'McNemar':>9} {'Holm':>9} {'Wilcox':>8} {'E':>8} {'med Δ':>7} {'noise':>6}"
     )
     last_arm = None
     for arm, tgt, r in results:
@@ -1005,7 +1009,7 @@ def _print_by_target(baseline: str, results: list[tuple[str, str, dict]]) -> Non
         print(
             f"{Path(tgt).name:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} "
             f"{r['losses']:>4} {r['ties']:>4} {r['mcnemar_p']:>9.3g} "
-            f"{r['holm_p']:>9.3g} {r['wilcoxon_p']:>8.3g} {r['median_delta']:>+7.1f} "
+            f"{r['holm_p']:>9.3g} {r['wilcoxon_p']:>8.3g} {r['e_value']:>8.3g} {r['median_delta']:>+7.1f} "
             f"{r['median_spread']:>6.1f}"
         )
 
@@ -1025,7 +1029,7 @@ def cmd_analyse(args: argparse.Namespace) -> int:
     print(f"baseline: {args.baseline}  ({len(base)} cells)\n")
     hdr = (
         f"{'arm':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
-        f"{'McNemar':>9} {'Holm':>9} {'Fisher':>9} {'med Δ':>7} {'noise':>6}"
+        f"{'McNemar':>9} {'Holm':>9} {'Fisher':>9} {'E':>8} {'med Δ':>7} {'noise':>6}"
     )
     print(hdr)
     print("-" * len(hdr))
@@ -1055,6 +1059,10 @@ def cmd_analyse(args: argparse.Namespace) -> int:
     print(
         "\nMcNemar is the test to read: the matrix is paired by construction. "
         "Fisher is shown only to make the cost of discarding the pairing visible."
+    )
+    print(
+        "E is a diagnostic e-value (uniform mixture on W/L): E >= 20 is the alpha=0.05 line and "
+        "1/E stays valid under peeking; it is less powerful than McNemar at a fixed n."
     )
     print(
         "Holm adjusts McNemar over every row of its table: read it, not the raw p, "
