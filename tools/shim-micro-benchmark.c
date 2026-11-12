@@ -55,8 +55,8 @@ static void attach(uint32_t map, int touched) {
     if (getenv("BENCH_DIST")) {
         uint32_t cap = 1u << 20;              /* slot capacity, power of two */
         uint8_t *d = (uint8_t *)calloc(1, 4 + (size_t)cap * 16);
-        __afl_dist_count = (uint32_t *)d;
-        *__afl_dist_count = cap;
+        *(uint32_t *)d = cap;
+        __afl_dist_cap = cap;
         __afl_dist_table = (struct __afl_dist_entry *)(d + 4);
         for (uint32_t i = 0; i < cap; i++) {
             /* Leave every other slot empty so __afl_probe_distance terminates
@@ -91,7 +91,7 @@ static double run(const char *mode, uint64_t iters) {
     } else if (strcmp(mode, "probe") == 0) {
         for (uint64_t i = 0; i < iters; i++) {
             uint32_t id = locs[i % distinct];
-            __afl_probe_insert(id, __afl_home_slot(id), __AFL_PROBE_MAX, 1);
+            __afl_probe_insert(__afl_area, __afl_map_size, id, __afl_home_slot(id), __AFL_PROBE_MAX, 1);
         }
     } else if (strcmp(mode, "dist") == 0) {
 #if __AFL_DISTANCE_MODE
@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
         for (uint32_t i = 0; i < distinct; i++) {
             uint32_t id = locs[i];
             if (strcmp(mode, "probe") == 0)
-                __afl_probe_insert(id, __afl_home_slot(id), __AFL_PROBE_MAX, 1);
+                __afl_probe_insert(__afl_area, __afl_map_size, id, __afl_home_slot(id), __AFL_PROBE_MAX, 1);
             else if (strcmp(mode, "dist") == 0) {
 #if __AFL_DISTANCE_MODE
                 __afl_probe_distance((uint64_t)id);
