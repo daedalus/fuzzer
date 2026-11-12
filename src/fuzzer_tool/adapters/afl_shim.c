@@ -2315,19 +2315,21 @@ static inline void __afl_note_stack(void) {
     if (__afl_stack_depth) *__afl_stack_depth = __afl_max_stack_depth;
 }
 
-/* FAST folds away every setting check __afl_fast vouches for. */
+/* Map cur_loc, then push next_prev as the previous location. FAST folds
+ * away every setting check __afl_fast vouches for. */
 __attribute__((always_inline))
-static inline void __afl_map_loc_as(uint32_t cur_loc, enum __afl_path path) {
+static inline void __afl_map_loc_push(uint32_t cur_loc, enum __afl_path path,
+                                      uint32_t next_prev) {
     const int any = path == __AFL_PATH_ANY;
     if (any && !__afl_area) return;
     __afl_wtok_t wk = any ? __afl_wguard_open() : 0;
     if (__afl_stack_on) __afl_note_stack();
 
     /* COMPCOV on: clear bit 31 of the hash, then carry bit 31 over from
-     * cur_loc. Real callers never set it, so their ids never carry it; the one
-     * synthetic caller that routes through here (__sfuzz_state, which also
-     * wants the prev_loc chain) sets it on cur_loc and keeps its tag whatever
-     * the hash width. COMPCOV off: keep = ~0, tag = 0, the hash is untouched. */
+     * cur_loc. Real callers never set it, so their ids never carry it; the
+     * synthetic callers that route through here (__sfuzz_state,
+     * __fuzz_event_at: they want the prev_loc chain) set it on cur_loc and
+     * keep their tag whatever the hash width. COMPCOV off: keep = ~0, tag = 0, the hash is untouched. */
     uint32_t edge_id = __afl_edge_hash_as(cur_loc, path);
     if (any && __builtin_expect(__afl_id_tag != 0, 0))   /* COMPCOV only (-3 Ir/edge off) */
         edge_id = (edge_id & __afl_id_keep) | (cur_loc & __afl_id_tag);
@@ -2352,12 +2354,27 @@ static inline void __afl_map_loc_as(uint32_t cur_loc, enum __afl_path path) {
 #endif
     if (any) __afl_wguard_close(wk);
 
-    __afl_push_prev(cur_loc);
+    __afl_push_prev(next_prev);
+}
+
+__attribute__((always_inline))
+static inline void __afl_map_loc_as(uint32_t cur_loc, enum __afl_path path) {
+    __afl_map_loc_push(cur_loc, path, cur_loc);
 }
 
 __attribute__((always_inline))
 static inline void __afl_map_loc(uint32_t cur_loc) {
     __afl_map_loc_as(cur_loc, __AFL_PATH_ANY);
+}
+
+/* Synthetic edge (state/LTL event) that stays in the prev_loc chain.
+ * Pushes the location masked to real width: the raw id carries bit 31,
+ * which >> 1 turned into bit 30 of every next real id -- past
+ * VIRGIN_DENSE_MAX (2^24) and off Python's dense path. The next real edge
+ * still depends on the event; only the width changes. */
+__attribute__((always_inline))
+static inline void __afl_map_synth_loc(uint32_t synth_loc) {
+    __afl_map_loc_push(synth_loc, __AFL_PATH_ANY, synth_loc & __afl_loc_mask);
 }
 
 /* ── Compiler-inserted edge coverage callbacks ────────────────────────
@@ -2597,15 +2614,14 @@ __AFL_GCC_NO_COV void __sfuzz_state(unsigned var_id, unsigned long long value) {
     __sfuzz_prev[slot] = (uint64_t)value;
     __sfuzz_digest ^= __sfuzz_mix(slot, prev) ^ __sfuzz_mix(slot, (uint64_t)value);
 
-    /* FNV-1a over (id, previous, current). The high bit is set so the
-     * result can never be 0, which __afl_map_edge reads as an empty
-     * slot. */
+    /* FNV-1a over (id, previous, current), tagged synthetic (bit 31, see
+     * __AFL_SYNTH_ID_BIT). The pushed prev_loc is masked to real width. */
     uint64_t h = 1469598103934665603ULL;
     h = (h ^ var_id) * 1099511628211ULL;
     h = (h ^ prev) * 1099511628211ULL;
     h = (h ^ (uint64_t)value) * 1099511628211ULL;
 
-    __afl_map_loc(__AFL_SYNTH_ID(h >> 32));
+    __afl_map_synth_loc(__AFL_SYNTH_ID(h >> 32));
 }
 
 /* ── LTL events (--ltl) ────────────────────────────────────────────────
@@ -2626,31 +2642,23 @@ __AFL_GCC_NO_COV void __sfuzz_state(unsigned var_id, unsigned long long value) {
 
 #define LTL_NO_OFFSET 0xFFFFFFFFu
 
-static int __ltl_fd = -2;  /* -2 not yet opened, -1 off */
 static __thread uint32_t __ltl_prev_event = LTL_NO_OFFSET;
 
-__AFL_NO_COV static void __ltl_emit(uint32_t id, uint32_t offset) {
-    if (__ltl_fd == -2) {
-        const char *p = getenv("__LTL_EVENTS_OUT");
-        __ltl_fd = (p && p[0]) ? open(p, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
-    }
-    if (__ltl_fd < 0) return;
-
-    uint64_t d = __sfuzz_digest;
-    uint32_t digest = d ? (uint32_t)((d >> 32) ^ d) | 1u : 0;
-    uint32_t rec[3] = {id, offset, digest};
-    ssize_t w = write(__ltl_fd, rec, sizeof rec);
-    (void)w;
-}
+/* Defined after the log-fd helpers (see "Log descriptors the target can
+ * steal"), which the cmplog layer shares. */
+__AFL_NO_COV static void __ltl_emit(uint32_t id, uint32_t offset);
+__AFL_NO_COV static void __ltl_reclaim(void);
 
 __attribute__((visibility("default")))
 __AFL_GCC_NO_COV void __fuzz_event_at(unsigned id, unsigned offset) {
+    if (__ltl_prev_event == LTL_NO_OFFSET) __ltl_reclaim();   /* first event this run */
+
     uint64_t h = 1469598103934665603ULL;
     h = (h ^ __ltl_prev_event) * 1099511628211ULL;
     h = (h ^ id) * 1099511628211ULL;
     __ltl_prev_event = id;
 
-    __afl_map_loc(__AFL_SYNTH_ID(h >> 32));
+    __afl_map_synth_loc(__AFL_SYNTH_ID(h >> 32));
     __ltl_emit(id, offset);
 }
 
@@ -3580,52 +3588,7 @@ __AFL_GCC_NO_COV static void __afl_write_distance_tail_exit(void) {
 
 #endif /* __AFL_EDGE */
 
-/* ══════════════════════════════════════════════════════════════════════
- * Comparison logging (-D__AFL_CMPLOG=1)
- *
- * Two interception layers, one output stream ($_CMPLOG_OUT):
- *
- *   Layer 1  libc interposition via dlsym(RTLD_NEXT) — memcmp/strcmp/...
- *            Catches explicit library calls. Needs -fno-builtin-<fn> on
- *            the target or -O2 folds the call away before it can be seen
- *            (see $NOBUILTIN_CMP in tools/build_targets.sh).
- *   Layer 2  Clang -fsanitize-coverage=trace-cmp callbacks. Catches
- *            inlined/folded integer compares and switch dispatch, which
- *            Layer 1 cannot see at all.
- *
- * Record format, unchanged from cmplog_shim.c so existing logs still
- * parse (core/cmplog.py::collect_tokens):
- *   Layer 1:  CMP <hex a> <hex b> <result> <n>
- *   Layer 2:  CMP <hex a> <hex b> <result> <n> 0x<pc>
- * ══════════════════════════════════════════════════════════════════════ */
-#if __AFL_CMPLOG
-
-#define CMPLOG_BUFFER_SIZE (256 * 1024)
-
-/* Longest operand pair written to the cmplog stream, in bytes. The record
- * writer truncates to this, so the interceptors must not promise more than
- * it records -- and memchr sizes a stack buffer from it. */
-#define CMPLOG_MAX_OPERAND 64
-
-/* Worst-case record: "CMP " + 2*2*64 hex + 3 separators + result + n + pc
- * + newline. 320 covers it with room to spare. */
-#define CMPLOG_MAX_RECORD 320
-
-/* Raw fd, not FILE*.
- *
- * The pre-crash flush runs inside a signal handler, and fwrite/fprintf are
- * not async-signal-safe -- cmplog_shim.c called both from its handler. A
- * raw descriptor plus write(2) is safe there, and drops the stdio lock from
- * a path that runs on every intercepted comparison. O_APPEND so the
- * external truncation in CmplogCollector.reset_log() stays coherent. */
-static int    __afl_cmplog_fd  = -1;
-static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
-static size_t __afl_cmplog_pos = 0;
-/* Record emission off (__cmplog_pause): the collector parses one round in
- * twenty, and ffmpeg emits ~400k records per run (3.1x the target's cost).
- * Counts/sites channels keep running. */
-static int    __afl_cmplog_paused = 0;
-
+#if __AFL_EDGE || __AFL_CMPLOG
 /* ── Log descriptors the target can steal ─────────────────────────────
  *
  * The shim's log fds live in the target's fd table. A target that closes
@@ -3669,6 +3632,103 @@ __AFL_NO_COV static void __afl_log_keep(int *fd, struct __afl_fd_id *id, const c
     const char *path = getenv(env);
     *fd = (path && path[0]) ? __afl_log_open(path, extra_flags, id) : -1;
 }
+#endif
+
+#if __AFL_EDGE
+#include <sched.h>
+
+#define LTL_ENV "__LTL_EVENTS_OUT"
+#define LTL_FD_UNOPENED (-2)
+#define LTL_FD_OPENING  (-3)
+
+static int __ltl_fd = LTL_FD_UNOPENED;  /* < 0 and not the above: off */
+static struct __afl_fd_id __ltl_fd_id;
+
+/* First caller opens; a racing thread waits (one open(2)) rather than
+ * opening a second fd. CAS, not a plain store: two threads both saw -2. */
+__AFL_NO_COV static int __ltl_open(void) {
+    int fd = __atomic_load_n(&__ltl_fd, __ATOMIC_ACQUIRE);
+    if (fd == LTL_FD_UNOPENED &&
+        __atomic_compare_exchange_n(&__ltl_fd, &fd, LTL_FD_OPENING, 0,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+        const char *p = getenv(LTL_ENV);
+        fd = (p && p[0]) ? __afl_log_open(p, 0, &__ltl_fd_id) : -1;
+        __atomic_store_n(&__ltl_fd, fd, __ATOMIC_RELEASE);
+        return fd;
+    }
+    while (fd == LTL_FD_OPENING) {
+        sched_yield();
+        fd = __atomic_load_n(&__ltl_fd, __ATOMIC_ACQUIRE);
+    }
+    return fd;
+}
+
+/* Target closed our fd and reused the number: reopen, never write it.
+ * Once per run (first event), not per event: the fstat cost 2.5x per
+ * event. An event after a mid-run steal still lands in the target's file
+ * until the next run's first event. */
+__AFL_NO_COV static void __ltl_reclaim(void) {
+    if (__ltl_open() >= 0) __afl_log_keep(&__ltl_fd, &__ltl_fd_id, LTL_ENV, 0);
+}
+
+__AFL_NO_COV static void __ltl_emit(uint32_t id, uint32_t offset) {
+    int fd = __ltl_open();
+    if (fd < 0) return;
+
+    uint64_t d = __sfuzz_digest;
+    uint32_t digest = d ? (uint32_t)((d >> 32) ^ d) | 1u : 0;
+    uint32_t rec[3] = {id, offset, digest};
+    ssize_t w = write(fd, rec, sizeof rec);
+    (void)w;
+}
+#endif /* __AFL_EDGE */
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Comparison logging (-D__AFL_CMPLOG=1)
+ *
+ * Two interception layers, one output stream ($_CMPLOG_OUT):
+ *
+ *   Layer 1  libc interposition via dlsym(RTLD_NEXT) — memcmp/strcmp/...
+ *            Catches explicit library calls. Needs -fno-builtin-<fn> on
+ *            the target or -O2 folds the call away before it can be seen
+ *            (see $NOBUILTIN_CMP in tools/build_targets.sh).
+ *   Layer 2  Clang -fsanitize-coverage=trace-cmp callbacks. Catches
+ *            inlined/folded integer compares and switch dispatch, which
+ *            Layer 1 cannot see at all.
+ *
+ * Record format, unchanged from cmplog_shim.c so existing logs still
+ * parse (core/cmplog.py::collect_tokens):
+ *   Layer 1:  CMP <hex a> <hex b> <result> <n>
+ *   Layer 2:  CMP <hex a> <hex b> <result> <n> 0x<pc>
+ * ══════════════════════════════════════════════════════════════════════ */
+#if __AFL_CMPLOG
+
+#define CMPLOG_BUFFER_SIZE (256 * 1024)
+
+/* Longest operand pair written to the cmplog stream, in bytes. The record
+ * writer truncates to this, so the interceptors must not promise more than
+ * it records -- and memchr sizes a stack buffer from it. */
+#define CMPLOG_MAX_OPERAND 64
+
+/* Worst-case record: "CMP " + 2*2*64 hex + 4 separators + result + n + pc
+ * + newline. 320 covers it with room to spare. */
+#define CMPLOG_MAX_RECORD 320
+
+/* Raw fd, not FILE*.
+ *
+ * The pre-crash flush runs inside a signal handler, and fwrite/fprintf are
+ * not async-signal-safe -- cmplog_shim.c called both from its handler. A
+ * raw descriptor plus write(2) is safe there, and drops the stdio lock from
+ * a path that runs on every intercepted comparison. O_APPEND so the
+ * external truncation in CmplogCollector.reset_log() stays coherent. */
+static int    __afl_cmplog_fd  = -1;
+static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
+static size_t __afl_cmplog_pos = 0;
+static size_t __afl_cmplog_sent = 0;   /* flushed prefix of buf, see flush */
+/* Record emission off (__cmplog_pause): the collector parses one round in
+ * twenty, and ffmpeg emits ~400k records per run (3.1x the target's cost).
+ * Counts/sites channels keep running. */
+static int    __afl_cmplog_paused = 0;
 
 /* Close *fd* only while it is ours; a stolen number is the target's. */
 __AFL_NO_COV static void __afl_log_close(int *fd, const struct __afl_fd_id *id) {
@@ -4167,9 +4227,21 @@ __AFL_NO_COV static size_t __afl_rec_cut(const char *p, size_t max) {
     return n;
 }
 
+/* Records configured but no sink yet (a FIFO with no reader at init):
+ * writers skip on fd < 0, so nothing is buffered and the flush below never
+ * reaches its reopen. Retried here instead, per flush/reset/fork, never per
+ * record: one failed open(2) (ENXIO) while the reader is missing. */
+__AFL_NO_COV static void __afl_cmplog_retry(void) {
+    if (__afl_cmplog_fd >= 0 || !__afl_cmplog_cfg) return;
+    const char *path = getenv("_CMPLOG_OUT");
+    if (path && path[0])
+        __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
+}
+
 /* Caller holds __afl_cmplog_lock. */
 __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
     if (__afl_cmplog_pos == 0) {
+        __afl_cmplog_retry();
         return;
     }
     /* Lazy reopen: if Python rotated the log and closed the fd, reopen
@@ -4180,10 +4252,10 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
      * a blocking open(2) of a FIFO for write-only stalls until a reader
      * shows up, and this call can run from __afl_auto_init before the
      * forkserver hello handshake. With O_NONBLOCK, opening a FIFO with no
-     * reader yet fails immediately (ENXIO) instead of hanging, and this
-     * lazy-reopen path already retries on every flush -- so the reader
-     * (the Python-side FIFO drain thread) just needs to exist by the time
-     * the *next* flush fires, not before this one. No-op for a regular
+     * reader yet fails immediately (ENXIO) instead of hanging, and
+     * __afl_cmplog_retry reopens on every later flush, reset and fork -- so
+     * the reader (the Python-side FIFO drain thread) just needs to exist by
+     * the time the *next* one fires, not before this one. No-op for a regular
      * file: O_NONBLOCK only changes open(2)/write(2) semantics for FIFOs
      * and some device nodes. */
     __afl_log_keep(&__afl_cmplog_fd, &__afl_cmplog_fd_id, "_CMPLOG_OUT", O_NONBLOCK);
@@ -4198,6 +4270,7 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
             __afl_health[__AFL_HEALTH_CMPLOG_DROPPED]++;
             __afl_health[__AFL_HEALTH_CMPLOG_NO_SINK]++;
             __afl_cmplog_pos = 0;
+            __afl_cmplog_sent = 0;
             /* Dropped records are still marked seen: forget them. */
             __afl_cmplog_new_scope();
             return;
@@ -4207,10 +4280,16 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
      * into a full pipe stored half a record, and the next flush glued its
      * first record onto that half. Chunk at record ends instead. */
     size_t max = __afl_cmplog_fd_id.fifo ? PIPE_BUF : __afl_cmplog_pos;
-    size_t off = 0;
-    while (off < __afl_cmplog_pos) {
+    /* Progress is published before each write: a signal whose handler
+     * flushes (crash, guard) lands after the bytes are out but before this
+     * loop sees the count, and a local offset made the nested flush write
+     * them again. Short write: step back to what went out, unless a nested
+     * flush already moved on. */
+    while (__afl_cmplog_sent < __afl_cmplog_pos) {
+        size_t off = __afl_cmplog_sent;
         size_t len = __afl_cmplog_pos - off;
         if (len > max) len = __afl_rec_cut(__afl_cmplog_buf + off, max);
+        __afl_cmplog_sent = off + len;
         ssize_t w = write(__afl_cmplog_fd, __afl_cmplog_buf + off, len);
         /* w <= 0 covers EAGAIN (pipe full, nothing draining it right now)
          * the same way it already covered EINTR/ENOSPC: drop the rest of
@@ -4223,9 +4302,10 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
             __afl_cmplog_new_scope();
             break;
         }
-        off += (size_t)w;
+        if ((size_t)w < len && __afl_cmplog_sent == off + len) __afl_cmplog_sent = off + (size_t)w;
     }
     __afl_cmplog_pos = 0;
+    __afl_cmplog_sent = 0;
 }
 
 /* Skipped, not waited for, while another thread owns the buffer. */
@@ -4628,12 +4708,50 @@ __AFL_NO_COV static void *__afl_icpt_sym(const char *name) {
     return NULL;
 }
 
-__AFL_GCC_NO_COV static void *__afl_next_sym(const char *name) {
-    if (__afl_in_dlsym) return NULL;
+/* One lookup under the recursion guard. */
+__AFL_GCC_NO_COV static void *__afl_sym_lookup(const char *name) {
     __afl_in_dlsym = 1;
     void *p = __afl_icpt_sym(name);
     if (!p) p = dlsym(RTLD_NEXT, name);
     __afl_in_dlsym = 0;
+    return p;
+}
+
+/* Slots given their fallback because the lookup ran inside dlsym (guard
+ * up), not because the symbol is missing. Caching that fallback pinned the
+ * naive version, past the sanitizer interceptor, for the process. Each slot
+ * leaves NULL once, so the list never holds more than the slot count. */
+#define AFL_RESOLVE_PENDING_MAX 32
+static __thread struct { void **slot; const char *name; }
+    __afl_pending[AFL_RESOLVE_PENDING_MAX];
+static __thread int __afl_pending_n;
+
+/* Lookup came back empty: use the fallback. Out of line and cold, so the
+ * interceptors' resolved path keeps its old code. */
+__attribute__((noinline, cold))
+__AFL_GCC_NO_COV static void __afl_resolve_miss(void **slot, const char *name, void *fallback) {
+    *slot = fallback;
+    if (!__afl_in_dlsym || __afl_pending_n >= AFL_RESOLVE_PENDING_MAX) return;
+    __afl_pending[__afl_pending_n].slot = slot;
+    __afl_pending[__afl_pending_n].name = name;
+    __afl_pending_n++;
+}
+
+/* Re-resolve the pending slots once the outermost lookup returned. Swaps
+ * fallback for real, never through NULL: another thread may be calling it. */
+__AFL_GCC_NO_COV static void __afl_resolve_pending(void) {
+    while (__afl_pending_n > 0) {
+        int i = --__afl_pending_n;
+        void *p = __afl_sym_lookup(__afl_pending[i].name);
+        if (p) __atomic_store_n(__afl_pending[i].slot, p, __ATOMIC_RELEASE);
+    }
+}
+
+__attribute__((noinline, cold))
+__AFL_GCC_NO_COV static void *__afl_next_sym(const char *name) {
+    if (__afl_in_dlsym) return NULL;
+    void *p = __afl_sym_lookup(name);
+    __afl_resolve_pending();
     return p;
 }
 
@@ -4843,7 +4961,8 @@ __AFL_NO_COV static void *__afl_fb_memrchr(const void *s, int c, size_t n) {
     do {                                                            \
         if (!(slot)) {                                              \
             (slot) = (type)__afl_next_sym(name);                    \
-            if (!(slot)) (slot) = (type)(fallback);                 \
+            if (!(slot)) __afl_resolve_miss((void **)&(slot), name, \
+                                            (void *)(fallback));    \
         }                                                           \
     } while (0)
 
@@ -5105,8 +5224,9 @@ __AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
      * its own, so a run with only $__AFL_COMPCOV_LEVEL set (no
      * _CMPLOG_OUT) must not skip this block the way it did before. */
     if ((__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) && n > 0) {
-        size_t k = n * sizeof(wchar_t);
-        if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+        /* Saturate before multiplying: n * 4 wraps for n >= 2^62. */
+        size_t k = n > CMPLOG_MAX_OPERAND / sizeof(wchar_t) ? CMPLOG_MAX_OPERAND
+                                                             : n * sizeof(wchar_t);
         __afl_cmplog_bytes(a, b, k, result);
         __afl_compcov_bytes(a, b, k, __builtin_return_address(0), COMPCOV_MEM);
     }
@@ -5120,8 +5240,9 @@ __AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     int result = real_wcsncmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_WCSNCMP, result == 0);
     if ((__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) && n > 0) {
-        size_t k = n * sizeof(wchar_t);
-        if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+        /* Saturate before multiplying: n * 4 wraps for n >= 2^62. */
+        size_t k = n > CMPLOG_MAX_OPERAND / sizeof(wchar_t) ? CMPLOG_MAX_OPERAND
+                                                             : n * sizeof(wchar_t);
         if (k > 0) {
             __afl_cmplog_bytes(a, b, k, result);
             __afl_compcov_bytes(a, b, k, __builtin_return_address(0), COMPCOV_WSTR);
@@ -5545,11 +5666,14 @@ __AFL_NO_COV static void __afl_cmp_counts_zero(void) {
  * flushed twice, once per process. Start the child clean. */
 __AFL_NO_COV static void __afl_cmplog_atfork_child(void) {
     __afl_cmplog_pos = 0;
+    __afl_cmplog_sent = 0;
     __atomic_store_n(&__afl_cmplog_lock, 0, __ATOMIC_RELEASE);
     /* Shared counters are not the parent's copy: zeroing them here would
      * wipe what the parent (or the fuzzer, in direct_lite) has not read. */
     if (!__afl_cmp_shm_on) __afl_cmp_counts_zero();
     __afl_cmplog_new_scope();
+    /* Forkserver: the parent never flushes, so each child retries. */
+    __afl_cmplog_retry();
 }
 
 /* ── Lifecycle ────────────────────────────────────────────────────────
@@ -5593,7 +5717,8 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
      * why. */
     if (path && path[0])
         __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
-    __afl_cmplog_cfg = __afl_cmplog_fd >= 0;
+    /* Configured, not opened: a failed open is retried (__afl_cmplog_retry). */
+    __afl_cmplog_cfg = path && path[0];
     __afl_cmp_refresh();
 }
 

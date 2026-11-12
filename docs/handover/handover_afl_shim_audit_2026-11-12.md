@@ -37,3 +37,8 @@ Read-only audit of `src/fuzzer_tool/adapters/afl_shim.c` (7,982 lines). Nothing 
 ## Checked fine
 
 SHM layout vs `shm.py`/`cmp_shm.py`; size/overflow math; probe bounds (scalar, SIMD, MSI); generation/saturation; frame walk; record/buffer bounds; cmplog lock; calloc overflow, alignment family; exit/abort visibility; forkserver I/O; constructor order; gate combos.
+
+## Status (2026-11-12)
+
+Fixed with regression tests: `tests/test_regression_shim_audit_{attach,cmplog,guard}.py`.
+Medium #7 kept by design (comment documents the GC/JIT false positive); low "getenv in handler" kept (env is set after dlopen) — both documented in code. Residuals: `docs/TODO.md` "afl_shim audit follow-ups".
