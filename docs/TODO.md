@@ -14,6 +14,7 @@
 > Every A/B result goes in `docs/AB_LEDGER.md` (Hard Rule 59).
 
 ## Coverage & Instrumentation
+- [ ] **afl_shim audit fixes** (2026-11-12) — `docs/handover/handover_afl_shim_audit_2026-11-12.md`: 7 medium (resize `shmdt` race, sticky fast tick, big-block double free to glibc, synthetic ids in `prev_loc`, block bitmap gated by distance mode, permanent FIFO ENXIO, recovered faults flagged), 12 low, stale comments. Each fix: test first (Rules 37, 53, 56).
 - [ ] **Sanitizer runtime hooks** (2026-11-08) — `docs/handover/handover_sancov_tables_2026-11-08.md` items 1 and 3: `*_default_options` for MSAN/UBSAN/TSAN/LSAN (only ASAN recovers in-process). Death callback, weak hooks and `--alloc-sizes` shipped.
 - [ ] **faiss port candidates** (2026-11-09) — `docs/handover/handover_faiss_port_2026-11-09.md`: NN-descent kNN graph over seeds (#1 shipped as `--seed-knn`, see below), exact 1-D k-means buckets (#2 shipped as `tools/count_buckets.py`, report only), faiss `read_index` as a target. #4 not implemented.
 - [ ] **`--alloc-sizes` follow-ups** (2026-11-08) — peak live heap per exec via the free hook + `__sanitizer_get_allocated_size`; A/B on clang-built fuzzgoat (ASAN). FFmpeg coverage A/B NULL (ledger #123); owed: a crash-time design (`tte_allocation-size-too-big`) on a target with a reachable large-allocation bug.
