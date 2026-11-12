@@ -159,9 +159,10 @@ def test_chi_square_detects_a_biased_sampler():
     assert chi2 > df + 6 * math.sqrt(2 * df)
 
 
-def test_empty_range_returns_lower_bound():
-    """Documented degenerate behaviour: b < a yields a (no exception)."""
+def test_empty_range_raises():
+    """b < a raises like random.randint; the list form stays empty."""
     pool = RandPool(seed=1)
 
-    assert pool.randint(5, 4) == 5
+    with pytest.raises(ValueError):
+        pool.randint(5, 4)
     assert pool.randint_list(5, 4, 10) == []

@@ -273,3 +273,67 @@ def test_regression_categorical_empty():
 def test_regression_gamma_array_empty():
     """Adversarial: zero arms return an empty array, as before the guard."""
     assert RandPool(seed=4).gammavariate_array([], []).shape == (0,)
+
+
+# ── Empty ranges raise, as in CPython's random ───────────────────────────
+
+
+@pytest.mark.parametrize("n", [0, -5])
+def test_regression_randrange_empty_raises(n):
+    with pytest.raises(ValueError, match="empty range"):
+        RandPool(seed=1).randrange(n)
+
+
+@pytest.mark.parametrize(("a", "b"), [(5, 4), (0, -1), (10, -(2**40))])
+def test_regression_randint_empty_raises(a, b):
+    """Adversarial: inverted ranges, including a wide one, raise."""
+    with pytest.raises(ValueError, match="empty range"):
+        RandPool(seed=1).randint(a, b)
+
+
+@pytest.mark.parametrize(("a", "b"), [(5, 4), (0, -1)])
+def test_regression_exhaustive_mirrors_empty_raise(a, b):
+    """Wiring: ExhaustivePool keeps RandPool's contract under enumeration."""
+    from fuzzer_tool.core.exhaustive_pool import ExhaustivePool
+
+    pool = ExhaustivePool()
+    with pytest.raises(ValueError, match="empty range"):
+        pool.randint(a, b)
+    with pytest.raises(ValueError, match="empty range"):
+        pool.randrange(b - a + 1)
+
+
+def test_regression_randrange_single_unchanged():
+    """Falsification: valid ranges keep the ``_draw() % n`` stream."""
+    raw = _raw_pool(2)
+    p = RandPool(seed=2)
+    assert [p.randrange(10), p.randint(3, 8)] == [raw[0] % 10, 3 + raw[1] % 6]
+
+
+# ── geometric: 53-bit uniform, no 2**-32 tail cap ────────────────────────
+
+
+def _u53(hi: int, lo: int) -> float:
+    """CPython's ``random()``: 27 + 26 bits of two 32-bit words."""
+    return ((hi >> 5) * 67108864 + (lo >> 6)) / 2**53
+
+
+def test_regression_geometric_53_bit():
+    p_ok = 0.25
+    raw = _raw_pool(3)
+    u = _u53(raw[0], raw[1])
+    expected = int(np.floor(np.log(1.0 - u) / np.log1p(-p_ok)))
+    pool = RandPool(seed=3)
+    assert pool.geometric(p_ok) == expected
+    assert pool._idx == 2
+
+
+def test_regression_geometric_tail_past_32_bits():
+    """Adversarial: the all-ones script reaches past the old 2**-32 cap."""
+    p = 1e-6
+    old_cap = int(np.floor(np.log(2.0**-32) / np.log1p(-p)))
+    pool = RandPool(seed=0)
+    pool._refill()
+    pool._pool_l[pool._idx] = U32 - 1
+    pool._pool_l[pool._idx + 1] = U32 - 1
+    assert pool.geometric(p) > old_cap

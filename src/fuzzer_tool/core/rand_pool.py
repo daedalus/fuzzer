@@ -363,6 +363,16 @@ class RandPool:
             count -= take
         return np.concatenate(parts)
 
+    def _random53(self) -> float:
+        """Float in [0.0, 1.0) with 53-bit resolution (CPython's formula).
+
+        27 bits of one word, 26 of the next: two pool draws. ``random()``
+        keeps one word (2**-32 resolution) for the hot path.
+        """
+        hi = self._draw() >> 5
+        lo = self._draw() >> 6
+        return (hi * 67108864 + lo) / 9007199254740992.0  # 2**26, 2**53
+
     def random_sequential(self, count: int) -> list[float]:
         """*count* floats, exactly as *count* ``random()`` calls would draw them.
 
@@ -428,9 +438,12 @@ class RandPool:
         via :meth:`_randbelow` so the full range is reachable — required by
         callers such as the Ogg granule-position mutator that request a
         64-bit span.
+
+        Raises ``ValueError`` for ``n <= 0``, as ``random.randrange`` does
+        (it returned 0, hiding callers' empty-range bugs).
         """
         if n <= 0:
-            return 0
+            raise ValueError(f"empty range for randrange({n})")
         if n <= _MODULO_SAFE_MAX:
             return self._draw() % n
         return self._randbelow(n)
@@ -442,10 +455,13 @@ class RandPool:
         path.  Wider ranges (e.g. ``randint(0, 0xFFFFFFFFFFFFFFFF)``)
         rejection-sample via :meth:`_randbelow` so every value of the
         requested range is reachable without bias.
+
+        Raises ``ValueError`` for ``b < a``, as ``random.randint`` does
+        (it returned *a*).
         """
         width = b - a + 1
         if width <= 0:
-            return a
+            raise ValueError(f"empty range for randint({a}, {b})")
         if width <= _MODULO_SAFE_MAX:
             if self._idx >= _POOL_ENTRIES:
                 self._refill()
@@ -805,10 +821,12 @@ class RandPool:
     def geometric(self, p: float) -> int:
         """Return the number of failures before the first success.
 
-        Inversion with one :meth:`random` draw: ``floor(log(V) / log(1-p))``
-        with ``V = 1 - U`` in ``(0, 1]``, so ``U = 0`` never reaches
-        ``log(0)``. ``log1p`` keeps tiny *p* accurate. ``p == 1`` is
-        certain and returns 0 without drawing.
+        Inversion: ``floor(log(V) / log(1-p))`` with ``V = 1 - U`` in
+        ``(0, 1]``, so ``U = 0`` never reaches ``log(0)``. ``U`` has 53 bits
+        (two pool words): one 32-bit word capped the tail at
+        ``log(2**-32) / log1p(-p)`` (~22x the mean at p=1e-6). ``log1p``
+        keeps tiny *p* accurate. ``p == 1`` is certain and returns 0
+        without drawing.
 
         Raises:
             ValueError: *p* outside ``(0, 1]`` (NaN included).
@@ -817,7 +835,7 @@ class RandPool:
             raise ValueError(f"geometric needs 0 < p <= 1, got {p}")
         if p == 1.0:
             return 0
-        return math.floor(math.log(1.0 - self.random()) / math.log1p(-p))
+        return math.floor(math.log(1.0 - self._random53()) / math.log1p(-p))
 
     def random_array(self, shape) -> np.ndarray:
         """Return uniform floats in [0.0, 1.0) as an array of *shape*.

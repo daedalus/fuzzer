@@ -125,13 +125,16 @@ class TestNarrowPathUnchanged:
         p.randint(0, U32 - 1)
         assert p._idx - before == 1
 
-    def test_randrange_nonpositive_still_zero(self):
+    def test_randrange_nonpositive_raises(self):
         p = RandPool(seed=14)
-        assert p.randrange(0) == 0
-        assert p.randrange(-5) == 0
+        with pytest.raises(ValueError):
+            p.randrange(0)
+        with pytest.raises(ValueError):
+            p.randrange(-5)
 
-    def test_randint_empty_width_still_returns_a(self):
-        assert RandPool(seed=15).randint(5, 4) == 5
+    def test_randint_empty_width_raises(self):
+        with pytest.raises(ValueError):
+            RandPool(seed=15).randint(5, 4)
 
 
 class TestBatchAndSampleWide:

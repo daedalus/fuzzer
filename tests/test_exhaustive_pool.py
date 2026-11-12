@@ -133,18 +133,20 @@ class TestDegenerateBounds:
         assert pool.max_depth_seen == 0
 
     def test_mirrors_randpool_on_degenerate_inputs(self):
-        """Same answers as RandPool where RandPool declines to raise.
+        """Same answers as RandPool on empty ranges: both raise ValueError.
 
-        RandPool returns 0 for a non-positive randrange and ``a`` for an
-        inverted randint rather than raising. An enumeration that raised
-        instead would report operators as broken that are not.
+        An enumeration that diverged from RandPool would report operators
+        as broken (or fine) when they are not.
         """
         pool = ExhaustivePool()
         real = RandPool(1)
         for _ in pool.runs():
-            assert pool.randrange(0) == real.randrange(0) == 0
-            assert pool.randrange(-3) == real.randrange(-3) == 0
-            assert pool.randint(5, 2) == real.randint(5, 2) == 5
+            for src in (pool, real):
+                for n in (0, -3):
+                    with pytest.raises(ValueError):
+                        src.randrange(n)
+                with pytest.raises(ValueError):
+                    src.randint(5, 2)
 
     def test_empty_sequence_raises_like_randpool(self):
         pool = ExhaustivePool()

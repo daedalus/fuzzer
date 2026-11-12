@@ -452,16 +452,16 @@ class ExhaustivePool:
     # ── Discrete core: the RandPool methods that can be walked ───────
 
     def randrange(self, n: int) -> int:
-        # RandPool returns 0 for n <= 0 rather than raising; mirrored so an
-        # operator cannot behave differently under enumeration.
+        # Mirrors RandPool's raise so an operator cannot behave differently
+        # under enumeration.
         if n <= 0:
-            return 0
+            raise ValueError(f"empty range for randrange({n})")
         return self._bounded(n, f"randrange({n})")
 
     def randint(self, a: int, b: int) -> int:
         width = b - a + 1
         if width <= 0:
-            return a  # RandPool's behaviour for an inverted range
+            raise ValueError(f"empty range for randint({a}, {b})")  # mirrors RandPool
         return a + self._bounded(width, f"randint({a}, {b})")
 
     def random_between(self, low: int, high: int) -> int:

@@ -68,14 +68,14 @@ def _trials(rng: RandPool, p: float, n: int) -> list[int]:
 
 
 class _FixedU(RandPool):
-    """RandPool whose ``random()`` replays a script and counts draws."""
+    """RandPool whose ``_random53()`` replays a script and counts draws."""
 
     def __init__(self, us):
         super().__init__(seed=0)
         self.us = iter(us)
         self.draws = 0
 
-    def random(self):
+    def _random53(self):
         self.draws += 1
         return next(self.us)
 
@@ -190,9 +190,11 @@ class TestGeometric:
         assert rng.geometric(1.0) == 0
         assert rng.draws == 0
 
-    def test_consumes_exactly_one_pool_word(self):
+    def test_consumes_exactly_two_pool_words(self):
+        """53-bit uniform: two words (one capped the tail at 2**-32)."""
         a, b = RandPool(seed=17), RandPool(seed=17)
         a.geometric(0.2)
+        b.random()
         b.random()
         assert a.random() == b.random()
 
