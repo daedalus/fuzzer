@@ -4,6 +4,7 @@ Counts must be the target's: a busy input reads far more CPU time than an
 idle one. Software ``task_clock`` keeps this runnable without a PMU.
 """
 
+import os
 import platform
 import shutil
 import subprocess
@@ -107,33 +108,49 @@ def test_forkserver_attaches_before_init(spin):
     assert spy.opened == [pid]
 
 
-def test_persistent_attaches_on_start(tmp_path):
-    from fuzzer_tool.adapters.persistent_signal import PersistentRunner
-
+def _sh_stop(tmp_path):
     script = tmp_path / "t.sh"
     script.write_text("#!/bin/sh\nkill -STOP $$\nsleep 5\n")
     script.chmod(0o755)
+    return str(script)
+
+
+def test_persistent_attaches_on_start(tmp_path):
+    """The attach follows the fork, before start() waits for the stop:
+    asserted on the fork's pid, not on start()'s timing-bound verdict."""
+    from fuzzer_tool.adapters.persistent_signal import PersistentRunner
+
     spy = _SpyPerf()
-    pr = PersistentRunner(str(script), timeout=1, perf_counters=spy)
+    pids = []
+    pr = PersistentRunner(_sh_stop(tmp_path), timeout=1, perf_counters=spy)
+    fork = os.fork
+
+    def record_fork():
+        pid = fork()
+        if pid:
+            pids.append(pid)
+        return pid
+
+    os.fork = record_fork
     try:
-        assert pr.start()
-        assert spy.opened == [pr.pid]
+        pr.start()
     finally:
+        os.fork = fork
         pr.stop()
+    assert spy.opened == pids
+    assert len(pids) == 1
 
 
 def test_persistent_without_perf_unchanged(tmp_path):
-    """Adversarial: no counters, no attach attempt, start still works."""
+    """Adversarial: no counters, no attach attempt, no error."""
     from fuzzer_tool.adapters.persistent_signal import PersistentRunner
 
-    script = tmp_path / "t.sh"
-    script.write_text("#!/bin/sh\nkill -STOP $$\nsleep 5\n")
-    script.chmod(0o755)
-    pr = PersistentRunner(str(script), timeout=1)
+    pr = PersistentRunner(_sh_stop(tmp_path), timeout=1)
     try:
-        assert pr.start()
+        pr.start()
     finally:
         pr.stop()
+    assert pr._perf_counters is None
 
 
 @needs_perf
