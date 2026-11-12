@@ -337,3 +337,25 @@ def test_regression_geometric_tail_past_32_bits():
     pool._pool_l[pool._idx] = U32 - 1
     pool._pool_l[pool._idx + 1] = U32 - 1
     assert pool.geometric(p) > old_cap
+
+
+# ── ExhaustivePool parity: pool_min_entropy_now ──────────────────────────
+
+
+def test_regression_exhaustive_min_entropy_raises():
+    """Never refills, so it raises like RandPool before its first refill."""
+    from fuzzer_tool.core.exhaustive_pool import ExhaustivePool
+
+    pool = ExhaustivePool()
+    with pytest.raises(RuntimeError, match="refill"):
+        pool.pool_min_entropy_now()
+
+
+def test_regression_exhaustive_min_entropy_after_reseed():
+    """Adversarial: a reseed (a no-op here) does not make a batch appear."""
+    from fuzzer_tool.core.exhaustive_pool import ExhaustivePool
+
+    pool = ExhaustivePool()
+    pool.reseed(1)
+    with pytest.raises(RuntimeError, match="refill"):
+        pool.pool_min_entropy_now()

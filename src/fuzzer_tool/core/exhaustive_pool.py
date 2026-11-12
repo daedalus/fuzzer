@@ -557,6 +557,13 @@ class ExhaustivePool:
         """
         return None
 
+    def pool_min_entropy_now(self) -> float:
+        """Always raises: no refill, so no batch to measure.
+
+        Same ``RuntimeError`` ``RandPool`` raises before its first refill.
+        """
+        raise RuntimeError("ExhaustivePool never refills; no batch to measure")
+
     def measure_entropy(self, data: bytes | None = None) -> float:
         """Shannon entropy of *data*; refuses the no-argument form.
 
