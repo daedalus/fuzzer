@@ -57,10 +57,13 @@ PERF_COUNT_HW_REF_CPU_CYCLES = 9
 
 # PERF_TYPE_HW_CACHE config = cache_id | (op << 8) | (result << 16)
 PERF_COUNT_HW_CACHE_L1D = 0
+PERF_COUNT_HW_CACHE_L1I = 1
 PERF_COUNT_HW_CACHE_LL = 2
 PERF_COUNT_HW_CACHE_DTLB = 3
 PERF_COUNT_HW_CACHE_ITLB = 4
+PERF_COUNT_HW_CACHE_BPU = 5
 PERF_COUNT_HW_CACHE_OP_READ = 0
+PERF_COUNT_HW_CACHE_OP_WRITE = 1
 PERF_COUNT_HW_CACHE_RESULT_ACCESS = 0
 PERF_COUNT_HW_CACHE_RESULT_MISS = 1
 
@@ -179,6 +182,7 @@ COUNTER_DEFS = {
     "stalled_cycles_frontend": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND, True),
     "stalled_cycles_backend": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_BACKEND, True),
     "ref_cycles": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, True),
+    "bus_cycles": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_BUS_CYCLES, True),
     # Inherited like the rest: a forkserver child's faults fold into the
     # counter on the forkserver when the child exits.
     "page_faults": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN, True),
@@ -218,6 +222,43 @@ COUNTER_DEFS = {
         PERF_TYPE_HW_CACHE,
         _hw_cache_config(
             PERF_COUNT_HW_CACHE_DTLB, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_MISS
+        ),
+        True,
+    ),
+    "l1d_write_access": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_L1D, PERF_COUNT_HW_CACHE_OP_WRITE, PERF_COUNT_HW_CACHE_RESULT_ACCESS
+        ),
+        True,
+    ),
+    "l1d_write_miss": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_L1D, PERF_COUNT_HW_CACHE_OP_WRITE, PERF_COUNT_HW_CACHE_RESULT_MISS
+        ),
+        True,
+    ),
+    "l1i_read_miss": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_L1I, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_MISS
+        ),
+        True,
+    ),
+    # BPU read access/miss are the branch-predictor view of branches and
+    # branch_misses on CPUs that expose them (often absent on VMs/AMD).
+    "bpu_read_access": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_BPU, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_ACCESS
+        ),
+        True,
+    ),
+    "bpu_read_miss": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_BPU, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_MISS
         ),
         True,
     ),
