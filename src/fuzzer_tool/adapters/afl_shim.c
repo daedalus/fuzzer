@@ -8,7 +8,7 @@
  * plain prev_loc ^ cur_loc if built with -D__AFL_CTX_SENSITIVE=0) so there
  * are no silent bucket collisions.  AFL_MAP_SIZE is the number of hash table
  * ENTRIES, not bytes -- a caller that passes a byte count sizes the table
- * eight times too large and the shim writes past the end of the segment.
+ * eight times too large, and attach refuses the segment as too small.
  * SHM size = SHM_TABLE_OFFSET + AFL_MAP_SIZE * sizeof(struct __afl_entry),
  * i.e. 32 bytes of front region plus 8 bytes per entry (see the layout map
  * further down), plus the 16-byte distance tail in __AFL_DISTANCE_MODE.
@@ -272,8 +272,8 @@ static void __afl_cmplog_fini(void);
 #include <dlfcn.h>
 static void __afl_map_dist_shm(void);
 static void __afl_map_node_shm(void);
-static void __afl_map_block_shm(void);
 #endif
+static void __afl_map_block_shm(void);
 
 /* ── Health counters ──────────────────────────────────────────────────
  *
@@ -637,8 +637,8 @@ enum __afl_path {
     __AFL_PATH_LEAF,   /* FAST, main stack only: elsewhere the caller falls back */
 };
 static int __afl_fast = 0;
-/* noinline: __afl_map_shm is instrumented under clang, and inlined here the
- * mode-dependent branches would record shim edges that differ by setting. */
+/* noinline: kept out of its callers' bodies, so its mode-dependent branches
+ * never become edges should a caller be instrumented. */
 __AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void);
 #if __AFL_NGRAM_K == 2
 __AFL_HOT_VIS uint32_t __afl_prev_loc = 0;
@@ -650,13 +650,12 @@ static uint32_t __afl_prev_locs[__AFL_NGRAM_K - 1];
 static uint32_t __afl_prev_idx  = 0;
 #endif
 
-/* Set while the SHM map / distance table is being attached. The map/setup
- * code is itself coverage-instrumented (targets -include this file), so its
- * entry fires trace_pc → map_edge before the stack contract a caller-context
- * frame walk expects exists — reading the return address there loads through
- * a bogus frame and segfaults (observed at -O1). No useful context exists
- * during setup, so callbacks skip it. Updated by __afl_map_shm, read by
- * __afl_get_caller_ctx. */
+/* Set while the SHM map / distance table is being attached. Setup code is
+ * no longer instrumented (clang pragma near the top, __AFL_GCC_NO_COV under
+ * gcc); this is the safeguard from when it was: an edge fired there walked
+ * a frame without the caller-context stack contract and segfaulted
+ * (observed at -O1). No useful context exists during setup, so callbacks
+ * skip it. Updated by __afl_map_shm, read by __afl_get_caller_ctx. */
 static volatile int __afl_mapping = 0;
 
 /* Metadata pointers (front region, before the edge table) */
@@ -798,7 +797,8 @@ static inline void __afl_note_drop(void) {
  *
  *   PKEY      x86 protection key, WD bit set in PKRU. open/close are
  *             RDPKRU/WRPKRU (userspace, no syscall). PKRU is per thread:
- *             threads that existed before attach stay unlocked.
+ *             threads that predate pkey_alloc keep the default PKRU,
+ *             which access-disables the new key (reads fault too).
  *   MPROTECT  same brackets via mprotect, two syscalls per edge: proves
  *             every write site is bracketed on hosts without PKU.
  *   OFF       default; also when pkey_alloc is refused (no PKU).
@@ -807,7 +807,8 @@ static inline void __afl_note_drop(void) {
  *
  * open() returns the previous PKRU and close() restores it, so nesting
  * and signal handlers (which run with the kernel's default PKRU) restore
- * the state they found. Reads stay allowed while locked.
+ * the state they found. Reads stay allowed while locked, except under the
+ * default PKRU (signal handlers, threads predating pkey_alloc).
  *
  * Not covered: the fuzzer's own mapping of the segment in in-process
  * modes, which shares this address space and stays writable. */
@@ -987,10 +988,13 @@ static uint8_t   __afl_generation = 0;          /* generation counter for tag-ba
 
 /* ── SHM attachment ──────────────────────────────────────────────────── */
 
-/* Parse a SysV segment id from the environment: decimal, non-negative,
- * fits an int, nothing trailing. -1 otherwise. atoi() could not fail:
- * "123junk" attached segment 123 and "banana" attached segment 0. */
+/* Parse a SysV segment id from the environment: ASCII digits only, fits
+ * an int. -1 otherwise. atoi() could not fail: "123junk" attached segment
+ * 123 and "banana" attached segment 0. Digits only, as AFL_MAP_SIZE:
+ * strtol alone accepted " 123" and "+123". */
 __AFL_GCC_NO_COV static int __afl_parse_shmid(const char *s) {
+    for (const char *q = s; *q; q++)
+        if (*q < '0' || *q > '9') return -1;
     errno = 0;
     char *end = NULL;
     long v = strtol(s, &end, 10);
@@ -1002,15 +1006,48 @@ __AFL_GCC_NO_COV static int __afl_parse_shmid(const char *s) {
  * __afl_map_shm() when __afl_area is still NULL after load (for the case
  * where the environment arrived late); a refusal is final for that id, so
  * the retry must not print and count it again. A different id (the next
- * resize) is a new request. */
-static int  __afl_shm_refused = 0;
-static char __afl_shm_refused_id[32];
+ * resize) is a new request. The id is kept as a hash of the whole string:
+ * a 32-byte copy never matched a longer id, so each retry re-counted it. */
+static int      __afl_shm_refused = 0;
+static uint64_t __afl_shm_refused_id = 0;
 
-/* Segment this shim shmat'd, NULL when none. Kept apart from __afl_area,
- * which the forkserver and inprocess.py's fallback repoint. */
+#define __AFL_FNV_OFFSET 1469598103934665603ULL
+#define __AFL_FNV_PRIME  1099511628211ULL
+
+/* FNV-1a of a NUL-terminated string. */
+__AFL_GCC_NO_COV static uint64_t __afl_str_hash(const char *s) {
+    uint64_t h = __AFL_FNV_OFFSET;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * __AFL_FNV_PRIME;
+    return h;
+}
+
+/* Retired segments, kept mapped. A resize or refusal unpublishes the old
+ * segment, but a target thread that loaded __afl_area before may still be
+ * mid-edge in it; shmdt would turn that store into a SEGV blamed on the
+ * input. Ring of __AFL_SHM_GRAVE: the oldest is detached only when a new
+ * one needs its slot, so a writer would have to stall across that many
+ * re-attaches to hit an unmapped segment. Python only grows the table
+ * (shm.py resize), so the retired bytes are bounded by GRAVE times the
+ * live segment, and stay below it under geometric growth. */
+#ifndef __AFL_SHM_GRAVE
+#  define __AFL_SHM_GRAVE 32
+#endif
+static void    *__afl_shm_grave[__AFL_SHM_GRAVE];
+static uint32_t __afl_shm_grave_next = 0;
+
+__AFL_GCC_NO_COV static void __afl_shm_retire(void *seg) {
+    if (!seg) return;
+    void **slot = &__afl_shm_grave[__afl_shm_grave_next++ % __AFL_SHM_GRAVE];
+    if (*slot) shmdt(*slot);
+    *slot = seg;
+}
+
+/* Segment this shim shmat'd, NULL when none, and its id. Kept apart from
+ * __afl_area, which the forkserver and inprocess.py's fallback repoint. */
 static void *__afl_shm_seg = NULL;
+static int   __afl_shm_seg_id = -1;
 
-/* Coverage off: unpublish every pointer into the segment, then detach it.
+/* Coverage off: unpublish every pointer into the segment, then retire it.
  * Area first -- every recording path tests it before anything else. */
 __AFL_GCC_NO_COV static void __afl_shm_detach(void) {
     void *seg = __afl_shm_seg;
@@ -1026,7 +1063,8 @@ __AFL_GCC_NO_COV static void __afl_shm_detach(void) {
     __afl_touched     = NULL;
     __afl_wguard_mode = __AFL_WGUARD_OFF;
     __afl_shm_seg     = NULL;
-    shmdt(seg);
+    __afl_shm_seg_id  = -1;
+    __afl_shm_retire(seg);
 }
 
 /* Refusing a re-attach detaches the old segment rather than keeping it:
@@ -1035,7 +1073,7 @@ __AFL_GCC_NO_COV static void __afl_shm_detach(void) {
  * first attach leaves -- coverage off, reported. */
 __AFL_GCC_NO_COV static void __afl_refuse_shm(const char *id) {
     __afl_shm_refused = 1;
-    snprintf(__afl_shm_refused_id, sizeof __afl_shm_refused_id, "%s", id);
+    __afl_shm_refused_id = __afl_str_hash(id);
     __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
     __afl_shm_detach();
 }
@@ -1044,7 +1082,7 @@ __attribute__((visibility("default")))
 __AFL_GCC_NO_COV void __afl_map_shm(void) {
     char *id = getenv("__AFL_SHM_ID");
     if (!id) return;   /* not under the fuzzer — silence is correct here */
-    if (__afl_shm_refused && strcmp(id, __afl_shm_refused_id) == 0) return;
+    if (__afl_shm_refused && __afl_str_hash(id) == __afl_shm_refused_id) return;
     __afl_fast = 0;    /* everything below may change what it vouches for */
 
     /* Past this point the fuzzer has explicitly asked for coverage, so a
@@ -1100,10 +1138,10 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
      * SHM_TABLE_OFFSET + AFL_MAP_SIZE * sizeof(struct __afl_entry) bytes,
      * plus the 16-byte distance tail.                                      */
     /* Strict parse: atoi("-5") became a 4-billion-entry map and every
-     * probe wrote past the segment. Unset, "" and "0" keep the default.
-     * Parsed into a local, published with the table below: this function
-     * is itself instrumented under clang, so an edge fired here with the
-     * new size and the old table indexes past the old table. */
+     * probe wrote past the segment. Unset, "" and "0" keep the size in
+     * effect: the default, or the previous attach's. Parsed into a local,
+     * published with the table below, so no other thread sees the new size
+     * before the new table. */
     uint32_t map_size = __afl_map_size;
     char *size_str = getenv("AFL_MAP_SIZE");
     if (size_str && size_str[0]) {
@@ -1136,10 +1174,18 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     const size_t tail_bytes = (__AFL_DISTANCE_MODE ? 2 * sizeof(uint64_t) : 0);
     if ((size_t)map_size >
         (SIZE_MAX - SHM_TABLE_OFFSET - tail_bytes) / sizeof(struct __afl_entry)) {
+        char msg[128];
+        int n = snprintf(msg, sizeof(msg),
+                         "__afl_shim: AFL_MAP_SIZE=%u overflows the address space"
+                         " -- coverage disabled\n", map_size);
+        if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
         __afl_refuse_shm(id);
         return;
     }
-    void *p = shmat(shmid, NULL, 0);
+    /* The segment already held is reused, not mapped again: retiring it
+     * would leave two mappings of one segment. */
+    int reuse = __afl_shm_seg && shmid == __afl_shm_seg_id;
+    void *p = reuse ? __afl_shm_seg : shmat(shmid, NULL, 0);
     if (p == (void *)-1) {
         char msg[160];
         int n = snprintf(msg, sizeof(msg),
@@ -1167,7 +1213,7 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
                          " -- too small, coverage disabled\n",
                          shmid, (size_t)ds.shm_segsz, map_size, need);
         if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
-        shmdt(p);
+        if (!reuse) shmdt(p);   /* never published; a reused one is retired */
         __afl_refuse_shm(id);
         return;
     }
@@ -1235,13 +1281,17 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         }
     }
 
-    /* Publish size, header pointers and table as one unit. The table goes
-     * dark first, so an edge in between sees no table rather than one
-     * table under the other's size. One basic block: no guard fires inside. */
+    /* Publish header pointers and table, then the size (release). Edge
+     * paths load the size first (acquire, __afl_home_slot/map_from_home)
+     * and the table after, so:
+     *
+     *   size new  ->  table new                 (release/acquire)
+     *   size old  ->  table old or new, and new holds old's slots
+     *
+     * The second line needs a growing table: Python only grows it (shm.py
+     * resize). A shrinking re-attach is safe only with no concurrent
+     * writer. No dark window: a FAST-path edge never sees a NULL table. */
     void *old_seg = __afl_shm_seg;
-    __atomic_store_n(&__afl_area, NULL, __ATOMIC_RELAXED);
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    __afl_map_size    = map_size;
     /* One pointer per field; see the layout map above. */
     __afl_stack_depth = (uint32_t *)(base + SHM_STACK_DEPTH_OFFSET);
     __afl_gen_word    = (uint32_t *)(base + SHM_GENERATION_OFFSET);
@@ -1250,8 +1300,10 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     __afl_dropped     = (uint64_t *)(base + SHM_DROP_OFFSET);
     __afl_touched     = touched;
     __afl_shm_seg     = p;
+    __afl_shm_seg_id  = shmid;
     __atomic_store_n(&__afl_area, (struct __afl_entry *)(base + SHM_TABLE_OFFSET),
-                     __ATOMIC_RELEASE);
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&__afl_map_size, map_size, __ATOMIC_RELEASE);
 
     /* Write-lock the mapping; shim stores go through open/close. After the
      * publish: arming retargets the guard, and the old table must not be
@@ -1260,8 +1312,9 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     if (shmctl(shmid, IPC_STAT, &ds) == 0) seg_len = (size_t)ds.shm_segsz;
     __afl_wguard_arm(p, seg_len);
 
-    /* A resize re-attach: nothing points into the old mapping any more. */
-    if (old_seg) shmdt(old_seg);
+    /* A resize re-attach: nothing new points into the old mapping, but a
+     * writer mid-edge may, so it is retired, not detached. */
+    if (old_seg != p) __afl_shm_retire(old_seg);
 
     /* Nothing is published here. Attach used to write the ctx width into
      * the segment, and the mask it used to do so zeroed the fuzzer's
@@ -1278,19 +1331,18 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
      * generation word at all on the attach path, so that class of clobber
      * is structurally impossible here rather than fixed by a mask. */
 
+    /* Setup code is uninstrumented (clang pragma, __AFL_GCC_NO_COV);
+     * __afl_mapping only keeps a stray edge from walking frames here. */
+    __afl_mapping = 1;
 #if __AFL_DISTANCE_MODE
-    __afl_mapping = 1;  /* map_dist_shm is instrumented; no ctx during setup */
     __afl_map_dist_shm();
     __afl_map_node_shm();
+#endif
     __afl_map_block_shm();
     __afl_mapping = 0;
-#endif
     __afl_fast_refresh();
 }
 
-/* Copy up to n health counters (see __AFL_HEALTH_*) into out; returns the
- * number of fields this shim has, so a caller can detect a newer shim
- * with more fields than it asked for. out may be NULL when n == 0. */
 static void __afl_check_crash_handlers(void);
 
 /* Call-context collapse detector.
@@ -1322,6 +1374,8 @@ static void __afl_check_crash_handlers(void);
 #ifndef __AFL_CTX_COLLAPSE_MIN_EDGES
 #  define __AFL_CTX_COLLAPSE_MIN_EDGES 128
 #endif
+#define __AFL_STR2(x) #x
+#define __AFL_STR(x) __AFL_STR2(x)
 /* -D__AFL_CTX_CHECK=0 compiles the detector and its per-edge bookkeeping out
  * entirely, for raw-speed runs. */
 #ifndef __AFL_CTX_CHECK
@@ -1356,7 +1410,8 @@ __AFL_GCC_NO_COV static int __afl_ctx_collapse_suspect(void) {
 static int __afl_ctx_reported = 0;
 __AFL_GCC_NO_COV static void __afl_ctx_report_collapse(void) {
     static const char msg[] =
-        "__afl_shim: call-context looks collapsed: >=128 distinct edges but a "
+        "__afl_shim: call-context looks collapsed: >="
+        __AFL_STR(__AFL_CTX_COLLAPSE_MIN_EDGES) " distinct edges but a "
         "single caller return address (or failed frame walks); the instrumented code was probably built "
         "without -fno-omit-frame-pointer, so edge ids carry no call-site context\n";
     if (__afl_ctx_reported || !__afl_ctx_collapse_suspect()) return;
@@ -1370,6 +1425,9 @@ __AFL_GCC_NO_COV static void __afl_ctx_arm_report(void) {
     atexit(__afl_ctx_report_collapse);
 }
 
+/* Copy up to n health counters (see __AFL_HEALTH_*) into out; returns the
+ * number of fields this shim has, so a caller can detect a newer shim
+ * with more fields than it asked for. out may be NULL when n == 0. */
 __attribute__((visibility("default")))
 __AFL_GCC_NO_COV uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
     __afl_check_crash_handlers();
@@ -1432,10 +1490,10 @@ __AFL_GCC_NO_COV uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
  *     compatibility with a pre-context session).                        */
 
 /* __AFL_CTX_SENSITIVE and __AFL_CTX_BITS are configured at the top of this
- * file, because __afl_map_shm() (above) publishes the context width into
- * the SHM header and so needs them already defined. The caveats that
- * govern whether you should turn this on are documented immediately
- * above. */
+ * file: __afl_map_shm() (above) reads __AFL_CTX_BITS for the runtime
+ * switch, and the __afl_ctx_bits_N marker advertises the width. The
+ * segment no longer carries it. The caveats that govern whether you
+ * should turn this on are documented immediately above. */
 
 /* COMPCOV (cmplog builds) reuses the base-relative helpers below for its
  * site keys; the context walk shares them. */
@@ -1476,12 +1534,28 @@ __AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
      * this shim targets), so the low bits never disambiguate two distinct
      * call sites -- drop them before folding into a slot index. */
     uint32_t slot = (uint32_t)((key >> 2) & (__AFL_CTX_CACHE_SIZE - 1));
-    if (__afl_ctx_base_cache[slot].ra == key) return __afl_ctx_base_cache[slot].base;
+    uintptr_t *tag = &__afl_ctx_base_cache[slot].ra;
+    uintptr_t *val = &__afl_ctx_base_cache[slot].base;
+
+    /* Seqlock read: tag, base, tag. Another thread may rewrite the slot
+     * between the tag check and the base load; the second tag load sees
+     * its cleared or new tag and falls through to dladdr. */
+    if (__atomic_load_n(tag, __ATOMIC_ACQUIRE) == key) {
+        uintptr_t b = __atomic_load_n(val, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(tag, __ATOMIC_RELAXED) == key) return b;
+    }
+
     Dl_info info;
     uintptr_t base = 0;
     if (dladdr(ra, &info) && info.dli_fbase) base = (uintptr_t)info.dli_fbase;
-    __afl_ctx_base_cache[slot].ra = key;
-    __afl_ctx_base_cache[slot].base = base;
+
+    /* Tag cleared before base, set after: no reader pairs a tag with
+     * another key's base (cf. __afl_ctx_last_ra below). */
+    __atomic_store_n(tag, 0, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(val, base, __ATOMIC_RELAXED);
+    __atomic_store_n(tag, key, __ATOMIC_RELEASE);
     return base;
 }
 
@@ -1804,12 +1878,14 @@ static inline uint32_t __afl_edge_hash_as(uint32_t cur_loc, enum __afl_path path
  * block. ffmpeg packed those blocks solid and overflowed the probe window
  * at 28% global load (51M drops). The multiply carries low-bit differences
  * into the high half, spreading variants across the table. Mirrored by
- * adapters/shm.py:home_slot. */
+ * adapters/shm.py:home_slot. Size loaded with acquire, before any table
+ * load: see the publish order in __afl_map_shm. */
 #define __AFL_HOME_GOLDEN 0x9E3779B1u
 __attribute__((always_inline))
 static inline uint32_t __afl_home_slot(uint32_t edge_id) {
     uint32_t h = edge_id * __AFL_HOME_GOLDEN;
-    return (uint32_t)(((uint64_t)h * __afl_map_size) >> 32);
+    uint32_t size = __atomic_load_n(&__afl_map_size, __ATOMIC_ACQUIRE);
+    return (uint32_t)(((uint64_t)h * size) >> 32);
 }
 
 /* Mark table slot idx live in this generation (no-op without the bitmap).
@@ -2053,20 +2129,19 @@ static inline int __afl_probe_run(struct __afl_entry *area, uint32_t start,
 #if __AFL_PROBE_MSI
 /* Odd step for edge_id: any odd step generates a power-of-two table. */
 __attribute__((always_inline))
-static inline uint32_t __afl_probe_step(uint32_t edge_id) {
-    uint32_t mask = __afl_map_size - 1;
-    if (__afl_map_size & mask) return 1;
+static inline uint32_t __afl_probe_step(uint32_t edge_id, uint32_t size) {
+    uint32_t mask = size - 1;
+    if (size & mask) return 1;
     return (((edge_id * __AFL_STEP_MUL) >> __AFL_STEP_SHIFT) | 1u) & mask;
 }
 
 /* Stepped counterpart of the linear version below: settles edge_id in the
  * first of `window` slots pos, pos+step, ... that is empty or holds it. */
 __attribute__((always_inline))
-static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
+static inline void __afl_probe_insert(struct __afl_entry *area, uint32_t size,
+                                      uint32_t edge_id, uint32_t pos,
                                       uint32_t window, uint32_t gen) {
-    struct __afl_entry *area = __afl_area;
-    uint32_t size = __afl_map_size;
-    uint32_t step = __afl_probe_step(edge_id);
+    uint32_t step = __afl_probe_step(edge_id, size);
     uint32_t tag  = gen << 24;
 
     for (uint32_t i = 0; i < window; i++) {
@@ -2078,10 +2153,9 @@ static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
 }
 #else
 __attribute__((always_inline))
-static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
+static inline void __afl_probe_insert(struct __afl_entry *area, uint32_t size,
+                                      uint32_t edge_id, uint32_t pos,
                                       uint32_t window, uint32_t gen) {
-    struct __afl_entry *area = __afl_area;
-    uint32_t size = __afl_map_size;
     uint32_t tag  = gen << 24;
     uint32_t head = (size - pos < window) ? size - pos : window;
 
@@ -2146,10 +2220,16 @@ __AFL_NO_COV static void __afl_id_scheme_init(void) {
 /* Settle edge_id starting at its home slot pos, for generation gen. */
 __attribute__((always_inline))
 static inline void __afl_map_from_home(uint32_t edge_id, uint32_t pos, uint32_t gen) {
+    /* One {size, table} snapshot, size first (see __afl_map_shm): a resize
+     * between two loads would pair the old table with the new size. pos
+     * came from an earlier, never larger, size. */
+    uint32_t size = __atomic_load_n(&__afl_map_size, __ATOMIC_ACQUIRE);
+    struct __afl_entry *area = __afl_area;
+
     /* Home slot first: hot edges settle there, before any window math
      * (ffmpeg_read: -8 Ir/edge). The rest of the window follows from
      * pos + 1, so placement is unchanged. */
-    if (__afl_probe_slot(__afl_area, pos, edge_id, gen << 24)) return;
+    if (__afl_probe_slot(area, pos, edge_id, gen << 24)) return;
 
     /* Linear probe, bounded to __AFL_PROBE_MAX slots.
      *
@@ -2159,16 +2239,16 @@ static inline void __afl_map_from_home(uint32_t edge_id, uint32_t pos, uint32_t 
      * or absent, so a bounded lookup can never miss an edge a bounded
      * insert placed. Do not bound one without the other. */
     uint32_t window = __AFL_PROBE_MAX;
-    if (window > __afl_map_size) window = __afl_map_size;
+    if (window > size) window = size;
     if (window < 2) { __afl_note_drop(); return; }
 
 #if __AFL_PROBE_MSI
-    uint32_t next = pos + __afl_probe_step(edge_id);
-    if (next >= __afl_map_size) next -= __afl_map_size;
+    uint32_t next = pos + __afl_probe_step(edge_id, size);
+    if (next >= size) next -= size;
 #else
-    uint32_t next = pos + 1 == __afl_map_size ? 0 : pos + 1;
+    uint32_t next = pos + 1 == size ? 0 : pos + 1;
 #endif
-    __afl_probe_insert(edge_id, next, window - 1, gen);
+    __afl_probe_insert(area, size, edge_id, next, window - 1, gen);
 }
 
 /* Insert a final, non-zero edge id for the current generation. No
@@ -2235,19 +2315,21 @@ static inline void __afl_note_stack(void) {
     if (__afl_stack_depth) *__afl_stack_depth = __afl_max_stack_depth;
 }
 
-/* FAST folds away every setting check __afl_fast vouches for. */
+/* Map cur_loc, then push next_prev as the previous location. FAST folds
+ * away every setting check __afl_fast vouches for. */
 __attribute__((always_inline))
-static inline void __afl_map_loc_as(uint32_t cur_loc, enum __afl_path path) {
+static inline void __afl_map_loc_push(uint32_t cur_loc, enum __afl_path path,
+                                      uint32_t next_prev) {
     const int any = path == __AFL_PATH_ANY;
     if (any && !__afl_area) return;
     __afl_wtok_t wk = any ? __afl_wguard_open() : 0;
     if (__afl_stack_on) __afl_note_stack();
 
     /* COMPCOV on: clear bit 31 of the hash, then carry bit 31 over from
-     * cur_loc. Real callers never set it, so their ids never carry it; the one
-     * synthetic caller that routes through here (__sfuzz_state, which also
-     * wants the prev_loc chain) sets it on cur_loc and keeps its tag whatever
-     * the hash width. COMPCOV off: keep = ~0, tag = 0, the hash is untouched. */
+     * cur_loc. Real callers never set it, so their ids never carry it; the
+     * synthetic callers that route through here (__sfuzz_state,
+     * __fuzz_event_at: they want the prev_loc chain) set it on cur_loc and
+     * keep their tag whatever the hash width. COMPCOV off: keep = ~0, tag = 0, the hash is untouched. */
     uint32_t edge_id = __afl_edge_hash_as(cur_loc, path);
     if (any && __builtin_expect(__afl_id_tag != 0, 0))   /* COMPCOV only (-3 Ir/edge off) */
         edge_id = (edge_id & __afl_id_keep) | (cur_loc & __afl_id_tag);
@@ -2272,12 +2354,27 @@ static inline void __afl_map_loc_as(uint32_t cur_loc, enum __afl_path path) {
 #endif
     if (any) __afl_wguard_close(wk);
 
-    __afl_push_prev(cur_loc);
+    __afl_push_prev(next_prev);
+}
+
+__attribute__((always_inline))
+static inline void __afl_map_loc_as(uint32_t cur_loc, enum __afl_path path) {
+    __afl_map_loc_push(cur_loc, path, cur_loc);
 }
 
 __attribute__((always_inline))
 static inline void __afl_map_loc(uint32_t cur_loc) {
     __afl_map_loc_as(cur_loc, __AFL_PATH_ANY);
+}
+
+/* Synthetic edge (state/LTL event) that stays in the prev_loc chain.
+ * Pushes the location masked to real width: the raw id carries bit 31,
+ * which >> 1 turned into bit 30 of every next real id -- past
+ * VIRGIN_DENSE_MAX (2^24) and off Python's dense path. The next real edge
+ * still depends on the event; only the width changes. */
+__attribute__((always_inline))
+static inline void __afl_map_synth_loc(uint32_t synth_loc) {
+    __afl_map_loc_push(synth_loc, __AFL_PATH_ANY, synth_loc & __afl_loc_mask);
 }
 
 /* ── Compiler-inserted edge coverage callbacks ────────────────────────
@@ -2517,15 +2614,14 @@ __AFL_GCC_NO_COV void __sfuzz_state(unsigned var_id, unsigned long long value) {
     __sfuzz_prev[slot] = (uint64_t)value;
     __sfuzz_digest ^= __sfuzz_mix(slot, prev) ^ __sfuzz_mix(slot, (uint64_t)value);
 
-    /* FNV-1a over (id, previous, current). The high bit is set so the
-     * result can never be 0, which __afl_map_edge reads as an empty
-     * slot. */
+    /* FNV-1a over (id, previous, current), tagged synthetic (bit 31, see
+     * __AFL_SYNTH_ID_BIT). The pushed prev_loc is masked to real width. */
     uint64_t h = 1469598103934665603ULL;
     h = (h ^ var_id) * 1099511628211ULL;
     h = (h ^ prev) * 1099511628211ULL;
     h = (h ^ (uint64_t)value) * 1099511628211ULL;
 
-    __afl_map_loc(__AFL_SYNTH_ID(h >> 32));
+    __afl_map_synth_loc(__AFL_SYNTH_ID(h >> 32));
 }
 
 /* ── LTL events (--ltl) ────────────────────────────────────────────────
@@ -2546,31 +2642,23 @@ __AFL_GCC_NO_COV void __sfuzz_state(unsigned var_id, unsigned long long value) {
 
 #define LTL_NO_OFFSET 0xFFFFFFFFu
 
-static int __ltl_fd = -2;  /* -2 not yet opened, -1 off */
 static __thread uint32_t __ltl_prev_event = LTL_NO_OFFSET;
 
-__AFL_NO_COV static void __ltl_emit(uint32_t id, uint32_t offset) {
-    if (__ltl_fd == -2) {
-        const char *p = getenv("__LTL_EVENTS_OUT");
-        __ltl_fd = (p && p[0]) ? open(p, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
-    }
-    if (__ltl_fd < 0) return;
-
-    uint64_t d = __sfuzz_digest;
-    uint32_t digest = d ? (uint32_t)((d >> 32) ^ d) | 1u : 0;
-    uint32_t rec[3] = {id, offset, digest};
-    ssize_t w = write(__ltl_fd, rec, sizeof rec);
-    (void)w;
-}
+/* Defined after the log-fd helpers (see "Log descriptors the target can
+ * steal"), which the cmplog layer shares. */
+__AFL_NO_COV static void __ltl_emit(uint32_t id, uint32_t offset);
+__AFL_NO_COV static void __ltl_reclaim(void);
 
 __attribute__((visibility("default")))
 __AFL_GCC_NO_COV void __fuzz_event_at(unsigned id, unsigned offset) {
+    if (__ltl_prev_event == LTL_NO_OFFSET) __ltl_reclaim();   /* first event this run */
+
     uint64_t h = 1469598103934665603ULL;
     h = (h ^ __ltl_prev_event) * 1099511628211ULL;
     h = (h ^ id) * 1099511628211ULL;
     __ltl_prev_event = id;
 
-    __afl_map_loc(__AFL_SYNTH_ID(h >> 32));
+    __afl_map_synth_loc(__AFL_SYNTH_ID(h >> 32));
     __ltl_emit(id, offset);
 }
 
@@ -3150,7 +3238,7 @@ struct __afl_dist_entry {
     uint32_t node_idx;
 } __attribute__((packed));
 
-static uint32_t  *__afl_dist_count = NULL;  /* entries + count at segment head */
+static uint32_t   __afl_dist_cap = 0;      /* slot capacity, read at attach */
 static struct __afl_dist_entry *__afl_dist_table = NULL;
 static uint32_t   __afl_dist_window = 0;    /* max slots one lookup walks */
 static uint64_t   __afl_dist_sum = 0;
@@ -3161,6 +3249,8 @@ static uint64_t   __afl_dist_hits = 0;
  * Python after each execution — no destructor writer. */
 static uint8_t   *__afl_node_bitmap = NULL;
 static uint32_t   __afl_node_bitmap_bytes = 0;
+
+#endif /* __AFL_DISTANCE_MODE */
 
 /* Attach an auxiliary segment whose u32 header sizes its payload, and
  * refuse it when header + payload overruns the segment: both headers are
@@ -3198,7 +3288,33 @@ __AFL_GCC_NO_COV static void *__afl_attach_sized(const char *env, uint64_t entry
     return p;
 }
 
+#if __AFL_DISTANCE_MODE
+/* Auxiliary segment held by id. A resize re-runs __afl_map_shm, which used
+ * to shmat the same id again each time and never detach the last one. */
+struct __afl_aux_seg {
+    int   shmid;
+    void *seg;
+};
+
+/* 1 when env still names the segment a holds: nothing to attach. */
+__AFL_GCC_NO_COV static int __afl_aux_held(const char *env, const struct __afl_aux_seg *a) {
+    const char *id = getenv(env);
+    return a->seg && id && __afl_parse_shmid(id) == a->shmid;
+}
+
+/* Hold p, attached from env; the previous segment is retired like a
+ * resized edge table (a probe may still be reading it). */
+__AFL_GCC_NO_COV static void __afl_aux_hold(const char *env, struct __afl_aux_seg *a, void *p) {
+    __afl_shm_retire(a->seg);
+    a->shmid = __afl_parse_shmid(getenv(env));
+    a->seg   = p;
+}
+
+static struct __afl_aux_seg __afl_node_seg = {-1, NULL};
+static struct __afl_aux_seg __afl_dist_seg = {-1, NULL};
+
 __AFL_GCC_NO_COV static void __afl_map_node_shm(void) {
+    if (__afl_aux_held("__AFL_NODE_BITMAP_ID", &__afl_node_seg)) return;
     void *p = __afl_attach_sized("__AFL_NODE_BITMAP_ID", 1);
     if (!p) return;
     uint32_t bytes = *(uint32_t *)p;
@@ -3209,7 +3325,9 @@ __AFL_GCC_NO_COV static void __afl_map_node_shm(void) {
     }
     __afl_node_bitmap_bytes = bytes;
     __afl_node_bitmap = (uint8_t *)((uint8_t *)p + 4);
+    __afl_aux_hold("__AFL_NODE_BITMAP_ID", &__afl_node_seg, p);
 }
+#endif /* __AFL_DISTANCE_MODE */
 
 /* Block bitmap (see __afl_block_mark). Once: a resize re-runs map_shm. */
 __AFL_GCC_NO_COV static void __afl_map_block_shm(void) {
@@ -3230,7 +3348,11 @@ __AFL_GCC_NO_COV static void __afl_map_block_shm(void) {
     __afl_block_bitmap = (uint8_t *)p + 8;
 }
 
+#if __AFL_DISTANCE_MODE
+/* An id change under a concurrently probing thread can still pair one
+ * table with the other's bounds; ids change only at campaign setup. */
 __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
+    if (__afl_aux_held("__AFL_DIST_SHM_ID", &__afl_dist_seg)) return;
     void *p = __afl_attach_sized("__AFL_DIST_SHM_ID", sizeof(struct __afl_dist_entry));
     if (!p) return;
 
@@ -3255,8 +3377,12 @@ __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
         if (d < cap) __afl_dist_window = d + 1;
     }
 
-    __afl_dist_count = (uint32_t *)p;
+    /* Bound fixed here, checked against the segment size by
+     * __afl_attach_sized: the live header is the fuzzer's to rewrite, and
+     * a larger value read per probe masked past the segment. */
+    __afl_dist_cap = cap;
     __afl_dist_table = (struct __afl_dist_entry *)((uint8_t *)p + 4);
+    __afl_aux_hold("__AFL_DIST_SHM_ID", &__afl_dist_seg, p);
 }
 
 /* Distance-table lookup + node-bitmap probe for one already-computed key.
@@ -3266,16 +3392,13 @@ __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
  * under either coverage flavor as long as icfg.py's probe-key scan looks
  * for calls to whichever of the two symbols the build actually calls. */
 __AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
-    if (!__afl_dist_table || !__afl_dist_count) return;
-    uint32_t size = *__afl_dist_count;
-    if (size == 0) return;
+    if (!__afl_dist_table) return;
 
-    /* size is a power of two (checked at attach): & replaces a division
-     * per probe step, 29.7 -> 19.3 ns per lookup (clang -O2). */
-    uint32_t mask = size - 1;
+    /* Capacity is a nonzero power of two (checked at attach): & replaces a
+     * division per probe step, 29.7 -> 19.3 ns per lookup (clang -O2). */
+    uint32_t mask = __afl_dist_cap - 1;
     uint32_t pos = (uint32_t)(key & mask);
-    /* window <= capacity (attach); a later smaller header still masks
-     * in bounds, so no clamp per lookup. */
+    /* window <= capacity (attach), so no clamp per lookup. */
     uint32_t n = __afl_dist_window;
     for (uint32_t i = 0; i < n; i++) {
         uint32_t idx = (pos + i) & mask;
@@ -3465,52 +3588,7 @@ __AFL_GCC_NO_COV static void __afl_write_distance_tail_exit(void) {
 
 #endif /* __AFL_EDGE */
 
-/* ══════════════════════════════════════════════════════════════════════
- * Comparison logging (-D__AFL_CMPLOG=1)
- *
- * Two interception layers, one output stream ($_CMPLOG_OUT):
- *
- *   Layer 1  libc interposition via dlsym(RTLD_NEXT) — memcmp/strcmp/...
- *            Catches explicit library calls. Needs -fno-builtin-<fn> on
- *            the target or -O2 folds the call away before it can be seen
- *            (see $NOBUILTIN_CMP in tools/build_targets.sh).
- *   Layer 2  Clang -fsanitize-coverage=trace-cmp callbacks. Catches
- *            inlined/folded integer compares and switch dispatch, which
- *            Layer 1 cannot see at all.
- *
- * Record format, unchanged from cmplog_shim.c so existing logs still
- * parse (core/cmplog.py::collect_tokens):
- *   Layer 1:  CMP <hex a> <hex b> <result> <n>
- *   Layer 2:  CMP <hex a> <hex b> <result> <n> 0x<pc>
- * ══════════════════════════════════════════════════════════════════════ */
-#if __AFL_CMPLOG
-
-#define CMPLOG_BUFFER_SIZE (256 * 1024)
-
-/* Longest operand pair written to the cmplog stream, in bytes. The record
- * writer truncates to this, so the interceptors must not promise more than
- * it records -- and memchr sizes a stack buffer from it. */
-#define CMPLOG_MAX_OPERAND 64
-
-/* Worst-case record: "CMP " + 2*2*64 hex + 3 separators + result + n + pc
- * + newline. 320 covers it with room to spare. */
-#define CMPLOG_MAX_RECORD 320
-
-/* Raw fd, not FILE*.
- *
- * The pre-crash flush runs inside a signal handler, and fwrite/fprintf are
- * not async-signal-safe -- cmplog_shim.c called both from its handler. A
- * raw descriptor plus write(2) is safe there, and drops the stdio lock from
- * a path that runs on every intercepted comparison. O_APPEND so the
- * external truncation in CmplogCollector.reset_log() stays coherent. */
-static int    __afl_cmplog_fd  = -1;
-static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
-static size_t __afl_cmplog_pos = 0;
-/* Record emission off (__cmplog_pause): the collector parses one round in
- * twenty, and ffmpeg emits ~400k records per run (3.1x the target's cost).
- * Counts/sites channels keep running. */
-static int    __afl_cmplog_paused = 0;
-
+#if __AFL_EDGE || __AFL_CMPLOG
 /* ── Log descriptors the target can steal ─────────────────────────────
  *
  * The shim's log fds live in the target's fd table. A target that closes
@@ -3554,6 +3632,103 @@ __AFL_NO_COV static void __afl_log_keep(int *fd, struct __afl_fd_id *id, const c
     const char *path = getenv(env);
     *fd = (path && path[0]) ? __afl_log_open(path, extra_flags, id) : -1;
 }
+#endif
+
+#if __AFL_EDGE
+#include <sched.h>
+
+#define LTL_ENV "__LTL_EVENTS_OUT"
+#define LTL_FD_UNOPENED (-2)
+#define LTL_FD_OPENING  (-3)
+
+static int __ltl_fd = LTL_FD_UNOPENED;  /* < 0 and not the above: off */
+static struct __afl_fd_id __ltl_fd_id;
+
+/* First caller opens; a racing thread waits (one open(2)) rather than
+ * opening a second fd. CAS, not a plain store: two threads both saw -2. */
+__AFL_NO_COV static int __ltl_open(void) {
+    int fd = __atomic_load_n(&__ltl_fd, __ATOMIC_ACQUIRE);
+    if (fd == LTL_FD_UNOPENED &&
+        __atomic_compare_exchange_n(&__ltl_fd, &fd, LTL_FD_OPENING, 0,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+        const char *p = getenv(LTL_ENV);
+        fd = (p && p[0]) ? __afl_log_open(p, 0, &__ltl_fd_id) : -1;
+        __atomic_store_n(&__ltl_fd, fd, __ATOMIC_RELEASE);
+        return fd;
+    }
+    while (fd == LTL_FD_OPENING) {
+        sched_yield();
+        fd = __atomic_load_n(&__ltl_fd, __ATOMIC_ACQUIRE);
+    }
+    return fd;
+}
+
+/* Target closed our fd and reused the number: reopen, never write it.
+ * Once per run (first event), not per event: the fstat cost 2.5x per
+ * event. An event after a mid-run steal still lands in the target's file
+ * until the next run's first event. */
+__AFL_NO_COV static void __ltl_reclaim(void) {
+    if (__ltl_open() >= 0) __afl_log_keep(&__ltl_fd, &__ltl_fd_id, LTL_ENV, 0);
+}
+
+__AFL_NO_COV static void __ltl_emit(uint32_t id, uint32_t offset) {
+    int fd = __ltl_open();
+    if (fd < 0) return;
+
+    uint64_t d = __sfuzz_digest;
+    uint32_t digest = d ? (uint32_t)((d >> 32) ^ d) | 1u : 0;
+    uint32_t rec[3] = {id, offset, digest};
+    ssize_t w = write(fd, rec, sizeof rec);
+    (void)w;
+}
+#endif /* __AFL_EDGE */
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Comparison logging (-D__AFL_CMPLOG=1)
+ *
+ * Two interception layers, one output stream ($_CMPLOG_OUT):
+ *
+ *   Layer 1  libc interposition via dlsym(RTLD_NEXT) — memcmp/strcmp/...
+ *            Catches explicit library calls. Needs -fno-builtin-<fn> on
+ *            the target or -O2 folds the call away before it can be seen
+ *            (see $NOBUILTIN_CMP in tools/build_targets.sh).
+ *   Layer 2  Clang -fsanitize-coverage=trace-cmp callbacks. Catches
+ *            inlined/folded integer compares and switch dispatch, which
+ *            Layer 1 cannot see at all.
+ *
+ * Record format, unchanged from cmplog_shim.c so existing logs still
+ * parse (core/cmplog.py::collect_tokens):
+ *   Layer 1:  CMP <hex a> <hex b> <result> <n>
+ *   Layer 2:  CMP <hex a> <hex b> <result> <n> 0x<pc>
+ * ══════════════════════════════════════════════════════════════════════ */
+#if __AFL_CMPLOG
+
+#define CMPLOG_BUFFER_SIZE (256 * 1024)
+
+/* Longest operand pair written to the cmplog stream, in bytes. The record
+ * writer truncates to this, so the interceptors must not promise more than
+ * it records -- and memchr sizes a stack buffer from it. */
+#define CMPLOG_MAX_OPERAND 64
+
+/* Worst-case record: "CMP " + 2*2*64 hex + 4 separators + result + n + pc
+ * + newline. 320 covers it with room to spare. */
+#define CMPLOG_MAX_RECORD 320
+
+/* Raw fd, not FILE*.
+ *
+ * The pre-crash flush runs inside a signal handler, and fwrite/fprintf are
+ * not async-signal-safe -- cmplog_shim.c called both from its handler. A
+ * raw descriptor plus write(2) is safe there, and drops the stdio lock from
+ * a path that runs on every intercepted comparison. O_APPEND so the
+ * external truncation in CmplogCollector.reset_log() stays coherent. */
+static int    __afl_cmplog_fd  = -1;
+static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
+static size_t __afl_cmplog_pos = 0;
+static size_t __afl_cmplog_sent = 0;   /* flushed prefix of buf, see flush */
+/* Record emission off (__cmplog_pause): the collector parses one round in
+ * twenty, and ffmpeg emits ~400k records per run (3.1x the target's cost).
+ * Counts/sites channels keep running. */
+static int    __afl_cmplog_paused = 0;
 
 /* Close *fd* only while it is ours; a stolen number is the target's. */
 __AFL_NO_COV static void __afl_log_close(int *fd, const struct __afl_fd_id *id) {
@@ -4052,9 +4227,21 @@ __AFL_NO_COV static size_t __afl_rec_cut(const char *p, size_t max) {
     return n;
 }
 
+/* Records configured but no sink yet (a FIFO with no reader at init):
+ * writers skip on fd < 0, so nothing is buffered and the flush below never
+ * reaches its reopen. Retried here instead, per flush/reset/fork, never per
+ * record: one failed open(2) (ENXIO) while the reader is missing. */
+__AFL_NO_COV static void __afl_cmplog_retry(void) {
+    if (__afl_cmplog_fd >= 0 || !__afl_cmplog_cfg) return;
+    const char *path = getenv("_CMPLOG_OUT");
+    if (path && path[0])
+        __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
+}
+
 /* Caller holds __afl_cmplog_lock. */
 __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
     if (__afl_cmplog_pos == 0) {
+        __afl_cmplog_retry();
         return;
     }
     /* Lazy reopen: if Python rotated the log and closed the fd, reopen
@@ -4065,10 +4252,10 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
      * a blocking open(2) of a FIFO for write-only stalls until a reader
      * shows up, and this call can run from __afl_auto_init before the
      * forkserver hello handshake. With O_NONBLOCK, opening a FIFO with no
-     * reader yet fails immediately (ENXIO) instead of hanging, and this
-     * lazy-reopen path already retries on every flush -- so the reader
-     * (the Python-side FIFO drain thread) just needs to exist by the time
-     * the *next* flush fires, not before this one. No-op for a regular
+     * reader yet fails immediately (ENXIO) instead of hanging, and
+     * __afl_cmplog_retry reopens on every later flush, reset and fork -- so
+     * the reader (the Python-side FIFO drain thread) just needs to exist by
+     * the time the *next* one fires, not before this one. No-op for a regular
      * file: O_NONBLOCK only changes open(2)/write(2) semantics for FIFOs
      * and some device nodes. */
     __afl_log_keep(&__afl_cmplog_fd, &__afl_cmplog_fd_id, "_CMPLOG_OUT", O_NONBLOCK);
@@ -4083,6 +4270,7 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
             __afl_health[__AFL_HEALTH_CMPLOG_DROPPED]++;
             __afl_health[__AFL_HEALTH_CMPLOG_NO_SINK]++;
             __afl_cmplog_pos = 0;
+            __afl_cmplog_sent = 0;
             /* Dropped records are still marked seen: forget them. */
             __afl_cmplog_new_scope();
             return;
@@ -4092,10 +4280,16 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
      * into a full pipe stored half a record, and the next flush glued its
      * first record onto that half. Chunk at record ends instead. */
     size_t max = __afl_cmplog_fd_id.fifo ? PIPE_BUF : __afl_cmplog_pos;
-    size_t off = 0;
-    while (off < __afl_cmplog_pos) {
+    /* Progress is published before each write: a signal whose handler
+     * flushes (crash, guard) lands after the bytes are out but before this
+     * loop sees the count, and a local offset made the nested flush write
+     * them again. Short write: step back to what went out, unless a nested
+     * flush already moved on. */
+    while (__afl_cmplog_sent < __afl_cmplog_pos) {
+        size_t off = __afl_cmplog_sent;
         size_t len = __afl_cmplog_pos - off;
         if (len > max) len = __afl_rec_cut(__afl_cmplog_buf + off, max);
+        __afl_cmplog_sent = off + len;
         ssize_t w = write(__afl_cmplog_fd, __afl_cmplog_buf + off, len);
         /* w <= 0 covers EAGAIN (pipe full, nothing draining it right now)
          * the same way it already covered EINTR/ENOSPC: drop the rest of
@@ -4108,9 +4302,10 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
             __afl_cmplog_new_scope();
             break;
         }
-        off += (size_t)w;
+        if ((size_t)w < len && __afl_cmplog_sent == off + len) __afl_cmplog_sent = off + (size_t)w;
     }
     __afl_cmplog_pos = 0;
+    __afl_cmplog_sent = 0;
 }
 
 /* Skipped, not waited for, while another thread owns the buffer. */
@@ -4513,12 +4708,50 @@ __AFL_NO_COV static void *__afl_icpt_sym(const char *name) {
     return NULL;
 }
 
-__AFL_GCC_NO_COV static void *__afl_next_sym(const char *name) {
-    if (__afl_in_dlsym) return NULL;
+/* One lookup under the recursion guard. */
+__AFL_GCC_NO_COV static void *__afl_sym_lookup(const char *name) {
     __afl_in_dlsym = 1;
     void *p = __afl_icpt_sym(name);
     if (!p) p = dlsym(RTLD_NEXT, name);
     __afl_in_dlsym = 0;
+    return p;
+}
+
+/* Slots given their fallback because the lookup ran inside dlsym (guard
+ * up), not because the symbol is missing. Caching that fallback pinned the
+ * naive version, past the sanitizer interceptor, for the process. Each slot
+ * leaves NULL once, so the list never holds more than the slot count. */
+#define AFL_RESOLVE_PENDING_MAX 32
+static __thread struct { void **slot; const char *name; }
+    __afl_pending[AFL_RESOLVE_PENDING_MAX];
+static __thread int __afl_pending_n;
+
+/* Lookup came back empty: use the fallback. Out of line and cold, so the
+ * interceptors' resolved path keeps its old code. */
+__attribute__((noinline, cold))
+__AFL_GCC_NO_COV static void __afl_resolve_miss(void **slot, const char *name, void *fallback) {
+    *slot = fallback;
+    if (!__afl_in_dlsym || __afl_pending_n >= AFL_RESOLVE_PENDING_MAX) return;
+    __afl_pending[__afl_pending_n].slot = slot;
+    __afl_pending[__afl_pending_n].name = name;
+    __afl_pending_n++;
+}
+
+/* Re-resolve the pending slots once the outermost lookup returned. Swaps
+ * fallback for real, never through NULL: another thread may be calling it. */
+__AFL_GCC_NO_COV static void __afl_resolve_pending(void) {
+    while (__afl_pending_n > 0) {
+        int i = --__afl_pending_n;
+        void *p = __afl_sym_lookup(__afl_pending[i].name);
+        if (p) __atomic_store_n(__afl_pending[i].slot, p, __ATOMIC_RELEASE);
+    }
+}
+
+__attribute__((noinline, cold))
+__AFL_GCC_NO_COV static void *__afl_next_sym(const char *name) {
+    if (__afl_in_dlsym) return NULL;
+    void *p = __afl_sym_lookup(name);
+    __afl_resolve_pending();
     return p;
 }
 
@@ -4728,7 +4961,8 @@ __AFL_NO_COV static void *__afl_fb_memrchr(const void *s, int c, size_t n) {
     do {                                                            \
         if (!(slot)) {                                              \
             (slot) = (type)__afl_next_sym(name);                    \
-            if (!(slot)) (slot) = (type)(fallback);                 \
+            if (!(slot)) __afl_resolve_miss((void **)&(slot), name, \
+                                            (void *)(fallback));    \
         }                                                           \
     } while (0)
 
@@ -4990,8 +5224,9 @@ __AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
      * its own, so a run with only $__AFL_COMPCOV_LEVEL set (no
      * _CMPLOG_OUT) must not skip this block the way it did before. */
     if ((__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) && n > 0) {
-        size_t k = n * sizeof(wchar_t);
-        if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+        /* Saturate before multiplying: n * 4 wraps for n >= 2^62. */
+        size_t k = n > CMPLOG_MAX_OPERAND / sizeof(wchar_t) ? CMPLOG_MAX_OPERAND
+                                                             : n * sizeof(wchar_t);
         __afl_cmplog_bytes(a, b, k, result);
         __afl_compcov_bytes(a, b, k, __builtin_return_address(0), COMPCOV_MEM);
     }
@@ -5005,8 +5240,9 @@ __AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     int result = real_wcsncmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_WCSNCMP, result == 0);
     if ((__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) && n > 0) {
-        size_t k = n * sizeof(wchar_t);
-        if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+        /* Saturate before multiplying: n * 4 wraps for n >= 2^62. */
+        size_t k = n > CMPLOG_MAX_OPERAND / sizeof(wchar_t) ? CMPLOG_MAX_OPERAND
+                                                             : n * sizeof(wchar_t);
         if (k > 0) {
             __afl_cmplog_bytes(a, b, k, result);
             __afl_compcov_bytes(a, b, k, __builtin_return_address(0), COMPCOV_WSTR);
@@ -5430,11 +5666,14 @@ __AFL_NO_COV static void __afl_cmp_counts_zero(void) {
  * flushed twice, once per process. Start the child clean. */
 __AFL_NO_COV static void __afl_cmplog_atfork_child(void) {
     __afl_cmplog_pos = 0;
+    __afl_cmplog_sent = 0;
     __atomic_store_n(&__afl_cmplog_lock, 0, __ATOMIC_RELEASE);
     /* Shared counters are not the parent's copy: zeroing them here would
      * wipe what the parent (or the fuzzer, in direct_lite) has not read. */
     if (!__afl_cmp_shm_on) __afl_cmp_counts_zero();
     __afl_cmplog_new_scope();
+    /* Forkserver: the parent never flushes, so each child retries. */
+    __afl_cmplog_retry();
 }
 
 /* ── Lifecycle ────────────────────────────────────────────────────────
@@ -5478,7 +5717,8 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
      * why. */
     if (path && path[0])
         __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
-    __afl_cmplog_cfg = __afl_cmplog_fd >= 0;
+    /* Configured, not opened: a failed open is retried (__afl_cmplog_retry). */
+    __afl_cmplog_cfg = path && path[0];
     __afl_cmp_refresh();
 }
 
@@ -5789,6 +6029,9 @@ __AFL_GCC_NO_COV __attribute__((constructor)) static void __afl_sym_prime(void) 
  * signal trampoline, and we drop everything above the interrupted frame. */
 __AFL_NO_COV static void __afl_sym_capture(int sig, siginfo_t *si, void *uc) {
     if (__afl_sym_busy) return;           /* the symbolizer itself faulted */
+    /* getenv in a handler: lock-free in glibc, but not AS-safe against a
+     * concurrent setenv. Not cached at load: the host sets the variable
+     * after dlopen (CrashSymbolSink). */
     const char *out = getenv("__AFL_CRASH_SYM_OUT");
     if (!out || !out[0]) return;
     __afl_sym_pend.sig = sig;
@@ -5998,6 +6241,10 @@ __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *u
      * anything else (kill, abort, seccomp) is re-raised and delivered once
      * this handler returns. __afl_guarded_call re-arms later. */
     __afl_health[__AFL_HEALTH_STRAY_SIGNALS]++;
+    /* Known false positive: a fault the target's handler recovers from
+     * (GC write barrier, JIT guard page) is marked too, and the shim's
+     * handlers are off until the next guarded call. Kept: whether the
+     * handler recovers is unknown here, and a miss is a blind crash. */
     if (__afl_target_handles(sig)) __afl_report_swallowed(sig);
     __afl_restore_crash_handlers();
     if (__afl_is_hw_fault(sig, si))
@@ -6442,7 +6689,9 @@ __AFL_GCC_NO_COV static void __afl_timer_budget(uint64_t budget_us) {
 #define __AFL_PH_TOMB_FRACTION 4                /* compact past BIG_SLOTS / 4 tombs */
 #define __AFL_PH_HASH         0x9E3779B97F4A7C15ULL
 #define __AFL_PH_ABORT_RC     134
-#define __AFL_PH_META_BYTES   9                 /* state 1 + stamp 4 + stack 4 per slot */
+#define __AFL_PH_META_BYTES   13                /* state 1 + stamp 8 + stack 4 per slot */
+#define __AFL_PH_STALE_SLOTS  64                /* freed big blocks remembered (power of 2) */
+#define __AFL_PH_DOUBLE_FREE  "free(): double free detected (private heap)\n"
 
 /* Marker for the host: bound by InProcessRunner. Absent => the target shares
  * the host's glibc heap, and an abort() inside malloc/free leaves an arena
@@ -6456,26 +6705,28 @@ enum { __AFL_PH_COLD, __AFL_PH_READY, __AFL_PH_OFF };
 
 typedef struct {
     uint8_t *state;
-    uint32_t *stamp;      /* guard call that allocated the slot */
+    uint64_t *stamp;      /* guard call that allocated the slot; 64-bit: no wrap */
     uint32_t *stack;      /* freed slot indices, reused LIFO */
     uint32_t nfresh, nstack, nslots;
 } __afl_ph_cls;
 
-typedef struct { void *p; size_t len; uint32_t stamp; } __afl_ph_big;
+typedef struct { void *p; size_t len; uint64_t stamp; } __afl_ph_big;
 
 static struct {
     char *base;
     __afl_ph_cls cls[__AFL_PH_CLASSES];
     __afl_ph_big big[__AFL_PH_BIG_SLOTS];
     unsigned big_used, big_tombs;         /* non-NULL slots; TOMB slots */
-    uint32_t calls;
+    void *stale[__AFL_PH_STALE_SLOTS];    /* ring of freed big blocks */
+    unsigned stale_next;
+    uint64_t calls;
     volatile uintptr_t lock;              /* holder's __afl_ph_token(), 0 free */
     int mode;
 } __afl_ph;
 
 /* Per thread: the stamp of this thread's innermost guard call (0 outside).
  * A process-global stamp let one thread's crash free another's slots. */
-static __thread uint32_t __afl_ph_stamp;
+static __thread uint64_t __afl_ph_stamp;
 
 static void *(*__afl_ph_rmalloc)(size_t);
 static void *(*__afl_ph_rrealloc)(void *, size_t);
@@ -6536,8 +6787,8 @@ __AFL_GCC_NO_COV static int __afl_ph_init(void) {
         k->nslots = (uint32_t)n;
         k->state = (uint8_t *)cur;
         cur += n;
-        k->stamp = (uint32_t *)cur;
-        cur += n * sizeof(uint32_t);
+        k->stamp = (uint64_t *)cur;
+        cur += n * sizeof(uint64_t);
         k->stack = (uint32_t *)cur;
         cur += n * sizeof(uint32_t);
     }
@@ -6570,7 +6821,7 @@ __AFL_GCC_NO_COV static void *__afl_ph_libc(size_t n, size_t align) {
     return __afl_ph_rmemalign(&p, align, n) ? NULL : p;
 }
 
-/* Raise SIGABRT from the allocator itself: the abort() macro above is a no-op. */
+/* Raise SIGABRT from the allocator itself: the abort() macro below is a no-op. */
 __AFL_GCC_NO_COV static void __afl_ph_die(const char *msg) {
     write(STDERR_FILENO, msg, strlen(msg));
     raise(SIGABRT);
@@ -6680,9 +6931,8 @@ __AFL_GCC_NO_COV static void *__afl_ph_take(unsigned c) {
     return __afl_ph.base + ((size_t)c << __AFL_PH_REGION_SHIFT) + ((size_t)i << (c + __AFL_PH_MIN_SHIFT));
 }
 
-/* Returns an error message, NULL when the slot was freed. State is written
- * before the push, so a longjmp in between leaks the slot, never duplicates it. */
-__AFL_GCC_NO_COV static const char *__afl_ph_put(const void *p) {
+/* Class and index of p; an error message unless p starts a live slot. */
+__AFL_GCC_NO_COV static const char *__afl_ph_slot(const void *p, __afl_ph_cls **kp, uint32_t *ip) {
     size_t off = (size_t)((const char *)p - __afl_ph.base);
     unsigned c = (unsigned)(off >> __AFL_PH_REGION_SHIFT);
     size_t in = off & (__AFL_PH_REGION - 1);
@@ -6690,8 +6940,20 @@ __AFL_GCC_NO_COV static const char *__afl_ph_put(const void *p) {
 
     __afl_ph_cls *k = &__afl_ph.cls[c];
     uint32_t i = (uint32_t)(in >> (c + __AFL_PH_MIN_SHIFT));
-    if (k->state[i] == __AFL_PH_FREED) return "free(): double free detected (private heap)\n";
+    if (k->state[i] == __AFL_PH_FREED) return __AFL_PH_DOUBLE_FREE;
     if (k->state[i] != __AFL_PH_LIVE) return "free(): invalid pointer (private heap)\n";
+    *kp = k;
+    *ip = i;
+    return NULL;
+}
+
+/* Returns an error message, NULL when the slot was freed. State is written
+ * before the push, so a longjmp in between leaks the slot, never duplicates it. */
+__AFL_GCC_NO_COV static const char *__afl_ph_put(const void *p) {
+    __afl_ph_cls *k;
+    uint32_t i;
+    const char *err = __afl_ph_slot(p, &k, &i);
+    if (err) return err;
     k->state[i] = __AFL_PH_FREED;
     k->stack[k->nstack++] = i;
     return NULL;
@@ -6759,6 +7021,26 @@ __AFL_GCC_NO_COV static void __afl_ph_big_bury(unsigned i) {
     __afl_ph.big_tombs++;
 }
 
+/* A freed big block's address died with its tomb, so a second free went on
+ * to glibc over unmapped memory. Remembered here, bounded to the last
+ * STALE_SLOTS frees. Caller holds the lock. */
+__AFL_GCC_NO_COV static void __afl_ph_big_forget(void *p) {
+    __afl_ph.stale[__afl_ph.stale_next++ & (__AFL_PH_STALE_SLOTS - 1)] = p;
+}
+
+/* 1 when p is a big block this heap freed and nothing mapped since: a double
+ * free. libc chunks start 16 B into their mapping and skip the scan; a
+ * page-aligned one (memalign) at a reused address is mapped and passes. */
+__AFL_GCC_NO_COV static int __afl_ph_big_stale(const void *p) {
+    if ((uintptr_t)p & (__AFL_PH_PAGE - 1)) return 0;
+    int hit = 0;
+    __afl_ph_lock();
+    for (unsigned i = 0; i < __AFL_PH_STALE_SLOTS && !hit; i++) hit = __afl_ph.stale[i] == p;
+    __afl_ph_unlock();
+    unsigned char resident;
+    return hit && mincore((void *)p, 1, &resident) != 0 && errno == ENOMEM;
+}
+
 __AFL_GCC_NO_COV static void __afl_ph_big_tidy(void) {
     if (__afl_ph.big_tombs > __AFL_PH_BIG_SLOTS / __AFL_PH_TOMB_FRACTION) __afl_ph_big_compact();
 }
@@ -6808,6 +7090,7 @@ __AFL_GCC_NO_COV static int __afl_ph_big_del(void *p) {
     }
 
     size_t len = __afl_ph.big[i].len;
+    __afl_ph_big_forget(p);
     __afl_ph_big_bury((unsigned)i);
     __afl_ph_big_tidy();
     __afl_ph_unlock();
@@ -6843,6 +7126,7 @@ __AFL_GCC_NO_COV static void __afl_ph_release(void *p) {
         return;
     }
     if (__afl_ph_big_del(p)) return;
+    if (__afl_ph_big_stale(p)) __afl_ph_die(__AFL_PH_DOUBLE_FREE);
     const char *err = __afl_ph_foreign_err(p);
     if (err) __afl_ph_die(err);
     if (__afl_ph_resolve()) __afl_ph_rfree(p);
@@ -6895,20 +7179,29 @@ __AFL_GCC_NO_COV void *realloc(void *p, size_t n) {
         return NULL;
     }
 
-    int ours = __afl_ph_in(p);
+    int cls = __afl_ph_in(p), ours = cls;
     if (!ours) {
         __afl_ph_lock();
         ours = __afl_ph_big_find(p) >= 0;
         __afl_ph_unlock();
     }
     if (!ours) {
+        if (__afl_ph_big_stale(p)) __afl_ph_die(__AFL_PH_DOUBLE_FREE);
         const char *err = __afl_ph_foreign_err(p);
         if (err) __afl_ph_die(err);
         return __afl_ph_resolve() ? __afl_ph_rrealloc(p, n) : NULL;
     }
 
-    size_t have = __afl_ph_usable(p);
-    if (n <= have && n > have / 2) return p;     /* same class: keep */
+    size_t have = cls ? __afl_ph_size_of(p) : __afl_ph_usable(p);
+    if (n <= have && n > have / 2) {             /* same class: keep */
+        /* Freed or interior class pointers were handed back as live. The
+         * unlocked read races only a concurrent free of p: a target bug. */
+        __afl_ph_cls *k;
+        uint32_t i;
+        const char *err = cls ? __afl_ph_slot(p, &k, &i) : NULL;
+        if (err) __afl_ph_die(err);
+        return p;
+    }
 
     void *q = __afl_ph_alloc(n, 16);
     if (!q) return NULL;
@@ -6955,15 +7248,15 @@ __AFL_GCC_NO_COV int posix_memalign(void **out, size_t a, size_t n) {
 
 /* Guard hooks. A call gets a fresh stamp; leaving restores the caller's, so a
  * nested guard does not retag its parent's later allocations. */
-__AFL_GCC_NO_COV static uint32_t __afl_ph_enter(void) {
-    uint32_t prev = __afl_ph_stamp, s;
+__AFL_GCC_NO_COV static uint64_t __afl_ph_enter(void) {
+    uint64_t prev = __afl_ph_stamp, s;
     do s = __atomic_add_fetch(&__afl_ph.calls, 1, __ATOMIC_RELAXED);
     while (!s);                         /* 0 means "no guard call" */
     __afl_ph_stamp = s;
     return prev;
 }
 
-__AFL_GCC_NO_COV static void __afl_ph_leave(uint32_t prev) { __afl_ph_stamp = prev; }
+__AFL_GCC_NO_COV static void __afl_ph_leave(uint64_t prev) { __afl_ph_stamp = prev; }
 
 /* Number of calls abandoned so far (crash, exit or timeout). Everything such
  * a call allocated is freed, including state the target meant to keep for its
@@ -6984,7 +7277,7 @@ __AFL_GCC_NO_COV static void __afl_ph_reclaim(void) {
     __atomic_add_fetch(&__afl_ph_abandoned, 1, __ATOMIC_RELAXED);
     if (__afl_ph_held()) __afl_ph_unlock();
     if (__afl_ph.mode != __AFL_PH_READY) return;
-    uint32_t me = __afl_ph_stamp;
+    uint64_t me = __afl_ph_stamp;
 
     __afl_ph_lock();
     for (int c = 0; c < __AFL_PH_CLASSES; c++) {
@@ -6999,6 +7292,7 @@ __AFL_GCC_NO_COV static void __afl_ph_reclaim(void) {
         __afl_ph_big *s = &__afl_ph.big[i];
         if (!s->p || s->p == __AFL_PH_TOMB || s->stamp != me) continue;
         munmap(s->p, s->len);
+        __afl_ph_big_forget(s->p);
         __afl_ph_big_bury(i);
     }
     __afl_ph_big_tidy();
@@ -7007,7 +7301,7 @@ __AFL_GCC_NO_COV static void __afl_ph_reclaim(void) {
 
 /* Every jump abandons the call: exit-on-error too, or each one leaked its
  * slots until the spans ran out and malloc fell back to libc. */
-__AFL_GCC_NO_COV static void __afl_ph_unwind(uint32_t prev) {
+__AFL_GCC_NO_COV static void __afl_ph_unwind(uint64_t prev) {
     __afl_ph_reclaim();
     __afl_ph_leave(prev);
 }
@@ -7025,10 +7319,16 @@ __AFL_GCC_NO_COV long __afl_ph_live(void) {
     return n;
 }
 
+/* fork() child: a thread holding the lock did not come along, and the
+ * child's first malloc spun forever. Its half-done take/put leaks a slot at
+ * worst (both are ordered for a jump at any point). */
+__AFL_GCC_NO_COV static void __afl_ph_fork_reset(void) { __afl_ph.lock = 0; }
+
 #else
 #define __afl_ph_enter() 0u
 #define __afl_ph_leave(prev) ((void)(prev))
 #define __afl_ph_unwind(prev) ((void)(prev))
+#define __afl_ph_fork_reset() ((void)0)
 #endif
 
 /* Fault address of the last crash a guarded call recovered on this
@@ -7164,7 +7464,7 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     sig_atomic_t prev_timed = __afl_guard_timed;
     /* Nested timed: the outer frame gets its own tick period back. */
     int restore_budget = timed && prev_timed;
-    uint32_t ph_prev = __afl_ph_enter();
+    uint64_t ph_prev = __afl_ph_enter();
     uint64_t wg_prev = __afl_wguard_snap();
 
     /* Outermost frame starts a run; a nested call is part of its caller's. */
@@ -7206,6 +7506,9 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
 #endif
     __afl_guard_jmp = prev;
     __afl_guard_timed = prev_timed;
+    /* A crash or exit after a libc deferral: the same budget would keep
+     * the fast tick and time the next call out (__afl_timer_budget no-ops). */
+    __afl_tick_slow();
     if (!prev) __afl_guard_leave();
     if (restore_budget) __afl_timer_budget(prev_budget);
     __afl_ph_unwind(ph_prev);
@@ -7243,6 +7546,7 @@ __AFL_GCC_NO_COV static void __afl_guard_atfork_child(void) {
     __afl_timer_budget_us = 0;
     __afl_guards_active = 0;    /* the parent's guards are not the child's */
     __afl_exit_pending = 0;
+    __afl_ph_fork_reset();
 }
 
 /* ── exit() / _exit() inside a guarded call ──────────────────────────
@@ -7351,11 +7655,14 @@ __AFL_GCC_NO_COV void exit(int status) {
 }
 
 /* ── abort() override (all builds) ───────────────────────────────────
- * Intercept libc's abort() for fuzzing: instead of killing the process,
+ * Replace abort() calls for fuzzing: instead of killing the process,
  * write a marker to stderr and return.  Libraries like FFmpeg call abort()
  * on internal assertion failures (~1600 av_assert0 sites), which would
- * flood the fuzzer with false crashes.  This override catches ALL abort()
- * sources — macros, direct calls in library .c files, etc.
+ * flood the fuzzer with false crashes.  It reaches only abort() calls in
+ * translation units compiled with -include afl_shim.c, after this macro.
+ * Not covered: library .o files built without the shim (tools/build_targets.sh
+ * compiles those in a separate pass), assert() (__assert_fail calls libc's
+ * abort), and other shared libraries.
  *
  * In ASAN builds, the __asan_default_options shim (loaded before libasan
  * by the fuzzer) sets halt_on_error=0:abort_on_error=0, so ASAN-detected
@@ -7378,7 +7685,7 @@ __AFL_GCC_NO_COV void exit(int status) {
  * A macro + static helper avoids the GCC "noreturn function does return"
  * warning that would fire if we defined void abort(void) directly
  * (stdlib.h declares abort() as __noreturn__).  The preprocessor
- * replaces all abort() calls with __afl_shim_abort() before the compiler
+ * replaces the abort() calls after it with __afl_shim_abort() before the compiler
  * sees the declaration mismatch.                                           */
 /* --abort-is-crash (__AFL_ABORT_CRASH=1): abort() raises SIGABRT, a real
  * crash, for targets whose assertions are bugs. Read once, on first abort. */

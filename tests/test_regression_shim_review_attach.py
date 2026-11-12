@@ -3,7 +3,9 @@
 - attach published the new map size before the new table: edges fired by
   the (instrumented) attach code indexed the old table with the new size.
 - a refused re-attach kept the stale table under the new size; a successful
-  one never detached the old segment (one leaked mapping per resize).
+  one never detached the old segment (one leaked mapping per resize). Old
+  segments are now retired, mapped but bounded: a writer mid-edge may still
+  use one (tests/test_regression_shim_audit_attach.py).
 - siglongjmp out of a guarded call skipped the write-guard close: the
   mprotect nesting count stayed raised and the segment writable for good.
 - the mprotect nesting count was a plain ++/-- shared by threads.
@@ -149,15 +151,16 @@ def test_regression_attach_size_commits_with_table(reattach, segs):
     assert _live(new) > 0
 
 
-# ── 2: re-attach detaches the old segment; refusal is consistent ────────
+# ── 2: re-attach retires the old segment; refusal is consistent ─────────
 
 
 @requires_clang
-def test_regression_reattach_detaches_old_segment(reattach, segs):
+def test_regression_reattach_retires_old_segment(reattach, segs):
+    """Retired, not detached: a concurrent writer may still hold it."""
     old, new = segs(), segs()
     (step,) = _steps(reattach, old, (new.env_id, BIG_ENTRIES))
     _, _, before, after = step
-    assert after == before - 1
+    assert after == before
 
 
 @requires_clang
@@ -171,13 +174,13 @@ def test_reattach_same_segment_keeps_one_mapping(reattach, segs):
 
 
 @requires_clang
-def test_regression_refused_reattach_detaches(reattach, segs):
+def test_regression_refused_reattach_unpublishes(reattach, segs):
     """A refused re-attach leaves coverage off, not the stale table at the new size."""
     old, small = segs(), segs(SMALL_ENTRIES)
     (step,) = _steps(reattach, old, (small.env_id, BIG_ENTRIES))
     attached, _, before, after = step
     assert attached == 0
-    assert after == before - 1
+    assert after == before  # retired, not detached
     assert _beyond_old_table(old) == 0
     assert _live(small) == 0
 
