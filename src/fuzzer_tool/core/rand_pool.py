@@ -52,9 +52,10 @@ import numpy as np
 
 _POOL_ENTRIES = 4096  # refill every 4K draws
 
-# ``draw % n`` has statistical distance (n % 2**32)*... from uniform: <= 1e-7
-# for n <= 2**20 but up to ~1/3 near n = 2/3 * 2**32.  Above this bound the
-# scalar/list range APIs rejection-sample (_randbelow) instead.
+# ``draw % n`` over-weights the lowest ``2**32 % n`` values by one count in
+# ``2**32 // n``: <= 1e-7 relative bias for n <= 2**20, 2:1 near
+# n = 2/3 * 2**32.  Above this bound the range APIs rejection-sample
+# (_randbelow) instead.
 _MODULO_SAFE_MAX = 1 << 30
 
 # Fixed replacement for "seed from OS/hardware entropy". Arbitrary but
@@ -68,6 +69,9 @@ _NO_SEED_FALLBACK = 0x5EED_5EED
 # RandPool(seed) built from the same campaign seed.
 _NEG_SEED_TAG = 0x4E45_4721
 _DEFAULT_POOL_TAG = 0xDEFA_0172
+
+# Entropy-gate retries per refill before raising starvation.
+_GATE_RETRIES = 3
 
 # Opt-in Floyd path (Phase 1 / B1 of the seventeen-source survey).
 _RAND_FLOYD: bool = os.environ.get("FUZZER_RAND_FLOYD", "").strip() in ("1", "true", "yes")
@@ -95,6 +99,13 @@ def _seed_source(seed):
     if isinstance(seed, int) and seed < 0:
         return np.random.SeedSequence([-seed, _NEG_SEED_TAG])
     return seed
+
+
+def _default_source(seed) -> np.random.SeedSequence:
+    """Tagged seed for the default pool: never mirrors ``RandPool(seed)``."""
+    base = _NO_SEED_FALLBACK if seed is None else seed
+    entropy = [-base, _NEG_SEED_TAG] if base < 0 else [base]
+    return np.random.SeedSequence([*entropy, _DEFAULT_POOL_TAG])
 
 
 def _min_entropy(data: bytes) -> float:
@@ -155,8 +166,9 @@ class RandPool:
         self._m256_l: list[int] = []
         self._idx = _POOL_ENTRIES
         self._min_entropy = min_entropy
-        # Min-entropy (not Shannon) gate; a 4096-byte uniform batch has an
-        # empirical H_inf of ~7.2 bits/byte, so thresholds belong near 7.0.
+        # Min-entropy (not Shannon) gate. A uniform 4096-byte batch reads
+        # H_inf ~7.2 bits/byte, but 2.6% of batches read < 7.0 and 25%
+        # < 7.1 (seed 3, 2000 batches): keep thresholds <= 6.5.
         self._min_hinf = min_hinf
 
     def _generate_pool(self) -> None:
@@ -167,42 +179,48 @@ class RandPool:
 
     def _refill(self) -> None:
         self._generate_pool()
+
         # Entropy only when gated: ~9% of a refill, read by nobody otherwise.
-        if self._min_hinf is not None and self.pool_min_entropy_now() < self._min_hinf:
-            for _ in range(3):
-                self.reseed(int(self._rng.integers(0, 2**63)))
-                self._generate_pool()
-                if self.pool_min_entropy_now() >= self._min_hinf:
-                    break
-            else:
-                raise RuntimeError(
-                    f"RandPool min-entropy starvation: {self.pool_min_entropy_now():.2f}"
-                    f" < {self._min_hinf:.2f}"
-                )
-        if self._min_entropy is not None and self._entropy() < self._min_entropy:
-            for _ in range(3):
-                # Derive the retry seed from the still-live (low-entropy)
-                # generator itself rather than reseeding from OS/hardware
-                # entropy or from the fixed no-seed fallback: the latter
-                # would retry with the exact same seed three times in a
-                # row (a no-op). Drawing the next seed from the current
-                # stream keeps the whole retry sequence a pure function of
-                # the pool's original seed, so it stays reproducible.
-                next_seed = int(self._rng.integers(0, 2**63))
-                self.reseed(next_seed)
-                self._generate_pool()
-                if self._entropy() >= self._min_entropy:
-                    break
-            else:
-                raise RuntimeError(
-                    f"RandPool entropy starvation: {self._entropy():.2f} < {self._min_entropy:.2f}"
-                )
+        # Every gate is rechecked after any retry: a batch drawn to satisfy
+        # one gate can fail the other. The retry seed comes from the live
+        # stream (not the fixed fallback, which would retry the same seed),
+        # so the sequence stays a pure function of the original seed.
+        retries = 0
+        while (starved := self._gate_failure()) is not None:
+            if retries == _GATE_RETRIES:
+                raise RuntimeError(starved)
+            retries += 1
+            self.reseed(int(self._rng.integers(0, 2**63)))
+            self._generate_pool()
+
         self._pool_l = self._pool.tolist()
         self._m256_l = self._m256.tolist()
         self._idx = 0
 
+    def _gate_failure(self) -> str | None:
+        """Starvation message for the first failing entropy gate, else None."""
+        if self._min_hinf is not None:
+            hinf = self._hinf()
+            if hinf < self._min_hinf:
+                return f"RandPool min-entropy starvation: {hinf:.2f} < {self._min_hinf:.2f}"
+        if self._min_entropy is not None:
+            h = self._entropy()
+            if h < self._min_entropy:
+                return f"RandPool entropy starvation: {h:.2f} < {self._min_entropy:.2f}"
+        return None
+
     def pool_min_entropy_now(self) -> float:
-        """Empirical min-entropy (bits/byte) of the current ``_m256`` batch."""
+        """Empirical min-entropy (bits/byte) of the current ``_m256`` batch.
+
+        Raises ``RuntimeError`` before the first refill (or after a reseed):
+        ``_m256`` then holds uninitialized memory or the old stream.
+        """
+        if not self._pool_l:
+            raise RuntimeError("RandPool has not been refilled")
+        return self._hinf()
+
+    def _hinf(self) -> float:
+        """Min-entropy (bits/byte) of the current ``_m256`` batch."""
         return _min_entropy(self._m256.tobytes())
 
     def _entropy(self) -> float:
@@ -218,7 +236,7 @@ class RandPool:
 
     # ── Public API ────────────────────────────────────────────────────
 
-    def reseed(self, seed: int | None = None) -> None:
+    def reseed(self, seed: int | np.random.SeedSequence | None = None) -> None:
         """Replace the backing generator and discard the pre-fetched pool.
 
         Args:
@@ -230,10 +248,12 @@ class RandPool:
         up to ``_POOL_ENTRIES`` values already drawn from the *old* stream,
         so the next ~4096 draws would keep coming from it and the reseed
         would look like a no-op.  Invalidating ``_idx`` forces a refill from
-        the new stream on the next draw.
+        the new stream on the next draw. Clearing ``_pool_l`` marks the old
+        batch stale for the entropy readers.
         """
         self._rng = np.random.default_rng(_seed_source(seed))
         self._idx = _POOL_ENTRIES
+        self._pool_l = []
 
     def inject_entropy(self, raw: bytes) -> None:
         """Mix externally supplied bytes into this pool's stream.
@@ -275,12 +295,13 @@ class RandPool:
         seed_words = [int.from_bytes(digest[i : i + 4], "little") for i in range(0, len(digest), 4)]
         self._rng = np.random.default_rng(np.random.SeedSequence(seed_words))
         self._idx = _POOL_ENTRIES
+        self._pool_l = []
 
     def pool_entropy(self) -> float | None:
         """Return the Shannon entropy (bits/byte) of the most recent refill.
 
-        Returns ``None`` until the first refill has completed. Computed on
-        demand from the batch still held in ``_m256``.
+        Returns ``None`` until the first refill after construction or a
+        reseed. Computed on demand from the batch still held in ``_m256``.
         """
         if not self._pool_l:
             return None
@@ -299,8 +320,8 @@ class RandPool:
 
         Equivalent to calling ``randrange(n)`` *count* times but all
         values are sliced from the pool in one C-level operation when
-        ``n`` fits in a uint32.  Wider ranges fall back to the scalar
-        path so the full span is reachable.
+        ``n <= _MODULO_SAFE_MAX``.  Wider ranges fall back to the scalar
+        rejection path so the full span is reachable without bias.
         """
         if n <= 0 or count <= 0:
             return []
@@ -308,10 +329,7 @@ class RandPool:
             return [self.randrange(n) for _ in range(count)]
         # _take spans refills; a bare slice truncated for count > _POOL_ENTRIES
         # (and still advanced _idx by the full count).
-        words = self._take(count)
-        if n == 1 << 32:  # full span: n overflows uint32, and % n is identity
-            return words.tolist()
-        return (words % n).tolist()
+        return (self._take(count) % n).tolist()
 
     def random(self) -> float:
         """Return a random float in [0.0, 1.0).  ``random.random()`` equivalent."""
@@ -376,8 +394,8 @@ class RandPool:
 
         This is faster than calling ``randint(a, b)`` *count* times because
         all values are sliced from the pool in a single C-level operation
-        when the width fits in a uint32.  Wider ranges fall back to the
-        scalar path so the full span is reachable.
+        when the width is at most ``_MODULO_SAFE_MAX``.  Wider ranges fall
+        back to the scalar rejection path so the full span is reachable.
         """
         width = b - a + 1
         if width <= 0 or count <= 0:
@@ -405,8 +423,8 @@ class RandPool:
     def randrange(self, n: int) -> int:
         """Return a random integer in ``[0, n)``.
 
-        For ``n <= 2**32`` uses a single pool word (modulo bias is accepted
-        for the hot path).  For larger ``n`` composes multiple 32-bit draws
+        For ``n <= _MODULO_SAFE_MAX`` uses a single pool word (modulo bias
+        is accepted for the hot path).  For larger ``n`` rejection-samples
         via :meth:`_randbelow` so the full range is reachable — required by
         callers such as the Ogg granule-position mutator that request a
         64-bit span.
@@ -420,10 +438,10 @@ class RandPool:
     def randint(self, a: int, b: int) -> int:
         """Return a random integer in ``[a, b]`` (inclusive).
 
-        Widths that fit in a single uint32 pool word stay on the fast
+        Widths up to ``_MODULO_SAFE_MAX`` stay on the single-word fast
         path.  Wider ranges (e.g. ``randint(0, 0xFFFFFFFFFFFFFFFF)``)
-        compose two or more pool draws so every bit of the requested
-        range is reachable.
+        rejection-sample via :meth:`_randbelow` so every value of the
+        requested range is reachable without bias.
         """
         width = b - a + 1
         if width <= 0:
@@ -562,6 +580,8 @@ class RandPool:
         n = len(seq)
         if n == 0:
             raise IndexError("cannot choose from empty sequence")
+        if len(weights) != n:
+            raise ValueError(f"weighted_choice: {len(weights)} weights for {n} items")
         cum = list(itertools.accumulate(weights))
         total = cum[-1]
         if total <= 0:
@@ -569,6 +589,10 @@ class RandPool:
             # rounding artifact -- keep raising rather than silently picking
             # an arbitrary element.
             raise IndexError("weighted_choice: weights sum to <= 0")
+        # A negative weight makes ``cum`` non-monotone: bisect then returns
+        # garbage ([5, -4, 1] picked 'a' and 'c' 50/50).
+        if min(weights) < 0:
+            raise ValueError("weighted_choice: negative weight")
         r = self.random() * total
         # ``r`` is mathematically < total (self.random() is in [0.0, 1.0)),
         # but float64 rounding in the multiplication can push it up to
@@ -612,8 +636,8 @@ class RandPool:
         """Floyd's sampling: exactly *k* unique indices in ``[0, n)``.
 
         Draws only from the pool's own stream (``randrange``: one word while
-        ``n <= 2**32``, composed words above that).  O(k) space, exactly k
-        draws for ``n <= 2**32``.
+        ``n <= _MODULO_SAFE_MAX``, rejection sampling above that).  O(k)
+        space, exactly k draws for ``n <= _MODULO_SAFE_MAX``.
 
         Permutation variant (Bentley & Floyd 1987): a fresh ``t`` goes to the
         front, a collision inserts ``j`` right after ``t``. The output order
@@ -664,11 +688,18 @@ class RandPool:
                 k = n
             if k <= 0:
                 return []
+            # Above _MODULO_SAFE_MAX, randrange rejection-samples so every
+            # index is reachable without bias; below it, inline the draw.
+            wide = n > _MODULO_SAFE_MAX
             if k == 1:
-                return [population[self._draw() % n]]
+                return [population[self.randrange(n) if wide else self._draw() % n]]
             if k == 2:
-                a = self._draw() % n
-                b = self._draw() % (n - 1)
+                if wide:
+                    a = self.randrange(n)
+                    b = self.randrange(n - 1)
+                else:
+                    a = self._draw() % n
+                    b = self._draw() % (n - 1)
                 if b >= a:
                     b += 1
                 return [population[a], population[b]]
@@ -823,6 +854,8 @@ class RandPool:
         """
         if count <= 0:
             return []
+        if len(probs) == 0:
+            raise IndexError("categorical: empty weights")
         cum = np.cumsum(probs)
         if cum[-1] <= 0:
             raise IndexError("categorical: weights sum to <= 0")
@@ -854,9 +887,17 @@ class RandPool:
         """Return one Gamma(alphas[i], rate=betas[i]) draw per element, as an array.
 
         The Gamma counterpart of :meth:`betavariate_array`: a Thompson step
-        over K Gamma-Poisson arms in one C-level numpy call.
+        over K Gamma-Poisson arms in one C-level numpy call. Rate <= 0
+        gives 0.0, as :meth:`gammavariate` does (was ``inf`` / negative).
         """
-        return self._rng.gamma(alphas) / np.asarray(betas, dtype=np.float64)
+        draws = self._rng.gamma(alphas)
+        rates = np.asarray(betas, dtype=np.float64)
+        # argmin+index beats .min() (350 vs 530 ns); empty arrays have no argmin.
+        if rates.size == 0 or rates.flat[rates.argmin()] > 0:
+            return draws / rates
+
+        draws, rates = np.broadcast_arrays(draws, rates)
+        return np.divide(draws, rates, out=np.zeros(draws.shape), where=rates > 0)
 
     def lognormvariate(self, mu: float = 0.0, sigma: float = 1.0) -> float:
         """Return a random float from LogNormal(*mu*, *sigma*).
@@ -908,7 +949,7 @@ def get_default_rand_pool(seed=None) -> RandPool:
     """
     global _default_instance
     if _default_instance is None:
-        _default_instance = RandPool(seed=seed)
+        _default_instance = RandPool(seed=_default_source(seed))
     return _default_instance
 
 
@@ -925,7 +966,7 @@ def configure_default_rand_pool_seed(seed) -> None:
         raise RuntimeError(
             "default RandPool singleton already created; cannot reconfigure its seed"
         )
-    _default_instance = RandPool(seed=seed)
+    _default_instance = RandPool(seed=_default_source(seed))
 
 
 def reset_default_rand_pool(seed=None) -> None:
@@ -937,7 +978,7 @@ def reset_default_rand_pool(seed=None) -> None:
     see the replacement.
     """
     global _default_instance
-    _default_instance = RandPool(seed=seed)
+    _default_instance = RandPool(seed=_default_source(seed))
 
 
 def reseed_default_rand_pool(seed=None) -> None:
@@ -945,8 +986,7 @@ def reseed_default_rand_pool(seed=None) -> None:
 
     The stream is tagged (``_DEFAULT_POOL_TAG``) so it differs from
     ``RandPool(seed)``: reseeding both with the same seed made fallback
-    draws replay the hotpath stream at an offset.
+    draws replay the hotpath stream at an offset. Every default-pool
+    constructor uses the same tag (:func:`_default_source`).
     """
-    base = _NO_SEED_FALLBACK if seed is None else seed
-    entropy = [-base, _NEG_SEED_TAG] if base < 0 else [base]
-    get_default_rand_pool().reseed(np.random.SeedSequence([*entropy, _DEFAULT_POOL_TAG]))
+    get_default_rand_pool().reseed(_default_source(seed))
