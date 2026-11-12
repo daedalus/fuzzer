@@ -26,7 +26,7 @@ class HierarchicalBanditScheduler:
     categories with collectively high yield.
     """
 
-    supports_priors = True  # top-level accepts format-specific priors
+    supports_priors = False  # init_arm(name) takes no (prior_alpha, prior_beta)
 
     # Operator categories: every operator known to exist
     # (shared taxonomy from core.operator_categories, kept as a class

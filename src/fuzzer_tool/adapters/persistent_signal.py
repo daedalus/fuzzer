@@ -148,15 +148,18 @@ class PersistentRunner:
             # to 200ms to handle this race reliably.
             deadline = time.monotonic() + 0.2
             while time.monotonic() < deadline:
-                _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                if waited == 0:
+                    time.sleep(0.01)
+                    continue
                 if os.WIFSTOPPED(status):
+                    # Leave the init stop: a stopped target never sees SIGUSR1.
+                    os.kill(pid, signal.SIGCONT)
                     self._started = True
                     log.info("Persistent target started (pid=%d)", pid)
                     return True
-                if status != 0:
-                    # Child exited/signaled — not a persistent target
-                    break
-                time.sleep(0.01)
+                # Child exited/signaled — not a persistent target
+                break
             log.warning("Persistent target exited immediately")
             self._cleanup()
             return False
@@ -183,8 +186,9 @@ class PersistentRunner:
 
         deadline = time.time() + self.timeout
         while time.time() < deadline:
-            _, status = os.waitpid(self.pid, os.WNOHANG | os.WUNTRACED)
-            if status == 0:
+            # Branch on the pid: a clean exit(0) also has status 0.
+            waited, status = os.waitpid(self.pid, os.WNOHANG | os.WUNTRACED)
+            if waited == 0:
                 time.sleep(0.0005)
                 continue
 
@@ -218,6 +222,16 @@ class PersistentRunner:
             pass
         self._started = False
         return -1, self._read_stderr() or "timeout"
+
+    def restart(self) -> bool:
+        """Replace a dead target (crash, exit, timeout) with a fresh one."""
+        self.stop()
+        return self.start()
+
+    @property
+    def alive(self) -> bool:
+        """Whether a target is parked and ready for the next input."""
+        return self._started
 
     def stop(self):
         """Stop the target. SIGUSR2 is dead code for __AFL_LOOP targets — just SIGKILL."""

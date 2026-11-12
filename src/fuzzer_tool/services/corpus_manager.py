@@ -56,18 +56,23 @@ log = logging.getLogger(__name__)
 # Subtrees of seeds/ a prune never moves files out of.
 _PRUNED = "pruned"
 _IRREPLACEABLE = "irreplaceable"
+_CRASHING = "crashing"
+_TIMEOUTS = "timeouts"
+
+# Never in the in-memory corpus, so no kept set names them.
+_PROTECTED = frozenset((_IRREPLACEABLE, _CRASHING, _TIMEOUTS))
 
 
 def _live_seed_files(seeds_dir: Path):
-    """``id_*`` files under *seeds_dir*, minus pruned/ and irreplaceable/.
+    """``id_*`` files under *seeds_dir*, minus pruned/ and the protected trees.
 
     pruned/ is skipped as a tree: it outgrows the live corpus (3,202 vs ~120
     files on fuzzgoat) and its files are already where a prune puts them.
-    irreplaceable/ seeds are never pruned.
+    irreplaceable/, crashing/ and timeouts/ seeds are never pruned.
     """
     for root, dirs, files in os.walk(seeds_dir):
         top = root == str(seeds_dir)
-        dirs[:] = [d for d in dirs if d != _IRREPLACEABLE and not (top and d == _PRUNED)]
+        dirs[:] = [d for d in dirs if d not in _PROTECTED and not (top and d == _PRUNED)]
         for name in files:
             if name.startswith("id_"):
                 yield Path(root, name)

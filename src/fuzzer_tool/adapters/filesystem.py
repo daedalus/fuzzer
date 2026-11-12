@@ -1409,12 +1409,6 @@ def save_crash(
     if not v.replaces and _cluster_files(crashes_dir, metadata.build_cluster_id(sig)):
         return False
 
-    # Smaller trigger of a known signature: drop its files, then write this one.
-    if crash_min_sizes is not None:
-        if v.replaces:
-            _evict_crash(crashes_dir, metadata.build_cluster_id(sig))
-        crash_min_sizes[sig] = len(data)
-
     # Store raw stderr (contains ASAN file:line diagnostics)
     if not metadata.raw_stderr:
         metadata.raw_stderr = stderr
@@ -1456,6 +1450,13 @@ def save_crash(
         ),
     )
     _publish_crash(crashes_dir, base_name, artifacts)
+
+    # Smaller trigger of a known signature: drop the old files only once this
+    # one is on disk, so a failed write (ENOSPC) keeps the old reproducer.
+    if crash_min_sizes is not None:
+        if v.replaces:
+            _evict_crash(crashes_dir, metadata.cluster_id, keep=base_name)
+        crash_min_sizes[sig] = len(data)
 
     return base_name
 
@@ -1600,9 +1601,11 @@ def _cluster_files(crashes_dir: Path, cluster_id: str) -> list[Path]:
     ]
 
 
-def _evict_crash(crashes_dir: Path, cluster_id: str) -> None:
-    """Remove the on-disk files of signature cluster *cluster_id*."""
+def _evict_crash(crashes_dir: Path, cluster_id: str, keep: str) -> None:
+    """Remove the on-disk files of signature cluster *cluster_id*, sparing base name *keep*."""
     for f in _cluster_files(crashes_dir, cluster_id):
+        if f.stem == keep:
+            continue
         f.unlink(missing_ok=True)
 
 

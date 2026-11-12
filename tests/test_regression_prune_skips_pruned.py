@@ -5,6 +5,7 @@
 every minimize: 3,202 pruned vs ~120 live seeds on a fuzzgoat corpus.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,8 @@ def layout(tmp_path, monkeypatch):
         "old": _seed(seeds, "pruned/dd/id_ddold"),
         "readmitted": _seed(seeds, "pruned/ee/id_eeback"),
         "irreplaceable": _seed(seeds, "irreplaceable/ff/id_ffkeep"),
+        "crashing": _seed(seeds, "crashing/11/id_11crash"),
+        "timeouts": _seed(seeds, "timeouts/22/id_22hang"),
     }
     moves: list[tuple[str, str]] = []
     real_move = corpus_manager.shutil.move
@@ -70,3 +73,13 @@ def test_irreplaceable_never_moved(layout):
 
     assert paths["irreplaceable"] not in {src for src, _ in moves}
     assert (seeds / "irreplaceable/ff/id_ffkeep").is_file()
+
+
+@pytest.mark.parametrize("kind", ["crashing", "timeouts"])
+def test_regression_crash_seeds_never_pruned(layout, kind):
+    """Crash/timeout seeds are not in the corpus, so no kept set names them."""
+    cm, _seeds, paths, moves = layout
+    cm._prune_files({"aakept"})
+
+    assert paths[kind] not in {src for src, _ in moves}
+    assert Path(paths[kind]).is_file()

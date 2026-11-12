@@ -97,7 +97,9 @@ class RunningMoments:
             self._slide_update(x)
         else:
             self._n += 1
-            self._buf.append(x)
+            # Only the window slides over samples; unwindowed mode never reads them.
+            if self._window is not None:
+                self._buf.append(x)
             self._inc_update(x)
 
     def _inc_update(self, x: float) -> None:

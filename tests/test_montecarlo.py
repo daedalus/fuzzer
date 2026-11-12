@@ -1545,7 +1545,8 @@ class TestHierarchicalBanditScheduler:
     def test_supports_priors(self):
         from fuzzer_tool.core.schedulers import HierarchicalBanditScheduler
 
-        assert HierarchicalBanditScheduler.supports_priors
+        # init_arm(name) takes no priors, so the flag must say so (Hard Rule 40).
+        assert not HierarchicalBanditScheduler.supports_priors
 
     def test_bandit_stats(self):
         from fuzzer_tool.core.schedulers import HierarchicalBanditScheduler
