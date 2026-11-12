@@ -5,6 +5,14 @@ count, branch count, branch misses) for target processes. These counters
 provide additional coverage signals beyond edge-based coverage — inputs
 that execute more instructions or take different branch paths are interesting.
 
+Counters open as one group (one read() per exec) with time enabled/running,
+so values multiplexed off the PMU are scaled back up. Without a PMU (most
+VMs) the software events -- CPU time, page faults, context switches -- still
+count:
+
+    leader fd ── read() ──> nr | enabled | running | v0 v1 ... vN-1
+                                  value = v * enabled / running
+
 Requires CAP_PERFMON capability or root. Disabled by default via --hw-perf.
 
 Usage:
@@ -49,6 +57,9 @@ PERF_COUNT_HW_REF_CPU_CYCLES = 9
 
 # PERF_TYPE_HW_CACHE config = cache_id | (op << 8) | (result << 16)
 PERF_COUNT_HW_CACHE_L1D = 0
+PERF_COUNT_HW_CACHE_LL = 2
+PERF_COUNT_HW_CACHE_DTLB = 3
+PERF_COUNT_HW_CACHE_ITLB = 4
 PERF_COUNT_HW_CACHE_OP_READ = 0
 PERF_COUNT_HW_CACHE_RESULT_ACCESS = 0
 PERF_COUNT_HW_CACHE_RESULT_MISS = 1
@@ -68,6 +79,16 @@ PERF_COUNT_SW_CONTEXT_SWITCHES = 3
 PERF_COUNT_SW_CPU_MIGRATIONS = 4
 PERF_COUNT_SW_PAGE_FAULTS_MIN = 5
 PERF_COUNT_SW_PAGE_FAULTS_MAJ = 6
+PERF_COUNT_SW_ALIGNMENT_FAULTS = 7
+
+# enum perf_event_read_format
+PERF_FORMAT_TOTAL_TIME_ENABLED = 1 << 0
+PERF_FORMAT_TOTAL_TIME_RUNNING = 1 << 1
+PERF_FORMAT_GROUP = 1 << 3
+_READ_FORMAT = PERF_FORMAT_GROUP | PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING
+
+# Group read layout: u64 nr, time_enabled, time_running, then nr values.
+_GROUP_HDR = 3
 
 # perf_event_attr flags
 PERF_FLAG_FD_CLOEXEC = 8
@@ -158,9 +179,13 @@ COUNTER_DEFS = {
     "stalled_cycles_frontend": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND, True),
     "stalled_cycles_backend": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_BACKEND, True),
     "ref_cycles": (PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES, True),
-    "page_faults": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN, False),
-    "page_faults_major": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MAJ, False),
-    "context_switches": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, False),
+    # Inherited like the rest: a forkserver child's faults fold into the
+    # counter on the forkserver when the child exits.
+    "page_faults": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN, True),
+    "page_faults_major": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MAJ, True),
+    "context_switches": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES, True),
+    "task_clock": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK, True),
+    "alignment_faults": (PERF_TYPE_SOFTWARE, PERF_COUNT_SW_ALIGNMENT_FAULTS, True),
     "l1d_read_access": (
         PERF_TYPE_HW_CACHE,
         _hw_cache_config(
@@ -175,7 +200,38 @@ COUNTER_DEFS = {
         ),
         True,
     ),
+    "llc_read_access": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_LL, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_ACCESS
+        ),
+        True,
+    ),
+    "llc_read_miss": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_LL, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_MISS
+        ),
+        True,
+    ),
+    "dtlb_read_miss": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_DTLB, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_MISS
+        ),
+        True,
+    ),
+    "itlb_read_miss": (
+        PERF_TYPE_HW_CACHE,
+        _hw_cache_config(
+            PERF_COUNT_HW_CACHE_ITLB, PERF_COUNT_HW_CACHE_OP_READ, PERF_COUNT_HW_CACHE_RESULT_MISS
+        ),
+        True,
+    ),
 }
+
+# Group read struct per member count, built once (the read is per exec).
+_GROUP_LAYOUT = [struct.Struct(f"<{_GROUP_HDR + k}Q") for k in range(len(COUNTER_DEFS) + 1)]
 
 DEFAULT_COUNTERS = [
     "instructions",
@@ -184,6 +240,10 @@ DEFAULT_COUNTERS = [
     "branch_misses",
     "l1d_read_access",
     "l1d_read_miss",
+    # Software events: no PMU slot, so they never push the group off it.
+    "task_clock",
+    "page_faults",
+    "context_switches",
 ]
 
 
@@ -213,7 +273,14 @@ class PerfCounters:
         self.exclude_kernel = exclude_kernel
         self.inherit = inherit
         self._fds: dict[str, int] = {}
+        # (read fd, counter names in value order); the leader's group first.
+        self._groups: list[tuple[int, tuple[str, ...]]] = []
+        self._pid: int | None = None
+        # Cleared when a group never got onto the PMU; later opens go solo.
+        self._grouped = True
         self._last_values: dict[str, int] = {}
+        self._totals: dict[str, int] = {}
+        self.has_pmu = False
         self._libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
         self._libc.syscall.restype = ctypes.c_long
         self._libc.syscall.argtypes = [
@@ -260,7 +327,8 @@ class PerfCounters:
 
         Checks three conditions:
         1. perf_event_paranoid allows access (-1 or 0), or CAP_PERFMON/CAP_SYS_ADMIN is present
-        2. Hardware PMU exists (actual syscall probe with pid=0 — covers all architectures)
+        2. Hardware PMU exists (actual syscall probe with pid=0 — covers all
+           architectures); else a software event opens (``has_pmu`` False)
         3. perf_event_open syscall works (not blocked by seccomp, etc.)
         """
         # Check 1: perf_event_paranoid
@@ -282,27 +350,25 @@ class PerfCounters:
         if not paranoid_ok and os.geteuid() != 0:
             return False
 
-        # Check 2: Actual syscall probe — open PERF_COUNT_HW_INSTRUCTIONS
-        # on the current thread (pid=0, no extra perms needed). This is the
-        # only reliable way to test PMU availability across architectures
-        # (Intel, AMD, ARM, Hygon, etc.) without maintaining a fragile name
-        # whitelist of /sys/bus/event_source/devices/ entries.
+        # Check 2: Actual syscall probe on the current thread (pid=0, no
+        # extra perms). The only reliable PMU test across architectures
+        # (Intel, AMD, ARM, Hygon, ...) without a fragile name whitelist.
+        self.has_pmu = self._probe(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS)
+        if self.has_pmu:
+            return True
+
+        # No PMU (most VMs): software events still count CPU time, faults
+        # and context switches.
+        return self._probe(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK)
+
+    def _probe(self, perf_type: int, config: int) -> bool:
+        """Whether one event of *perf_type*/*config* opens on this thread."""
         pe = perf_event_attr()
         pe.size = ctypes.sizeof(perf_event_attr)
-        pe.type = PERF_TYPE_HARDWARE
-        pe.config = PERF_COUNT_HW_INSTRUCTIONS
-        flags = _FLAG_DISABLED | _FLAG_EXCLUDE_KERNEL | _FLAG_EXCLUDE_HV
-        pe.flags = flags
-        pe_bytes = bytes(pe)
-
-        fd = self._libc.syscall(
-            NR_PERF_EVENT_OPEN,
-            (ctypes.c_char * len(pe_bytes))(*pe_bytes),
-            0,  # pid=0: current thread, no CAP_PERFMON required
-            -1,  # cpu: any
-            -1,  # group_fd: none
-            ctypes.c_ulong(PERF_FLAG_FD_CLOEXEC),
-        )
+        pe.type = perf_type
+        pe.config = config
+        pe.flags = _FLAG_DISABLED | _FLAG_EXCLUDE_KERNEL | _FLAG_EXCLUDE_HV
+        fd = self._sys_open(bytes(pe), 0, -1)
         if fd < 0:
             errno = ctypes.get_errno()
             log.debug("perf_event_open probe failed: errno=%d (%s)", errno, os.strerror(errno))
@@ -311,16 +377,30 @@ class PerfCounters:
         os.close(fd)
         return True
 
+    def _sys_open(self, attr: bytes, pid: int, group_fd: int) -> int:
+        """Raw perf_event_open(2); -1 with errno set on failure."""
+        return self._libc.syscall(
+            NR_PERF_EVENT_OPEN,
+            (ctypes.c_char * len(attr))(*attr),
+            pid,
+            -1,  # cpu: any
+            group_fd,
+            ctypes.c_ulong(PERF_FLAG_FD_CLOEXEC),
+        )
+
     @property
     def available(self) -> bool:
         """Whether perf counters can be opened on this system."""
         return self._available
 
     def open_for_pid(self, pid: int) -> bool:
-        """Open perf counters attached to a specific PID.
+        """Open perf counters attached to a specific PID, always afresh.
+
+        The spawn path calls this per exec: a recycled pid number is a
+        different process, so open fds are never reused here.
 
         Args:
-            pid: Target process PID. Use -1 for current process (inprocess mode).
+            pid: Target process PID. 0 for the calling thread (inprocess mode).
 
         Returns:
             True if all counters were opened successfully.
@@ -329,82 +409,132 @@ class PerfCounters:
             return False
 
         self.close()
+        self._pid = pid
+        return self._open_all(pid)
+
+    def ensure_open(self, pid: int) -> bool:
+        """Keep the fds already on *pid*; open them otherwise.
+
+        For long-lived processes (inprocess, forkserver, persistent child):
+        one open per process instead of one per exec.
+        """
+        if self._fds and self._pid == pid:
+            return True
+
+        return self.open_for_pid(pid)
+
+    def _attr(self, name: str) -> bytes:
+        """perf_event_attr for counter *name*, as the syscall takes it."""
+        perf_type, config, needs_inherit = COUNTER_DEFS[name]
+        flags = _FLAG_DISABLED | _FLAG_EXCLUDE_HV | _FLAG_ENABLE_ON_EXEC
+        if self.exclude_kernel or self._exclude_kernel_required():
+            flags |= _FLAG_EXCLUDE_KERNEL
+        if needs_inherit and self.inherit:
+            flags |= _FLAG_INHERIT
+
+        # ctypes.Structure for the kernel layout; flags packed by hand to
+        # avoid ctypes bitfield layout issues.
+        pe = perf_event_attr()
+        pe.size = ctypes.sizeof(perf_event_attr)
+        pe.type = perf_type
+        pe.config = config
+        pe.flags = flags
+        pe.read_format = _READ_FORMAT
+        return bytes(pe)
+
+    def _open_all(self, pid: int) -> bool:
+        """Open every counter: into the leader's group, else on its own."""
         success = True
-
+        leader = -1
+        members: list[str] = []
         for name in self.counter_names:
-            perf_type, config, needs_inherit = COUNTER_DEFS[name]
+            attr = self._attr(name)
 
-            # Build perf_event_attr as raw bytes at known offsets
-            # to avoid ctypes bitfield layout issues.
+            # Join the group: one read() serves all, values from one instant.
+            fd = self._sys_open(attr, pid, leader) if leader >= 0 else -1
+            if fd >= 0:
+                members.append(name)
+            else:
+                fd = self._sys_open(attr, pid, -1)
+                if fd < 0:
+                    errno = ctypes.get_errno()
+                    log.debug(
+                        "perf_event_open failed for %s: errno=%d (%s)",
+                        name,
+                        errno,
+                        os.strerror(errno),
+                    )
+                    success = False
+                    continue
 
-            flags = 0
-            flags |= _FLAG_DISABLED
-            if self.exclude_kernel or self._exclude_kernel_required():
-                flags |= _FLAG_EXCLUDE_KERNEL
-            flags |= _FLAG_EXCLUDE_HV
-            if needs_inherit and self.inherit:
-                flags |= _FLAG_INHERIT
-            flags |= _FLAG_ENABLE_ON_EXEC
+                if self._grouped and leader < 0:
+                    leader, members = fd, [name]
+                else:
+                    self._groups.append((fd, (name,)))
 
-            # Use ctypes.Structure for correct layout (varies by kernel version)
-            pe = perf_event_attr()
-            pe.size = ctypes.sizeof(perf_event_attr)
-            pe.type = perf_type
-            pe.config = config
-            pe.flags = flags
-            pe = bytes(pe)
-
-            fd = self._libc.syscall(
-                NR_PERF_EVENT_OPEN,  # __NR_perf_event_open (x86_64)
-                (ctypes.c_char * len(pe))(*pe),
-                pid,  # target pid
-                -1,  # cpu (any)
-                -1,  # group_fd (none)
-                ctypes.c_ulong(PERF_FLAG_FD_CLOEXEC),
-            )
-            if fd < 0:
-                errno = ctypes.get_errno()
-                log.debug(
-                    "perf_event_open failed for %s: errno=%d (%s)",
-                    name,
-                    errno,
-                    os.strerror(errno),
-                )
-                success = False
-                continue
-
-            # Enable immediately — enable_on_exec only triggers on the
-            # process that calls exec(), but we open on the parent PID.
-            # The child inherits already-enabled counters via inherit=1.
-            with contextlib.suppress(OSError):
+            # Enable now: enable_on_exec only fires on an exec after the
+            # open, and the spawn path attaches after it.
+            try:
                 fcntl.ioctl(fd, PERF_IOC_ENABLE)
+            except OSError as exc:
+                log.debug("PERF_EVENT_IOC_ENABLE failed for %s: %s", name, exc)
 
             self._fds[name] = fd
             self._last_values[name] = 0
 
+        if leader >= 0:
+            self._groups.insert(0, (leader, tuple(members)))
         if self._fds:
             log.info("Opened %d perf counters: %s", len(self._fds), ", ".join(self._fds.keys()))
         return success
 
     def read_values(self) -> dict[str, int]:
-        """Read current counter values (not deltas).
+        """Read current counter values (not deltas), scaled for multiplexing.
 
         Returns:
             Dict of counter_name -> raw value.
         """
-        values = {}
-        for name, fd in self._fds.items():
-            try:
-                # read() returns 8 bytes (uint64)
-                buf = os.read(fd, 8)
-                if len(buf) == 8:
-                    val = struct.unpack("<Q", buf)[0]
-                    values[name] = val
-                else:
-                    values[name] = 0
-            except OSError:
-                values[name] = 0
+        groups = self._groups
+        # Common case, one group: no merge dict.
+        if len(groups) == 1:
+            return self._read_group(*groups[0])
+
+        values: dict[str, int] = {}
+        for fd, names in groups:
+            values.update(self._read_group(fd, names))
         return values
+
+    def _read_group(self, fd: int, names: tuple[str, ...]) -> dict[str, int]:
+        """One read() for the group; v * enabled / running per value."""
+        layout = _GROUP_LAYOUT[len(names)]
+        try:
+            buf = os.read(fd, layout.size)
+        except OSError:
+            return dict.fromkeys(names, 0)
+        if len(buf) != layout.size:
+            return dict.fromkeys(names, 0)
+
+        row = layout.unpack(buf)
+        enabled, running = row[1], row[2]
+        if running == enabled:
+            return dict(zip(names, row[_GROUP_HDR:]))  # noqa: B905 -- layout sized by names
+
+        # Enabled but never on the PMU: the group is wider than the
+        # hardware. Zero now; reopen solo so each one multiplexes.
+        if running == 0:
+            if enabled > 0 and len(names) > 1:
+                self._split_groups(names)
+            return dict.fromkeys(names, 0)
+
+        return {nm: v * enabled // running for nm, v in zip(names, row[_GROUP_HDR:])}  # noqa: B905
+
+    def _split_groups(self, names: tuple[str, ...]) -> None:
+        if not self._grouped:
+            return
+
+        log.warning("perf group %s never scheduled; reopening counters ungrouped", names)
+        self._grouped = False
+        self._pid = None  # next ensure_open() reopens
 
     def read_and_reset(self) -> dict[str, int]:
         """Read counter values and compute deltas since last read.
@@ -414,11 +544,16 @@ class PerfCounters:
         """
         current = self.read_values()
         deltas = {}
+        last = self._last_values
+        totals = self._totals
         for name, val in current.items():
-            last = self._last_values.get(name, 0)
-            delta = val - last if val >= last else val  # handle wrap
+            # Never negative: a scaled estimate may shrink between reads.
+            delta = val - last.get(name, 0)
+            if delta < 0:
+                delta = 0
             deltas[name] = delta
-            self._last_values[name] = val
+            last[name] = val
+            totals[name] = totals.get(name, 0) + delta
 
         # Accumulate totals for stats
         self._total_instructions += deltas.get("instructions", 0)
@@ -452,19 +587,21 @@ class PerfCounters:
             with contextlib.suppress(OSError):
                 os.close(fd)
         self._fds.clear()
+        self._groups.clear()
+        self._pid = None
         self._last_values.clear()
 
     @property
     def stats(self) -> dict:
         """Return cumulative perf stats for display."""
-        return {
+        # total_<name> for every counter; the explicit keys below win.
+        out = {f"total_{name}": self._totals.get(name, 0) for name in COUNTER_DEFS}
+        return out | {
             "total_instructions": self._total_instructions,
             "total_branches": self._total_branches,
             "total_branch_misses": self._total_branch_misses,
             "branch_miss_rate": (
-                self._total_branch_misses / self._total_branches
-                if self._total_branches > 0
-                else 0
+                self._total_branch_misses / self._total_branches if self._total_branches > 0 else 0
             ),
             "total_l1d_read_access": self._total_l1d_read_access,
             "total_l1d_read_miss": self._total_l1d_read_miss,
@@ -485,9 +622,7 @@ class PerfCounters:
             ),
             # Instructions per branch (what "ipc" used to report).
             "ipb": (
-                self._total_instructions / self._total_branches
-                if self._total_branches > 0
-                else 0
+                self._total_instructions / self._total_branches if self._total_branches > 0 else 0
             ),
             "stall_frontend_rate": (
                 self._total_stalled_frontend / self._total_cpu_cycles

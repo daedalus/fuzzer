@@ -150,6 +150,18 @@ def _run_mail_test(args) -> int:
     return 0
 
 
+def _hw_perf_counter_list(text: str) -> list[str]:
+    """``--hw-perf-counters`` value: comma list of known counter names."""
+    from fuzzer_tool.adapters.perf_event import COUNTER_DEFS
+
+    names = [n.strip() for n in text.split(",") if n.strip()]
+    unknown = [n for n in names if n not in COUNTER_DEFS]
+    if unknown or not names:
+        known = ", ".join(sorted(COUNTER_DEFS))
+        raise argparse.ArgumentTypeError(f"unknown counter(s) {unknown}; known: {known}")
+    return names
+
+
 def _load_hash_list(path: str | None) -> set[str] | None:
     """Load a file of hex stack hashes (one per line) into a set.
 
@@ -884,6 +896,8 @@ def cmd_fuzz(args):
         save_smaller=getattr(args, "save_smaller", False),
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
+        hw_perf_counters=getattr(args, "hw_perf_counters", None),
+        hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
         intel_pt_mode=getattr(args, "intel_pt_mode", "block"),
         lbr=getattr(args, "lbr", False),
@@ -6587,7 +6601,25 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--hw-perf",
         action="store_true",
-        help="Enable hardware performance counters (instructions, branches, branch_misses) via perf_event_open. Requires CAP_PERFMON or root.",
+        help="Enable performance counters via perf_event_open (instructions, cycles, "
+        "branches, branch misses, L1D, CPU time, page faults, context switches). "
+        "Software events only without a PMU. Requires CAP_PERFMON or root.",
+    )
+    fuzz_parser.add_argument(
+        "--hw-perf-counters",
+        type=_hw_perf_counter_list,
+        default=None,
+        metavar="NAME[,NAME...]",
+        help="Counters to open instead of the --hw-perf defaults (implies --hw-perf), "
+        "e.g. instructions,llc_read_miss,dtlb_read_miss,page_faults.",
+    )
+    fuzz_parser.add_argument(
+        "--hw-instr-limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Treat a clean run of more than N instructions as a hang: a "
+        "deterministic timeout (implies --hw-perf; needs a PMU). 0 = off.",
     )
     fuzz_parser.add_argument(
         "--intel-pt",

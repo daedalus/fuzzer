@@ -54,8 +54,12 @@ class PersistentRunner:
 
     HEADER_SIZE = 8  # 4 bytes len + 4 bytes padding
 
-    def __init__(self, target: str, timeout: float = 5.0, map_size: int = 65536):
+    def __init__(
+        self, target: str, timeout: float = 5.0, map_size: int = 65536, perf_counters=None
+    ):
         self.target = target
+        # Attached once per started target; each iteration is a delta.
+        self._perf_counters = perf_counters
         self.timeout = timeout
         self.map_size = map_size
         self.pid: int | None = None
@@ -134,6 +138,8 @@ class PersistentRunner:
         os.close(stdin_r)
         os.close(stdin_w)
         self.pid = pid
+        if self._perf_counters is not None:
+            self._perf_counters.open_for_pid(pid)
 
         try:
             # Poll for child status with retries.  In a multi-threaded

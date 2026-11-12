@@ -55,6 +55,9 @@ ENTROPY_SPARSE_PCT = 25.0
 # hw ratio -> multiplier bands: (>2.0, >1.5, >1.0, <0.3); else 1x.
 _HW_INSTR_MULTS = (2.0, 1.5, 1.2, 0.5)
 _HW_BRANCH_MULTS = (1.8, 1.4, 1.15, 0.6)
+# Cycles track instructions plus stalls (cache/TLB misses): milder bands so
+# the stall share, not instruction count twice over, moves the score.
+_HW_CYCLE_MULTS = (1.4, 1.2, 1.05, 0.8)
 
 
 def _ratio_mult(ratio: float, mults: tuple[float, float, float, float]) -> float:
@@ -202,6 +205,7 @@ class SeedScorer:
         # Running averages for hw perf normalization (EMA)
         self._avg_hw_instructions: float = 0.0
         self._avg_hw_branches: float = 0.0
+        self._avg_hw_cycles: float = 0.0
         self._hw_avg_alpha: float = 0.1  # EMA smoothing factor
 
     def score(
@@ -233,6 +237,7 @@ class SeedScorer:
         max_cov: int = 0,
         hw_instructions: int = 0,
         hw_branches: int = 0,
+        hw_cycles: int = 0,
         # AFLGo directed-distance annealing
         avg_distance: float = 0.0,
         max_distance: float = 0.0,
@@ -274,6 +279,7 @@ class SeedScorer:
             max_cov: Maximum coverage across all seeds.
             hw_instructions: Hardware instruction count delta (from perf counters).
             hw_branches: Hardware branch count delta (from perf counters).
+            hw_cycles: CPU cycle count delta (from perf counters).
 
         Returns:
             Energy score (1 to max_mult * 100).
@@ -283,8 +289,8 @@ class SeedScorer:
         )
 
         # ── Hardware perf factors (apply to ALL schedules) ──────────────
-        if hw_instructions > 0 or hw_branches > 0:
-            perf_score = self._apply_hw(perf_score, hw_instructions, hw_branches)
+        if hw_instructions > 0 or hw_branches > 0 or hw_cycles > 0:
+            perf_score = self._apply_hw(perf_score, hw_instructions, hw_branches, hw_cycles)
 
         # Schedule-specific frequency adjustment
         if self.schedule == "rare":
@@ -398,8 +404,10 @@ class SeedScorer:
         perf_score *= self._depth_factor(depth)
         return perf_score
 
-    def _apply_hw(self, perf_score: float, hw_instructions: int, hw_branches: int) -> float:
-        """Scale *perf_score* by hw instruction/branch counts vs their EMA.
+    def _apply_hw(
+        self, perf_score: float, hw_instructions: int, hw_branches: int, hw_cycles: int = 0
+    ) -> float:
+        """Scale *perf_score* by hw instruction/branch/cycle counts vs their EMA.
 
         Updates the running averages; a zero count means "not measured".
         """
@@ -428,6 +436,14 @@ class SeedScorer:
             if self._avg_hw_branches > 0:
                 ratio = hw_branches / max(1, self._avg_hw_branches)
                 perf_score *= _ratio_mult(ratio, _HW_BRANCH_MULTS)
+
+        if hw_cycles > 0:
+            if self._avg_hw_cycles == 0:
+                self._avg_hw_cycles = float(hw_cycles)
+            else:
+                a = self._hw_avg_alpha
+                self._avg_hw_cycles = self._avg_hw_cycles * (1 - a) + hw_cycles * a
+            perf_score *= _ratio_mult(hw_cycles / max(1, self._avg_hw_cycles), _HW_CYCLE_MULTS)
         return perf_score
 
     def _honggfuzz_factors(

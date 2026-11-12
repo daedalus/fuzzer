@@ -11,8 +11,8 @@
  *   perf_read(fd) -> uint64 value
  *   perf_close(fd) -> 0
  *
- * Compile:
- *   gcc -O2 -shared -fPIC -o perf_shim.so perf_shim.c
+ * Compile (tools/build_targets.sh does this):
+ *   clang -O2 -shared -fPIC -o perf_shim.so perf_shim.c
  *
  * Based on honggfuzz linux/perf.c perf_event_open usage.
  */
@@ -56,7 +56,8 @@ int perf_open(int pid, int hw_config, int exclude_kernel, int inherit) {
     if (exclude_kernel) pe.exclude_kernel = 1;
     if (inherit)         pe.inherit = 1;
 
-    int fd = do_perf_event_open(&pe, pid, -1, -1, 0 /* PERF_FLAG_FD_CLOEXEC */);
+    /* CLOEXEC: the fuzzer forks targets; they must not inherit the fd. */
+    int fd = do_perf_event_open(&pe, pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
     return fd;
 }
 

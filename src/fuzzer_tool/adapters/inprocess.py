@@ -254,8 +254,11 @@ class InProcessRunner:
         capture_stderr: bool = False,
         use_ptrace: bool = False,
         placement: InputPlacement = InputPlacement.EXACT,
+        perf_counters=None,
     ):
         self.target = target
+        # Handed to the loaders, which attach at spawn (see perf_pid()).
+        self._perf_counters = perf_counters
         self.function_name = function_name
         self.timeout = timeout
         self.shm_size = shm_size
@@ -330,6 +333,7 @@ class InProcessRunner:
             capture_stderr=self.capture_stderr,
             use_ptrace=self.use_ptrace,
             placement=self._placement,
+            perf_counters=self._perf_counters,
         )
 
     def _start(self):
@@ -563,6 +567,7 @@ class InProcessRunner:
                 function_name=self.function_name,
                 timeout=self.timeout,
                 use_ptrace=self.use_ptrace,
+                perf_counters=self._perf_counters,
             )
             if not self._persistent.start():
                 log.warning("Persistent loader failed, falling back to per-call")
@@ -576,6 +581,7 @@ class InProcessRunner:
                 target=self.target,
                 function_name=self.function_name,
                 timeout=self.timeout,
+                perf_counters=self._perf_counters,
             )
             if self._forkserver.start():
                 log.info("Forkserver: using C binary for %s", self.target)
@@ -590,6 +596,20 @@ class InProcessRunner:
             if cov:
                 fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
                 os.close(fd)
+
+    def perf_pid(self) -> int | None:
+        """Process running the target, for perf counters.
+
+        0 (this thread) in direct modes; the long-lived loader, whose
+        per-call children inherit the counters; None for the per-call
+        loader, a new process every run.
+        """
+        if self.direct or self.direct_lite:
+            return 0
+        loader = self._persistent or self._forkserver
+        if loader is None or loader._proc is None:
+            return None
+        return loader._proc.pid
 
     def _loader_type(self) -> str:
         """Name of the active loader, for logging."""
