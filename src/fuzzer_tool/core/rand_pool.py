@@ -677,6 +677,20 @@ class RandPool:
             head = nxt[head]
         return out
 
+    def _pair(self, n: int) -> tuple[int, int]:
+        """Two distinct indices in ``[0, n)``, n >= 2: the second skips the first.
+
+        Same draws as ``randrange(n), randrange(n - 1)``: the inline modulo
+        equals ``randrange`` up to ``_MODULO_SAFE_MAX``; above it, rejection.
+        """
+        if n > _MODULO_SAFE_MAX:
+            a = self.randrange(n)
+            b = self.randrange(n - 1)
+        else:
+            a = self._draw() % n
+            b = self._draw() % (n - 1)
+        return a, b + 1 if b >= a else b
+
     def sample(self, population, k: int):
         """Return *k* unique elements from *population*.
 
@@ -706,18 +720,10 @@ class RandPool:
                 return []
             # Above _MODULO_SAFE_MAX, randrange rejection-samples so every
             # index is reachable without bias; below it, inline the draw.
-            wide = n > _MODULO_SAFE_MAX
             if k == 1:
-                return [population[self.randrange(n) if wide else self._draw() % n]]
+                return [population[self.randrange(n) if n > _MODULO_SAFE_MAX else self._draw() % n]]
             if k == 2:
-                if wide:
-                    a = self.randrange(n)
-                    b = self.randrange(n - 1)
-                else:
-                    a = self._draw() % n
-                    b = self._draw() % (n - 1)
-                if b >= a:
-                    b += 1
+                a, b = self._pair(n)
                 return [population[a], population[b]]
             if _RAND_FLOYD:
                 indices = self._floyd_indices(n, k)
@@ -732,9 +738,7 @@ class RandPool:
         if k == 1:
             return [self.randrange(population)]
         if k == 2:
-            a = self.randrange(population)
-            b = self.randrange(population - 1)
-            return [a, b if b < a else b + 1]
+            return list(self._pair(population))
         if _RAND_FLOYD:
             return self._floyd_indices(population, k)
         return self._rng.choice(population, size=k, replace=False).tolist()

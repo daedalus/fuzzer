@@ -213,10 +213,13 @@ def _rng_health_line(f) -> str:
     if not (hasattr(f, "_rng") and f._rng is not None):
         return "  RNG health:      Not checked"
 
-    from fuzzer_tool.core.rng_health import quick_health_check
+    from fuzzer_tool.core.rand_pool import get_default_rand_pool
+    from fuzzer_tool.core.rng_health import quick_health_check, structure_check
 
     try:
         result = quick_health_check(f._rng)
+        default = get_default_rand_pool()
+        result.warnings.extend(structure_check(f._rng, seed=f.seed, default_pool=default))
         return f"  RNG health:      {result.summary()}"
     except Exception:
         return "  RNG health:      ERROR (health check failed)"

@@ -5,8 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.rng_health import quick_health_check
+from fuzzer_tool.core import rand_pool as rp
+from fuzzer_tool.core.rand_pool import _POOL_ENTRIES, RandPool
+from fuzzer_tool.core.rng_health import quick_health_check, structure_check
 
 
 class _ConstRng:
@@ -107,6 +108,7 @@ def test_reports_rng_health_prints_banner_line(capsys):
 
     f = object.__new__(Fuzzer)
     f._rng = RandPool(seed=99)
+    f.seed = None
     f._report_rng_health()
     out = capsys.readouterr().out
     assert "[*] RNG health:" in out
@@ -117,6 +119,7 @@ def test_reports_rng_health_warns_on_bad_rng(capsys):
 
     f = object.__new__(Fuzzer)
     f._rng = _ConstRng()
+    f.seed = None
     f._report_rng_health()
     out = capsys.readouterr().out
     assert "[!] WARNING:" in out
@@ -186,3 +189,173 @@ def test_regression_entropy_test_calibrated():
     # Control (Rule 46): the oracle must pass a known-calibrated test first.
     assert ks_uniform([byte_chisq(d) for d in streams]) > 0.001
     assert ks_uniform([shannon_entropy_test(d) for d in streams]) > 0.001
+
+
+# ── structure_check: exact checks the byte battery cannot see ──────────
+
+_STRUCT_SEED = 42
+_LAG = 3
+
+
+class _Replay(RandPool):
+    """Every refill replays the same batch (generator reset per refill)."""
+
+    __slots__ = ()
+
+    def _generate_pool(self):
+        self._rng = np.random.default_rng(7)
+        super()._generate_pool()
+
+
+class _HighStuck(RandPool):
+    """Upper 24 bits of every word are zero; the low byte stays uniform."""
+
+    __slots__ = ()
+
+    def _generate_pool(self):
+        super()._generate_pool()
+        self._pool &= 0xFF
+
+
+class _LagCopy(RandPool):
+    """Every third word copies the word _LAG draws back."""
+
+    __slots__ = ()
+
+    def _generate_pool(self):
+        super()._generate_pool()
+        dst = self._pool[_LAG::_LAG]
+        dst[:] = self._pool[0:-_LAG:_LAG][: len(dst)]
+        np.copyto(self._m256, self._pool, casting="unsafe")
+
+
+def _tagged_default(seed):
+    """The default pool as Fuzzer.__init__ seeds it."""
+    rp.reset_default_rand_pool(seed)
+    return rp.get_default_rand_pool()
+
+
+@pytest.fixture
+def _restore_default():
+    yield
+    rp.reset_default_rand_pool()
+
+
+@pytest.mark.usefixtures("_restore_default")
+@pytest.mark.parametrize("seed", [None, 0, _STRUCT_SEED, -5])
+def test_structure_healthy_pool_clean(seed):
+    pool = RandPool(seed=seed)
+    assert structure_check(pool, seed=seed, default_pool=_tagged_default(seed)) == []
+
+
+def test_structure_flags_refill_replay():
+    """The byte battery passes this pool (p=0.84 measured)."""
+    assert quick_health_check(_Replay(1)).ok
+    warnings = structure_check(_Replay(1))
+    assert any("replays" in w for w in warnings)
+
+
+def test_structure_flags_stuck_high_bits():
+    """Low byte uniform, upper 24 bits zero: only a byte-lane test sees it."""
+    assert quick_health_check(_HighStuck(1)).ok
+    warnings = structure_check(_HighStuck(1))
+    assert any("byte lane" in w for w in warnings)
+
+
+def test_structure_flags_lag_repeats():
+    assert quick_health_check(_LagCopy(1)).ok
+    warnings = structure_check(_LagCopy(1))
+    assert any(f"lag {_LAG}" in w for w in warnings)
+
+
+def test_structure_flags_seed_wired_to_constant():
+    """--seed given, but the pool runs the unseeded fallback stream."""
+    warnings = structure_check(RandPool(seed=None), seed=_STRUCT_SEED)
+    assert any("seed" in w for w in warnings)
+
+
+def test_structure_seed_check_survives_consumed_draws():
+    """Adversarial: the live pool is already 10k draws into the stream."""
+    pool = RandPool(seed=None)
+    pool.random_list(10_000)
+    assert any("seed" in w for w in structure_check(pool, seed=_STRUCT_SEED))
+
+
+def test_structure_no_seed_no_seed_warning():
+    """Falsification: unseeded runs use the fallback stream by design."""
+    assert structure_check(RandPool(seed=None), seed=None) == []
+
+
+def test_structure_flags_default_mirroring_main():
+    """The pre-2026-11-08 bug: default pool = RandPool(seed) at an offset."""
+    main = RandPool(seed=_STRUCT_SEED)
+    mirror = RandPool(seed=_STRUCT_SEED)
+    mirror.random_list(5_000)
+    warnings = structure_check(main, seed=_STRUCT_SEED, default_pool=mirror)
+    assert any("default pool" in w for w in warnings)
+
+
+def test_structure_control_independent_default_clean():
+    """Control (rule 46): an unrelated default pool must not match."""
+    main = RandPool(seed=_STRUCT_SEED)
+    other = RandPool(seed=_STRUCT_SEED + 1)
+    assert structure_check(main, seed=_STRUCT_SEED, default_pool=other) == []
+
+
+def test_structure_does_not_move_live_streams():
+    """Checks draw from clones: the campaign streams are untouched."""
+    main, default = RandPool(seed=3), RandPool(seed=4)
+    main.random()
+    want = (RandPool(seed=3).random_list(2)[1], RandPool(seed=4).random())
+    structure_check(main, seed=3, default_pool=default)
+    assert (main.random(), default.random()) == want
+
+
+def test_structure_false_alarm_rate():
+    """Healthy pools: exact checks ~never fire, lane chisq at 1e-4 each."""
+    fired = [s for s in range(200) if structure_check(RandPool(seed=s), seed=s)]
+    assert fired == []
+
+
+def test_reports_structure_warning_on_banner(capsys):
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    f = object.__new__(Fuzzer)
+    f._rng = RandPool(seed=None)
+    f.seed = _STRUCT_SEED
+    f._report_rng_health()
+    out = capsys.readouterr().out
+    assert "PRNG structure" in out
+
+
+@pytest.mark.usefixtures("_restore_default")
+def test_stall_reseed_runs_structure_check(monkeypatch):
+    """Wiring: every stall reseed rechecks the new streams."""
+    from fuzzer_tool.services import fuzzer as fz
+
+    seen = []
+    monkeypatch.setattr(fz, "structure_check", lambda pool, **kw: seen.append(kw["seed"]) or [])
+    f = object.__new__(fz.Fuzzer)
+    f.seed = _STRUCT_SEED
+    f._stall_reseed_count = 0
+    f._rng = RandPool(seed=_STRUCT_SEED)
+    new_seed = f._reseed_after_stall()
+    assert seen == [new_seed]
+
+
+def test_report_line_suspect_on_structure_warning():
+    from unittest.mock import MagicMock
+
+    from fuzzer_tool.services.report import _rng_health_line
+
+    f = MagicMock()
+    f._rng = RandPool(seed=None)
+    f.seed = _STRUCT_SEED
+    assert "SUSPECT" in _rng_health_line(f)
+
+
+def test_structure_replay_period_is_pool_size():
+    """The replay probe's period tracks the pool's refill size."""
+    from fuzzer_tool.core import rng_health
+
+    assert rng_health._REPLAY_PERIOD == _POOL_ENTRIES
