@@ -2768,8 +2768,11 @@ def _lz_edit(tokens: list, block: bytearray, min_match: int, max_match: int, rng
         pos = rng.randint(0, len(tokens) - 1)
         tok = tokens[pos]
         if tok[0] == "lit":
-            dist = rng.randint(1, min(32768, pos))
-            run_len = rng.randint(min_match, min(max_match, len(block) - pos))
+            # Floors keep the ranges non-empty: pos 0 has no history (dist 1
+            # reaches before the block; replay draws random bytes) and a tail
+            # shorter than min_match still emits a min_match ref.
+            dist = rng.randint(1, max(1, min(32768, pos)))
+            run_len = rng.randint(min_match, max(min_match, min(max_match, len(block) - pos)))
             tokens[pos] = ("ref", dist, run_len)
             continue
         action = rng.randint(0, 2)

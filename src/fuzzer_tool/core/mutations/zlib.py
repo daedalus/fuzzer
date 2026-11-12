@@ -177,7 +177,7 @@ class ZlibMutator:
         self._rng = rng or self._rng
         info = parse_zlib(data)
         if info is None:
-            return self._generate_random_zlib(max_len, rng=self._rng)
+            return self._generate_random_zlib(max_len, rng=self._rng)[:max_len]
 
         op = self._rng.randint(0, 9)
         mutators = [
@@ -272,8 +272,9 @@ class ZlibMutator:
         if isinstance(info_or_max, int):
             max_len = info_or_max
 
-        # Random uncompressed data
-        payload_len = self._rng.randint(1, min(128, max_len - 10))
+        # Random uncompressed data; floor 1 when max_len cannot hold the
+        # ~10-byte zlib overhead (callers truncate to max_len).
+        payload_len = self._rng.randint(1, max(1, min(128, max_len - 10)))
         payload = bytes(self._rng.randint(0, 255) for _ in range(payload_len))
 
         # Compress with deflate (wbits=15 for zlib format)

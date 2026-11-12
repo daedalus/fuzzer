@@ -202,7 +202,7 @@ class GzipMutator:
         self._rng = rng or self._rng
         info = parse_gzip(data)
         if info is None:
-            return self._generate_random_gzip(max_len, rng=self._rng)
+            return self._generate_random_gzip(max_len, rng=self._rng)[:max_len]
 
         op = self._rng.randint(0, 11)
         mutators = [
@@ -318,8 +318,9 @@ class GzipMutator:
         elif isinstance(info_or_max, int):
             max_len = info_or_max
 
-        # Random uncompressed data
-        payload_len = self._rng.randint(1, min(128, max_len - 20))
+        # Random uncompressed data; floor 1 when max_len cannot hold the
+        # ~20-byte gzip overhead (callers truncate to max_len).
+        payload_len = self._rng.randint(1, max(1, min(128, max_len - 20)))
         payload = bytes(self._rng.randint(0, 255) for _ in range(payload_len))
 
         # Compress with deflate

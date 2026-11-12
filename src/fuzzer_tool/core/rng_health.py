@@ -28,12 +28,22 @@ combination: counting it twice flagged ~3.7% of healthy streams at the 1%
 threshold. This never raises:
 a suspect RNG is a warning, not a reason to abort a run that was otherwise
 ready to go.
+
+The battery sees only the low byte of one refill, so it passes a pool that
+replays every refill (p=0.84), has its top 24 bits stuck (p=0.78), copies
+words at lag 3 (p=0.89), or ignores ``--seed`` (statistics cannot see a
+constant seed). ``structure_check`` covers those with exact 32-bit word
+comparisons on cloned streams; see its docstring.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 
+import numpy as np
+
+from fuzzer_tool.core.rand_pool import _NO_SEED_FALLBACK, _POOL_ENTRIES, RandPool
 from fuzzer_tool.core.randomness import (
     byte_chisq,
     fishers_method,
@@ -46,6 +56,19 @@ from fuzzer_tool.core.randomness import (
 _DEFAULT_N_BYTES = 4096
 _P_THRESHOLD = 0.01  # standard NIST SP 800-22 significance level
 _REDUNDANT = frozenset({"entropy"})  # same histogram as byte_chisq
+
+# structure_check: exact 32-bit word checks on a cloned stream.
+_WINDOW = 1 << 16  # words drawn per stream: 16 refills
+_WORD_SCALE = 4294967296.0  # 2**32: random() = word / 2**32, exact
+_REPLAY_PERIOD = _POOL_ENTRIES  # one refill
+_MAX_LAG = 64
+_LANES = 4  # bytes per 32-bit word
+# A healthy stream repeats a word with p = 2**-32 per pair: over _WINDOW
+# words at 64 lags that is ~1e-3 expected repeats, so P(> 1) ~ 5e-7.
+_MAX_EXACT_MATCHES = 1
+# Per-lane chisq threshold: gross failures only (stuck bits give p = 0);
+# 4 lanes add ~4e-4 false alarms on top of the battery's 1%.
+_LANE_P = 1e-4
 
 
 @dataclass
@@ -107,3 +130,85 @@ def quick_health_check(rng, n_bytes: int = _DEFAULT_N_BYTES) -> RngHealthResult:
         pvalues=pvalues,
         warnings=warnings,
     )
+
+
+def structure_check(pool, seed: int | None = None, default_pool=None) -> list[str]:
+    """Exact stream checks the byte battery cannot see; returns warnings.
+
+    ``quick_health_check`` tests the low byte of one refill. This draws
+    ``_WINDOW`` raw 32-bit words from a deep copy of each pool, so the live
+    streams are untouched, and checks:
+
+      * replay  -- word i == word i + one refill (a pool replaying its batch)
+      * lag     -- word i == word i - k, k = 1.._MAX_LAG
+      * lanes   -- byte_chisq per byte lane (stuck high bits; the battery
+        only sees lane 0)
+      * seed    -- with a campaign *seed*, the stream is not the unseeded
+        fallback (a seed wired to a constant)
+      * default -- *default_pool* does not share the stream (fallback draws
+        replaying the hotpath, the pre-2026-11-08 bug)
+
+    Stream sharing compares overlapping word pairs (64-bit keys), so it is
+    offset-agnostic within the window. Never raises on a suspect stream;
+    *pool* needs ``random_list`` and must deep-copy (``RandPool`` does).
+    """
+    words = _words(pool)
+    warnings = [*_replay(words), *_lag(words), *_lanes(words)]
+    keys = np.sort(_pair_keys(words))  # sorted once, probed by both checks
+
+    # An explicit seed equal to the fallback legitimately matches it.
+    seeded = seed is not None and seed != _NO_SEED_FALLBACK
+    if seeded and _shared(keys, _words(RandPool(seed=None))):
+        warnings.append(f"seed {seed} not applied: stream matches the unseeded fallback")
+
+    if default_pool is not None and _shared(keys, _words(default_pool)):
+        warnings.append("default pool shares the main pool's stream")
+    return warnings
+
+
+def _words(pool) -> np.ndarray:
+    """Next ``_WINDOW`` raw words of a clone of *pool*, as uint64."""
+    floats = np.asarray(copy.deepcopy(pool).random_list(_WINDOW))
+    return (floats * _WORD_SCALE).astype(np.uint64)
+
+
+def _replay(words: np.ndarray) -> list[str]:
+    matches = int(np.count_nonzero(words[_REPLAY_PERIOD:] == words[:-_REPLAY_PERIOD]))
+    if matches <= _MAX_EXACT_MATCHES:
+        return []
+    return [f"stream replays every {_REPLAY_PERIOD} draws ({matches} repeats)"]
+
+
+def _lag(words: np.ndarray) -> list[str]:
+    hits = np.array([np.count_nonzero(words[k:] == words[:-k]) for k in range(1, _MAX_LAG + 1)])
+    if hits.sum() <= _MAX_EXACT_MATCHES:
+        return []
+    k = int(hits.argmax()) + 1
+    return [f"words repeat at lag {k} ({int(hits[k - 1])} of {len(words) - k})"]
+
+
+def _lanes(words: np.ndarray) -> list[str]:
+    # Column j = byte j of each word, j = 0 the low byte.
+    shifts = np.arange(_LANES, dtype=np.uint64) * np.uint64(8)
+    lanes = ((words[:, None] >> shifts) & np.uint64(0xFF)).astype(np.uint8)
+    return [
+        f"byte lane {j} non-uniform (chisq p < {_LANE_P})"
+        for j in range(_LANES)
+        if byte_chisq(lanes[:, j].tobytes()) < _LANE_P
+    ]
+
+
+def _pair_keys(words: np.ndarray) -> np.ndarray:
+    """Overlapping word pairs as 64-bit keys: (w[i] << 32) | w[i + 1]."""
+    return (words[:-1] << np.uint64(32)) | words[1:]
+
+
+def _shared(sorted_keys: np.ndarray, other: np.ndarray) -> bool:
+    """True when *other* shares word pairs with *sorted_keys*: the same stream.
+
+    searchsorted over one sorted side: 1.8 ms vs 20 ms for intersect1d at
+    2**16 words, same counts.
+    """
+    probe = _pair_keys(other)
+    idx = np.minimum(np.searchsorted(sorted_keys, probe), sorted_keys.size - 1)
+    return int(np.count_nonzero(sorted_keys[idx] == probe)) > _MAX_EXACT_MATCHES

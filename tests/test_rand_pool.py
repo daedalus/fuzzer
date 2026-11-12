@@ -212,9 +212,9 @@ class TestRandint:
         assert all(0 <= v <= 255 for v in vals)
 
     def test_negative_width(self):
-        """randint(a, b) where a > b returns a."""
-        p = RandPool()
-        assert p.randint(10, 5) == 10
+        """randint(a, b) where a > b raises, as random.randint does."""
+        with pytest.raises(ValueError):
+            RandPool().randint(10, 5)
 
     def test_triggers_refill(self):
         """randint triggers refill when pool exhausted."""
@@ -240,13 +240,15 @@ class TestRandrange:
         for _ in range(50):
             assert p.randrange(1) == 0
 
-    def test_zero_returns_zero(self):
-        """randrange(0) returns 0 (edge case)."""
-        assert RandPool().randrange(0) == 0
+    def test_zero_raises(self):
+        """randrange(0) raises, as random.randrange does."""
+        with pytest.raises(ValueError):
+            RandPool().randrange(0)
 
-    def test_negative_returns_zero(self):
-        """randrange(-5) returns 0 (edge case)."""
-        assert RandPool().randrange(-5) == 0
+    def test_negative_raises(self):
+        """randrange(-5) raises, as random.randrange does."""
+        with pytest.raises(ValueError):
+            RandPool().randrange(-5)
 
 
 # ── Choice edge cases ──────────────────────────────────────────────────

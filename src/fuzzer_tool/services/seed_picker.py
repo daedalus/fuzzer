@@ -201,9 +201,9 @@ def _cdf_pick(population: list, weights: list[float], store: dict, slot: str, rn
     the pool. This used to defer to ``random.choices``, which raised
     ValueError for all three; ``RandPool.weighted_choice`` does not -- a
     zero or non-finite total walks ``bisect_right`` off the end of the
-    prefix sum (IndexError), and a length mismatch does not raise at all,
-    it silently returns whatever index the short weight vector lands on.
-    Deferring would therefore have converted a loud caller-visible error
+    prefix sum (IndexError), and a length mismatch raised a bare
+    IndexError or silently picked a wrong index (it raises ValueError
+    since 2026-11-12, with its own message). Deferring would therefore have converted a loud caller-visible error
     into a wrong seed pick, so the checks and CPython's exact messages
     live here, in CPython's order (non-positive before non-finite, so
     ``-inf`` still reports as non-positive).

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
-from fuzzer_tool.core.rand_pool import RandPool, reseed_default_rand_pool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool, reseed_default_rand_pool
 from fuzzer_tool.core.tuple_walk import TupleWalk
 
 if TYPE_CHECKING:
@@ -95,7 +95,7 @@ from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD, OrbitProbe, canonical
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.reject_stats import RejectStats
-from fuzzer_tool.core.rng_health import quick_health_check
+from fuzzer_tool.core.rng_health import quick_health_check, structure_check
 from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, Switch
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
@@ -1418,6 +1418,24 @@ class Fuzzer:
             print(f"[*] RNG health: {result.summary()}")
         else:
             msg = f"PRNG health check: {result.summary()}"
+            log.warning(msg)
+            print(f"[!] WARNING: {msg}")
+        self._report_rng_structure(self.seed)
+
+    def _report_rng_structure(self, seed: int | None) -> None:
+        """Exact stream checks (``core/rng_health.structure_check``).
+
+        Replay, lag repeats, byte lanes, seed binding, default-pool sharing:
+        failures the byte battery cannot see. Draws from clones, so the
+        campaign streams are untouched. Warns, never raises.
+        """
+        try:
+            warnings = structure_check(self._rng, seed=seed, default_pool=get_default_rand_pool())
+        except Exception as exc:  # noqa: BLE001 -- never let a smoke test sink startup
+            log.warning("RNG structure check errored: %s", exc)
+            return
+        for w in warnings:
+            msg = f"PRNG structure: {w}"
             log.warning(msg)
             print(f"[!] WARNING: {msg}")
 
@@ -8480,6 +8498,7 @@ class Fuzzer:
             self._rng.reseed(new_seed)
         self._last_stall_seed = new_seed
         print(f"[*] Reseeded RNG → {new_seed} (stall reseed #{self._stall_reseed_count})")
+        self._report_rng_structure(new_seed)  # the new streams, before they run
         return new_seed
 
     def _stall_recovery_enter(self, reason: str, execs_since_edge: int) -> None:
