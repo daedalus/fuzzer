@@ -238,6 +238,7 @@
 #include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <dlfcn.h>
 #include <err.h>
 #include <error.h>
@@ -965,12 +966,15 @@ __AFL_NO_COV static void __afl_wguard_arm(void *p, size_t len) {
     if (!want) return;
 
     if (strcmp(want, "mprotect") == 0) {
-        if (mprotect(p, len, PROT_READ) != 0) return;
-        __afl_wguard_base  = p;
-        __afl_wguard_len   = len;
-        __atomic_store_n(&__afl_wguard_depth, 0, __ATOMIC_RELAXED);
-        __afl_wguard_tdepth = 0;
-        __afl_wguard_mode  = __AFL_WGUARD_MPROTECT;
+        /* A re-attach keeps the count: zeroed under another thread's open
+         * bracket, its close wrapped it and every later open skipped the
+         * unlock. Left writable while brackets are open; the last close
+         * locks the new mapping. */
+        __afl_wguard_base = p;
+        __afl_wguard_len  = len;
+        int open_brackets = __atomic_load_n(&__afl_wguard_depth, __ATOMIC_ACQUIRE) != 0;
+        if (!open_brackets && mprotect(p, len, PROT_READ) != 0) return;
+        __afl_wguard_mode = __AFL_WGUARD_MPROTECT;
         return;
     }
 
@@ -1047,20 +1051,17 @@ __AFL_GCC_NO_COV static void __afl_shm_retire(void *seg) {
 static void *__afl_shm_seg = NULL;
 static int   __afl_shm_seg_id = -1;
 
-/* Coverage off: unpublish every pointer into the segment, then retire it.
- * Area first -- every recording path tests it before anything else. */
+/* Coverage off: unpublish the table, then retire the segment. Area first
+ * -- every recording path but the leaf guard tests it before anything else.
+ * The header and bitmap pointers stay on the retired segment, mapped until
+ * GRAVE later re-attaches (each repoints them): NULLed, a thread between
+ * its check and its load faulted, blamed on the input. */
 __AFL_GCC_NO_COV static void __afl_shm_detach(void) {
     void *seg = __afl_shm_seg;
     if (!seg) return;
     __afl_fast = 0;
     __atomic_store_n(&__afl_area, NULL, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    __afl_stack_depth = NULL;
-    __afl_gen_word    = NULL;
-    __afl_path_hash   = NULL;
-    __afl_edge_count  = NULL;
-    __afl_dropped     = NULL;
-    __afl_touched     = NULL;
     __afl_wguard_mode = __AFL_WGUARD_OFF;
     __afl_shm_seg     = NULL;
     __afl_shm_seg_id  = -1;
@@ -1265,7 +1266,8 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         int bm_end_ok = bm_size_ok && tail_end <= SIZE_MAX - bm_bytes;
         if (bm_end_ok && shmctl(shmid, IPC_STAT, &ds) == 0 &&
             (size_t)ds.shm_segsz >= tail_end + bm_bytes) {
-            memcpy(base + tail_end, SHM_TOUCHED_MAGIC, SHM_TOUCHED_HEADER);
+            /* A reused mapping is already write-locked, and carries it. */
+            if (!reuse) memcpy(base + tail_end, SHM_TOUCHED_MAGIC, SHM_TOUCHED_HEADER);
             touched = (uint64_t *)(base + tail_end + SHM_TOUCHED_HEADER);
             const char *ta = getenv("__AFL_TOUCHED_ATOMIC");
             if (ta && ta[0] && !ta[1] && (ta[0] == '0' || ta[0] == '1')) {
@@ -1527,6 +1529,8 @@ static struct {
     uintptr_t ra;
     uintptr_t base;
 } __afl_ctx_base_cache[__AFL_CTX_CACHE_SIZE];
+/* Tag of a slot a writer holds; never a return address. */
+#define __AFL_CTX_BASE_BUSY ((uintptr_t)1)
 
 __AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
     uintptr_t key = (uintptr_t)ra;
@@ -1550,10 +1554,15 @@ __AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
     uintptr_t base = 0;
     if (dladdr(ra, &info) && info.dli_fbase) base = (uintptr_t)info.dli_fbase;
 
-    /* Tag cleared before base, set after: no reader pairs a tag with
-     * another key's base (cf. __afl_ctx_last_ra below). */
-    __atomic_store_n(tag, 0, __ATOMIC_RELAXED);
-    __atomic_thread_fence(__ATOMIC_RELEASE);
+    /* Tag claimed before base, set after: no reader pairs a tag with
+     * another key's base (cf. __afl_ctx_last_ra below). One writer per
+     * slot: two interleaved left tag A over base B. The loser resolves
+     * uncached. */
+    uintptr_t seen = __atomic_load_n(tag, __ATOMIC_RELAXED);
+    if (seen == __AFL_CTX_BASE_BUSY ||
+        !__atomic_compare_exchange_n(tag, &seen, __AFL_CTX_BASE_BUSY, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return base;
     __atomic_store_n(val, base, __ATOMIC_RELAXED);
     __atomic_store_n(tag, key, __ATOMIC_RELEASE);
     return base;
@@ -1703,8 +1712,11 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
     if (cfp == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_cfp) &&
         cur >= (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_main_lo)) {
         void *hit = __afl_raw_load(caller_fp + 1);
+        /* ctx before ra: a handler rewriting the pair between the two
+         * loads then fails the ra match instead of lending its ctx. */
+        void *hit_ctx = __afl_raw_load((void *const *)&__afl_ctx_last_ctx);
         if (hit && (uintptr_t)hit == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ra))
-            return (uint32_t)(uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ctx);
+            return (uint32_t)(uintptr_t)hit_ctx;
     }
 
     /* Raw loads: a plain read here gets an ASAN check in every guard callback.
@@ -1733,9 +1745,10 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
     }
     void *ra = __afl_raw_load(caller_fp + 1);   /* return addr into caller's caller */
     if (!ra) return 0;
+    void *ra_ctx = __afl_raw_load((void *const *)&__afl_ctx_last_ctx);   /* before ra, as above */
     if (main_stack && (uintptr_t)ra == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ra)) {
         __afl_ctx_last_cfp = cfp;
-        return (uint32_t)(uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ctx);
+        return (uint32_t)(uintptr_t)ra_ctx;
     }
     /* Cache miss: the return address changed (or first walk). Flagged for
      * __afl_ctx_collapse_suspect(); this is the cold path, the hit above is not. */
@@ -1796,6 +1809,10 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
         __afl_ctx_last_ctx = ctx;
         __atomic_signal_fence(__ATOMIC_SEQ_CST);
         __afl_ctx_last_ra = (uintptr_t)ra;
+        /* A handler that walked between the two stores left its own ctx
+         * under this ra: drop the pair. */
+        __atomic_signal_fence(__ATOMIC_SEQ_CST);
+        if (__afl_ctx_last_ctx != ctx) __afl_ctx_last_ra = 0;
         __afl_ctx_last_cfp = cfp;
     }
     return ctx;
@@ -2845,18 +2862,45 @@ struct __afl_sancov_rec {
 _Static_assert(sizeof(struct __afl_sancov_rec) == 32, "sancov_tables.py _HEAD");
 
 static int __afl_sancov_fd = -2;   /* -2 not yet opened, -1 off */
+static struct stat __afl_sancov_st;    /* what the fd was opened on */
 static const uintptr_t *__afl_sancov_seen[__AFL_SANCOV_MAX_SEEN];
 static uint32_t __afl_sancov_nseen;
 static uint32_t __afl_sancov_paired;   /* guard regions already given a pc-table */
 
+__AFL_NO_COV static int __afl_sancov_same(int fd) {
+    struct stat st;
+    return fstat(fd, &st) == 0 && st.st_dev == __afl_sancov_st.st_dev &&
+           st.st_ino == __afl_sancov_st.st_ino;
+}
+
+/* The fd lives in the target's table: a target that closed every
+ * descriptor got the number back for its own file, and a later module's
+ * tables went into it. Checked before each use; the dump file is reopened,
+ * never created twice. */
 __AFL_NO_COV static int __afl_sancov_open(void) {
-    if (__afl_sancov_fd != -2) return __afl_sancov_fd;
+    if (__afl_sancov_fd == -1) return -1;
 
     const char *p = getenv("__AFL_SANCOV_OUT");
-    __afl_sancov_fd = -1;
-    if (p && p[0])
-        __afl_sancov_fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_APPEND, 0600);
-    return __afl_sancov_fd;
+    if (__afl_sancov_fd == -2) {
+        __afl_sancov_fd = -1;
+        if (p && p[0])
+            __afl_sancov_fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_APPEND, 0600);
+        if (__afl_sancov_fd >= 0 && fstat(__afl_sancov_fd, &__afl_sancov_st) != 0) {
+            close(__afl_sancov_fd);
+            __afl_sancov_fd = -1;
+        }
+        return __afl_sancov_fd;
+    }
+    if (__afl_sancov_same(__afl_sancov_fd)) return __afl_sancov_fd;
+
+    /* Stolen: the number is the target's now, never closed here. */
+    int fd = (p && p[0]) ? open(p, O_WRONLY | O_CLOEXEC | O_APPEND) : -1;
+    if (fd >= 0 && !__afl_sancov_same(fd)) {
+        close(fd);
+        fd = -1;
+    }
+    __afl_sancov_fd = fd;
+    return fd;
 }
 
 /* Every TU's ctor passes the same linker-wide bounds: dump once. */
@@ -3409,8 +3453,13 @@ __AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
             __afl_dist_hits++;
             uint32_t nidx = __afl_dist_table[idx].node_idx;
             if (__afl_area && __afl_node_bitmap &&
-                nidx < __afl_node_bitmap_bytes * 8u)
-                __afl_node_bitmap[nidx >> 3] |= (uint8_t)(1u << (nidx & 7u));
+                nidx < __afl_node_bitmap_bytes * 8u) {
+                /* Test, then atomic OR, as __afl_block_mark: a plain |=
+                 * lost a node when two threads shared the byte. */
+                uint8_t bit = (uint8_t)(1u << (nidx & 7u));
+                if (!(__afl_node_bitmap[nidx >> 3] & bit))
+                    __atomic_fetch_or(&__afl_node_bitmap[nidx >> 3], bit, __ATOMIC_RELAXED);
+            }
             break;
         }
     }
@@ -3640,6 +3689,9 @@ __AFL_NO_COV static void __afl_log_keep(int *fd, struct __afl_fd_id *id, const c
 #define LTL_ENV "__LTL_EVENTS_OUT"
 #define LTL_FD_UNOPENED (-2)
 #define LTL_FD_OPENING  (-3)
+/* Yields a waiter spends on another thread's open(2) before dropping the
+ * event: the opener may be this thread, interrupted by a signal handler. */
+#define LTL_OPEN_YIELDS 4096
 
 static int __ltl_fd = LTL_FD_UNOPENED;  /* < 0 and not the above: off */
 static struct __afl_fd_id __ltl_fd_id;
@@ -3656,11 +3708,11 @@ __AFL_NO_COV static int __ltl_open(void) {
         __atomic_store_n(&__ltl_fd, fd, __ATOMIC_RELEASE);
         return fd;
     }
-    while (fd == LTL_FD_OPENING) {
+    for (int i = 0; fd == LTL_FD_OPENING && i < LTL_OPEN_YIELDS; i++) {
         sched_yield();
         fd = __atomic_load_n(&__ltl_fd, __ATOMIC_ACQUIRE);
     }
-    return fd;
+    return fd == LTL_FD_OPENING ? -1 : fd;
 }
 
 /* Target closed our fd and reused the number: reopen, never write it.
@@ -4742,8 +4794,10 @@ __AFL_GCC_NO_COV static void __afl_resolve_miss(void **slot, const char *name, v
 __AFL_GCC_NO_COV static void __afl_resolve_pending(void) {
     while (__afl_pending_n > 0) {
         int i = --__afl_pending_n;
+        /* Copied out: a miss nested in the lookup reuses entry i. */
+        void **slot = __afl_pending[i].slot;
         void *p = __afl_sym_lookup(__afl_pending[i].name);
-        if (p) __atomic_store_n(__afl_pending[i].slot, p, __ATOMIC_RELEASE);
+        if (p) __atomic_store_n(slot, p, __ATOMIC_RELEASE);
     }
 }
 
@@ -5877,6 +5931,14 @@ static int __afl_guard_signals[] = {
  * Cleared in a fork() child, whose copy of the guarded frame belongs to a
  * copy of the host. */
 static __thread sigjmp_buf *volatile __afl_guard_jmp = NULL;
+/* Kernel tid of the thread that owns the frame. A vfork() child shares
+ * this TLS and stack but not the tid: jumping from it ran the host in the
+ * child, on the parent's stack. Reset in a fork() child. */
+static __thread pid_t __afl_guard_tid = 0;
+
+__AFL_GCC_NO_COV static int __afl_guard_mine(void) {
+    return __afl_guard_tid == (pid_t)syscall(SYS_gettid);
+}
 static __thread volatile sig_atomic_t __afl_guard_timed = 0;  /* active frame is timed */
 static volatile sig_atomic_t __afl_handlers_live = 0;
 static int __afl_guard_index(int sig);
@@ -5993,6 +6055,7 @@ __AFL_NO_COV static void __afl_sym_write_all(int fd, const char *buf, size_t len
 }
 
 #define __AFL_SYM_MAX_FRAMES 24
+#define __AFL_SYM_ALARM_S 2   /* bound on an inline symbolizer call */
 struct __afl_sym_pending {
     int sig;
     uintptr_t pc;
@@ -6023,6 +6086,31 @@ __AFL_GCC_NO_COV __attribute__((constructor)) static void __afl_sym_prime(void) 
     (void)backtrace(tmp, 2);
 }
 
+/* backtrace() reads the frame chain unchecked: a smashed saved rbp faulted
+ * it inside the handler, signal blocked, and the kernel killed the process
+ * (the fuzzer, in direct mode). The fault signals are unblocked for the
+ * unwind and a nested fault jumps back here: the record keeps the pc. */
+static __thread sigjmp_buf *volatile __afl_sym_unwind = NULL;
+
+__AFL_NO_COV static int __afl_sym_backtrace(void **bt, int cap) {
+    sigset_t faults, old;
+    sigemptyset(&faults);
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
+        sigaddset(&faults, __afl_guard_signals[i]);
+    __afl_real_sigmask(SIG_UNBLOCK, &faults, &old);
+
+    sigjmp_buf jb;
+    volatile int n = 0;
+    if (sigsetjmp(jb, 0) == 0) {
+        __afl_sym_unwind = &jb;
+        n = backtrace(bt, cap);
+    }
+    __afl_sym_unwind = NULL;
+
+    __afl_real_sigmask(SIG_SETMASK, &old, NULL);
+    return n;
+}
+
 /* Stores the PC and a bounded backtrace. For SIGABRT and friends the
  * faulting PC is inside libc (abort -> pthread_kill), so the PC alone names
  * nothing of the target; the callers do. backtrace() unwinds across the
@@ -6040,7 +6128,7 @@ __AFL_NO_COV static void __afl_sym_capture(int sig, siginfo_t *si, void *uc) {
     __afl_sym_pend.nframes = 0;
 
     void *bt[__AFL_SYM_MAX_FRAMES + 8];
-    int n = backtrace(bt, (int)(sizeof(bt) / sizeof(bt[0])));
+    int n = __afl_sym_backtrace(bt, (int)(sizeof(bt) / sizeof(bt[0])));
     int start = -1;
     for (int i = 0; i < n && __afl_sym_pend.pc; i++)
         if ((uintptr_t)bt[i] == __afl_sym_pend.pc) { start = i; break; }
@@ -6214,11 +6302,20 @@ __AFL_GCC_NO_COV static int __afl_target_handles(int sig) {
 }
 
 __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
+#if __AFL_CRASH_SYM
+    /* The unwind of an earlier crash faulted: back to its capture. */
+    sigjmp_buf *unwind = __afl_sym_unwind;
+    if (unwind) {
+        __afl_sym_unwind = NULL;
+        siglongjmp(*unwind, 1);
+    }
+#endif
+
     /* Flush before escaping, on every crash (see __afl_cmplog_crash_flush). */
     __afl_crash_flush();
     __afl_sym_capture(sig, si, uc);
     sigjmp_buf *jb = __afl_guard_jmp;
-    if (jb) {
+    if (jb && __afl_guard_mine()) {
         __afl_guard_fault = si ? (uintptr_t)si->si_addr : 0;
         /* A tick held by sa_mask fires as siglongjmp unmasks it, before
          * the landing: untimed, it cannot turn this crash into a timeout. */
@@ -6230,9 +6327,11 @@ __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *u
     /* No guard frame: this process dies after the handler. Symbolize now,
      * bounded so a wedged symbolizer cannot turn a crash into a hang. */
     if (__afl_sym_have) {
-        alarm(2);
+        /* The previous alarm is put back: this path also runs ahead of a
+         * target handler that recovers, whose watchdog it cancelled. */
+        unsigned pending = alarm(__AFL_SYM_ALARM_S);
         __afl_sym_emit();
-        alarm(0);
+        alarm(pending);
     }
 #endif
 
@@ -6315,8 +6414,26 @@ __AFL_GCC_NO_COV static int __afl_guard_index(int sig) {
     return -1;
 }
 
+/* The guard's own signals, once their handlers are installed. A target
+ * resetting every disposition (daemon init loops) dropped them: SIG_DFL
+ * killed the host on the next tick, SIG_IGN ended timeouts for good. */
+static int __afl_timeout_handler_live;
+static volatile int __afl_exit_handler_live;
+
+__AFL_GCC_NO_COV static int __afl_owns_rt_sig(int sig) {
+    if (sig == __AFL_TIMEOUT_SIG) return __afl_timeout_handler_live;
+    if (sig == __AFL_EXIT_SIG) return __afl_exit_handler_live;
+    return 0;
+}
+
 __attribute__((visibility("hidden")))
 __AFL_GCC_NO_COV int (sigaction)(int sig, const struct sigaction *act, struct sigaction *old) {
+    /* Swallowed: the target reads back the default it expects to replace. */
+    if (__afl_owns_rt_sig(sig)) {
+        if (old) memset(old, 0, sizeof(*old));
+        return 0;
+    }
+
     int i = __afl_guard_index(sig);
     /* Not gated on a guard being active: a one-shot or forkserver child
      * never enters one, and the target's handler then replaced ours, so a
@@ -7051,21 +7168,25 @@ __AFL_GCC_NO_COV static void *__afl_ph_big_new(size_t n) {
         return NULL;
     }
     size_t len = (n + __AFL_PH_PAGE - 1) & ~(size_t)(__AFL_PH_PAGE - 1);
+
+    /* Mapped under the lock, which the tick defers on: a jump between the
+     * mmap and the insert leaked a mapping no table tracked. */
+    __afl_ph_lock();
     void *p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
+        __afl_ph_unlock();
         errno = ENOMEM;
         return NULL;
     }
 
-    __afl_ph_lock();
     int i = __afl_ph_big_slot(p);
     if (i < 0 && __afl_ph.big_tombs) {
         __afl_ph_big_compact();
         i = __afl_ph_big_slot(p);
     }
     if (i < 0) {
-        __afl_ph_unlock();
         munmap(p, len);
+        __afl_ph_unlock();
         errno = ENOMEM;
         return NULL;
     }
@@ -7093,8 +7214,8 @@ __AFL_GCC_NO_COV static int __afl_ph_big_del(void *p) {
     __afl_ph_big_forget(p);
     __afl_ph_big_bury((unsigned)i);
     __afl_ph_big_tidy();
+    munmap(p, len);   /* under the lock, as the mmap */
     __afl_ph_unlock();
-    munmap(p, len);
     return 1;
 }
 
@@ -7362,11 +7483,34 @@ __AFL_GCC_NO_COV static void __afl_guard_leave(void) {
     __afl_guards_active = 0;
 }
 
+/* The owner is jumped from wherever the worker's signal finds it: out of
+ * glibc malloc it kept the arena lock and the host's next malloc hung.
+ * Same spans as the tick (see Guard timer); the worker re-sends until the
+ * owner is clear or parked in one syscall, or the tries run out. */
+static volatile uint32_t __afl_exit_tries;    /* signals sent for this exit */
+static volatile uint32_t __afl_exit_parked;   /* consecutive same-syscall ones */
+static volatile uintptr_t __afl_exit_pc;      /* pc of the previous deferral */
+
+__AFL_GCC_NO_COV static int __afl_exit_defer(uintptr_t pc) {
+    if (__afl_exit_tries > __AFL_TIMEOUT_LIBC_DEFER_TICKS) return 0;
+    if (__asan_report_present && __asan_report_present()) return 1;
+    if (__afl_ph_held()) return 1;
+
+    uintptr_t lo = __afl_rt_lo(pc);
+    if (!lo) return 0;
+
+    int parked = pc == __afl_exit_pc && __afl_at_syscall(pc, lo);
+    __afl_exit_parked = parked ? __afl_exit_parked + 1 : 0;
+    __afl_exit_pc = pc;
+    return __afl_exit_parked < __AFL_TIMEOUT_BLOCKED_TICKS;
+}
+
 __AFL_GCC_NO_COV static void __afl_exit_handler(int sig, siginfo_t *si, void *uc) {
-    (void)sig; (void)si; (void)uc;
+    (void)sig; (void)si;
     sigjmp_buf *jb = __afl_guard_jmp;
     int code = __afl_exit_pending;
     if (!jb || !code) return;
+    if (__afl_exit_defer(__afl_sym_pc_of(uc))) return;
     __afl_exit_pending = 0;
     __afl_guard_timed = 0;
     siglongjmp(*jb, code);
@@ -7382,6 +7526,7 @@ __AFL_GCC_NO_COV static int __afl_exit_sig_ready(void) {
     sigaddset(&sa.sa_mask, __AFL_TIMEOUT_SIG);
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
     if (sigaction(__AFL_EXIT_SIG, &sa, NULL) != 0) return 0;
+    if (!__afl_rt_hi_of[__AFL_RT_LIBC]) __afl_map_libc_range();
     __afl_exit_handler_live = 1;
     return 1;
 }
@@ -7429,9 +7574,19 @@ __AFL_GCC_NO_COV void __afl_signals_claim(void) {
  * guard runs (the caller then exits for real). */
 __AFL_GCC_NO_COV static void __afl_worker_exit(int status) {
     if (!__afl_guards_active || !__afl_exit_sig_ready()) return;
+    __afl_exit_tries = 0;
+    __afl_exit_parked = 0;
+    __afl_exit_pc = 0;
     __afl_exit_pending = __AFL_JMP_EXIT | (status & 0xFF);
     pthread_detach(pthread_self());
-    pthread_kill(__atomic_load_n(&__afl_guard_owner, __ATOMIC_RELAXED), __AFL_EXIT_SIG);
+
+    /* Re-sent while the owner defers (see __afl_exit_defer). */
+    pthread_t owner = __atomic_load_n(&__afl_guard_owner, __ATOMIC_RELAXED);
+    while (__afl_exit_pending && __afl_guards_active) {
+        __afl_exit_tries++;
+        pthread_kill(owner, __AFL_EXIT_SIG);
+        usleep(__AFL_TIMEOUT_FAST_TICK_US);
+    }
     pthread_exit(NULL);
 }
 
@@ -7455,6 +7610,8 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
         __afl_install_crash_handlers();
     if (!__afl_altstack_ready)
         __afl_install_altstack();
+    if (!__afl_guard_tid)
+        __afl_guard_tid = (pid_t)syscall(SYS_gettid);
     int timed = timeout_us && __afl_timer_ready();
     uint64_t prev_budget = __afl_timer_budget_us;
     if (timed) __afl_timer_budget(timeout_us);
@@ -7540,7 +7697,10 @@ __AFL_GCC_NO_COV int __afl_guarded_call_timeout(int (*entry)(const uint8_t *, si
  * belongs to a copy of the host. Left armed, a crash in the child jumped
  * there and the child went on running the fuzzer. */
 __AFL_GCC_NO_COV static void __afl_guard_atfork_child(void) {
+    /* The thread that was opening the LTL sink is not in the child. */
+    if (__ltl_fd == LTL_FD_OPENING) __ltl_fd = LTL_FD_UNOPENED;
     __afl_guard_jmp = NULL;
+    __afl_guard_tid = 0;
     __afl_guard_timed = 0;
     __afl_timer_state = 0;      /* POSIX timers are not inherited */
     __afl_timer_budget_us = 0;
@@ -7563,8 +7723,10 @@ __AFL_GCC_NO_COV static void __afl_guard_atfork_child(void) {
  * keep libc's exit. */
 __AFL_GCC_NO_COV static void __afl_guard_escape(int status) {
     sigjmp_buf *jb = __afl_guard_jmp;
-    if (jb)
+    if (jb) {
+        if (!__afl_guard_mine()) return;   /* vfork() child: the real exit */
         siglongjmp(*jb, __AFL_JMP_EXIT | (status & 0xFF));
+    }
     __afl_worker_exit(status);
 }
 
@@ -7867,6 +8029,11 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
         if (got == 0) _exit(0);
         if (got < 0) _exit(1);
 
+        /* Parked child killed meanwhile (late timeout kill, OOM killer):
+         * waking it reported the corpse's status for an input that never
+         * ran. Reaped here; a fresh child takes the input. */
+        if (child_stopped && waitpid(child, NULL, WNOHANG) == child) child_stopped = 0;
+
         if (child_stopped) {
             /* Persistent: wake the parked child for the next input. */
             child_stopped = 0;
@@ -7884,6 +8051,10 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
              * kill_tree); restore recording, drop the control pipe, and
              * fall through into main(). */
             setpgid(0, 0);
+            /* A parked child outlived the server (EOF, or the loader's
+             * SIGKILL): under an ignored SIGHUP it resumed, ran one stale
+             * input and parked for good. The kernel ends it with the server. */
+            if (__afl_persistent) prctl(PR_SET_PDEATHSIG, SIGKILL);
             __afl_area = saved_area;
             __afl_fast_refresh();
 #if __AFL_DISTANCE_MODE
@@ -7927,6 +8098,9 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
 
 /* Per-input work an exiting child would do, for a child that stays. */
 __AFL_GCC_NO_COV static void __afl_persist_sync(void) {
+    /* Inline counters only reach the map folded: unfolded, every parked
+     * input reported no edges and the last one reported them all. */
+    __afl_sancov_fold();
 #if __AFL_DISTANCE_MODE
     __afl_dist_flush();
 #endif
@@ -7934,6 +8108,9 @@ __AFL_GCC_NO_COV static void __afl_persist_sync(void) {
     __afl_cmplog_flush();
     __afl_cmp_dump_counts();
     __afl_cmp_dump_sites();
+    /* A fork child starts a scope; a parked one dropped every record an
+     * earlier input had already emitted. */
+    __afl_cmplog_new_scope();
 #endif
 }
 
@@ -8074,6 +8251,9 @@ __AFL_GCC_NO_COV static int __afl_fuzz_len(void) {
         n = __atomic_load_n(&__afl_fuzz_seg->len, __ATOMIC_ACQUIRE);
         if (n > __afl_fuzz_cap) n = __afl_fuzz_cap;
     } else {
+        /* The previous call poisoned the tail this read fills. */
+        if (__asan_unpoison_memory_region)
+            __asan_unpoison_memory_region(__afl_fuzz_data, __afl_fuzz_cap);
         n = __afl_fuzz_read_alt();
     }
 
@@ -8243,17 +8423,20 @@ static struct sigaction __afl_pre_old_abrt;
 static struct sigaction __afl_pre_old_bus;
 static struct sigaction __afl_pre_old_fpe;
 
-__AFL_NO_COV static void __afl_preload_crash_handler(int sig) {
+__AFL_NO_COV static void __afl_preload_crash_handler(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
     __afl_cmplog_flush();
     __afl_cmp_dump_counts();
     __afl_cmp_dump_sites();
     struct sigaction *old;
-    int hardware_fault = 0;
+    /* By si_code, not by number: raise(SIGSEGV) / kill() has no faulting
+     * instruction, and returning swallowed the signal (exit 0). */
+    int hardware_fault = si && si->si_code > 0;
     switch (sig) {
-    case SIGSEGV: old = &__afl_pre_old_segv; hardware_fault = 1; break;
-    case SIGBUS:  old = &__afl_pre_old_bus;  hardware_fault = 1; break;
-    case SIGFPE:  old = &__afl_pre_old_fpe;  hardware_fault = 1; break;
-    case SIGABRT: old = &__afl_pre_old_abrt; break;
+    case SIGSEGV: old = &__afl_pre_old_segv; break;
+    case SIGBUS:  old = &__afl_pre_old_bus;  break;
+    case SIGFPE:  old = &__afl_pre_old_fpe;  break;
+    case SIGABRT: old = &__afl_pre_old_abrt; hardware_fault = 0; break;
     default:      signal(sig, SIG_DFL); raise(sig); return;
     }
     sigaction(sig, old, NULL);
@@ -8267,9 +8450,9 @@ __AFL_NO_COV static void __afl_preload_init(void) {
     __afl_cmplog_init();
     if (__sanitizer_set_death_callback) __sanitizer_set_death_callback(__afl_cmplog_crash_flush);
     struct sigaction sa;
-    sa.sa_handler = __afl_preload_crash_handler;
+    sa.sa_sigaction = __afl_preload_crash_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, &__afl_pre_old_segv);
     sigaction(SIGABRT, &sa, &__afl_pre_old_abrt);
     sigaction(SIGBUS,  &sa, &__afl_pre_old_bus);
