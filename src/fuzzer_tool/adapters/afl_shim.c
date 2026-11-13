@@ -238,6 +238,7 @@
 #include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <dlfcn.h>
 #include <err.h>
 #include <error.h>
@@ -3688,6 +3689,9 @@ __AFL_NO_COV static void __afl_log_keep(int *fd, struct __afl_fd_id *id, const c
 #define LTL_ENV "__LTL_EVENTS_OUT"
 #define LTL_FD_UNOPENED (-2)
 #define LTL_FD_OPENING  (-3)
+/* Yields a waiter spends on another thread's open(2) before dropping the
+ * event: the opener may be this thread, interrupted by a signal handler. */
+#define LTL_OPEN_YIELDS 4096
 
 static int __ltl_fd = LTL_FD_UNOPENED;  /* < 0 and not the above: off */
 static struct __afl_fd_id __ltl_fd_id;
@@ -3704,11 +3708,11 @@ __AFL_NO_COV static int __ltl_open(void) {
         __atomic_store_n(&__ltl_fd, fd, __ATOMIC_RELEASE);
         return fd;
     }
-    while (fd == LTL_FD_OPENING) {
+    for (int i = 0; fd == LTL_FD_OPENING && i < LTL_OPEN_YIELDS; i++) {
         sched_yield();
         fd = __atomic_load_n(&__ltl_fd, __ATOMIC_ACQUIRE);
     }
-    return fd;
+    return fd == LTL_FD_OPENING ? -1 : fd;
 }
 
 /* Target closed our fd and reused the number: reopen, never write it.
@@ -6051,6 +6055,7 @@ __AFL_NO_COV static void __afl_sym_write_all(int fd, const char *buf, size_t len
 }
 
 #define __AFL_SYM_MAX_FRAMES 24
+#define __AFL_SYM_ALARM_S 2   /* bound on an inline symbolizer call */
 struct __afl_sym_pending {
     int sig;
     uintptr_t pc;
@@ -6322,9 +6327,11 @@ __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *u
     /* No guard frame: this process dies after the handler. Symbolize now,
      * bounded so a wedged symbolizer cannot turn a crash into a hang. */
     if (__afl_sym_have) {
-        alarm(2);
+        /* The previous alarm is put back: this path also runs ahead of a
+         * target handler that recovers, whose watchdog it cancelled. */
+        unsigned pending = alarm(__AFL_SYM_ALARM_S);
         __afl_sym_emit();
-        alarm(0);
+        alarm(pending);
     }
 #endif
 
@@ -7161,21 +7168,25 @@ __AFL_GCC_NO_COV static void *__afl_ph_big_new(size_t n) {
         return NULL;
     }
     size_t len = (n + __AFL_PH_PAGE - 1) & ~(size_t)(__AFL_PH_PAGE - 1);
+
+    /* Mapped under the lock, which the tick defers on: a jump between the
+     * mmap and the insert leaked a mapping no table tracked. */
+    __afl_ph_lock();
     void *p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
+        __afl_ph_unlock();
         errno = ENOMEM;
         return NULL;
     }
 
-    __afl_ph_lock();
     int i = __afl_ph_big_slot(p);
     if (i < 0 && __afl_ph.big_tombs) {
         __afl_ph_big_compact();
         i = __afl_ph_big_slot(p);
     }
     if (i < 0) {
-        __afl_ph_unlock();
         munmap(p, len);
+        __afl_ph_unlock();
         errno = ENOMEM;
         return NULL;
     }
@@ -7203,8 +7214,8 @@ __AFL_GCC_NO_COV static int __afl_ph_big_del(void *p) {
     __afl_ph_big_forget(p);
     __afl_ph_big_bury((unsigned)i);
     __afl_ph_big_tidy();
+    munmap(p, len);   /* under the lock, as the mmap */
     __afl_ph_unlock();
-    munmap(p, len);
     return 1;
 }
 
@@ -7686,6 +7697,8 @@ __AFL_GCC_NO_COV int __afl_guarded_call_timeout(int (*entry)(const uint8_t *, si
  * belongs to a copy of the host. Left armed, a crash in the child jumped
  * there and the child went on running the fuzzer. */
 __AFL_GCC_NO_COV static void __afl_guard_atfork_child(void) {
+    /* The thread that was opening the LTL sink is not in the child. */
+    if (__ltl_fd == LTL_FD_OPENING) __ltl_fd = LTL_FD_UNOPENED;
     __afl_guard_jmp = NULL;
     __afl_guard_tid = 0;
     __afl_guard_timed = 0;
@@ -8016,6 +8029,11 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
         if (got == 0) _exit(0);
         if (got < 0) _exit(1);
 
+        /* Parked child killed meanwhile (late timeout kill, OOM killer):
+         * waking it reported the corpse's status for an input that never
+         * ran. Reaped here; a fresh child takes the input. */
+        if (child_stopped && waitpid(child, NULL, WNOHANG) == child) child_stopped = 0;
+
         if (child_stopped) {
             /* Persistent: wake the parked child for the next input. */
             child_stopped = 0;
@@ -8033,6 +8051,10 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
              * kill_tree); restore recording, drop the control pipe, and
              * fall through into main(). */
             setpgid(0, 0);
+            /* A parked child outlived the server (EOF, or the loader's
+             * SIGKILL): under an ignored SIGHUP it resumed, ran one stale
+             * input and parked for good. The kernel ends it with the server. */
+            if (__afl_persistent) prctl(PR_SET_PDEATHSIG, SIGKILL);
             __afl_area = saved_area;
             __afl_fast_refresh();
 #if __AFL_DISTANCE_MODE
@@ -8229,6 +8251,9 @@ __AFL_GCC_NO_COV static int __afl_fuzz_len(void) {
         n = __atomic_load_n(&__afl_fuzz_seg->len, __ATOMIC_ACQUIRE);
         if (n > __afl_fuzz_cap) n = __afl_fuzz_cap;
     } else {
+        /* The previous call poisoned the tail this read fills. */
+        if (__asan_unpoison_memory_region)
+            __asan_unpoison_memory_region(__afl_fuzz_data, __afl_fuzz_cap);
         n = __afl_fuzz_read_alt();
     }
 

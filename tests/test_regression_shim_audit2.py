@@ -9,13 +9,16 @@ shim's signal handlers never reach pytest.
 
 from __future__ import annotations
 
+import os
 import signal
+import struct
 import subprocess
+import time
 from pathlib import Path
 
 from fuzzer_tool.adapters.shm import ShmCoverage
 from tests.conftest import requires_clang
-from tests.test_regression_shim_audit import SHIM, _build, _clean_env
+from tests.test_regression_shim_audit import SHIM, STATUS_TIMEOUT_S, _build, _clean_env, _Forkserver
 
 RUN_TIMEOUT_S = 30
 BUDGET_US = 20000
@@ -773,3 +776,309 @@ def test_regression_sancov_dump_skips_stolen_fd(tmp_path):
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["opened", "1", "reused", "1", "own_bytes", "0"]
     assert out.stat().st_size > 0
+
+
+# ── Private heap: big blocks mapped and unmapped under the heap lock ──
+
+# A timeout jump between mmap and the table insert (or between the removal
+# and munmap) leaked the mapping. Under the lock the tick defers.
+_BIG_LOCKED = r"""
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#define BIG (4u << 20)          /* above the largest class */
+
+void *__real_mmap(void *a, size_t n, int prot, int flags, int fd, off_t off);
+int __real_munmap(void *a, size_t n);
+static int map_locked = -1, unmap_locked = -1;
+
+void *__wrap_mmap(void *a, size_t n, int prot, int flags, int fd, off_t off) {
+    if (n >= BIG) map_locked = __afl_ph.lock != 0;
+    return __real_mmap(a, n, prot, flags, fd, off);
+}
+
+int __wrap_munmap(void *a, size_t n) {
+    if (n >= BIG) unmap_locked = __afl_ph.lock != 0;
+    return __real_munmap(a, n);
+}
+
+int main(void) {
+    void *volatile p = malloc(BIG);
+    free(p);
+    printf("map_locked %d unmap_locked %d\n", map_locked, unmap_locked);
+    return 0;
+}
+"""
+
+
+@requires_clang
+def test_regression_big_block_mapped_under_heap_lock(tmp_path):
+    src = tmp_path / "big.c"
+    src.write_text(_BIG_LOCKED)
+    exe = _cc(
+        tmp_path / "big",
+        "-O1", "-D__AFL_PRIVATE_HEAP=1", "-include", SHIM, src,
+        "-Wl,--wrap=mmap", "-Wl,--wrap=munmap", "-ldl", "-pthread",
+    )  # fmt: skip
+    r = _run(exe)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["map_locked", "1", "unmap_locked", "1"]
+
+
+# ── Fallback testcase read vs the previous call's poisoned tail ───────
+
+# Stand-ins for the ASAN region calls record the poisoned tail; read() is
+# wrapped to check the range it is about to fill.
+_POISONED_READ = r"""
+#include <stdio.h>
+#include <unistd.h>
+
+static const char *poison_lo, *poison_hi;
+static int read_into_poison;
+
+void __asan_poison_memory_region(void const volatile *a, size_t n) {
+    poison_lo = (const char *)a;
+    poison_hi = poison_lo + n;
+}
+
+void __asan_unpoison_memory_region(void const volatile *a, size_t n) {
+    const char *lo = (const char *)a, *hi = lo + n;
+    if (lo <= poison_lo && hi > poison_lo) poison_lo = hi < poison_hi ? hi : poison_hi;
+}
+
+ssize_t __real_read(int fd, void *buf, size_t n);
+ssize_t __wrap_read(int fd, void *buf, size_t n) {
+    const char *lo = (const char *)buf, *hi = lo + n;
+    if (lo < poison_hi && hi > poison_lo) read_into_poison = 1;
+    return __real_read(fd, buf, n);
+}
+
+int main(void) {
+    int first = __afl_fuzz_len();       /* stdin, then poisons the tail */
+    int second = __afl_fuzz_len();      /* reads into the same buffer */
+    printf("first %d second %d read_into_poison %d\n", first, second, read_into_poison);
+    return 0;
+}
+"""
+POISON_INPUT = b"abc"
+
+
+@requires_clang
+def test_regression_fallback_read_unpoisons_buffer(tmp_path):
+    src = tmp_path / "rd.c"
+    src.write_text(_POISONED_READ)
+    exe = _cc(tmp_path / "rd", "-O1", "-include", SHIM, src, "-Wl,--wrap=read", "-ldl", "-pthread")
+    r = subprocess.run(
+        [str(exe)], input=POISON_INPUT, capture_output=True, timeout=RUN_TIMEOUT_S, env=_clean_env()
+    )
+    assert r.returncode == 0, r.stderr
+    assert (
+        r.stdout.split()
+        == f"first {len(POISON_INPUT)} second 0 read_into_poison 0".encode().split()
+    )
+
+
+# ── LTL sink: an opener that never finishes ───────────────────────────
+
+# Seam: the fd word is left at "opening", as a fork during another
+# thread's open (child) or a signal handler on the opening thread sees it.
+_LTL_OPENING = r"""
+#include <stdio.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#define HANG_ALARM_S 5
+
+int main(int argc, char **argv) {
+    (void)argv;
+    __ltl_fd = LTL_FD_OPENING;
+    alarm(HANG_ALARM_S);
+
+    if (argc > 1) {                       /* fork child: the opener is gone */
+        pid_t pid = fork();
+        if (pid == 0) _exit(__ltl_open() >= 0 ? 0 : 1);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        printf("child_opened %d\n", WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        return 0;
+    }
+
+    printf("gave_up %d\n", __ltl_open() < 0);    /* same thread: bounded wait */
+    return 0;
+}
+"""
+
+
+@requires_clang
+def test_regression_ltl_open_wait_is_bounded(tmp_path):
+    exe = _build(tmp_path, _LTL_OPENING)
+    r = _run(exe, __LTL_EVENTS_OUT=str(tmp_path / "ltl.out"))
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert r.stdout.split() == ["gave_up", "1"]
+
+
+@requires_clang
+def test_regression_ltl_open_recovers_in_fork_child(tmp_path):
+    exe = _build(tmp_path, _LTL_OPENING)
+    r = _run(exe, "fork", __LTL_EVENTS_OUT=str(tmp_path / "ltl.out"))
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert r.stdout.split() == ["child_opened", "1"]
+
+
+# ── Crash path outside a guard: the process's own alarm ───────────────
+
+# The target recovers from a fault with its own handler. The shim's
+# handler symbolizes first, under its own alarm.
+_ALARM_KEPT = r"""
+#include <setjmp.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <unistd.h>
+#define WATCHDOG_S 100
+
+static sigjmp_buf recover;
+static void on_segv(int s) { (void)s; siglongjmp(recover, 1); }
+static int ok(const uint8_t *d, size_t n) { (void)d; (void)n; return 0; }
+
+int main(void) {
+    __afl_guarded_call(ok, 0, 0);         /* shim handlers installed */
+    signal(SIGSEGV, on_segv);             /* kept as the previous owner */
+    alarm(WATCHDOG_S);
+
+    if (sigsetjmp(recover, 1) == 0) *(volatile int *)0 = 1;
+
+    printf("watchdog_left %d\n", alarm(0) > 0);
+    return 0;
+}
+"""
+
+
+@requires_clang
+def test_regression_crash_path_keeps_pending_alarm(tmp_path):
+    exe = _build(tmp_path, _ALARM_KEPT)
+    sym = tmp_path / "sym.out"
+    r = _run(exe, __AFL_CRASH_SYM_OUT=str(sym))
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert r.stdout.split() == ["watchdog_left", "1"]
+    assert sym.read_text().startswith("SYM ")  # the symbolizing path ran
+
+
+# ── Forkserver: the parked persistent child ───────────────────────────
+
+# One byte appended per input run; SIGHUP ignored as under nohup, so an
+# orphaned parked child survives the kernel's SIGHUP + SIGCONT.
+_PARKED = r"""
+#include <fcntl.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <unistd.h>
+#define EARLY_CTOR 101
+#define LOOP_MAX 1000
+#define LOG_MODE 0600
+
+__attribute__((constructor(EARLY_CTOR))) static void early(void) { signal(SIGHUP, SIG_IGN); }
+
+int main(void) {
+    while (__AFL_LOOP(LOOP_MAX)) {
+        int fd = open(getenv("RUN_LOG"), O_WRONLY | O_APPEND | O_CREAT, LOG_MODE);
+        (void)!write(fd, "x", 1);
+        close(fd);
+    }
+    return 0;
+}
+"""
+PROC_STATE_FIELD = 2  # /proc/<pid>/stat: pid (comm) state ...
+DEAD_STATES = ("Z", "X")
+POLL_S = 0.01
+
+
+def _gone(pid: int) -> bool:
+    """True once *pid* is dead: reaped, or a zombie awaiting its parent."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return stat.rsplit(")", 1)[1].split()[PROC_STATE_FIELD - 2] in DEAD_STATES
+
+
+def _wait_gone(pid: int) -> bool:
+    deadline = time.monotonic() + STATUS_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if _gone(pid):
+            return True
+        time.sleep(POLL_S)
+    return _gone(pid)
+
+
+class _PersistentServer(_Forkserver):
+    """As _Forkserver, keeping the pid the server reports for each input."""
+
+    def run_one(self) -> int | None:
+        os.write(self._ctl_w, b"\0\0\0\0")
+        (self.child,) = struct.unpack("<i", self._read4())
+        status = self._read4()
+        return struct.unpack("<i", status)[0] if len(status) == 4 else None
+
+
+def _parked_server(tmp_path: Path) -> tuple[_PersistentServer, Path]:
+    exe = _build(tmp_path, _PARKED, "-fsanitize-coverage=trace-pc-guard")
+    log = tmp_path / "runs.log"
+    return _PersistentServer(exe, [], _clean_env(__AFL_PERSISTENT="1", RUN_LOG=str(log))), log
+
+
+def _reap(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+@requires_clang
+def test_regression_forkserver_replaces_dead_parked_child(tmp_path):
+    fs, log = _parked_server(tmp_path)
+    try:
+        assert fs.run_one() == 0
+        first = fs.child
+        os.kill(first, signal.SIGKILL)  # a late timeout kill, the OOM killer
+        assert _wait_gone(first)
+
+        status = fs.run_one()
+        second = fs.child
+    finally:
+        fs.close()
+        _reap(fs.child)
+
+    assert status == 0, "the corpse's status was reported for an input that never ran"
+    assert second != first
+    assert len(log.read_text()) == 2
+
+
+@requires_clang
+def test_regression_forkserver_eof_takes_parked_child(tmp_path):
+    fs, _log = _parked_server(tmp_path)
+    try:
+        assert fs.run_one() == 0
+        os.close(fs._ctl_w)  # loader gone: the server ends on EOF
+        fs.proc.wait(timeout=STATUS_TIMEOUT_S)
+        gone = _wait_gone(fs.child)
+    finally:
+        os.close(fs._st_r)
+        _reap(fs.child)
+
+    assert gone, "parked child outlived its forkserver"
+
+
+@requires_clang
+def test_regression_forkserver_kill_takes_parked_child(tmp_path):
+    fs, _log = _parked_server(tmp_path)
+    try:
+        assert fs.run_one() == 0
+        fs.proc.kill()  # as the loader's stop_forkserver
+        fs.proc.wait(timeout=STATUS_TIMEOUT_S)
+        gone = _wait_gone(fs.child)
+    finally:
+        os.close(fs._ctl_w)
+        os.close(fs._st_r)
+        _reap(fs.child)
+
+    assert gone, "parked child outlived its forkserver"

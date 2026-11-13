@@ -1,6 +1,6 @@
 # afl_shim.c audit (2026-11-13)
 
-Read-only audit of `src/fuzzer_tool/adapters/afl_shim.c` (8,289 lines, at `d9d67d14`). No fix shipped.
+Audit of `src/fuzzer_tool/adapters/afl_shim.c` (8,289 lines, at `d9d67d14`). All 20 fixed; see Status.
 Items in `handover_afl_shim_audit_2026-11-12.md` and `docs/TODO.md` excluded.
 R = reproduced (clang 18, no sanitizer runtime on the host); ✔ = repro rerun or code path re-read by the merging session.
 
@@ -43,6 +43,20 @@ SHM header/entry/tail/bitmap layout vs `shm.py`; attach size math; refusal memo,
 
 Not exercised: `-fsanitize-coverage` and ASAN builds (no compiler-rt), pkey guard (no PKU).
 
-## Repros
+## Status (2026-11-13)
 
-Not in the repo (scratch, session-local): `a.c`/`b.c` (wguard), `pend.c` (pending), `bt.c` (backtrace), `rt.c` (RT signals), `t.c`/`host.c` (worker exit), `v.c`/`vhost.c` (vfork), `p.c` (preload raise), `sig.c`, `seq.c` (ctx caches). Each fix needs its regression test written first (Hard Rule 37).
+All 20 fixed; each test seen red, then green: `tests/test_regression_shim_audit2.py` (23 tests).
+
+- Unwind: fault signals unblocked around `backtrace()`; a nested fault jumps back to the capture, record keeps the pc.
+- RT signals: `sigaction`/`signal` on `__AFL_TIMEOUT_SIG`/`__AFL_EXIT_SIG` swallowed once their handlers are live.
+- Worker exit: handler defers like the tick (ASAN report, private heap lock, runtime span; parked syscall and a try cap end it); the worker re-sends every fast tick.
+- vfork: guard frame records its tid; crash handler and `_exit` jump only on a match.
+- Persistent: `__afl_persist_sync` folds inline counters and opens a cmplog dedup scope.
+- Forkserver: dead parked child reaped (`WNOHANG`) and replaced; children get `PR_SET_PDEATHSIG` in persistent mode.
+- Write guard: re-arm keeps the depth, leaves the new mapping writable while brackets are open; reused mapping skips the magic write.
+- Ctx cache: miss path drops the pair when a handler rewrote ctx; both hit sites load ctx before the ra match. Benchmark (clang -O2, interleaved min of 6): ctx 2.30 -> 2.16 ns, full 7.08 -> 6.90 ns. dladdr cache: CAS slot claim, loser resolves uncached.
+- Others: pending slot copied before lookup; preload handler keys on `si_code`; node bitmap test-then-atomic-OR; refused detach keeps header pointers on the retired segment; sancov fd checked by dev/ino and reopened; big blocks `mmap`/`munmap` under the heap lock; fallback read unpoisons first; LTL wait bounded + atfork reset; alarm restored.
+
+Regression check: existing shim tests (754) and the 87 other files that build or drive the shim: same failures as the unfixed shim on this host (missing compiler-rt, cargo targets), none new. `TestStickyFastTick` failed once in 7 runs (known flake, TODO "afl_shim audit follow-ups" (b)).
+
+Open: Hard Rule 58 in-run fuzzgoat A/B for the ctx hit-path change (microbenchmark only; no ASAN runtime here); worker-exit deferral and preload path untested under ASAN; pkey guard unrun (no PKU).
