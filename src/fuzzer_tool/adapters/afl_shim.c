@@ -965,12 +965,15 @@ __AFL_NO_COV static void __afl_wguard_arm(void *p, size_t len) {
     if (!want) return;
 
     if (strcmp(want, "mprotect") == 0) {
-        if (mprotect(p, len, PROT_READ) != 0) return;
-        __afl_wguard_base  = p;
-        __afl_wguard_len   = len;
-        __atomic_store_n(&__afl_wguard_depth, 0, __ATOMIC_RELAXED);
-        __afl_wguard_tdepth = 0;
-        __afl_wguard_mode  = __AFL_WGUARD_MPROTECT;
+        /* A re-attach keeps the count: zeroed under another thread's open
+         * bracket, its close wrapped it and every later open skipped the
+         * unlock. Left writable while brackets are open; the last close
+         * locks the new mapping. */
+        __afl_wguard_base = p;
+        __afl_wguard_len  = len;
+        int open_brackets = __atomic_load_n(&__afl_wguard_depth, __ATOMIC_ACQUIRE) != 0;
+        if (!open_brackets && mprotect(p, len, PROT_READ) != 0) return;
+        __afl_wguard_mode = __AFL_WGUARD_MPROTECT;
         return;
     }
 
@@ -1265,7 +1268,8 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         int bm_end_ok = bm_size_ok && tail_end <= SIZE_MAX - bm_bytes;
         if (bm_end_ok && shmctl(shmid, IPC_STAT, &ds) == 0 &&
             (size_t)ds.shm_segsz >= tail_end + bm_bytes) {
-            memcpy(base + tail_end, SHM_TOUCHED_MAGIC, SHM_TOUCHED_HEADER);
+            /* A reused mapping is already write-locked, and carries it. */
+            if (!reuse) memcpy(base + tail_end, SHM_TOUCHED_MAGIC, SHM_TOUCHED_HEADER);
             touched = (uint64_t *)(base + tail_end + SHM_TOUCHED_HEADER);
             const char *ta = getenv("__AFL_TOUCHED_ATOMIC");
             if (ta && ta[0] && !ta[1] && (ta[0] == '0' || ta[0] == '1')) {
@@ -5877,6 +5881,14 @@ static int __afl_guard_signals[] = {
  * Cleared in a fork() child, whose copy of the guarded frame belongs to a
  * copy of the host. */
 static __thread sigjmp_buf *volatile __afl_guard_jmp = NULL;
+/* Kernel tid of the thread that owns the frame. A vfork() child shares
+ * this TLS and stack but not the tid: jumping from it ran the host in the
+ * child, on the parent's stack. Reset in a fork() child. */
+static __thread pid_t __afl_guard_tid = 0;
+
+__AFL_GCC_NO_COV static int __afl_guard_mine(void) {
+    return __afl_guard_tid == (pid_t)syscall(SYS_gettid);
+}
 static __thread volatile sig_atomic_t __afl_guard_timed = 0;  /* active frame is timed */
 static volatile sig_atomic_t __afl_handlers_live = 0;
 static int __afl_guard_index(int sig);
@@ -6023,6 +6035,31 @@ __AFL_GCC_NO_COV __attribute__((constructor)) static void __afl_sym_prime(void) 
     (void)backtrace(tmp, 2);
 }
 
+/* backtrace() reads the frame chain unchecked: a smashed saved rbp faulted
+ * it inside the handler, signal blocked, and the kernel killed the process
+ * (the fuzzer, in direct mode). The fault signals are unblocked for the
+ * unwind and a nested fault jumps back here: the record keeps the pc. */
+static __thread sigjmp_buf *volatile __afl_sym_unwind = NULL;
+
+__AFL_NO_COV static int __afl_sym_backtrace(void **bt, int cap) {
+    sigset_t faults, old;
+    sigemptyset(&faults);
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
+        sigaddset(&faults, __afl_guard_signals[i]);
+    __afl_real_sigmask(SIG_UNBLOCK, &faults, &old);
+
+    sigjmp_buf jb;
+    volatile int n = 0;
+    if (sigsetjmp(jb, 0) == 0) {
+        __afl_sym_unwind = &jb;
+        n = backtrace(bt, cap);
+    }
+    __afl_sym_unwind = NULL;
+
+    __afl_real_sigmask(SIG_SETMASK, &old, NULL);
+    return n;
+}
+
 /* Stores the PC and a bounded backtrace. For SIGABRT and friends the
  * faulting PC is inside libc (abort -> pthread_kill), so the PC alone names
  * nothing of the target; the callers do. backtrace() unwinds across the
@@ -6040,7 +6077,7 @@ __AFL_NO_COV static void __afl_sym_capture(int sig, siginfo_t *si, void *uc) {
     __afl_sym_pend.nframes = 0;
 
     void *bt[__AFL_SYM_MAX_FRAMES + 8];
-    int n = backtrace(bt, (int)(sizeof(bt) / sizeof(bt[0])));
+    int n = __afl_sym_backtrace(bt, (int)(sizeof(bt) / sizeof(bt[0])));
     int start = -1;
     for (int i = 0; i < n && __afl_sym_pend.pc; i++)
         if ((uintptr_t)bt[i] == __afl_sym_pend.pc) { start = i; break; }
@@ -6214,11 +6251,20 @@ __AFL_GCC_NO_COV static int __afl_target_handles(int sig) {
 }
 
 __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
+#if __AFL_CRASH_SYM
+    /* The unwind of an earlier crash faulted: back to its capture. */
+    sigjmp_buf *unwind = __afl_sym_unwind;
+    if (unwind) {
+        __afl_sym_unwind = NULL;
+        siglongjmp(*unwind, 1);
+    }
+#endif
+
     /* Flush before escaping, on every crash (see __afl_cmplog_crash_flush). */
     __afl_crash_flush();
     __afl_sym_capture(sig, si, uc);
     sigjmp_buf *jb = __afl_guard_jmp;
-    if (jb) {
+    if (jb && __afl_guard_mine()) {
         __afl_guard_fault = si ? (uintptr_t)si->si_addr : 0;
         /* A tick held by sa_mask fires as siglongjmp unmasks it, before
          * the landing: untimed, it cannot turn this crash into a timeout. */
@@ -6315,8 +6361,26 @@ __AFL_GCC_NO_COV static int __afl_guard_index(int sig) {
     return -1;
 }
 
+/* The guard's own signals, once their handlers are installed. A target
+ * resetting every disposition (daemon init loops) dropped them: SIG_DFL
+ * killed the host on the next tick, SIG_IGN ended timeouts for good. */
+static int __afl_timeout_handler_live;
+static volatile int __afl_exit_handler_live;
+
+__AFL_GCC_NO_COV static int __afl_owns_rt_sig(int sig) {
+    if (sig == __AFL_TIMEOUT_SIG) return __afl_timeout_handler_live;
+    if (sig == __AFL_EXIT_SIG) return __afl_exit_handler_live;
+    return 0;
+}
+
 __attribute__((visibility("hidden")))
 __AFL_GCC_NO_COV int (sigaction)(int sig, const struct sigaction *act, struct sigaction *old) {
+    /* Swallowed: the target reads back the default it expects to replace. */
+    if (__afl_owns_rt_sig(sig)) {
+        if (old) memset(old, 0, sizeof(*old));
+        return 0;
+    }
+
     int i = __afl_guard_index(sig);
     /* Not gated on a guard being active: a one-shot or forkserver child
      * never enters one, and the target's handler then replaced ours, so a
@@ -7362,11 +7426,34 @@ __AFL_GCC_NO_COV static void __afl_guard_leave(void) {
     __afl_guards_active = 0;
 }
 
+/* The owner is jumped from wherever the worker's signal finds it: out of
+ * glibc malloc it kept the arena lock and the host's next malloc hung.
+ * Same spans as the tick (see Guard timer); the worker re-sends until the
+ * owner is clear or parked in one syscall, or the tries run out. */
+static volatile uint32_t __afl_exit_tries;    /* signals sent for this exit */
+static volatile uint32_t __afl_exit_parked;   /* consecutive same-syscall ones */
+static volatile uintptr_t __afl_exit_pc;      /* pc of the previous deferral */
+
+__AFL_GCC_NO_COV static int __afl_exit_defer(uintptr_t pc) {
+    if (__afl_exit_tries > __AFL_TIMEOUT_LIBC_DEFER_TICKS) return 0;
+    if (__asan_report_present && __asan_report_present()) return 1;
+    if (__afl_ph_held()) return 1;
+
+    uintptr_t lo = __afl_rt_lo(pc);
+    if (!lo) return 0;
+
+    int parked = pc == __afl_exit_pc && __afl_at_syscall(pc, lo);
+    __afl_exit_parked = parked ? __afl_exit_parked + 1 : 0;
+    __afl_exit_pc = pc;
+    return __afl_exit_parked < __AFL_TIMEOUT_BLOCKED_TICKS;
+}
+
 __AFL_GCC_NO_COV static void __afl_exit_handler(int sig, siginfo_t *si, void *uc) {
-    (void)sig; (void)si; (void)uc;
+    (void)sig; (void)si;
     sigjmp_buf *jb = __afl_guard_jmp;
     int code = __afl_exit_pending;
     if (!jb || !code) return;
+    if (__afl_exit_defer(__afl_sym_pc_of(uc))) return;
     __afl_exit_pending = 0;
     __afl_guard_timed = 0;
     siglongjmp(*jb, code);
@@ -7382,6 +7469,7 @@ __AFL_GCC_NO_COV static int __afl_exit_sig_ready(void) {
     sigaddset(&sa.sa_mask, __AFL_TIMEOUT_SIG);
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
     if (sigaction(__AFL_EXIT_SIG, &sa, NULL) != 0) return 0;
+    if (!__afl_rt_hi_of[__AFL_RT_LIBC]) __afl_map_libc_range();
     __afl_exit_handler_live = 1;
     return 1;
 }
@@ -7429,9 +7517,19 @@ __AFL_GCC_NO_COV void __afl_signals_claim(void) {
  * guard runs (the caller then exits for real). */
 __AFL_GCC_NO_COV static void __afl_worker_exit(int status) {
     if (!__afl_guards_active || !__afl_exit_sig_ready()) return;
+    __afl_exit_tries = 0;
+    __afl_exit_parked = 0;
+    __afl_exit_pc = 0;
     __afl_exit_pending = __AFL_JMP_EXIT | (status & 0xFF);
     pthread_detach(pthread_self());
-    pthread_kill(__atomic_load_n(&__afl_guard_owner, __ATOMIC_RELAXED), __AFL_EXIT_SIG);
+
+    /* Re-sent while the owner defers (see __afl_exit_defer). */
+    pthread_t owner = __atomic_load_n(&__afl_guard_owner, __ATOMIC_RELAXED);
+    while (__afl_exit_pending && __afl_guards_active) {
+        __afl_exit_tries++;
+        pthread_kill(owner, __AFL_EXIT_SIG);
+        usleep(__AFL_TIMEOUT_FAST_TICK_US);
+    }
     pthread_exit(NULL);
 }
 
@@ -7455,6 +7553,8 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
         __afl_install_crash_handlers();
     if (!__afl_altstack_ready)
         __afl_install_altstack();
+    if (!__afl_guard_tid)
+        __afl_guard_tid = (pid_t)syscall(SYS_gettid);
     int timed = timeout_us && __afl_timer_ready();
     uint64_t prev_budget = __afl_timer_budget_us;
     if (timed) __afl_timer_budget(timeout_us);
@@ -7541,6 +7641,7 @@ __AFL_GCC_NO_COV int __afl_guarded_call_timeout(int (*entry)(const uint8_t *, si
  * there and the child went on running the fuzzer. */
 __AFL_GCC_NO_COV static void __afl_guard_atfork_child(void) {
     __afl_guard_jmp = NULL;
+    __afl_guard_tid = 0;
     __afl_guard_timed = 0;
     __afl_timer_state = 0;      /* POSIX timers are not inherited */
     __afl_timer_budget_us = 0;
@@ -7563,8 +7664,10 @@ __AFL_GCC_NO_COV static void __afl_guard_atfork_child(void) {
  * keep libc's exit. */
 __AFL_GCC_NO_COV static void __afl_guard_escape(int status) {
     sigjmp_buf *jb = __afl_guard_jmp;
-    if (jb)
+    if (jb) {
+        if (!__afl_guard_mine()) return;   /* vfork() child: the real exit */
         siglongjmp(*jb, __AFL_JMP_EXIT | (status & 0xFF));
+    }
     __afl_worker_exit(status);
 }
 
@@ -7927,6 +8030,9 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
 
 /* Per-input work an exiting child would do, for a child that stays. */
 __AFL_GCC_NO_COV static void __afl_persist_sync(void) {
+    /* Inline counters only reach the map folded: unfolded, every parked
+     * input reported no edges and the last one reported them all. */
+    __afl_sancov_fold();
 #if __AFL_DISTANCE_MODE
     __afl_dist_flush();
 #endif
@@ -7934,6 +8040,9 @@ __AFL_GCC_NO_COV static void __afl_persist_sync(void) {
     __afl_cmplog_flush();
     __afl_cmp_dump_counts();
     __afl_cmp_dump_sites();
+    /* A fork child starts a scope; a parked one dropped every record an
+     * earlier input had already emitted. */
+    __afl_cmplog_new_scope();
 #endif
 }
 
