@@ -17,11 +17,18 @@ _REPORT = "==1==ERROR: AddressSanitizer: heap-buffer-overflow"
 # Prints a report, then overruns the deadline ('H'); stays silent and hangs ('S'); returns ('A').
 _SRC = r"""
 #include <stdio.h>
-#include <unistd.h>
+#include <time.h>
+/* Spin, not usleep(): a shim loaded earlier in the process shortens sleeps. */
+static void overrun(void) {
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    do clock_gettime(CLOCK_MONOTONIC, &t);
+    while ((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000 < 600);
+}
 int f(const unsigned char *d, unsigned long n) {
     if (n && d[0] == 'A') return 0;
     if (n && d[0] == 'H') { fputs("@REPORT@\n", stderr); fflush(stderr); }
-    usleep(600000);
+    overrun();
     return 0;
 }
 """.replace("@REPORT@", _REPORT)
@@ -164,3 +171,35 @@ class TestPersistentLoaderTempFiles:
         pl.stop()
 
         assert self._files(tmp) == []
+
+
+class TestPersistentLoaderCollected:
+    """The drain thread's bound-method target pinned the loader: ``__del__`` never ran."""
+
+    def test_regression_unstopped_loader_is_collected(self, tmp_path):
+        import gc
+        import weakref
+
+        from fuzzer_tool.adapters.persistent_subprocess import PersistentLoader
+
+        cc = shutil.which("clang")
+        if not cc:
+            pytest.skip("no clang")
+        src, out = tmp_path / "f.c", tmp_path / "f.so"
+        src.write_text("int f(const unsigned char *d, unsigned long n) { return 0; }")
+        r = subprocess.run(
+            [cc, "-shared", "-fPIC", "-o", str(out), str(src)], capture_output=True, text=True
+        )
+        if r.returncode != 0:
+            pytest.skip(f"build failed: {r.stderr[:300]}")
+
+        loader = PersistentLoader(str(out), "f", timeout=1)
+        assert loader.start()
+        assert loader.run_one(b"A")[0] == 0
+        proc, ref = loader._proc, weakref.ref(loader)
+
+        del loader
+        gc.collect()
+
+        assert ref() is None
+        assert proc.wait(timeout=5) is not None  # __del__ -> stop() ended the loader

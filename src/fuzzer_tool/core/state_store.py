@@ -204,7 +204,8 @@ class StateStore:
                 # Do not silently continue: a rejected global means the file
                 # was tampered with or written by something else entirely.
                 log.error("refusing to load untrusted state file %s", self.path)
-            except (OSError, EOFError, pickle.UnpicklingError, ValueError) as exc:
+            # MemoryError: an allowlisted bytearray(n) with a hostile n.
+            except (OSError, EOFError, pickle.UnpicklingError, ValueError, MemoryError) as exc:
                 log.warning("could not read state file %s: %s", self.path, exc)
             self._data = {}
             return self._data

@@ -130,10 +130,10 @@ def test_regression_persistent_stderr_reaches_its_run(so, monkeypatch) -> None:
     # The report must be read with the run that wrote it, not the next one.
     real_thread = threading.Thread
 
-    def _slow_thread(*, target, daemon):
+    def _slow_thread(*, target, daemon, args=()):
         def _late():
             time.sleep(_DRAIN_DELAY)
-            target()
+            target(*args)
 
         return real_thread(target=_late, daemon=daemon)
 

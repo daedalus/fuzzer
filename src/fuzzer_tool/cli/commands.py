@@ -2288,7 +2288,8 @@ def cmd_rank(args):
     store.load()
 
     bloom = BloomFilter(capacity=100_000)
-    corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, bloom)
+    # add_default=False: the synthetic AAAAAAAA seed is not part of the corpus.
+    corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, bloom, add_default=False)
     if not corpus:
         print("[-] Empty corpus", file=sys.stderr)
         return 1
@@ -2394,7 +2395,8 @@ def cmd_ppmd(args):
 
     bloom = BloomFilter(capacity=100_000)
     bloom.init_fuzzy(max_recent=200)
-    corpus, _, _ = load_corpus(corpus_dir, bloom)
+    # add_default=False: the synthetic AAAAAAAA seed is not part of the corpus.
+    corpus, _, _ = load_corpus(corpus_dir, bloom, add_default=False)
 
     if not corpus:
         print(f"No seeds found in {corpus_dir}")

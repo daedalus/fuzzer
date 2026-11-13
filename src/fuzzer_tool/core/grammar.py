@@ -309,12 +309,11 @@ class Grammar:
                 elif m.group(2) is not None:
                     tokens.append(("lit", decode_quoted_literal(m.group(2))))
                 elif m.group(3) is not None:
-                    lo, hi = int(m.group(4)), int(m.group(5))
-                    clamped_lo = min(lo, _MAX_REPEAT)
-                    clamped_hi = min(hi, _MAX_REPEAT)
+                    clamped_lo = _repeat_count(m.group(4), _MAX_REPEAT)
+                    clamped_hi = _repeat_count(m.group(5), _MAX_REPEAT)
                     tokens.append(("repeat", m.group(3), clamped_lo, max(clamped_hi, clamped_lo)))
                 elif m.group(6) is not None:
-                    n = min(int(m.group(7)), _MAX_REPEAT)
+                    n = _repeat_count(m.group(7), _MAX_REPEAT)
                     tokens.append(("repeat", m.group(6), n, n))
                 elif m.group(8) is not None:
                     tokens.append(("repeat", m.group(8), 1, 8))
@@ -1173,6 +1172,16 @@ class SubtreePopulation:
 
     def __len__(self) -> int:
         return sum(len(pool) for pool in self._pools.values())
+
+
+def _repeat_count(digits: str, cap: int) -> int:
+    """A grammar repeat count clamped to *cap*.
+
+    Compared by length first: int() raises past 4300 digits.
+    """
+    if len(digits) > len(str(cap)):
+        return cap
+    return min(int(digits), cap)
 
 
 # Bracket levels TreeMutator.parse descends before treating the rest as a leaf.

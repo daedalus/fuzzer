@@ -1225,6 +1225,8 @@ def _word_is_noise(value: int, width: int) -> bool:
 
 def _collect_words(section: bytes, size: int, words: set[int]) -> None:
     """Add every aligned non-noise u64 then u32 of *section* to *words* (capped)."""
+    # The declared sh_size can exceed the bytes actually in the file.
+    size = min(size, len(section))
     for width in (8, 4):  # u64 first, then u32, like honggfuzz
         n_words = size // width
         for i in range(min(n_words, _DATA_WORD_COLLECT_CAP)):
