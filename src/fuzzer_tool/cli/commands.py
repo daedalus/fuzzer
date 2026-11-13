@@ -4,6 +4,7 @@ import argparse
 import builtins
 import datetime
 import glob
+import math
 import os
 import shlex
 import shutil
@@ -324,6 +325,18 @@ def _validate_target(target):
     if not os.access(target, os.X_OK):
         print(f"[-] Target not executable: {target}")
         sys.exit(1)
+
+
+def _dir_exists(path: str, what: str) -> bool:
+    """Whether *path* is a directory; prints the ``[-]`` line when it is not."""
+    if os.path.isdir(path):
+        return True
+    print(f"[-] {what} directory not found: {path}", file=sys.stderr)
+    return False
+
+
+# cmd_fuzz exit code for a campaign cut short by an unexpected error.
+_EXIT_ABORTED = 1
 
 
 class ProfileMode(Enum):
@@ -772,6 +785,10 @@ def cmd_fuzz(args):
     # consulted in _is_repeat(). None when the flag is unset.
     negative_bloom = load_negative_bloom(getattr(args, "negative_bloom", None))
 
+    differential = getattr(args, "differential", None)
+    if differential is not None:
+        _validate_target(differential)
+
     fuzzer = Fuzzer(
         target=args.target,
         multi_targets=args.targets if len(args.targets) > 1 else None,
@@ -1114,6 +1131,7 @@ def cmd_fuzz(args):
         kl_swucb=getattr(args, "kl_swucb", False),
         kl_swucb_window=getattr(args, "kl_swucb_window", 4000),
         markov_blend=getattr(args, "markov_blend", False),
+        differential_target=differential,
         dirichlet_alpha=AlphaMode(getattr(args, "dirichlet_alpha", AlphaMode.FIXED.value)),
         splice_donor=SpliceDonor(getattr(args, "splice_donor", SpliceDonor.UNIFORM.value)),
         target_schedule=TargetSchedule(
@@ -1322,7 +1340,11 @@ def cmd_fuzz(args):
                 target_label=", ".join(getattr(args, "targets", []) or []),
             )
 
-    if getattr(args, "ledger_preset", None) is not None:
+    # `is True`: only a real abort flag counts, not a stand-in fuzzer's attribute.
+    aborted = fuzzer.aborted is True
+
+    # A truncated campaign is not a finished ledger row.
+    if getattr(args, "ledger_preset", None) is not None and not aborted:
         _record_ledger(args, fuzzer)
 
     if getattr(args, "edge_hist", False):
@@ -1357,7 +1379,7 @@ def cmd_fuzz(args):
         written = generate_html_report(fuzzer, coverage_log_arg, plot_graph_path)
         print(f"[*] Plot graph saved to {written}")
 
-    return 0
+    return _EXIT_ABORTED if aborted else 0
 
 
 def _auto_tune_timeout(target, file_mode=False, target_args=None, runs=10):
@@ -1409,6 +1431,9 @@ def cmd_import(args):
         import_from_libfuzzer,
         write_dictionary,
     )
+
+    if not _dir_exists(args.source_dir, "Import source"):
+        return 1
 
     if args.format == "afl":
         seeds, crashes = import_from_afl(args.source_dir, args.corpus, args.crashes)
@@ -1752,6 +1777,9 @@ def cmd_minimize(args):
     )
     if count_mode is not CountItems.OFF and not args.coverage:
         print("[!] --count-aware needs -c/--coverage: no edge data without it", file=sys.stderr)
+
+    if not _dir_exists(args.corpus, "Corpus"):
+        return 1
 
     kept, removed = minimize_corpus(
         target=args.target,
@@ -3121,6 +3149,17 @@ def _positive_int_arg(value: str) -> int:
     return n
 
 
+def _positive_float_arg(value: str) -> float:
+    """argparse type: a finite number above 0."""
+    try:
+        x = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
+    if not (math.isfinite(x) and x > 0):
+        raise argparse.ArgumentTypeError(f"must be > 0, got {value}")
+    return x
+
+
 def _pos_arena_arms_arg(value: str) -> tuple[str, ...]:
     """argparse ``type=`` for --pos-arena-arms; a bad name is a usage error."""
     try:
@@ -3342,8 +3381,12 @@ def main() -> int:
         default=None,
         help="Crashes directory (default: ~/fuzzing/<target>/crashes)",
     )
-    fuzz_parser.add_argument("-m", "--max-len", type=int, default=4096, help="Max input length")
-    fuzz_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
+    fuzz_parser.add_argument(
+        "-m", "--max-len", type=_positive_int_arg, default=4096, help="Max input length"
+    )
+    fuzz_parser.add_argument(
+        "-t", "--timeout", type=_positive_float_arg, default=1, help="Timeout in seconds"
+    )
     fuzz_parser.add_argument(
         "--max-execs",
         type=int,

@@ -8317,6 +8317,11 @@ class Fuzzer:
     def _format_elapsed(self):
         return self._stats.format_elapsed()
 
+    @property
+    def aborted(self) -> bool:
+        """Whether run() ended on an unexpected error rather than a stop."""
+        return self._aborted_by_error
+
     def print_stats(self):
         return self._stats.print_stats()
 
@@ -10701,8 +10706,11 @@ class Fuzzer:
                         self._run_sanitizer_replays()
         except (KeyboardInterrupt, SystemExit):
             pass
-        except OSError as e:
-            log.warning("Fuzzing interrupted by OS error: %s", e)
+        except OSError:
+            # ENOSPC / EMFILE mid-run is not a clean stop: the crash being
+            # saved may be lost. Same handling as any other unexpected error.
+            log.exception("Fuzzing aborted by OS error — persisting state before exit")
+            self._aborted_by_error = True
         except Exception:
             # Everything below this try is end-of-run persistence: _dump_stats,
             # every _state_store.set, both _save_state, and the ablation fd

@@ -370,6 +370,7 @@ class PersistentLoader:
         self._last_bitmap = None
         self._restarting = False
         self._child_pid_file: str | None = None
+        self._loader_path: str | None = None
 
         # Fault-address/register relay from the last run (None/{} when absent)
         self._last_fault_addr: int | None = None
@@ -395,6 +396,8 @@ class PersistentLoader:
         if self._proc and self._proc.poll() is None:
             return True
 
+        # A restart (hang, dead loader) reaches here without stop().
+        self._drop_temp_files()
         fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_persist_")
         os.write(fd, _PERSISTENT_LOADER.encode())
         os.close(fd)
@@ -631,6 +634,7 @@ class PersistentLoader:
         self._ready = False
         self._kill_orphaned_child()
         if proc is None:
+            self._drop_temp_files()
             return
         try:
             proc.stdin.write(b"QUIT\n")
@@ -649,11 +653,17 @@ class PersistentLoader:
         # thread never sees EOF and the process stays permanently
         # multi-threaded (poisoning every later os.fork()).
         _close_streams(proc)
-        # Clean up PID file
-        if self._child_pid_file:
-            with contextlib.suppress(OSError):
-                os.unlink(self._child_pid_file)
-            self._child_pid_file = None
+        self._drop_temp_files()
+
+    def _drop_temp_files(self) -> None:
+        """Unlink this run's loader script and grandchild PID file."""
+        for path in (self._loader_path, self._child_pid_file):
+            if path:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)
+
+        self._loader_path = None
+        self._child_pid_file = None
 
     def _kill_orphaned_child(self):
         """Kill the grandchild process (target function) if it was orphaned by timeout.

@@ -1019,9 +1019,12 @@ def run_target_fast(
         # Own process group, so a timeout kill reaches anything the target
         # spawned. The sibling paths get this from preexec_fn=os.setsid.
         argv = _limited_argv([target, fname])
-        pid = os.posix_spawn(argv[0], argv, e, file_actions=file_actions, setpgroup=0)
-        os.close(stdin_fd)
-        os.close(stderr_w)
+        # Child-side fds close on every path: a failed spawn leaked both.
+        try:
+            pid = os.posix_spawn(argv[0], argv, e, file_actions=file_actions, setpgroup=0)
+        finally:
+            os.close(stdin_fd)
+            os.close(stderr_w)
         _track(pid)
 
         # Open perf counters on the child PID while still running
