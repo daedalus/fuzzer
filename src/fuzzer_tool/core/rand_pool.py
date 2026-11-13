@@ -6,8 +6,26 @@ numpy call (C-level), then dispenses them via fast array indexing.
 Key optimisations over ``random`` module:
 - Pool generation: ``rng.integers`` fills 4096 entries in one C call.
 - Pre-computed ``% 256``: ``integers(0, 255)`` reads a uint8 array — no modulo.
-- ``shuffle`` / ``sample`` delegate to the Generator's C-level functions.
+- ``shuffle`` / ``sample`` may delegate to the Generator's C-level functions
+  on some paths (see stream model below).
 - Inlined ``choice`` avoids method call indirection.
+
+Stream model
+------------
+Not every method consumes the pre-fetched uint32 pool:
+
+- **Pool-backed** draws consume/refill ``_pool``/``_m256`` and are subject to
+  pool entropy gates: e.g. ``random``, ``randrange``/``randint`` and their
+  list forms, ``randbytes``, ``choice``/``choice_list``, ``_randbelow``/
+  ``random_between``, ``sample`` fast paths and Floyd sampling, and small
+  shuffles.
+- **Generator-backed** draws use ``self._rng`` directly (no pool words, no
+  pool entropy gate): e.g. ``shuffle`` for ``n >= 8``, ``sample`` for
+  ``k >= 3`` when Floyd is disabled, ``weighted_choice_list``, ``categorical``,
+  and continuous/distribution helpers.
+
+Because of this, seeded reproducibility depends on method, thresholds, and
+configuration (such as ``FUZZER_RAND_FLOYD``) as well as the seed.
 
 Opt-in Floyd sampling (``--rand-floyd-sample`` / ``FUZZER_RAND_FLOYD=1``):
   When enabled, the ``k >= 3`` branch of ``sample()`` uses Floyd's algorithm
@@ -47,6 +65,7 @@ import bisect
 import itertools
 import math
 import os
+import warnings
 
 import numpy as np
 
@@ -119,6 +138,47 @@ def _shannon_entropy(data: bytes) -> float:
     counts = np.bincount(np.frombuffer(data, dtype=np.uint8), minlength=256).astype(np.float64)
     c = counts[counts > 0] / len(data)
     return float(-np.sum(c * np.log2(c)))
+
+
+def _canonical_state_bytes(state, _prefix: bytes = b"") -> bytes:
+    """Deterministically serialize a bit-generator state for hashing.
+
+    Unlike ``repr(state)`` this does not depend on dict repr formatting
+    details and encodes numpy scalars/arrays by dtype, shape, and raw bytes.
+    """
+    if isinstance(state, dict):
+        parts = [b"dict", str(len(state)).encode()]
+        for key in sorted(state):
+            parts.append(str(key).encode())
+            parts.append(_canonical_state_bytes(state[key]))
+        return _prefix + b"\0".join(parts)
+    if isinstance(state, (list, tuple)):
+        parts = [b"seq", type(state).__name__.encode(), str(len(state)).encode()]
+        for item in state:
+            parts.append(_canonical_state_bytes(item))
+        return _prefix + b"\0".join(parts)
+    if isinstance(state, np.ndarray):
+        return _prefix + b"\0".join(
+            [
+                b"ndarray",
+                str(state.dtype).encode(),
+                str(state.shape).encode(),
+                np.ascontiguousarray(state).tobytes(),
+            ]
+        )
+    if isinstance(state, np.generic):
+        arr = np.asarray(state)
+        return _prefix + b"\0".join(
+            [b"npscalar", str(arr.dtype).encode(), np.ascontiguousarray(arr).tobytes()]
+        )
+    if isinstance(state, (bytes, bytearray, memoryview)):
+        return _prefix + b"bytes\0" + bytes(state)
+    if isinstance(state, str):
+        return _prefix + b"str\0" + state.encode("utf-8", "surrogatepass")
+    if state is None or isinstance(state, (bool, int, float)):
+        return _prefix + b"py\0" + repr(state).encode()
+    # Last resort: stable string form for uncommon state payloads.
+    return _prefix + b"repr\0" + repr(state).encode()
 
 
 class RandPool:
@@ -290,7 +350,7 @@ class RandPool:
             return
         import hashlib
 
-        state_bytes = repr(self._rng.bit_generator.state).encode()
+        state_bytes = _canonical_state_bytes(self._rng.bit_generator.state)
         digest = hashlib.sha256(state_bytes + bytes(raw)).digest()
         seed_words = [int.from_bytes(digest[i : i + 4], "little") for i in range(0, len(digest), 4)]
         self._rng = np.random.default_rng(np.random.SeedSequence(seed_words))
@@ -345,11 +405,14 @@ class RandPool:
         Counts that fit in one pool keep the original refill-then-slice
         sequence exactly, so existing seeded runs are unchanged; only the
         previously-broken oversized path is new.
+
+        The returned array is a copy: callers may hold it across later draws
+        (and refills), which overwrite ``self._pool`` in place.
         """
         if count <= _POOL_ENTRIES:
             if self._idx + count > _POOL_ENTRIES:
                 self._refill()
-            out = self._pool[self._idx : self._idx + count]
+            out = self._pool[self._idx : self._idx + count].copy()
             self._idx += count
             return out
 
@@ -623,20 +686,32 @@ class RandPool:
 
         ``random.choices(seq, weights=weights, k=k)`` equivalent.
         Vectorized via numpy for the index generation.
+
+        Draws indices from the backing ``Generator`` (not the pre-fetched
+        pool), like the other distribution helpers.
         """
         n = len(seq)
         if n == 0:
             raise IndexError("cannot choose from empty sequence")
+        if len(weights) != n:
+            raise ValueError(f"weighted_choice_list: {len(weights)} weights for {n} items")
         if k <= 0:
             return []
         total = sum(weights)
         if total <= 0:
             raise IndexError("weighted_choice_list: weights sum to <= 0")
+        if min(weights) < 0:
+            raise ValueError("weighted_choice_list: negative weight")
         probs = [w / total for w in weights]
         indices = self._rng.choice(n, size=k, replace=True, p=probs)
         return [seq[i] for i in indices]
 
     def shuffle(self, seq: list) -> None:
+        """Shuffle *seq* in place.
+
+        For small lists (``n < 8``) uses pool-backed Fisher-Yates draws; for
+        larger lists delegates to ``self._rng.shuffle`` (generator-backed).
+        """
         n = len(seq)
         if n < 8:
             for i in range(n - 1, 0, -1):
@@ -873,6 +948,7 @@ class RandPool:
 
         Inverse-CDF over one cumsum: ~2x cheaper than
         :meth:`weighted_choice_list` on a numpy vector (no list round-trip).
+        Uses ``self._rng.random`` (generator-backed), not the pre-fetched pool.
         """
         if count <= 0:
             return []
@@ -957,21 +1033,31 @@ class RandPool:
 _default_instance: RandPool | None = None
 
 
+def is_default_rand_pool_initialized() -> bool:
+    """Return whether the process-wide shared ``RandPool`` exists."""
+    return _default_instance is not None
+
+
 def get_default_rand_pool(seed=None) -> RandPool:
     """Return the process-wide shared ``RandPool``, creating it if needed.
 
     ``seed`` only has an effect on the call that actually creates the
-    singleton; once created, later calls (with or without a ``seed``)
-    just return the existing instance unchanged. Silently reseeding an
-    already-shared instance out from under everything already holding a
-    reference to it would move their stream without their knowledge,
-    which is its own source of non-determinism -- so seeding after the
-    fact is a hard error via :func:`configure_default_rand_pool_seed`
-    instead of a silent option here.
+    singleton; once created, later calls return the existing instance
+    unchanged. Passing a ``seed`` after initialization emits a warning,
+    because the seed is ignored and existing holders keep their stream.
+    To choose the initial seed explicitly, call
+    :func:`configure_default_rand_pool_seed` before first use.
     """
     global _default_instance
     if _default_instance is None:
         _default_instance = RandPool(seed=_default_source(seed))
+        return _default_instance
+    if seed is not None:
+        warnings.warn(
+            "get_default_rand_pool(seed=...) ignored because the default RandPool "
+            "singleton is already initialized",
+            stacklevel=2,
+        )
     return _default_instance
 
 
