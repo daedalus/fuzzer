@@ -15,19 +15,16 @@ _FAILED_SPAWNS = 20
 _REPORT = "==1==ERROR: AddressSanitizer: heap-buffer-overflow"
 
 # Prints a report, then overruns the deadline ('H'); stays silent and hangs ('S'); returns ('A').
-_SRC = (
-    r"""
+_SRC = r"""
 #include <stdio.h>
 #include <unistd.h>
 int f(const unsigned char *d, unsigned long n) {
     if (n && d[0] == 'A') return 0;
-    if (n && d[0] == 'H') { fputs("%s\n", stderr); fflush(stderr); }
+    if (n && d[0] == 'H') { fputs("@REPORT@\n", stderr); fflush(stderr); }
     usleep(600000);
     return 0;
 }
-"""
-    % _REPORT
-)
+""".replace("@REPORT@", _REPORT)
 _DEADLINE_S = 0.2
 
 

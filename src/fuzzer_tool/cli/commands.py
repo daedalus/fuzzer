@@ -2,6 +2,7 @@
 
 import argparse
 import builtins
+import contextlib
 import datetime
 import glob
 import math
@@ -1487,19 +1488,21 @@ def cmd_tmin(args):
             else:
                 print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
 
-    minimized = tmin(
-        target=args.target,
-        crash_file=args.crash_file,
-        timeout=args.timeout,
-        file_mode=args.file_mode,
-        target_args=args.target_args,
-        use_coverage=args.coverage,
-        max_stages=args.max_stages,
-        grammar=grammar,
-        lineage=getattr(args, "lineage", False),
-        corpus_dir=getattr(args, "corpus_dir", None),
-        also_dir=getattr(args, "also_interesting", None),
-    )
+    # Without -O the minimized bytes own stdout: progress goes to stderr.
+    with contextlib.redirect_stdout(sys.stdout if args.output else sys.stderr):
+        minimized = tmin(
+            target=args.target,
+            crash_file=args.crash_file,
+            timeout=args.timeout,
+            file_mode=args.file_mode,
+            target_args=args.target_args,
+            use_coverage=args.coverage,
+            max_stages=args.max_stages,
+            grammar=grammar,
+            lineage=getattr(args, "lineage", False),
+            corpus_dir=getattr(args, "corpus_dir", None),
+            also_dir=getattr(args, "also_interesting", None),
+        )
 
     if minimized is None:
         return 1

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from fuzzer_tool.cli import commands
-from fuzzer_tool.cli.commands import cmd_fuzz, cmd_import, cmd_minimize, main
+from fuzzer_tool.cli.commands import cmd_fuzz, cmd_import, main
 from tests import test_commands_extended as ext
 
 _USAGE_ERROR = 2

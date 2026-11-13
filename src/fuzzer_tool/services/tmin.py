@@ -1,5 +1,6 @@
 """Crash minimizer: binary-search for smallest input that still triggers a crash."""
 
+import contextlib
 import os
 import shutil
 import sys
@@ -345,15 +346,17 @@ def main():
         print(f"[-] Target not found: {args.target}", file=sys.stderr)
         sys.exit(1)
 
-    minimized = tmin(
-        target=args.target,
-        crash_file=args.crash_file,
-        timeout=args.timeout,
-        file_mode=args.file_mode,
-        target_args=args.target_args,
-        use_coverage=args.coverage,
-        max_stages=args.max_stages,
-    )
+    # Without -o the minimized bytes own stdout: progress goes to stderr.
+    with contextlib.redirect_stdout(sys.stdout if args.output else sys.stderr):
+        minimized = tmin(
+            target=args.target,
+            crash_file=args.crash_file,
+            timeout=args.timeout,
+            file_mode=args.file_mode,
+            target_args=args.target_args,
+            use_coverage=args.coverage,
+            max_stages=args.max_stages,
+        )
 
     if minimized is None:
         sys.exit(1)

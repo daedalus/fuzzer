@@ -71,3 +71,22 @@ def test_replace_within_same_second_keeps_new(saved, monkeypatch):
 
     assert _save_small(crashes_dir, state) == old_base
     assert _bins(crashes_dir) == [_SMALL]
+
+
+def test_regression_failed_first_save_is_retried(tmp_path, monkeypatch):
+    """A failed write marked the input and signature known: the crash was never saved."""
+    hashes, sigs, mins = set(), {}, {}
+    real = fs._publish_crash
+
+    def enospc(*_a, **_k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(fs, "_publish_crash", enospc)
+    with pytest.raises(OSError):
+        fs.save_crash(_BIG, _SEGV_RC, "", tmp_path, hashes, sigs, crash_min_sizes=mins)
+
+    assert (hashes, sigs, mins) == (set(), {}, {})
+
+    monkeypatch.setattr(fs, "_publish_crash", real)
+    assert fs.save_crash(_BIG, _SEGV_RC, "", tmp_path, hashes, sigs, crash_min_sizes=mins)
+    assert _bins(tmp_path) == [_BIG]
