@@ -211,3 +211,41 @@ class TestCompressedSectionCap:
         payload = bytes(range(256)) * 16
 
         assert _elf_sections(self._elf(len(payload), payload))[b".debug_info"] == payload
+
+
+class TestTreeParseDepth:
+    """``TreeMutator.parse`` recursed once per bracket level: a nested seed raised ``RecursionError``."""
+
+    @staticmethod
+    def _mutator():
+        from fuzzer_tool.core.grammar import Grammar, TreeMutator
+
+        grammar = Grammar()
+        grammar.parse('value = "x"\n')
+        return TreeMutator(grammar)
+
+    @staticmethod
+    def _flat(node) -> bytes:
+        """Leaf bytes in order, walked without recursion."""
+        out, stack = [], [node]
+        while stack:
+            cur = stack.pop()
+            if cur.children:
+                stack.extend(reversed(cur.children))
+                continue
+            out.append(cur.data)
+        return b"".join(out)
+
+    @pytest.mark.parametrize("depth", [2000, 20000])
+    def test_regression_deep_nesting_parses(self, depth):
+        data = b"[" * depth + b"]" * depth
+
+        assert self._flat(self._mutator().parse(data)) == data
+
+    def test_shallow_nesting_keeps_its_tree(self):
+        """Falsification: ordinary nesting still splits into delimiters and elements."""
+        tree = self._mutator().parse(b"[[1,2],[3]]")
+
+        # delim, [1,2], [3], delim; separators are not kept as nodes.
+        assert [c.data for c in tree.children if c.rule == "delim"] == [b"[", b"]"]
+        assert [self._flat(c) for c in tree.children[1:-1]] == [b"[12]", b"[3]"]

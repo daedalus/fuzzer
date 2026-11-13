@@ -1957,9 +1957,14 @@ class EdgeTracker:
         Args:
             exec_count: Current execution count.
         """
+        # A legacy timeline restores without clock readings (see
+        # _restore_timeline). Stamping only the new points would leave the
+        # three arrays unequal: timestamps stay all-or-nothing.
+        timed = len(self._coverage_timestamps) == len(self._coverage_execs)
         self._coverage_execs.append(exec_count)
         self._coverage_edges.append(len(self.cumulative_edges))
-        self._coverage_timestamps.append(time.time())
+        if timed:
+            self._coverage_timestamps.append(time.time())
         if len(self._coverage_execs) > COVERAGE_TIMELINE_MAX:
             del self._coverage_execs[:250]
             del self._coverage_edges[:250]
@@ -3980,15 +3985,7 @@ class EdgeTracker:
             "edge_first_seen": {str(e): c for e, c in self._edge_first_seen.items()},
             "edge_first_exec": {str(e): c for e, c in self._edge_first_exec.items()},
             "edge_last_seen": {str(e): c for e, c in self._edge_last_seen.items()},
-            "coverage_timeline": [
-                list(p)
-                for p in zip(
-                    self._coverage_execs,
-                    self._coverage_edges,
-                    self._coverage_timestamps,
-                    strict=True,
-                )
-            ],
+            "coverage_timeline": self._timeline_rows(),
             "correlation_matrix": {f"{a},{b}": c for (a, b), c in self._correlation_matrix.items()},
             "correlation_total": self._correlation_total,
             "seed_stack_depth": self.seed_stack_depth,
@@ -4067,6 +4064,17 @@ class EdgeTracker:
             for edge, count in hc.items():
                 self._aggregate_totals[edge] = self._aggregate_totals.get(edge, 0) + count
                 self._aggregate_total_count += count
+
+    def _timeline_rows(self) -> list[list]:
+        """Timeline as ``[execs, edges, timestamp]`` rows; pairs when untimed.
+
+        Untimed: restored from a snapshot written before timestamps joined
+        the timeline. The strict zip of all three raised on every save.
+        """
+        columns = [self._coverage_execs, self._coverage_edges]
+        if len(self._coverage_timestamps) == len(self._coverage_execs):
+            columns.append(self._coverage_timestamps)
+        return [list(p) for p in zip(*columns, strict=True)]
 
     def _restore_timeline(self, tl: list) -> None:
         """Restore the (execs, edges[, timestamp]) coverage timeline."""

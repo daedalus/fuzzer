@@ -1098,15 +1098,9 @@ class FuzzRound:
         # strategy actually picked this parent, and independent of
         # whether --bayesian is on -- canary does not need
         # BayesianSeedQuality enabled to track its own posterior.
-        if f._seed_canary:
-            f._seed_canary.record(parent_key, success=found, weight=weight)
-        # Elo-compatibility signal only -- round-robin's own selection
-        # ignores it entirely (deterministic cycling), same as its
-        # operator-side counterpart's record().
-        if f._seed_round_robin:
-            f._seed_round_robin.record(parent_key, success=found, weight=weight)
-        if f._seed_drr:
-            f._seed_drr.record(parent_key, success=found, weight=weight)
+        # For round-robin and DRR an Elo-compatibility signal only: their own
+        # selection ignores it (deterministic cycling).
+        f._record_seed_floor_arms(data, found, weight)
         f._record_seed_os_arms(data, found, weight)
 
     def _feed_models(self) -> None:

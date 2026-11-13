@@ -3576,6 +3576,10 @@ class Fuzzer:
 
             self._seed_drr = SeedDRRScheduler()
             log.info("Seed deficit-round-robin scheduling enabled")
+        # Live subset fed by the outcome record site (_record_seed_floor_arms).
+        self._seed_floor_arms = tuple(
+            arm for arm in (self._seed_canary, self._seed_round_robin, self._seed_drr) if arm
+        )
         # OS / network seed arms. _seed_os_arms is the live subset the
         # outcome record site feeds (_record_seed_os_arms).
         self._seed_mlfq = SeedMLFQScheduler() if seed_mlfq_scheduler else None
@@ -5844,6 +5848,20 @@ class Fuzzer:
 
         key = self._seed_key(parent)
         for arm in self._seed_os_arms:
+            arm.record(key, success=success, weight=weight)
+
+    def _record_seed_floor_arms(self, parent: bytes, success: bool, weight: float) -> None:
+        """Feed one corpus parent's outcome to the canary / round-robin / DRR seed arms.
+
+        Same guard as _record_seed_os_arms: a parent outside the corpus is
+        never a candidate, and none of the three trims its ledger.
+        """
+        arms = self._seed_floor_arms
+        if not arms or not self._in_corpus(parent):
+            return
+
+        key = self._seed_key(parent)
+        for arm in arms:
             arm.record(key, success=success, weight=weight)
 
     def _in_corpus(self, parent: bytes) -> bool:
