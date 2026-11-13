@@ -553,6 +553,18 @@ def _elf64_le(elf: bytes) -> bool:
     return len(elf) >= 64 and elf[:4] == b"\x7fELF" and elf[4] == 2 and elf[5] == 1
 
 
+def _shdrs_in_bounds(n: int, e_shoff: int, e_shnum: int, e_shentsize: int) -> bool:
+    """Whether the whole section-header table lies inside an *n*-byte image.
+
+    Section headers are attacker-controlled and ignored by the kernel: a
+    binary with ``e_shoff = 2**64 - 1`` still runs. Phrased as a subtraction
+    so a 64-bit e_shoff cannot overflow the comparison.
+    """
+    if e_shentsize < _ELF64_SHDR_MIN:
+        return False
+    return 0 < e_shoff <= n and e_shnum * e_shentsize <= n - e_shoff
+
+
 def _sym_sections(elf: bytes) -> tuple | None:
     """Section-header offsets of (.symtab, .strtab, .dynsym, .dynstr).
 
@@ -564,6 +576,8 @@ def _sym_sections(elf: bytes) -> tuple | None:
     e_shentsize = struct.unpack_from("<H", elf, 58)[0]
     e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
     if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return None
+    if not _shdrs_in_bounds(len(elf), e_shoff, e_shnum, e_shentsize):
         return None
     shstr_off = e_shoff + e_shstrndx * e_shentsize
     shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
@@ -757,6 +771,8 @@ def _has_static_symtab(target: str) -> bool:
         e_shoff = struct.unpack_from("<Q", elf, 40)[0]
         e_shnum = struct.unpack_from("<H", elf, 60)[0]
         e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+        if not _shdrs_in_bounds(len(elf), e_shoff, e_shnum, e_shentsize):
+            return False
         for i in range(e_shnum):
             sh = e_shoff + i * e_shentsize
             if struct.unpack_from("<I", elf, sh + 4)[0] == 2:  # SHT_SYMTAB
@@ -1905,7 +1921,8 @@ def is_elf_executable(target: str) -> bool:
             phentsize, phnum = struct.unpack_from("<HH", head, _E_PHENTSIZE)
             f.seek(phoff)
             phdrs = f.read(phentsize * phnum)
-    except OSError:
+    # ValueError / OverflowError: seek() on an e_phoff past the off_t range.
+    except (OSError, ValueError, OverflowError, struct.error):
         return False
 
     n = len(phdrs)

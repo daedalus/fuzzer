@@ -152,6 +152,21 @@ def _cstr(data: bytes, off: int) -> tuple[bytes, int]:
 # ── ELF section extraction ─────────────────────────────────────────────
 
 
+_ELFCOMPRESS_ZLIB = 1
+_CHDR_SIZE = 24
+# Largest section inflated: a few hundred KB of zlib can declare gigabytes.
+_MAX_INFLATE = 1 << 30
+
+
+def _inflate(payload: bytes, declared: int) -> bytes:
+    """At most ``min(declared, _MAX_INFLATE)`` bytes of a zlib section body."""
+    limit = min(declared, _MAX_INFLATE)
+    # max_length 0 means "no limit" to zlib, so an empty section is spelled out.
+    if limit == 0:
+        return b""
+    return zlib.decompressobj().decompress(payload, limit)
+
+
 def _elf_sections(elf_data: bytes) -> dict[bytes, tuple[int, int, int]]:
     """Map section name → (file_offset, size, flags), decompressing
     SHF_COMPRESSED sections. Returns {} for non-ELF or malformed input."""
@@ -170,15 +185,19 @@ def _elf_sections(elf_data: bytes) -> dict[bytes, tuple[int, int, int]]:
         for i in range(e_shnum):
             sh = e_shoff + i * e_shentsize
             name_off = struct.unpack_from("<I", elf_data, sh)[0]
-            name = elf_data[shstr_off + name_off :].split(b"\x00", 1)[0]
+            # find(), not a slice-and-split: that copied the file tail per section.
+            name_at = shstr_off + name_off
+            name_end = elf_data.find(b"\x00", name_at)
+            name = elf_data[name_at : name_end if name_end >= 0 else len(elf_data)]
             flags = struct.unpack_from("<Q", elf_data, sh + 8)[0]
             offset = struct.unpack_from("<Q", elf_data, sh + 24)[0]
             size = struct.unpack_from("<Q", elf_data, sh + 32)[0]
             data = elf_data[offset : offset + size]
             if flags & _SHF_COMPRESSED and len(data) >= 24:
-                ch_type, ch_size = struct.unpack_from("<IQ", data, 0)
-                if ch_type == 1:  # ELFCOMPRESS_ZLIB
-                    data = zlib.decompress(data[24 : 24 + (size - 24)])[:ch_size]
+                # Elf64_Chdr: ch_type(4) ch_reserved(4) ch_size(8) ch_addralign(8).
+                ch_type, ch_size = struct.unpack_from("<I4xQ", data, 0)
+                if ch_type == _ELFCOMPRESS_ZLIB:
+                    data = _inflate(data[_CHDR_SIZE:], ch_size)
             sections[name] = data
         return sections
     except Exception:
@@ -729,6 +748,22 @@ class DwarfLineResolver:
         self._by_basename: dict[str, dict[int, list[int]]] = {}
         self._loaded = False
 
+    def _load_unit(self, sections, info: bytes, line: bytes, cu_off: int) -> None:
+        """Line program of the unit at *cu_off*; a unit that fails is skipped.
+
+        Type units (``-fdebug-types-section``), unsupported forms and a bad
+        line program used to end the walk and drop every later unit.
+        """
+        try:
+            parsed = _parse_cu_die(sections, info, cu_off)
+            if parsed is None:
+                return
+            stmt_list, comp_dir, _cu_name, addr_size = parsed
+            if stmt_list is not None:
+                self._parse_line_program(line, stmt_list, comp_dir, addr_size, sections)
+        except Exception:
+            log.debug("DWARF unit at %#x skipped", cu_off, exc_info=True)
+
     def load(self) -> bool:
         """Parse DWARF sections. Returns True if any line info was found."""
         try:
@@ -745,17 +780,12 @@ class DwarfLineResolver:
 
         try:
             cu_off = 0
-            while cu_off < len(info):
-                parsed = _parse_cu_die(sections, info, cu_off)
-                if parsed is None:
-                    break
-                stmt_list, comp_dir, _cu_name, addr_size = parsed
-                if stmt_list is not None:
-                    self._parse_line_program(line, stmt_list, comp_dir, addr_size, sections)
-                # advance to next CU
+            while cu_off + 4 <= len(info):
                 unit_length = struct.unpack_from("<I", info, cu_off)[0]
                 if unit_length == 0xFFFFFFFF or unit_length == 0:
                     break
+
+                self._load_unit(sections, info, line, cu_off)
                 cu_off += 4 + unit_length
         except Exception:
             log.debug("DWARF parse failed for %s", self.target, exc_info=True)
