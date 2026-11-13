@@ -385,7 +385,7 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
                 return apply_delta_v2(parent, diff)
             return apply_delta(parent, diff)
         except _BAD_DELTA as exc:
-            log.warning("skipping corrupt delta %s: %s", delta_file.name, exc)
+            log.warning("skipping corrupt delta %r: %s", delta_file.name, exc)
     return None
 
 
@@ -502,7 +502,15 @@ def _absorb(
 # What a hand-edited, truncated or foreign delta record raises: bad JSON and
 # bad UTF-8 (ValueError), wrong shapes (TypeError, AttributeError, KeyError,
 # IndexError), unreadable file (OSError). One bad record must not stop a load.
-_BAD_DELTA = (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError)
+_BAD_DELTA = (
+    OSError,
+    ValueError,
+    TypeError,
+    KeyError,
+    IndexError,
+    AttributeError,
+    RecursionError,  # json.loads on deeply nested input
+)
 
 
 def _resolve_deltas(
@@ -533,7 +541,7 @@ def _resolve_deltas(
                 else:
                     still_remaining[h] = f
             except _BAD_DELTA as exc:
-                log.warning("skipping corrupt delta %s: %s", f.name, exc)
+                log.warning("skipping corrupt delta %r: %s", f.name, exc)
         remaining = still_remaining
     return resolved
 

@@ -182,6 +182,7 @@ class PersistentRunner:
         try:
             os.kill(self.pid, signal.SIGUSR1)
         except ProcessLookupError:
+            self._reaped()
             return -2, "target process not found"
 
         deadline = time.time() + self.timeout
@@ -193,10 +194,10 @@ class PersistentRunner:
                 continue
 
             if os.WIFEXITED(status):
-                self._started = False
+                self._reaped()
                 return os.WEXITSTATUS(status), self._read_stderr() or "target exited"
             if os.WIFSIGNALED(status):
-                self._started = False
+                self._reaped()
                 return signal_rc(os.WTERMSIG(status)), self._read_stderr()
             if os.WIFSTOPPED(status):
                 sig = os.WSTOPSIG(status)
@@ -220,8 +221,17 @@ class PersistentRunner:
             os.waitpid(self.pid, 0)
         except (ProcessLookupError, ChildProcessError):
             pass
-        self._started = False
+        self._reaped()
         return -1, self._read_stderr() or "timeout"
+
+    def _reaped(self) -> None:
+        """The child is gone and waited for: forget its pid.
+
+        The kernel may hand the number to an unrelated process; a later
+        stop() / _cleanup() would SIGKILL that one.
+        """
+        self._started = False
+        self.pid = None
 
     def restart(self) -> bool:
         """Replace a dead target (crash, exit, timeout) with a fresh one."""

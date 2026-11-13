@@ -423,7 +423,9 @@ class PersistentLoader:
         if self._proc and self._proc.poll() is None:
             return True
 
-        # A restart (hang, dead loader) reaches here without stop().
+        # A restart (hang, dead loader) reaches here without stop(). The
+        # dead loader's target may still run: kill it before its pid file goes.
+        self._kill_orphaned_child()
         self._drop_temp_files()
         fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_persist_")
         os.write(fd, _PERSISTENT_LOADER.encode())
@@ -485,7 +487,10 @@ class PersistentLoader:
             log.info("Persistent loader started: %s", self.target)
             return True
 
+        # Still alive but unready: left running, the next start() would
+        # see a live process and return True.
         log.warning("Persistent loader failed to start")
+        self.stop()
         return False
 
     @property
