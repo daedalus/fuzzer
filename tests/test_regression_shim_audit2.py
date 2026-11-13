@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fuzzer_tool.adapters.shm import ShmCoverage
 from tests.conftest import requires_clang
-from tests.test_regression_shim_audit import _build, _clean_env
+from tests.test_regression_shim_audit import SHIM, _build, _clean_env
 
 RUN_TIMEOUT_S = 30
 BUDGET_US = 20000
@@ -321,7 +321,7 @@ def test_regression_persist_sync_folds_and_rescopes(tmp_path):
         shm.cleanup()
 
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == "attached 1 ticked 1 live 0 scopes 1".split()
+    assert r.stdout.split() == ["attached", "1", "ticked", "1", "live", "0", "scopes", "1"]
     assert edges >= 1
 
 
@@ -427,3 +427,349 @@ def test_regression_wguard_same_id_reattach(tmp_path):
     r = _wguard(tmp_path, _WGUARD_REUSE)
     assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
     assert r.stdout.splitlines() == ["mode 1 touched 1"]
+
+
+def _cc(out: Path, *args: str | Path) -> Path:
+    """clang with a custom command line (link flags, preload-only builds)."""
+    r = subprocess.run(["clang", *map(str, args), "-o", str(out)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return out
+
+
+# ── Pending re-resolve vs a nested first-time miss ────────────────────
+
+# A dlsym wrapper that calls strncmp on every lookup and memchr on "strn*"
+# names: the memchr miss lands while the strncmp slot is being re-resolved.
+_PENDING = r"""
+#include <stdio.h>
+#include <string.h>
+#define PROBE_LEN 4
+#define SCAN_LEN 7
+#define EARLY_CTOR 101
+
+void *__real_dlsym(void *h, const char *name);
+
+void *__wrap_dlsym(void *h, const char *name) {
+    static void *volatile sink;
+    if (strncmp(name, "zzz_", PROBE_LEN) == 0) return NULL;
+    if (strncmp(name, "strn", PROBE_LEN) == 0) sink = memchr(name, 'q', SCAN_LEN);
+    return __real_dlsym(h, name);
+}
+
+static const char *who(void *p) {
+    if (p == (void *)__afl_fb_strncmp || p == (void *)__afl_fb_memchr) return "fallback";
+    if (p == __real_dlsym(RTLD_NEXT, "strncmp")) return "strncmp";
+    if (p == __real_dlsym(RTLD_NEXT, "memchr")) return "memchr";
+    return "other";
+}
+
+/* Ahead of the shim's constructors: the first interposed call, a lookup. */
+__attribute__((constructor(EARLY_CTOR))) static void early(void) {
+    static volatile int r;
+    r = memcmp("ab", "ac", 2);
+}
+
+int main(void) {
+    printf("strncmp=%s memchr=%s\n", who((void *)real_strncmp), who((void *)real_memchr));
+    return 0;
+}
+"""
+
+
+@requires_clang
+def test_regression_pending_resolve_keeps_its_slot(tmp_path):
+    src = tmp_path / "pend.c"
+    src.write_text(_PENDING)
+    exe = _cc(
+        tmp_path / "pend",
+        "-O1", "-D__AFL_CMPLOG=1", "-fno-builtin", "-include", SHIM, src,
+        "-Wl,--wrap=dlsym", "-ldl", "-pthread",
+    )  # fmt: skip
+    r = _run(exe)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["strncmp=strncmp", "memchr=memchr"]
+
+
+# ── Preload-only shim: software-sent fault signals ────────────────────
+
+_RAISE = r"""
+#include <signal.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+    (void)argv;
+    if (argc > 1) *(volatile int *)0 = 1;   /* control: a hardware fault */
+    raise(SIGSEGV);
+    puts("survived");
+    return 0;
+}
+"""
+
+
+@requires_clang
+def test_regression_preload_shim_keeps_raised_fault(tmp_path):
+    src = tmp_path / "p.c"
+    src.write_text(_RAISE)
+    exe = _cc(tmp_path / "p", "-O1", src)
+    pre = _cc(
+        tmp_path / "pre.so",
+        "-O1", "-fPIC", "-shared", "-D__AFL_PRELOAD_ONLY", "-x", "c", SHIM, "-ldl",
+    )  # fmt: skip
+
+    # Control: the hardware-fault path was never broken.
+    hw = _run(exe, "hw", LD_PRELOAD=str(pre))
+    assert hw.returncode == -signal.SIGSEGV
+
+    sw = _run(exe, LD_PRELOAD=str(pre))
+    assert sw.returncode == -signal.SIGSEGV, sw.stdout
+
+
+# ── Caller-context caches ─────────────────────────────────────────────
+
+# A handler on the main stack walks its own context between the miss
+# path's two stores; main then paired its return address with that ctx.
+# Statistical by nature: the control (no signals) must read 0 too.
+_CTX_SIGNAL = r"""
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#define NI __attribute__((noinline))
+
+static volatile uint32_t sink;
+NI static uint32_t probe(void) { uint32_t c = __afl_get_caller_ctx(); __asm__(""); return c; }
+NI static uint32_t g1(void) { uint32_t c = probe(); __asm__(""); return c; }
+NI static uint32_t g2(void) { uint32_t c = probe(); __asm__(""); return c; }
+/* The ctx is keyed on the return address into c1/c2: one call site each. */
+NI static uint32_t c1(void) { uint32_t c = g1(); __asm__(""); return c; }
+NI static uint32_t c2(void) { uint32_t c = g2(); __asm__(""); return c; }
+NI static uint32_t in_handler(void) { uint32_t c = probe(); __asm__(""); return c; }
+
+static void on_sig(int s) { (void)s; sink = in_handler(); }
+
+static atomic_int stop;
+static pthread_t main_th;
+static void *killer(void *a) {
+    (void)a;
+    while (!stop) pthread_kill(main_th, SIGUSR1);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    (void)argv;
+    uint32_t e1 = c1(), e2 = c2();
+    struct sigaction sa = {0};
+    sa.sa_handler = on_sig;
+    sigaction(SIGUSR1, &sa, 0);
+
+    main_th = pthread_self();
+    pthread_t t;
+    int signals = argc == 1;
+    if (signals) pthread_create(&t, 0, killer, 0);
+
+    long wrong = 0;
+    for (long i = 0; i < CALLS; i++) {    /* miss, then a hit on what it cached */
+        wrong += c1() != e1;
+        wrong += c1() != e1;
+        wrong += c2() != e2;
+        wrong += c2() != e2;
+    }
+
+    stop = 1;
+    if (signals) pthread_join(t, 0);
+    printf("distinct %d wrong %ld\n", e1 != e2, wrong);
+    return 0;
+}
+"""
+CTX_CALLS = 3_000_000  # unfixed: hundreds of wrong contexts at this count
+
+
+@requires_clang
+def test_regression_ctx_cache_survives_signal_handler(tmp_path):
+    exe = _build(tmp_path, _CTX_SIGNAL, f"-DCALLS={CTX_CALLS}", "-D__AFL_CTX_BITS=32", "-pthread")
+
+    ctl = _run(exe, "nosignals")
+    assert ctl.stdout.split() == ["distinct", "1", "wrong", "0"], ctl.stderr
+
+    r = _run(exe)
+    assert r.stdout.split() == ["distinct", "1", "wrong", "0"], r.stderr
+
+
+# Another writer holds the slot: this one must resolve without caching.
+_CTX_BASE_CLAIM = r"""
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+#ifndef __AFL_CTX_BASE_BUSY
+#define __AFL_CTX_BASE_BUSY 1
+#endif
+#define FOREIGN_BASE 0x5a5a000u
+
+int main(void) {
+    uintptr_t key = (uintptr_t)&main + 8;
+    Dl_info info;
+    dladdr((void *)key, &info);
+    uint32_t slot = (uint32_t)((key >> 2) & (__AFL_CTX_CACHE_SIZE - 1));
+
+    __afl_ctx_base_cache[slot].ra = __AFL_CTX_BASE_BUSY;
+    __afl_ctx_base_cache[slot].base = FOREIGN_BASE;
+    uintptr_t got = __afl_ctx_resolve_base((void *)key);
+
+    printf("resolved %d untouched %d\n", got == (uintptr_t)info.dli_fbase,
+           __afl_ctx_base_cache[slot].ra == __AFL_CTX_BASE_BUSY &&
+           __afl_ctx_base_cache[slot].base == FOREIGN_BASE);
+
+    /* A free slot is still claimed and cached. */
+    __afl_ctx_base_cache[slot].ra = 0;
+    __afl_ctx_resolve_base((void *)key);
+    printf("cached %d\n", __afl_ctx_base_cache[slot].ra == key &&
+           __afl_ctx_base_cache[slot].base == (uintptr_t)info.dli_fbase);
+    return 0;
+}
+"""
+
+
+@requires_clang
+def test_regression_ctx_base_cache_writer_claims_slot(tmp_path):
+    r = _run(_build(tmp_path, _CTX_BASE_CLAIM))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["resolved 1 untouched 1", "cached 1"]
+
+
+# ── Node bitmap: two threads, two bits of one byte ────────────────────
+
+# Each round clears the byte and releases both threads onto one probe
+# each. A plain |= loses one bit when the two load-or-store pairs overlap.
+_NODE_BITS = r"""
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#define THREADS 2
+#define TABLE_CAP 4u
+#define BOTH_BITS 3
+
+static struct __afl_dist_entry table[TABLE_CAP];
+static uint8_t bitmap[1];
+static struct __afl_entry area_stub[1];
+static atomic_long go[THREADS], done;
+static atomic_int stop;
+
+static void *prober(void *a) {
+    long me = (long)a, seen = 0;
+    for (;;) {
+        while (atomic_load(&go[me]) == seen)
+            if (atomic_load(&stop)) return 0;
+        seen++;
+        __afl_probe_distance((uint64_t)me + 1);
+        atomic_fetch_add(&done, 1);
+    }
+}
+
+int main(void) {
+    for (uint32_t k = 1; k <= THREADS; k++) {    /* key k sits in slot k, sets bit k-1 */
+        table[k].key = k;
+        table[k].node_idx = k - 1;
+    }
+    __afl_dist_table = table;
+    __afl_dist_cap = TABLE_CAP;
+    __afl_dist_window = TABLE_CAP;
+    __afl_node_bitmap = bitmap;
+    __afl_node_bitmap_bytes = sizeof bitmap;
+    __afl_area = area_stub;
+
+    pthread_t th[THREADS];
+    for (long i = 0; i < THREADS; i++) pthread_create(&th[i], 0, prober, (void *)i);
+
+    long lost = 0;
+    for (long r = 1; r <= ROUNDS; r++) {
+        bitmap[0] = 0;
+        for (int i = 0; i < THREADS; i++) atomic_store(&go[i], r);
+        while (atomic_load(&done) != r * THREADS) {}
+        lost += bitmap[0] != BOTH_BITS;
+    }
+
+    atomic_store(&stop, 1);
+    for (int i = 0; i < THREADS; i++) pthread_join(th[i], 0);
+    printf("lost %ld\n", lost);
+    return 0;
+}
+"""
+NODE_ROUNDS = 400_000
+
+
+@requires_clang
+def test_regression_node_bitmap_or_is_atomic(tmp_path):
+    exe = _build(tmp_path, _NODE_BITS, f"-DROUNDS={NODE_ROUNDS}", "-pthread")
+    r = _run(exe)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["lost", "0"]
+
+
+# ── Refused re-attach: header pointers under a thread mid-edge ────────
+
+_REFUSED = (
+    _WGUARD_COMMON
+    + r"""
+int main(void) {
+    int a = seg(MAP);
+    attach(a, MAP);
+    shmctl(a, IPC_RMID, 0);
+
+    setenv("AFL_MAP_SIZE", "-1", 1);      /* refused: the segment is detached */
+    __afl_map_shm();
+
+    /* Coverage is off, yet a thread already past its checks still loads
+     * through these: they stay on the retired, still mapped segment. */
+    printf("off %d header %d\n", __afl_area == 0,
+           __afl_gen_word && __afl_path_hash && __afl_edge_count && __afl_stack_depth &&
+           __afl_dropped && __afl_touched);
+    return 0;
+}
+"""
+)
+
+
+@requires_clang
+def test_regression_refused_reattach_keeps_header_mapped(tmp_path):
+    r = _run(_build(tmp_path, _REFUSED, f"-DMAP={MAP_ENTRIES}", "-pthread"))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["off", "1", "header", "1"]
+
+
+# ── Sancov dump fd: stolen number ─────────────────────────────────────
+
+_SANCOV_FD = r"""
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define FILE_MODE 0600
+
+static const uintptr_t pcs[] = {0x1000, 0, 0x1010, 0};
+
+int main(int argc, char **argv) {
+    (void)argc;
+    int fd = __afl_sancov_open();
+    close(fd);                              /* closefrom()-style target */
+    int own = open(argv[1], O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE);
+
+    __afl_sancov_dump(__AFL_SANCOV_PCS, 0, pcs, pcs + sizeof pcs / sizeof pcs[0]);
+
+    struct stat st;
+    fstat(own, &st);
+    printf("opened %d reused %d own_bytes %ld\n", fd >= 0, own == fd, (long)st.st_size);
+    return 0;
+}
+"""
+
+
+@requires_clang
+def test_regression_sancov_dump_skips_stolen_fd(tmp_path):
+    exe = _build(tmp_path, _SANCOV_FD)
+    out = tmp_path / "sancov.out"
+    r = _run(exe, str(tmp_path / "own.txt"), __AFL_SANCOV_OUT=str(out))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["opened", "1", "reused", "1", "own_bytes", "0"]
+    assert out.stat().st_size > 0

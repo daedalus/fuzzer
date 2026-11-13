@@ -1050,20 +1050,17 @@ __AFL_GCC_NO_COV static void __afl_shm_retire(void *seg) {
 static void *__afl_shm_seg = NULL;
 static int   __afl_shm_seg_id = -1;
 
-/* Coverage off: unpublish every pointer into the segment, then retire it.
- * Area first -- every recording path tests it before anything else. */
+/* Coverage off: unpublish the table, then retire the segment. Area first
+ * -- every recording path but the leaf guard tests it before anything else.
+ * The header and bitmap pointers stay on the retired segment, mapped until
+ * GRAVE later re-attaches (each repoints them): NULLed, a thread between
+ * its check and its load faulted, blamed on the input. */
 __AFL_GCC_NO_COV static void __afl_shm_detach(void) {
     void *seg = __afl_shm_seg;
     if (!seg) return;
     __afl_fast = 0;
     __atomic_store_n(&__afl_area, NULL, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_RELEASE);
-    __afl_stack_depth = NULL;
-    __afl_gen_word    = NULL;
-    __afl_path_hash   = NULL;
-    __afl_edge_count  = NULL;
-    __afl_dropped     = NULL;
-    __afl_touched     = NULL;
     __afl_wguard_mode = __AFL_WGUARD_OFF;
     __afl_shm_seg     = NULL;
     __afl_shm_seg_id  = -1;
@@ -1531,6 +1528,8 @@ static struct {
     uintptr_t ra;
     uintptr_t base;
 } __afl_ctx_base_cache[__AFL_CTX_CACHE_SIZE];
+/* Tag of a slot a writer holds; never a return address. */
+#define __AFL_CTX_BASE_BUSY ((uintptr_t)1)
 
 __AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
     uintptr_t key = (uintptr_t)ra;
@@ -1554,10 +1553,15 @@ __AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
     uintptr_t base = 0;
     if (dladdr(ra, &info) && info.dli_fbase) base = (uintptr_t)info.dli_fbase;
 
-    /* Tag cleared before base, set after: no reader pairs a tag with
-     * another key's base (cf. __afl_ctx_last_ra below). */
-    __atomic_store_n(tag, 0, __ATOMIC_RELAXED);
-    __atomic_thread_fence(__ATOMIC_RELEASE);
+    /* Tag claimed before base, set after: no reader pairs a tag with
+     * another key's base (cf. __afl_ctx_last_ra below). One writer per
+     * slot: two interleaved left tag A over base B. The loser resolves
+     * uncached. */
+    uintptr_t seen = __atomic_load_n(tag, __ATOMIC_RELAXED);
+    if (seen == __AFL_CTX_BASE_BUSY ||
+        !__atomic_compare_exchange_n(tag, &seen, __AFL_CTX_BASE_BUSY, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return base;
     __atomic_store_n(val, base, __ATOMIC_RELAXED);
     __atomic_store_n(tag, key, __ATOMIC_RELEASE);
     return base;
@@ -1707,8 +1711,11 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
     if (cfp == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_cfp) &&
         cur >= (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_main_lo)) {
         void *hit = __afl_raw_load(caller_fp + 1);
+        /* ctx before ra: a handler rewriting the pair between the two
+         * loads then fails the ra match instead of lending its ctx. */
+        void *hit_ctx = __afl_raw_load((void *const *)&__afl_ctx_last_ctx);
         if (hit && (uintptr_t)hit == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ra))
-            return (uint32_t)(uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ctx);
+            return (uint32_t)(uintptr_t)hit_ctx;
     }
 
     /* Raw loads: a plain read here gets an ASAN check in every guard callback.
@@ -1737,9 +1744,10 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
     }
     void *ra = __afl_raw_load(caller_fp + 1);   /* return addr into caller's caller */
     if (!ra) return 0;
+    void *ra_ctx = __afl_raw_load((void *const *)&__afl_ctx_last_ctx);   /* before ra, as above */
     if (main_stack && (uintptr_t)ra == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ra)) {
         __afl_ctx_last_cfp = cfp;
-        return (uint32_t)(uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ctx);
+        return (uint32_t)(uintptr_t)ra_ctx;
     }
     /* Cache miss: the return address changed (or first walk). Flagged for
      * __afl_ctx_collapse_suspect(); this is the cold path, the hit above is not. */
@@ -1800,6 +1808,10 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
         __afl_ctx_last_ctx = ctx;
         __atomic_signal_fence(__ATOMIC_SEQ_CST);
         __afl_ctx_last_ra = (uintptr_t)ra;
+        /* A handler that walked between the two stores left its own ctx
+         * under this ra: drop the pair. */
+        __atomic_signal_fence(__ATOMIC_SEQ_CST);
+        if (__afl_ctx_last_ctx != ctx) __afl_ctx_last_ra = 0;
         __afl_ctx_last_cfp = cfp;
     }
     return ctx;
@@ -2849,18 +2861,45 @@ struct __afl_sancov_rec {
 _Static_assert(sizeof(struct __afl_sancov_rec) == 32, "sancov_tables.py _HEAD");
 
 static int __afl_sancov_fd = -2;   /* -2 not yet opened, -1 off */
+static struct stat __afl_sancov_st;    /* what the fd was opened on */
 static const uintptr_t *__afl_sancov_seen[__AFL_SANCOV_MAX_SEEN];
 static uint32_t __afl_sancov_nseen;
 static uint32_t __afl_sancov_paired;   /* guard regions already given a pc-table */
 
+__AFL_NO_COV static int __afl_sancov_same(int fd) {
+    struct stat st;
+    return fstat(fd, &st) == 0 && st.st_dev == __afl_sancov_st.st_dev &&
+           st.st_ino == __afl_sancov_st.st_ino;
+}
+
+/* The fd lives in the target's table: a target that closed every
+ * descriptor got the number back for its own file, and a later module's
+ * tables went into it. Checked before each use; the dump file is reopened,
+ * never created twice. */
 __AFL_NO_COV static int __afl_sancov_open(void) {
-    if (__afl_sancov_fd != -2) return __afl_sancov_fd;
+    if (__afl_sancov_fd == -1) return -1;
 
     const char *p = getenv("__AFL_SANCOV_OUT");
-    __afl_sancov_fd = -1;
-    if (p && p[0])
-        __afl_sancov_fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_APPEND, 0600);
-    return __afl_sancov_fd;
+    if (__afl_sancov_fd == -2) {
+        __afl_sancov_fd = -1;
+        if (p && p[0])
+            __afl_sancov_fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_APPEND, 0600);
+        if (__afl_sancov_fd >= 0 && fstat(__afl_sancov_fd, &__afl_sancov_st) != 0) {
+            close(__afl_sancov_fd);
+            __afl_sancov_fd = -1;
+        }
+        return __afl_sancov_fd;
+    }
+    if (__afl_sancov_same(__afl_sancov_fd)) return __afl_sancov_fd;
+
+    /* Stolen: the number is the target's now, never closed here. */
+    int fd = (p && p[0]) ? open(p, O_WRONLY | O_CLOEXEC | O_APPEND) : -1;
+    if (fd >= 0 && !__afl_sancov_same(fd)) {
+        close(fd);
+        fd = -1;
+    }
+    __afl_sancov_fd = fd;
+    return fd;
 }
 
 /* Every TU's ctor passes the same linker-wide bounds: dump once. */
@@ -3413,8 +3452,13 @@ __AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
             __afl_dist_hits++;
             uint32_t nidx = __afl_dist_table[idx].node_idx;
             if (__afl_area && __afl_node_bitmap &&
-                nidx < __afl_node_bitmap_bytes * 8u)
-                __afl_node_bitmap[nidx >> 3] |= (uint8_t)(1u << (nidx & 7u));
+                nidx < __afl_node_bitmap_bytes * 8u) {
+                /* Test, then atomic OR, as __afl_block_mark: a plain |=
+                 * lost a node when two threads shared the byte. */
+                uint8_t bit = (uint8_t)(1u << (nidx & 7u));
+                if (!(__afl_node_bitmap[nidx >> 3] & bit))
+                    __atomic_fetch_or(&__afl_node_bitmap[nidx >> 3], bit, __ATOMIC_RELAXED);
+            }
             break;
         }
     }
@@ -4746,8 +4790,10 @@ __AFL_GCC_NO_COV static void __afl_resolve_miss(void **slot, const char *name, v
 __AFL_GCC_NO_COV static void __afl_resolve_pending(void) {
     while (__afl_pending_n > 0) {
         int i = --__afl_pending_n;
+        /* Copied out: a miss nested in the lookup reuses entry i. */
+        void **slot = __afl_pending[i].slot;
         void *p = __afl_sym_lookup(__afl_pending[i].name);
-        if (p) __atomic_store_n(__afl_pending[i].slot, p, __ATOMIC_RELEASE);
+        if (p) __atomic_store_n(slot, p, __ATOMIC_RELEASE);
     }
 }
 
@@ -8352,17 +8398,20 @@ static struct sigaction __afl_pre_old_abrt;
 static struct sigaction __afl_pre_old_bus;
 static struct sigaction __afl_pre_old_fpe;
 
-__AFL_NO_COV static void __afl_preload_crash_handler(int sig) {
+__AFL_NO_COV static void __afl_preload_crash_handler(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
     __afl_cmplog_flush();
     __afl_cmp_dump_counts();
     __afl_cmp_dump_sites();
     struct sigaction *old;
-    int hardware_fault = 0;
+    /* By si_code, not by number: raise(SIGSEGV) / kill() has no faulting
+     * instruction, and returning swallowed the signal (exit 0). */
+    int hardware_fault = si && si->si_code > 0;
     switch (sig) {
-    case SIGSEGV: old = &__afl_pre_old_segv; hardware_fault = 1; break;
-    case SIGBUS:  old = &__afl_pre_old_bus;  hardware_fault = 1; break;
-    case SIGFPE:  old = &__afl_pre_old_fpe;  hardware_fault = 1; break;
-    case SIGABRT: old = &__afl_pre_old_abrt; break;
+    case SIGSEGV: old = &__afl_pre_old_segv; break;
+    case SIGBUS:  old = &__afl_pre_old_bus;  break;
+    case SIGFPE:  old = &__afl_pre_old_fpe;  break;
+    case SIGABRT: old = &__afl_pre_old_abrt; hardware_fault = 0; break;
     default:      signal(sig, SIG_DFL); raise(sig); return;
     }
     sigaction(sig, old, NULL);
@@ -8376,9 +8425,9 @@ __AFL_NO_COV static void __afl_preload_init(void) {
     __afl_cmplog_init();
     if (__sanitizer_set_death_callback) __sanitizer_set_death_callback(__afl_cmplog_crash_flush);
     struct sigaction sa;
-    sa.sa_handler = __afl_preload_crash_handler;
+    sa.sa_sigaction = __afl_preload_crash_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, &__afl_pre_old_segv);
     sigaction(SIGABRT, &sa, &__afl_pre_old_abrt);
     sigaction(SIGBUS,  &sa, &__afl_pre_old_bus);
