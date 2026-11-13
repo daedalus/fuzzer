@@ -249,6 +249,7 @@ _CORPUS_DELTA_ROOTS = ("deltas", "seeds")  # seeds/ kept for legacy layouts
 _REHYDRATE_FULL_ROOTS = (
     "seeds",
     "seeds/pruned",
+    "pruned/seeds",  # where `fuzzer-tool minimize` prunes a sharded corpus
     "seeds/irreplaceable",
     "seeds/crashing",
     "seeds/timeouts",
@@ -376,15 +377,15 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
             continue
         try:
             rec = json.loads(delta_file.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        parent = rehydrate_by_hash(str(rec.get("parent", "")), corpus_dir, _depth + 1)
-        diff = rec.get("diff")
-        if parent is None or not isinstance(diff, list):
-            continue
-        if rec.get("v") == 2:
-            return apply_delta_v2(parent, diff)
-        return apply_delta(parent, diff)
+            parent = rehydrate_by_hash(str(rec.get("parent", "")), corpus_dir, _depth + 1)
+            diff = rec.get("diff")
+            if parent is None or not isinstance(diff, list):
+                continue
+            if rec.get("v") == 2:
+                return apply_delta_v2(parent, diff)
+            return apply_delta(parent, diff)
+        except _BAD_DELTA as exc:
+            log.warning("skipping corrupt delta %s: %s", delta_file.name, exc)
     return None
 
 
@@ -498,6 +499,12 @@ def _absorb(
         corpus.append(data)
 
 
+# What a hand-edited, truncated or foreign delta record raises: bad JSON and
+# bad UTF-8 (ValueError), wrong shapes (TypeError, AttributeError, KeyError,
+# IndexError), unreadable file (OSError). One bad record must not stop a load.
+_BAD_DELTA = (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError)
+
+
 def _resolve_deltas(
     full_files: dict[str, bytes], delta_files: list[tuple[str, Path]]
 ) -> dict[str, bytes]:
@@ -525,8 +532,8 @@ def _resolve_deltas(
                     resolved[h] = reconstructed
                 else:
                     still_remaining[h] = f
-            except (json.JSONDecodeError, KeyError, IndexError):
-                pass  # corrupt delta — skip
+            except _BAD_DELTA as exc:
+                log.warning("skipping corrupt delta %s: %s", f.name, exc)
         remaining = still_remaining
     return resolved
 
@@ -1409,12 +1416,6 @@ def save_crash(
     if not v.replaces and _cluster_files(crashes_dir, metadata.build_cluster_id(sig)):
         return False
 
-    # Smaller trigger of a known signature: drop its files, then write this one.
-    if crash_min_sizes is not None:
-        if v.replaces:
-            _evict_crash(crashes_dir, metadata.build_cluster_id(sig))
-        crash_min_sizes[sig] = len(data)
-
     # Store raw stderr (contains ASAN file:line diagnostics)
     if not metadata.raw_stderr:
         metadata.raw_stderr = stderr
@@ -1455,7 +1456,22 @@ def save_crash(
             _READONLY_MODE,
         ),
     )
-    _publish_crash(crashes_dir, base_name, artifacts)
+    try:
+        _publish_crash(crashes_dir, base_name, artifacts)
+    except BaseException:
+        # Unsaved (ENOSPC): forget it, so the next sighting retries the write.
+        crash_hashes.discard(h)
+        crash_sigs[sig] -= 1
+        if not crash_sigs[sig]:
+            del crash_sigs[sig]
+        raise
+
+    # Smaller trigger of a known signature: drop the old files only once this
+    # one is on disk, so a failed write (ENOSPC) keeps the old reproducer.
+    if crash_min_sizes is not None:
+        if v.replaces:
+            _evict_crash(crashes_dir, metadata.cluster_id, keep=base_name)
+        crash_min_sizes[sig] = len(data)
 
     return base_name
 
@@ -1600,9 +1616,11 @@ def _cluster_files(crashes_dir: Path, cluster_id: str) -> list[Path]:
     ]
 
 
-def _evict_crash(crashes_dir: Path, cluster_id: str) -> None:
-    """Remove the on-disk files of signature cluster *cluster_id*."""
+def _evict_crash(crashes_dir: Path, cluster_id: str, keep: str) -> None:
+    """Remove the on-disk files of signature cluster *cluster_id*, sparing base name *keep*."""
     for f in _cluster_files(crashes_dir, cluster_id):
+        if f.stem == keep:
+            continue
         f.unlink(missing_ok=True)
 
 

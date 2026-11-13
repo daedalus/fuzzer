@@ -306,6 +306,10 @@ class TargetRunner:
         """Non-in-process backends: persistent, ptrace, forkserver, spawn."""
         f = self.f
         if f._persistent_runner:
+            # The previous input killed the target (crash, exit, timeout).
+            if not f._persistent_runner.alive:
+                f._persistent_runner.restart()
+
             rc, err = f._persistent_runner.run_one(data)
             if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
@@ -342,8 +346,7 @@ class TargetRunner:
 
         print("[*] Persistent: page-fault budget spent (leak?), restarting target")
         f._fault_budget.reset()
-        f._persistent_runner.stop()
-        f._persistent_runner.start()
+        f._persistent_runner.restart()
 
     def _run_spawn(self, data: bytes, shm) -> tuple[int, str]:
         """Fresh-process execution: reset maps, build env, spawn via stdin/file/fast path."""

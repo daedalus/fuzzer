@@ -1943,8 +1943,12 @@ def zero_run_amplify(data: bytes, rng) -> bytes:
         best_start, best_len = run_start, run_len
     if best_len < 1:
         return data
+    # All-zero region: no non-zero neighbour to grow into.
+    room = len(block) - best_len
+    if room < 1:
+        return data
     # Extend the run by up to min(best_len, available non-zero neighbours).
-    extend = rng.randint(1, min(best_len, len(block) - best_len))
+    extend = rng.randint(1, min(best_len, room))
     # Grow from both ends of the run.
     left = min(extend, best_start)
     right = min(extend - left, len(block) - best_start - best_len)

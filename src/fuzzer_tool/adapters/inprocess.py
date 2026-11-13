@@ -828,7 +828,8 @@ class InProcessRunner:
             captured = self._stderr.finish()
             capturing = False
 
-            result = (-1, "timeout") if timed_out else (rc, captured)
+            # A report written before the deadline is a crash, not a hang.
+            result = (-1, captured or "timeout") if timed_out else (rc, captured)
         except Exception as e:
             # Restore stderr on exception
             if capturing:
@@ -899,7 +900,8 @@ class InProcessRunner:
                 _captured_stderr = self._stderr.finish()
 
         if self._timed_out:
-            return -1, "timeout"
+            # A report written before the deadline is a crash, not a hang.
+            return -1, _captured_stderr or "timeout"
         # In-process mode has no process boundary, so the shim's distance
         # accumulators never flush on their own — write the SHM tail now.
         self._flush_distance_tail()

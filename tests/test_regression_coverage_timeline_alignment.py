@@ -130,3 +130,35 @@ class TestTemporalJoinPairsCorrectly:
 
         out = _temporal_correlation(f)
         assert isinstance(out, str)  # must not raise
+
+
+class TestLegacyTimelineSaves:
+    """A timeline restored without timestamps made every later ``to_dict()`` raise."""
+
+    _LEGACY = [[0, 0], [1, 5], [2, 9]]
+
+    def _restored(self):
+        et = EdgeTracker()
+        et.from_dict({"coverage_timeline": self._LEGACY})
+        return et
+
+    def test_regression_legacy_timeline_round_trips(self):
+        assert self._restored().to_dict()["coverage_timeline"] == self._LEGACY
+
+    def test_regression_snapshot_after_legacy_restore_saves(self):
+        """Adversarial: a new snapshot must not leave one timestamp against four points."""
+        et = self._restored()
+        et.record_coverage_snapshot(3)
+
+        saved = et.to_dict()["coverage_timeline"]
+
+        assert [p[0] for p in saved] == [0, 1, 2, 3]
+        assert len(et._coverage_timestamps) in (0, len(et._coverage_execs))
+
+    def test_fresh_timeline_keeps_timestamps(self):
+        """Falsification: a tracker that never saw legacy state still saves triples."""
+        et = EdgeTracker()
+        et.record_coverage_snapshot(1)
+        et.record_coverage_snapshot(2)
+
+        assert [len(p) for p in et.to_dict()["coverage_timeline"]] == [3, 3]

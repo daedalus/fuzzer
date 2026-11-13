@@ -9,9 +9,7 @@
 
 from __future__ import annotations
 
-import os
 import shutil
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -189,7 +187,6 @@ class TestPersistentStderr:  # 3
             if not pr._started:
                 pytest.skip("persistent target did not stop at start")
             # The first stop is start()'s; only a SIGCONT leaves it.
-            os.kill(pr.pid, signal.SIGCONT)
             rc, err = pr.run_one(b"A")
             assert rc == 0 and "iteration ok" in err
             assert "ok" in err and "ERROR" not in err  # per-iteration, not cumulative

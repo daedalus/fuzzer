@@ -259,6 +259,12 @@ class _Persist:
     def stop(self):
         self.stops += 1
 
+    alive = True
+
+    def restart(self):
+        self.stop()
+        return self.start()
+
 
 def _persistent_run(faults_per_exec, n):
     from fuzzer_tool.services.runner import TargetRunner

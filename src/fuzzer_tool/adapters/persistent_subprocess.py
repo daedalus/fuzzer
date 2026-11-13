@@ -333,6 +333,32 @@ while True:
 """
 
 
+def _drain_stderr(stream, cond: threading.Condition, buffer, marks: list[int]) -> None:
+    """Buffer the loader's stderr for consume_stderr(); count run markers.
+
+    Module-level on purpose: see the thread's construction in start().
+    Lines go to *buffer* (a bounded deque); each ``_STDERR_MARK`` line bumps
+    ``marks[0]`` and wakes the waiter.
+    """
+    if stream is None:
+        return
+    try:
+        for line in stream:
+            text = line.decode(errors="replace").rstrip()
+            if text == _STDERR_MARK:
+                with cond:
+                    marks[0] += 1
+                    cond.notify_all()
+                continue
+            if text:
+                log.debug("loader stderr: %s", text[:200])
+                with cond:
+                    buffer.append(text + "\n")
+    except (ValueError, OSError) as exc:
+        # The pipe was closed under the read: stop() ended the loader.
+        log.debug("loader stderr drain ended: %s", exc)
+
+
 class PersistentLoader:
     """Persistent subprocess — one process, many calls.
 
@@ -370,6 +396,7 @@ class PersistentLoader:
         self._last_bitmap = None
         self._restarting = False
         self._child_pid_file: str | None = None
+        self._loader_path: str | None = None
 
         # Fault-address/register relay from the last run (None/{} when absent)
         self._last_fault_addr: int | None = None
@@ -382,7 +409,8 @@ class PersistentLoader:
         # Run markers seen by the drain thread vs replies read: stderr is
         # complete for a run once its marker arrived.
         self._stderr_cond = threading.Condition(self._stderr_lock)
-        self._stderr_marks = 0
+        # One-slot box: the drain thread counts into it without holding self.
+        self._stderr_mark_box = [0]
         self._replies = 0
 
         # Throughput monitoring
@@ -395,6 +423,8 @@ class PersistentLoader:
         if self._proc and self._proc.poll() is None:
             return True
 
+        # A restart (hang, dead loader) reaches here without stop().
+        self._drop_temp_files()
         fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_persist_")
         os.write(fd, _PERSISTENT_LOADER.encode())
         os.close(fd)
@@ -426,7 +456,15 @@ class PersistentLoader:
 
         # Drain stderr in background — prevents pipe-buffer deadlock when
         # ASAN/instrumented targets write diagnostic output to stderr.
-        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        #
+        # The thread must not hold `self` (a bound-method target did): it
+        # blocks until the loader exits, the loader exits on stop(), and
+        # stop() runs from __del__, which a pinned loader never reaches.
+        self._stderr_thread = threading.Thread(
+            target=_drain_stderr,
+            args=(self._proc.stderr, self._stderr_cond, self._stderr_buffer, self._stderr_mark_box),
+            daemon=True,
+        )
         self._stderr_thread.start()
 
         init = f"INIT {self.target} {self.function_name}\n"
@@ -450,30 +488,14 @@ class PersistentLoader:
         log.warning("Persistent loader failed to start")
         return False
 
-    def _drain_stderr(self):
-        """Buffer stderr output from the loader subprocess.
+    @property
+    def _stderr_marks(self) -> int:
+        """Run markers the drain thread has seen."""
+        return self._stderr_mark_box[0]
 
-        Lines are stored in a ring buffer for per-call retrieval via
-        consume_stderr(). Also logs first 200 chars of each line at debug
-        level for diagnostics.
-        """
-        proc = self._proc
-        if proc is None or proc.stderr is None:
-            return
-        try:
-            for line in proc.stderr:
-                text = line.decode(errors="replace").rstrip()
-                if text == _STDERR_MARK:
-                    with self._stderr_cond:
-                        self._stderr_marks += 1
-                        self._stderr_cond.notify_all()
-                    continue
-                if text:
-                    log.debug("loader stderr: %s", text[:200])
-                    with self._stderr_lock:
-                        self._stderr_buffer.append(text + "\n")
-        except (ValueError, OSError):
-            pass
+    @_stderr_marks.setter
+    def _stderr_marks(self, n: int) -> None:
+        self._stderr_mark_box[0] = n
 
     def consume_stderr(self) -> str:
         """Return and clear stderr accumulated since the last call.
@@ -631,6 +653,7 @@ class PersistentLoader:
         self._ready = False
         self._kill_orphaned_child()
         if proc is None:
+            self._drop_temp_files()
             return
         try:
             proc.stdin.write(b"QUIT\n")
@@ -649,11 +672,17 @@ class PersistentLoader:
         # thread never sees EOF and the process stays permanently
         # multi-threaded (poisoning every later os.fork()).
         _close_streams(proc)
-        # Clean up PID file
-        if self._child_pid_file:
-            with contextlib.suppress(OSError):
-                os.unlink(self._child_pid_file)
-            self._child_pid_file = None
+        self._drop_temp_files()
+
+    def _drop_temp_files(self) -> None:
+        """Unlink this run's loader script and grandchild PID file."""
+        for path in (self._loader_path, self._child_pid_file):
+            if path:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)
+
+        self._loader_path = None
+        self._child_pid_file = None
 
     def _kill_orphaned_child(self):
         """Kill the grandchild process (target function) if it was orphaned by timeout.

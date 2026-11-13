@@ -309,12 +309,11 @@ class Grammar:
                 elif m.group(2) is not None:
                     tokens.append(("lit", decode_quoted_literal(m.group(2))))
                 elif m.group(3) is not None:
-                    lo, hi = int(m.group(4)), int(m.group(5))
-                    clamped_lo = min(lo, _MAX_REPEAT)
-                    clamped_hi = min(hi, _MAX_REPEAT)
+                    clamped_lo = _repeat_count(m.group(4), _MAX_REPEAT)
+                    clamped_hi = _repeat_count(m.group(5), _MAX_REPEAT)
                     tokens.append(("repeat", m.group(3), clamped_lo, max(clamped_hi, clamped_lo)))
                 elif m.group(6) is not None:
-                    n = min(int(m.group(7)), _MAX_REPEAT)
+                    n = _repeat_count(m.group(7), _MAX_REPEAT)
                     tokens.append(("repeat", m.group(6), n, n))
                 elif m.group(8) is not None:
                     tokens.append(("repeat", m.group(8), 1, 8))
@@ -1175,6 +1174,20 @@ class SubtreePopulation:
         return sum(len(pool) for pool in self._pools.values())
 
 
+def _repeat_count(digits: str, cap: int) -> int:
+    """A grammar repeat count clamped to *cap*.
+
+    Compared by length first: int() raises past 4300 digits.
+    """
+    if len(digits) > len(str(cap)):
+        return cap
+    return min(int(digits), cap)
+
+
+# Bracket levels TreeMutator.parse descends before treating the rest as a leaf.
+_MAX_PARSE_DEPTH = 64
+
+
 class TreeMutator:
     """Parse inputs against a grammar into trees and mutate at the tree level.
 
@@ -1194,7 +1207,11 @@ class TreeMutator:
         }
 
     def parse(
-        self, data: bytes, rule: str | None = None, chunk_size: int | None = None
+        self,
+        data: bytes,
+        rule: str | None = None,
+        chunk_size: int | None = None,
+        _depth: int = 0,
     ) -> TreeNode:
         """Heuristic parse of input bytes into a tree structure.
 
@@ -1210,24 +1227,31 @@ class TreeMutator:
         if not data:
             return TreeNode(rule=rule, data=b"")
 
+        # Past the cap the rest is one leaf: a seed of 2000 nested brackets
+        # raised RecursionError, and each level rescans its whole content.
+        if _depth >= _MAX_PARSE_DEPTH:
+            return TreeNode(rule=rule, data=data)
+
         # Try structured parsing for known formats
-        tree = self._parse_structured(data, rule)
+        tree = self._parse_structured(data, rule, _depth)
         if tree is not None:
             return tree
 
         # Fallback: segment by grammar-inferred chunk sizes
         return self._parse_chunked(data, rule, chunk_size)
 
-    def _parse_structured(self, data: bytes, rule: str) -> TreeNode | None:
+    def _parse_structured(self, data: bytes, rule: str, depth: int = 0) -> TreeNode | None:
         """Parse structured formats using delimiter matching."""
         # JSON-like: { ... } or [ ... ]
         if data.startswith(b"{") and data.endswith(b"}"):
-            return self._parse_braced(data, rule, b"{", b"}")
+            return self._parse_braced(data, rule, b"{", b"}", depth)
         if data.startswith(b"[") and data.endswith(b"]"):
-            return self._parse_braced(data, rule, b"[", b"]")
+            return self._parse_braced(data, rule, b"[", b"]", depth)
         return None
 
-    def _parse_braced(self, data: bytes, rule: str, open_b: bytes, close_b: bytes) -> TreeNode:
+    def _parse_braced(
+        self, data: bytes, rule: str, open_b: bytes, close_b: bytes, depth: int = 0
+    ) -> TreeNode:
         """Parse braced content into a tree with children for each element."""
         children = []
         # Opening delimiter
@@ -1242,7 +1266,7 @@ class TreeMutator:
                 if not elem:
                     continue
                 child_rule = self._infer_rule(elem)
-                children.append(self.parse(elem, child_rule))
+                children.append(self.parse(elem, child_rule, _depth=depth + 1))
 
         # Closing delimiter
         children.append(TreeNode(rule="delim", data=close_b))

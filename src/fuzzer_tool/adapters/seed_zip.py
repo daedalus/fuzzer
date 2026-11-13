@@ -77,6 +77,13 @@ class ZipMode(Enum):
     ON = "on"
 
 
+class Torn(Enum):
+    """What a store does with an archive whose central directory is torn."""
+
+    SALVAGE = "salvage"  # rebuild from local headers; renames the original
+    SKIP = "skip"  # index nothing: the archive may belong to a live writer
+
+
 class SeedTree(StrEnum):
     """Zip subtree, named like the seeds/ subdirectory it replaces."""
 
@@ -256,8 +263,10 @@ class SeedZip:
         block_bytes: int,
         growth: int,
         readonly: bool = False,
+        torn: Torn = Torn.SALVAGE,
     ):
         self._readonly = readonly
+        self._torn = torn
         self._foreign: list[str] = []  # members not named ab/id_<hash>
         self._path = Path(corpus_dir) / ZIP_NAME
         self._block_seeds = block_seeds
@@ -286,6 +295,11 @@ class SeedZip:
         try:
             infos = self._infolist()
         except zipfile.BadZipFile:
+            # Mid-flush a live writer's directory is torn too. Renaming the
+            # archive then strands every later seed in the .corrupt file.
+            if self._torn is Torn.SKIP:
+                log.warning("seeds.zip: torn or mid-write, not read (a writer salvages it)")
+                return
             _salvage(self._path)
             infos = self._infolist()
 
@@ -470,6 +484,18 @@ class SeedZip:
                 seen.add(h)
                 yield h, data
 
+    def _drop_cold_foreign(self, cold: set[str]) -> set[str]:
+        """Forget foreign members whose content is a pruned seed; returns their names."""
+        if not (self._foreign and cold):
+            return set()
+        from fuzzer_tool.adapters.filesystem import hash_data  # noqa: PLC0415
+
+        with zipfile.ZipFile(self._path) as zf:
+            dead = {name for name in self._foreign if hash_data(zf.read(name)) in cold}
+
+        self._foreign = [name for name in self._foreign if name not in dead]
+        return dead
+
     def _adopt(self, foreign: dict[str, bytes]) -> None:
         """Re-add foreign seeds as canonical members so prune can tombstone them."""
         for h, data in foreign.items():
@@ -520,9 +546,15 @@ def configure(
     return store
 
 
-def open_readonly(corpus_dir: str | Path) -> SeedZip:
-    """Unregistered store for reading *corpus_dir*/seeds.zip; callers never write."""
-    return SeedZip(Path(corpus_dir), BLOCK_SEEDS, BLOCK_BYTES, BLOCK_GROWTH, readonly=True)
+def open_readonly(corpus_dir: str | Path, torn: Torn = Torn.SKIP) -> SeedZip:
+    """Unregistered store for reading *corpus_dir*/seeds.zip; callers never write.
+
+    A torn archive is left alone unless *torn* says the caller owns it
+    (offline compact / uproot).
+    """
+    return SeedZip(
+        Path(corpus_dir), BLOCK_SEEDS, BLOCK_BYTES, BLOCK_GROWTH, readonly=True, torn=torn
+    )
 
 
 _PEEK: dict[Path, tuple[tuple[int, int], SeedZip]] = {}
@@ -601,19 +633,20 @@ def _spill(corpus: Path, h: str, data: bytes) -> None:
     os.replace(tmp, dest)
 
 
-def _plan(names: list[str], cold: set[str]) -> list[int]:
+def _plan(names: list[str], cold: set[str], dead: Collection[str] = ()) -> list[int]:
     """Indices of members to keep.
 
     Dropped: every tombstone (cold ones leave with their data, the rest were
     superseded by re-admission), data of cold seeds, directory entries, and
     all but the last copy of a name at the archive root (``seeds/ab/id_x``
-    and ``ab/id_x`` are one). Foreign members are kept.
+    and ``ab/id_x`` are one). Foreign members are kept, except *dead* ones:
+    originals of adopted seeds since pruned, which would be adopted again.
     """
     last = {_rooted(n): i for i, n in enumerate(names)}
     keep = []
     for i, name in enumerate(names):
         rooted = _rooted(name)
-        if rooted is None or last[rooted] != i:
+        if rooted is None or last[rooted] != i or name in dead:
             continue
 
         parsed = _parse(name)
@@ -678,12 +711,13 @@ def compact(corpus_dir: str | Path) -> CompactStats:
     if not path.is_file():
         return CompactStats()
 
-    store = open_readonly(corpus)
+    store = open_readonly(corpus, Torn.SALVAGE)
     store._index()  # salvages a torn archive first
     infos = store._infolist()
     cold = store._main_seen - store._main_live
     names = [i.filename for i in infos]
-    keep = _plan(names, cold)
+    dead = store._drop_cold_foreign(cold)
+    keep = _plan(names, cold, dead)
     dropped = len(infos) - len(keep)
     if not dropped and not _uprooted(names):
         return CompactStats()
@@ -713,7 +747,7 @@ def uproot(corpus_dir: str | Path) -> bool:
     if not (corpus / ZIP_NAME).is_file():
         return False
 
-    store = open_readonly(corpus)
+    store = open_readonly(corpus, Torn.SALVAGE)
     store._index()  # salvages a torn archive first
     infos = store._infolist()
     if not _uprooted([i.filename for i in infos]):

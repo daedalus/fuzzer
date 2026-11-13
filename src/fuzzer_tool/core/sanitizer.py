@@ -104,17 +104,23 @@ _ASAN_HEADER_TYPES = (
 _ASAN_DEALLOC_FRAME = "__asan::Allocator::Deallocate"
 
 # Stack frame line: "#0 0x4011d6 in foo a.c:1" or unsymbolized "#0 0x4011d6  (/bin/t+0x11d6)".
+# [ \t], not \s: \s crosses newlines, so a run of blank lines rescanned
+# quadratically (6.3 s on 64 KiB of "\n").
 _FRAME_LINE_RE = re.compile(
-    r"^\s*#(\d+)\s+(0x[0-9a-fA-F]+)\s+(?:in\s+(\S+)|\(([^)\s]+)\))", re.MULTILINE
+    r"^[ \t]*#(\d+)[ \t]+(0x[0-9a-fA-F]+)[ \t]+(?:in[ \t]+(\S+)|\(([^)\s]+)\))", re.MULTILINE
 )
+# Bounded gap: an open ".*" rescanned the line from every "Sanitizer" in it.
+_FAULT_ADDR_GAP = 256
 SANITIZER_FAULT_ADDR_RE = re.compile(
-    r"(?:Address|Memory)Sanitizer.*(?:on|at) (?:unknown )?address\s+(0x[0-9a-f]+)",
+    rf"(?:Address|Memory)Sanitizer.{{0,{_FAULT_ADDR_GAP}}}?(?:on|at) (?:unknown )?address\s+(0x[0-9a-f]+)",
     re.IGNORECASE,
 )
+# Longest decimal field parsed from target stderr; int() raises past 4300 digits.
+_MAX_DEC_DIGITS = 18
 
 # Enriched ASAN output patterns
 SANITIZER_ACCESS_RE = re.compile(
-    r"(READ|WRITE|FREE)\s+of\s+size\s+(\d+)",
+    rf"(READ|WRITE|FREE)\s+of\s+size\s+(\d{{1,{_MAX_DEC_DIGITS}}})",
     re.IGNORECASE,
 )
 SANITIZER_SHADOW_RE = re.compile(

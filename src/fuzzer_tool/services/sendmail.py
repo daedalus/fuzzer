@@ -95,7 +95,8 @@ class MailConfig:
                 returncode=returncode,
                 exec_count=exec_count,
             )
-        except (KeyError, IndexError, ValueError):
+        # AttributeError / TypeError: "{target.foo}", "{base_name[x]}".
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             # Unknown placeholders or bad format string — send the template as-is
             # rather than failing the notification.
             return self.subject
