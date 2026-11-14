@@ -1524,8 +1524,42 @@ def _publish_crash(crashes_dir: Path, base_name: str, artifacts) -> None:
             tmp.unlink(missing_ok=True)
         raise
 
-    for tmp, final in staged:
-        os.replace(tmp, final)
+    # All or nothing: an existing artifact is set aside, restored if a later
+    # rename fails, dropped once every rename landed.
+    done: list[tuple[Path, Path | None]] = []
+    try:
+        for tmp, final in staged:
+            done.append((final, _set_aside(final)))
+            os.replace(tmp, final)
+    except BaseException:
+        _roll_back(done, staged)
+        raise
+
+    for _, bak in done:
+        if bak is not None:
+            bak.unlink(missing_ok=True)
+
+
+def _set_aside(final: Path) -> Path | None:
+    """Move *final* to ``.<name>.bak``; None when there is nothing to keep."""
+    bak = final.with_name(f".{final.name}.bak")
+    try:
+        os.replace(final, bak)
+    except FileNotFoundError:
+        return None
+    return bak
+
+
+def _roll_back(done: list[tuple[Path, Path | None]], staged: list[tuple[Path, Path]]) -> None:
+    """Undo a partial publish: restore set-aside artifacts, drop new ones and temps."""
+    for final, bak in reversed(done):
+        if bak is None:
+            final.unlink(missing_ok=True)
+            continue
+        os.replace(bak, final)
+
+    for tmp, _ in staged:
+        tmp.unlink(missing_ok=True)
 
 
 def record_repro(crash_input: Path, crashed: int, runs: int) -> bool:
