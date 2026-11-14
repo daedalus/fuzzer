@@ -3672,6 +3672,14 @@ class OperatorEngine:
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
 
+    def _op_fox_newton(self, buf, _byte_idx, _data):
+        """FOX secant step: set a field to its fitted root (core/fox_newton.py, --fox-newton)."""
+        log = getattr(self.f, "_secant_log", None)
+        out = log.propose(bytes(buf), self.ctx._rng) if log is not None else None
+        if out is None:
+            return self._op_declined("fox_newton", buf)
+        return bytearray(out[: self.ctx.max_len])
+
     def _op_saliency_ladder(self, buf, _byte_idx, _data):
         """NEUZZ ladder: nudge the bytes the saliency net ranks highest along the gradient sign.
 

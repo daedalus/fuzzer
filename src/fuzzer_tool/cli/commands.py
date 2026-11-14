@@ -844,6 +844,7 @@ def cmd_fuzz(args):
         affine_mod=getattr(args, "affine_mod", False),
         affine_mod_execs=getattr(args, "affine_mod_execs", AFFINE_MOD_EXECS),
         derived_cmp=getattr(args, "derived_cmp", False),
+        fox_newton=getattr(args, "fox_newton", False),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
@@ -3097,6 +3098,7 @@ _HAIL_MARY_FLAGS = (
     "i2s_fixpoint",
     "affine_mod",
     "derived_cmp",
+    "fox_newton",
     "weizz_tags",
     "formatfuzzer",
     "op_span_reverse",
@@ -5948,6 +5950,15 @@ def main() -> int:
         "(x*x + 3*x), additive (byte sums, weighted checksums) and per-byte "
         "maps into string compares (strcmp(rot13(x), ...)). Screens 64 bytes; shares "
         "--affine-mod-execs; needs cmplog.",
+    )
+    fuzz_parser.add_argument(
+        "--fox-newton",
+        action="store_true",
+        default=False,
+        help="FOX secant step (fox_newton op): fit each integer compare's operand "
+        "against the input field two logged runs changed, and write the field value "
+        "that lands it on an unreached side of the constant. No extra execs; "
+        "needs cmplog.",
     )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"

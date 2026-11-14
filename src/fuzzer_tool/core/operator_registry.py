@@ -349,6 +349,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "redqueen_xform",
         "gradient_cmp",
         "gradient_descent",
+        "fox_newton",
         "condstmt_solve",
         "magic_byte_search",
         "climb_hill",
@@ -375,6 +376,12 @@ _CATEGORIES: dict[str, set[str]] = {
 
 def _has_cmplog_pairs(fuzzer, _data) -> bool:
     return bool(getattr(fuzzer, "_cmplog", None) and fuzzer._cmplog.pairs)
+
+
+def _has_secant_fit(fuzzer, _data) -> bool:
+    """--fox-newton logged two runs of some compare site that fit a line."""
+    log = getattr(fuzzer, "_secant_log", None)
+    return bool(log is not None and log.ready())
 
 
 def _has_branch_records(fuzzer, _data) -> bool:
@@ -977,6 +984,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
     "gradient_descent": _has_cmplog_pairs,
+    "fox_newton": _has_secant_fit,
     "condstmt_solve": _has_cmplog_pairs,
     "magic_byte_search": _has_cmplog_pairs,
     "climb_hill": _has_cmplog_pairs,
