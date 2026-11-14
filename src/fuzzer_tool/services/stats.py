@@ -25,6 +25,8 @@ import os
 import resource
 import time
 
+import numpy as np
+
 from fuzzer_tool.adapters import libc_mem
 from fuzzer_tool.core.analyzers.analyzer_elo import (
     Arena,
@@ -770,6 +772,19 @@ class StatsReporter:
         ]
         print(f"  New edges/seed:    {' '.join(parts)}")
 
+    def _print_summary_crash_cov(self, f) -> None:
+        """Crashes that hit edges no earlier crash hit; sig-dup ones hint at merged bugs."""
+        cov = getattr(f, "_crash_cov", None)
+        if cov is None:
+            return
+        st = cov.summary()
+        if st["crashes"] == 0:
+            return
+        print(
+            f"  Crash coverage:    {st['crashes']} crashes, {st['cov_new']} hit new crash "
+            f"edges ({st['sig_dup_cov_new']} sig-dup), {st['edges']} edges"
+        )
+
     def _print_summary_confirm(self, f) -> None:
         """Say what --confirm-novelty did: reruns paid, successes it withdrew."""
         if not getattr(f, "_confirm_novelty", False):
@@ -986,6 +1001,7 @@ class StatsReporter:
         self._print_summary_coverage(f)
         self._print_summary_seeds(f)
         self._print_summary_novelty(f)
+        self._print_summary_crash_cov(f)
         self._print_summary_rarity(f)
         self._print_summary_gravity(f)
 
@@ -1149,6 +1165,18 @@ class StatsReporter:
             arr = bytes(f.ptrace_cov.edge_map)
             return {i for i, v in enumerate(arr) if v}
         return set()
+
+    def get_current_edge_array(self) -> np.ndarray:
+        """Array twin of :meth:`get_current_edge_set` (no Python set built)."""
+        f = self.f
+        shm_cov = f.shm_cov
+        if f.multi_targets:
+            shm_cov = f._target_shm_covs.get(f.target) or shm_cov
+        if shm_cov:
+            return shm_cov.edge_id_array()
+        if f.ptrace_cov:
+            return np.flatnonzero(np.frombuffer(bytes(f.ptrace_cov.edge_map), dtype=np.uint8))
+        return np.empty(0, dtype=np.uint32)
 
     def format_elapsed(self) -> str:
         return _format_elapsed_fn(self.f.start_time, clock_of(self.f).time())
