@@ -89,6 +89,11 @@ _ALLOWED_GLOBALS = {
     ("numpy._core.multiarray", "scalar"),
 }
 
+# Allowlisted constructors whose int argument is an allocation size:
+# ``bytearray(1 << 40)``. Protocol 5 writes both as opcodes; 3 and 4 call
+# them with content. A count never comes from a real save.
+_SIZED = frozenset({("builtins", "bytes"), ("builtins", "bytearray")})
+
 # (module, name) pairs a caller admits on top of _ALLOWED_GLOBALS.
 Globals = frozenset[tuple[str, str]]
 
@@ -109,9 +114,30 @@ class _SafeUnpickler(pickle.Unpickler):
         self._extra = extra
 
     def find_class(self, module: str, name: str):  # noqa: D102
-        if allowed_global(module, name, self._extra):
-            return super().find_class(module, name)
-        raise UnsafeStateError(f"refusing to load disallowed object {module}.{name} from pickle")
+        if not allowed_global(module, name, self._extra):
+            raise UnsafeStateError(
+                f"refusing to load disallowed object {module}.{name} from pickle"
+            )
+
+        cls = super().find_class(module, name)
+        if (module, name) in _SIZED:
+            return _content_only(cls)
+        return cls
+
+
+def _content_only(ctor: type) -> Any:
+    """*ctor* refusing a count: ``bytearray(b"ab")`` loads, ``bytearray(10**9)`` raises.
+
+    A pickle naming the class itself (a ``defaultdict(bytearray)`` factory)
+    gets this wrapper; re-saving it then fails :func:`_verify_readable`, loudly.
+    """
+
+    def build(*args: Any) -> Any:
+        if args and isinstance(args[0], int):
+            raise UnsafeStateError(f"refusing {ctor.__name__}({args[0]}) from pickle: a size")
+        return ctor(*args)
+
+    return build
 
 
 def _safe_loads(raw: bytes) -> Any:
