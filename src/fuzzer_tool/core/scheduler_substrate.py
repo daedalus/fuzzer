@@ -39,6 +39,8 @@ from collections.abc import Iterable, Mapping
 
 import numpy as np
 
+from fuzzer_tool.adapters import native_scan
+
 log = logging.getLogger(__name__)
 
 __all__ = [
@@ -292,6 +294,7 @@ class EdgeCanonicalizer:
         self._edges = 0
         self._keys = np.empty(0, dtype=np.int64)  # seen edges, ascending
         self._heads = np.empty(0, dtype=np.int64)  # their representatives
+        self._index = native_scan.sorted_index(self._keys)
 
     def refit(self, seed_hit_counts: Mapping[object, Mapping[int, int]]) -> None:
         """Rebuild the classes from the per-seed hit counts.
@@ -323,6 +326,7 @@ class EdgeCanonicalizer:
         group = group.ravel()
         self._keys = edges[starts]
         self._heads = self._keys[first][group]
+        self._index = native_scan.sorted_index(self._keys)
         unique_edges = self._keys.tolist()
         self._representative = dict(zip(unique_edges, self._heads.tolist(), strict=True))
         self._size = dict(zip(unique_edges, size[group].tolist(), strict=True))
@@ -337,7 +341,7 @@ class EdgeCanonicalizer:
         """:meth:`class_of` over an int64 array, for folds over every nonzero cell."""
         if not len(self._keys):
             return edges.copy()
-        at = np.searchsorted(self._keys, edges).clip(max=len(self._keys) - 1)
+        at = self._index.lower_bound(edges).clip(max=len(self._keys) - 1)
         return np.where(self._keys[at] == edges, self._heads[at], edges)
 
     def multiplicity(self, edge: int) -> int:

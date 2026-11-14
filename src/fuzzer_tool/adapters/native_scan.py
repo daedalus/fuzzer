@@ -9,6 +9,7 @@ of "live entries", "fold" and "drain"; pointers and scratch stay here.
     ShmCoverage._scan_new  -> LiveScan.fold, or LiveScan.live_fold (gather + fold)
     CmpCounterShm.drain_*  -> CmpDrain.counts / sites
     CrashMITracker.record  -> MIBump.bump
+    EdgeCanonicalizer / EdgeClusters lookups -> SortedIndex.lower_bound
 
 ``load()`` returns None when no compiler is available; callers keep their
 numpy paths for that case.
@@ -22,6 +23,7 @@ import logging
 import os
 import subprocess
 import tempfile
+from collections.abc import Callable
 from typing import NamedTuple
 
 import numpy as np
@@ -53,6 +55,8 @@ _SIGNATURES = {
     "fs_drain_counts": [_P, _P, _L, _P, _P, _P],
     "fs_drain_sites": [_P, _L, _P, _P, _P],
     "fs_mi_bump": [ctypes.c_char_p, _L, _L, _P],
+    "fs_splus_lb": [_P, _P, _L, _P, _L, _P],
+    "fs_splus_ok": [],
 }
 
 # Loaded library, or False once a build failed (don't retry per instance).
@@ -382,3 +386,119 @@ def mi_bump(step: np.ndarray) -> MIBump | None:
     """An unbound MIBump over *step*; None when the kernel cannot build."""
     lib = load()
     return MIBump(lib, step) if lib is not None else None
+
+
+# S+ tree node: SP_B int64 keys = one 64-byte cache line, SP_B + 1 children.
+_SP_B = 8
+_SP_FANOUT = _SP_B + 1
+_CACHE_LINE = 64
+_I64_MAX = np.iinfo(np.int64).max
+# Batches up to this size are staged in held buffers whose addresses are bound
+# once (reading an array's address costs ~0.9 us, more than a 64-query search).
+# Larger batches allocate, so held memory stays bounded.
+_SP_STAGED = 4096
+# Below this batch size the ctypes call (~0.75 us) plus staging (~0.65 us)
+# costs more than np.searchsorted's whole search. Fresh queries, interleaved:
+# kernel/numpy at n=1.5k/30k/500k keys, 128 queries 1.09/0.88/0.86x,
+# 192 queries 0.90/0.83/0.71x.
+_SP_MIN_BATCH = 192
+
+
+def _aligned(n: int) -> np.ndarray:
+    """*n* INT64_MAX-filled int64s starting on a cache-line boundary."""
+    raw = np.full(n + _SP_B, _I64_MAX, dtype=np.int64)
+    skip = (-_addr(raw) % _CACHE_LINE) // raw.itemsize
+    return raw[skip : skip + n]
+
+
+def _splus_levels(leaf: np.ndarray) -> list[np.ndarray]:
+    """Internal levels above *leaf*, root first.
+
+    A parent holds the first key of its children 1..8; its own first key
+    (child 0's) feeds the level above. Missing children pad with INT64_MAX.
+    """
+    levels = []
+    first = leaf[::_SP_B]
+    while first.size > 1:
+        parents = -(-first.size // _SP_FANOUT)
+        groups = np.full(parents * _SP_FANOUT, _I64_MAX, dtype=np.int64)
+        groups[: first.size] = first
+        groups = groups.reshape(parents, _SP_FANOUT)
+        levels.append(groups[:, 1:].ravel())
+        first = groups[:, 0]
+
+    levels.reverse()
+    return levels
+
+
+class SortedIndex:
+    """lower_bound over fixed sorted int64 keys (``np.searchsorted`` semantics).
+
+    Built once per key set (O(n), ~1.14x the keys' memory), queried in
+    batches by ``fs_splus_lb``; ``np.searchsorted`` for small batches and
+    when the kernel cannot run. Addresses are held as ctypes objects, so pickling fails loudly
+    instead of restoring dangling pointers. Not thread-safe: queries share
+    the staging buffers.
+
+        tree = [root | ... | last internal level | leaf]   off[l] = level start
+    """
+
+    def __init__(self, keys: np.ndarray, lib: ctypes.CDLL | None):
+        keys = np.array(keys, dtype=np.int64)  # copy: callers may mutate theirs
+        self._keys = keys
+        self._fn = lib.fs_splus_lb if lib is not None and keys.size else None
+        if self._fn is None:
+            return
+
+        # Leaf = keys padded to whole nodes; levels stacked root first.
+        leaf = np.full(-(-keys.size // _SP_B) * _SP_B, _I64_MAX, dtype=np.int64)
+        leaf[: keys.size] = keys
+        sections = [*_splus_levels(leaf), leaf]
+        sizes = np.array([sec.size for sec in sections], dtype=np.int64)
+        self._off = np.concatenate(([0], np.cumsum(sizes)[:-1])).astype(np.int64)
+
+        self._tree = _aligned(int(sizes.sum()))
+        for start, sec in zip(self._off.tolist(), sections, strict=True):
+            self._tree[start : start + sec.size] = sec
+        self._args = (_P(_addr(self._tree)), _P(_addr(self._off)), len(sections) - 1)
+
+        self._q_buf = np.empty(_SP_STAGED, dtype=np.int64)
+        self._out_buf = np.empty(_SP_STAGED, dtype=np.int64)
+        self._q_ptr, self._out_ptr = _P(_addr(self._q_buf)), _P(_addr(self._out_buf))
+
+    @property
+    def uses_kernel(self) -> bool:
+        """True when queries run on the S+ tree kernel."""
+        return self._fn is not None
+
+    def lower_bound(self, q: np.ndarray) -> np.ndarray:
+        """Index of the first key >= each query (``np.searchsorted``, side left)."""
+        m, fn = len(q), self._fn
+        if fn is None or m < _SP_MIN_BATCH:
+            return self._keys.searchsorted(q)  # method: ~0.6 us under np.searchsorted
+
+        if m > _SP_STAGED:
+            return self._lower_bound_big(fn, q)
+
+        # copyto converts int32/uint32 queries and refuses lossy casts.
+        np.copyto(self._q_buf[:m], q, casting="same_kind")
+        fn(*self._args, self._q_ptr, m, self._out_ptr)
+        return self._out_buf[:m].copy()
+
+    def _lower_bound_big(self, fn: Callable[..., int], q: np.ndarray) -> np.ndarray:
+        """Unstaged call: fresh query and result arrays."""
+        q = np.ascontiguousarray(q, dtype=np.int64)
+        out = np.empty(q.size, dtype=np.int64)
+        fn(*self._args, _addr(q), q.size, _addr(out))
+        return out
+
+
+def _splus_lib() -> ctypes.CDLL | None:
+    """The kernel library when this CPU can run the S+ tree (x86 AVX2)."""
+    lib = load()
+    return lib if lib is not None and lib.fs_splus_ok() else None
+
+
+def sorted_index(keys: np.ndarray) -> SortedIndex:
+    """A SortedIndex over sorted *keys*; numpy-backed when the kernel cannot run."""
+    return SortedIndex(keys, _splus_lib())
