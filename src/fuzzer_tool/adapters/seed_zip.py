@@ -36,6 +36,7 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import shutil
 import struct
 import warnings
 import zipfile
@@ -51,6 +52,10 @@ ZIP_NAME = "seeds.zip"
 COMPRESS_LEVEL = 9
 BLOCK_SEEDS = 64
 BLOCK_BYTES = 8 << 20  # bounds pending memory and data lost to a kill
+# Largest member read as a seed: every read inflates a member whole, and a
+# few KiB of deflate can declare GiBs. Larger members stay unread, never dropped.
+MAX_MEMBER_BYTES = 64 << 20
+_COPY_CHUNK = 1 << 20  # compact() streams members in chunks this size
 # Block grows to entries/BLOCK_GROWTH seeds: each flush rewrites the whole
 # central directory, so a fixed block makes total directory writes O(N^2);
 # a proportional one makes them ~(BLOCK_GROWTH + 1) entries per seed.
@@ -198,6 +203,11 @@ def _salvage(path: Path) -> None:
         if end > len(raw):
             break
 
+        # Too big to be a seed: left in the .corrupt original, not inflated.
+        if usize > MAX_MEMBER_BYTES:
+            off = end
+            continue
+
         data = _inflate(method, raw[start:end])
         if data is None or len(data) != usize or zlib.crc32(data) != crc:
             break
@@ -224,7 +234,8 @@ def _inflate(method: int, payload: bytes) -> bytes | None:
     if method != zipfile.ZIP_DEFLATED:
         return None
     try:
-        return zlib.decompressobj(-zlib.MAX_WBITS).decompress(payload)
+        # One byte past the cap: a lying usize then fails the length check.
+        return zlib.decompressobj(-zlib.MAX_WBITS).decompress(payload, MAX_MEMBER_BYTES + 1)
     except zlib.error:
         return None
 
@@ -303,8 +314,12 @@ class SeedZip:
             _salvage(self._path)
             infos = self._infolist()
 
+        big = [info.filename for info in infos if info.file_size > MAX_MEMBER_BYTES]
+        if big:
+            log.warning("seeds.zip: %d members over %d bytes not read", len(big), MAX_MEMBER_BYTES)
         for info in infos:
-            self._note(info.filename)
+            if info.file_size <= MAX_MEMBER_BYTES:
+                self._note(info.filename)
 
     def _infolist(self) -> list[zipfile.ZipInfo]:
         with zipfile.ZipFile(self._path) as zf:
@@ -664,8 +679,16 @@ def _rewrite(path: Path, tmp: Path, infos: list[zipfile.ZipInfo], keep) -> None:
         warnings.filterwarnings("ignore", "Duplicate name", UserWarning)
         for i in keep:
             name = _rooted(infos[i].filename)
-            if name is not None:
+            if name is None:
+                continue
+            if infos[i].file_size <= MAX_MEMBER_BYTES:
                 zout.writestr(name, zin.read(infos[i]))
+                continue
+
+            # Past MAX_MEMBER_BYTES: kept, streamed, never inflated whole.
+            big = infos[i].file_size > zipfile.ZIP64_LIMIT
+            with zin.open(infos[i]) as src, zout.open(name, "w", force_zip64=big) as dst:
+                shutil.copyfileobj(src, dst, _COPY_CHUNK)
 
 
 def _same_view(a: SeedZip, b: SeedZip) -> bool:

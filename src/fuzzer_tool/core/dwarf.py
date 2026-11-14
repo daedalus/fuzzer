@@ -156,11 +156,19 @@ _ELFCOMPRESS_ZLIB = 1
 _CHDR_SIZE = 24
 # Largest section inflated: a few hundred KB of zlib can declare gigabytes.
 _MAX_INFLATE = 1 << 30
+# Above _FREE_INFLATE a section may expand at most _MAX_RATIO times its
+# compressed size, so memory tracks the file: real DWARF is ~3-8x, zlib's
+# ceiling ~1032x. Small sections (unrelocated .debug_addr: 150x) stay free.
+_FREE_INFLATE = 16 << 20
+_MAX_RATIO = 32
 
 
 def _inflate(payload: bytes, declared: int) -> bytes:
-    """At most ``min(declared, _MAX_INFLATE)`` bytes of a zlib section body."""
-    limit = min(declared, _MAX_INFLATE)
+    """At most ``min(declared, _MAX_INFLATE)`` bytes of a zlib section body,
+    and past ``_FREE_INFLATE`` no more than ``_MAX_RATIO`` x the payload."""
+    limit = min(declared, _MAX_INFLATE, max(_FREE_INFLATE, len(payload) * _MAX_RATIO))
+    if limit < declared:
+        log.warning("compressed debug section truncated: declares %d, reading %d", declared, limit)
     # max_length 0 means "no limit" to zlib, so an empty section is spelled out.
     if limit == 0:
         return b""
