@@ -9,6 +9,7 @@ from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers.op_hierarchical import HierarchicalBanditScheduler
+from tests.support.scripted_rng import ScriptedRng
 
 _ASAN_HEAD = (
     "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000011 at pc 0x4011d6\n"
@@ -20,6 +21,13 @@ _PARSE_BUDGET_S = 1.0
 _INT_MAX_STR_DIGITS = 4300
 
 
+class _SampleRng(ScriptedRng):
+    """ScriptedRng plus ``sample``: the first *k* items, no draw consumed."""
+
+    def sample(self, population, k):
+        return list(population)[:k]
+
+
 class TestZeroRunAmplify:
     """``randint(1, 0)`` on an all-zero region killed the fuzz loop."""
 
@@ -29,13 +37,14 @@ class TestZeroRunAmplify:
 
         assert zero_run_amplify(data, RandPool(seed=0)) == data
 
-    def test_mixed_input_still_mutates(self):
-        """Falsification: a region with room to grow keeps its length and changes."""
-        data = b"ab\x00\x00cdefgh" * 4
-        outs = {zero_run_amplify(data, RandPool(seed=s)) for s in range(8)}
+    def test_mixed_input_grows_the_run(self):
+        """Falsification: with room to grow, the run extends by the scripted amount."""
+        data = b"ab\x00\x00cdef"
+        # _region: length 8, offset 0 (the whole buffer); then extend = 1.
+        rng = _SampleRng(randints=[len(data), 0, 1])
 
-        assert all(len(o) == len(data) for o in outs)
-        assert outs != {data}
+        # The run at [2, 4) grows one byte to the left; no other zero to compensate.
+        assert zero_run_amplify(data, rng) == b"a\x00\x00\x00cdef"
 
     def test_zero_prefix_then_one_byte(self):
         """Adversarial: one non-zero byte leaves exactly one byte of room."""

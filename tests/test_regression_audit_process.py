@@ -42,6 +42,14 @@ def _open_fds() -> int:
 class TestFastSpawnFds:
     """``run_target_fast`` leaked stdin + stderr-write fds when ``posix_spawn`` raised."""
 
+    @pytest.fixture(autouse=True)
+    def _no_rss_cap(self, monkeypatch):
+        # A Fuzzer built with rss_limit_mb earlier in the process leaves the
+        # cap on; then the spawn goes through sh, which exits 127 instead.
+        from fuzzer_tool.adapters import process
+
+        monkeypatch.setattr(process, "_rss_limit_bytes", 0)
+
     def test_regression_failed_spawn_leaks_no_fd(self):
         run_target_fast("/bin/true", b"x", timeout=2)  # opens the cached input fd
         before = _open_fds()

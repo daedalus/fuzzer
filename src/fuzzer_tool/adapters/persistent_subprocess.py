@@ -167,6 +167,17 @@ _STDERR_MARK = os.environ.get("_STDERR_MARK", "").encode()
 # Track child PID file so outer layer can kill orphaned grandchild on timeout
 child_pid_file = os.environ.get("_CHILD_PID_FILE", "")
 
+
+# Start time of pid (field 22 of /proc/<pid>/stat); empty when unreadable.
+def _start_ticks(pid):
+    try:
+        with open("/proc/%d/stat" % pid) as fh:
+            stat = fh.read()
+    except OSError:
+        return ""
+    return stat[stat.rindex(")") + 2 :].split()[19]
+
+
 # Main loop
 while True:
     line = sys.stdin.buffer.readline()
@@ -259,8 +270,10 @@ while True:
         os.close(write_pipe)
         if child_pid_file:
             try:
+                # "<pid> <start ticks>": a bare pid could be reused by the time
+                # the outer layer reads it.
                 with open(child_pid_file, "w") as f:
-                    f.write(str(child_pid))
+                    f.write("%d %s" % (child_pid, _start_ticks(child_pid)))
             except OSError:
                 pass
         fault_addr = None
@@ -331,6 +344,25 @@ while True:
         sys.stdout.buffer.write(resp)
         sys.stdout.buffer.flush()
 """
+
+
+def _start_ticks(pid: int) -> str:
+    """Start time of *pid* in clock ticks (``/proc/<pid>/stat`` field 22); "" if gone.
+
+    Mirrors the loader script's helper: together with the pid it names one
+    process, where a bare pid may already belong to another.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            stat = fh.read()
+    except OSError:
+        return ""
+    # comm (field 2) may hold spaces and parentheses: split after the last ")".
+    return stat[stat.rindex(")") + 2 :].split()[_STAT_START_FIELD]
+
+
+# Index of starttime (field 22) among the fields after comm (fields 3..).
+_STAT_START_FIELD = 19
 
 
 def _drain_stderr(stream, cond: threading.Condition, buffer, marks: list[int]) -> None:
@@ -423,7 +455,9 @@ class PersistentLoader:
         if self._proc and self._proc.poll() is None:
             return True
 
-        # A restart (hang, dead loader) reaches here without stop().
+        # A restart (hang, dead loader) reaches here without stop(). The
+        # dead loader's target may still run: kill it before its pid file goes.
+        self._kill_orphaned_child()
         self._drop_temp_files()
         fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_persist_")
         os.write(fd, _PERSISTENT_LOADER.encode())
@@ -485,7 +519,10 @@ class PersistentLoader:
             log.info("Persistent loader started: %s", self.target)
             return True
 
+        # Still alive but unready: left running, the next start() would
+        # see a live process and return True.
         log.warning("Persistent loader failed to start")
+        self.stop()
         return False
 
     @property
@@ -694,11 +731,22 @@ class PersistentLoader:
             return
         try:
             with open(self._child_pid_file) as f:
-                child_pid = int(f.read().strip())
-            # Kill the process group (grandchild called os.setsid())
+                pid_text, start = f.read().split()
+            child_pid = int(pid_text)
+        except (OSError, ValueError):
+            return  # no run in flight, or a record we cannot verify
+
+        # A reaped target's pid can be reused before this runs: only kill the
+        # process that started at the recorded tick.
+        if _start_ticks(child_pid) != start:
+            return
+
+        try:
+            # Its own group once setsid() ran; before that, only the pid.
             os.killpg(child_pid, signal.SIGKILL)
-        except (OSError, ValueError, ProcessLookupError):
-            pass  # child already dead or PID file missing
+        except ProcessLookupError:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
 
     def __del__(self):
         self.stop()

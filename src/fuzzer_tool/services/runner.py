@@ -58,6 +58,8 @@ _PTRACE_STDERR_CAP = 65536
 # Signal stops that end a traced run as a crash; any other (SIGCHLD from a
 # helper process, SIGALRM, ...) is delivered and tracing goes on.
 _FATAL_STOP_SIGNALS = frozenset(CRASH_SIGNALS) - {signal.SIGTRAP}
+# Backend return code for "input not run" (infrastructure failure, not the target's).
+_NOT_RUN = -2
 
 # Hang confirmation (AFL's hang_tmout idea): a timed-out input is re-run once
 # at this multiple of the deadline. A masked crash whose wrapper waits on a
@@ -306,11 +308,7 @@ class TargetRunner:
         """Non-in-process backends: persistent, ptrace, forkserver, spawn."""
         f = self.f
         if f._persistent_runner:
-            # The previous input killed the target (crash, exit, timeout).
-            if not f._persistent_runner.alive:
-                f._persistent_runner.restart()
-
-            rc, err = f._persistent_runner.run_one(data)
+            rc, err = self._run_persistent(data)
             if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
                 self._spend_faults(f._last_perf_deltas.get("page_faults", 0))
@@ -333,6 +331,22 @@ class TargetRunner:
             return rc, err
 
         return self._run_spawn(data, shm)
+
+    def _run_persistent(self, data: bytes) -> tuple[int, str]:
+        """One input on the persistent target, restarting a dead one.
+
+        The target can die between inputs (crash, exit, timeout) or between
+        the liveness check and the run: either way this input still runs,
+        once, on a fresh target.
+        """
+        pr = self.f._persistent_runner
+        if not pr.alive:
+            pr.restart()
+
+        rc, err = pr.run_one(data)
+        if rc == _NOT_RUN and not pr.alive and pr.restart():
+            rc, err = pr.run_one(data)
+        return rc, err
 
     def _spend_faults(self, faults: int) -> None:
         """Restart the persistent target once it faulted in its budget.

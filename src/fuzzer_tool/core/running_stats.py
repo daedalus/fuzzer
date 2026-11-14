@@ -305,7 +305,8 @@ class RunningMoments:
             self._front = [tuple(a) for a in data.get("front", [])]
             self._back = tuple(data.get("back", _EMPTY))
         else:
-            self._buf = collections.deque(data.get("buf", []))
+            # Unwindowed mode reads no samples: a legacy save's are dropped.
+            self._buf = collections.deque()
 
 
 # ------------------------------------------------------------------
