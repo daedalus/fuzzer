@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fuzzer_tool.adapters import persistent_subprocess
+from fuzzer_tool.adapters import persistent_signal, persistent_subprocess
 from fuzzer_tool.adapters.filesystem import (
     hash_data,
     load_corpus,
@@ -33,17 +33,48 @@ class TestPersistentPid:
         assert runner.pid is None
         assert not runner.alive
 
-    def test_regression_vanished_child_is_restarted(self, runner):  # noqa: F811
-        """Killed between inputs: the next exec must restart, not report -2 forever."""
-        os.kill(runner.pid, signal.SIGKILL)
-        os.waitpid(runner.pid, 0)
+    def test_regression_vanished_child_is_restarted(self, runner, monkeypatch):  # noqa: F811
+        """The child dies between the liveness check and SIGUSR1: that same input still runs.
+
+        The race is staged inside ``os.kill``: the real child is killed and
+        reaped, then SIGUSR1 reports it gone. No stale pid is ever signalled.
+        """
+        real_kill = os.kill
+        staged = []
+
+        def vanish_once(pid, sig):
+            if sig == signal.SIGUSR1 and not staged:
+                staged.append(pid)
+                real_kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                raise ProcessLookupError(pid)
+            return real_kill(pid, sig)
+
+        monkeypatch.setattr(persistent_signal.os, "kill", vanish_once)
         run = TargetRunner(
             SimpleNamespace(_persistent_runner=runner, _perf_counters=None)
         )._run_other
 
         rcs = [run(_OK, None)[0] for _ in range(3)]
 
-        assert rcs[1:] == [0, 0]
+        assert staged
+        assert rcs == [0, 0, 0]
+
+    def test_regression_start_exit_signals_nothing(self, monkeypatch):
+        """A target that exits during start() is reaped there: cleanup must not kill its old pid."""
+        real_kill = os.kill
+        sent = []
+
+        def spy(pid, sig):
+            sent.append((pid, sig))
+            return real_kill(pid, sig)
+
+        monkeypatch.setattr(persistent_signal.os, "kill", spy)
+        pr = persistent_signal.PersistentRunner("/bin/true", timeout=1)
+
+        assert pr.start() is False
+        assert sent == []
+        assert pr.pid is None
 
     def test_live_child_keeps_its_pid(self, runner):  # noqa: F811
         """Falsification: an ordinary iteration leaves the same child parked."""
@@ -133,3 +164,89 @@ class TestLoaderFailedInit:
         assert loader.start() is False
         assert loader._proc is None
         assert list(tmp_path.iterdir()) == []
+
+
+def _proc_start(pid: int) -> str:
+    """Field 22 of /proc/<pid>/stat (start time in clock ticks), parsed here independently."""
+    with open(f"/proc/{pid}/stat") as fh:
+        stat = fh.read()
+    return stat[stat.rindex(")") + 2 :].split()[19]
+
+
+class TestOrphanKillIdentity:
+    """``_kill_orphaned_child`` trusted a bare pid: a reused pid's group got SIGKILL."""
+
+    # How long a spared process must stay alive after the kill attempt.
+    _GRACE_S = 0.5
+
+    @pytest.fixture
+    def loader(self, tmp_path):
+        pl = persistent_subprocess.PersistentLoader("/bin/true", "f", timeout=1)
+        pl._child_pid_file = str(tmp_path / "child.pid")
+        return pl
+
+    @pytest.fixture
+    def spawn(self):
+        """``spawn(session)`` starts ``sleep 30``; every one is killed at teardown."""
+        import subprocess
+
+        procs = []
+
+        def make(session: bool):
+            proc = subprocess.Popen(["sleep", "30"], start_new_session=session)
+            procs.append(proc)
+            return proc
+
+        yield make
+        for proc in procs:
+            proc.kill()
+            proc.wait()
+
+    def _record(self, loader, text: str) -> None:
+        with open(loader._child_pid_file, "w") as fh:
+            fh.write(text)
+
+    def _spared(self, proc) -> bool:
+        import subprocess
+
+        try:
+            proc.wait(timeout=self._GRACE_S)
+        except subprocess.TimeoutExpired:
+            return True
+        return False
+
+    def test_regression_reused_pid_is_spared(self, loader, spawn):
+        """The recorded pid now belongs to another group leader with a different start time."""
+        bystander = spawn(session=True)
+        self._record(loader, f"{bystander.pid} 1")
+
+        loader._kill_orphaned_child()
+
+        assert self._spared(bystander)
+
+    def test_bare_pid_record_is_spared(self, loader, spawn):
+        """Adversarial: a record without a start time cannot be verified, so nothing is killed."""
+        bystander = spawn(session=True)
+        self._record(loader, str(bystander.pid))
+
+        loader._kill_orphaned_child()
+
+        assert self._spared(bystander)
+
+    def test_orphan_group_is_killed(self, loader, spawn):
+        """Falsification: the real orphan (matching start time) still dies."""
+        orphan = spawn(session=True)
+        self._record(loader, f"{orphan.pid} {_proc_start(orphan.pid)}")
+
+        loader._kill_orphaned_child()
+
+        assert orphan.wait(timeout=5) == -signal.SIGKILL
+
+    def test_regression_pre_setsid_orphan_is_killed(self, loader, spawn):
+        """The loader died before the target's setsid(): no group yet, kill the pid itself."""
+        orphan = spawn(session=False)
+        self._record(loader, f"{orphan.pid} {_proc_start(orphan.pid)}")
+
+        loader._kill_orphaned_child()
+
+        assert orphan.wait(timeout=5) == -signal.SIGKILL

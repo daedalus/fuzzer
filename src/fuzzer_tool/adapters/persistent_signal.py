@@ -158,7 +158,9 @@ class PersistentRunner:
                     self._started = True
                     log.info("Persistent target started (pid=%d)", pid)
                     return True
-                # Child exited/signaled — not a persistent target
+                # Child exited/signaled — not a persistent target. Reaped
+                # here: forget the pid before _cleanup() could signal it.
+                self.pid = None
                 break
             log.warning("Persistent target exited immediately")
             self._cleanup()
