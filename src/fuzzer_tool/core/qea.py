@@ -23,6 +23,7 @@ class of combinatorial optimization", IEEE Trans. Evol. Comp. 2002.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -110,6 +111,21 @@ def _bits_to_bytes(bits: list[int]) -> bytes:
 
 
 # ── Individual ─────────────────────────────────────────────────────────
+
+
+def _current_key(key: str, best_hex: str) -> str:
+    """Migrate a pre-2026-11-14 sha256 seed key to key16.
+
+    Recoverable only while best_collapsed is still the original seed
+    (uncapped, not yet evolved); otherwise the original is gone and the
+    stale key is kept until the individual is culled.
+    """
+    if not key or not best_hex:
+        return key
+    best = bytes.fromhex(best_hex)
+    if key != hashlib.sha256(best).hexdigest()[:16]:
+        return key
+    return key16(best)
 
 
 @dataclass
@@ -208,7 +224,7 @@ class QEAIndividual:
             generation=d.get("generation", 0),
             best_collapsed=bytes.fromhex(bc) if bc else b"",
             best_fitness=d.get("best_fitness", 0.0),
-            seed_key=d.get("seed_key", ""),
+            seed_key=_current_key(d.get("seed_key", ""), bc),
             crash=d.get("crash", False),
             coupling=_coupling_from_state(coupling),
         )

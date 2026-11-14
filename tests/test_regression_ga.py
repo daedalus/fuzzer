@@ -1,8 +1,10 @@
 """Regressions: GA seed-key scheme and unmutated clones."""
 
+import hashlib
+
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.core.ga import GALifecycle, Individual
-from fuzzer_tool.core.qea import QEALifecycle
+from fuzzer_tool.core.qea import QEAIndividual, QEALifecycle
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.corpus_manager import seed_key
 
@@ -98,3 +100,38 @@ def test_clone_of_empty_parent():
     ga.population = [Individual(data=b"", fitness=1.0) for _ in range(3)]
     ga._evolve(EdgeTracker())
     assert all(isinstance(o.data, bytes) for o in ga.population)
+
+
+# --- QEA resume -----------------------------------------------------------
+
+
+def _legacy_key(data: bytes) -> str:
+    """Pre-2026-11-14 QEA key scheme (sha256 prefix)."""
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _qea_state(best: bytes, key: str) -> dict:
+    return {"amplitudes": [0.5] * 8 * len(best), "best_collapsed": best.hex(), "seed_key": key}
+
+
+def test_regression_qea_resume_drops_stale_key():
+    """Uncapped seed: best_collapsed is the original, so the key is recoverable."""
+    ind = QEAIndividual.from_dict(_qea_state(b"abc", _legacy_key(b"abc")))
+    assert ind.seed_key == seed_key(b"abc")
+
+
+def test_qea_resume_keeps_current_key():
+    """Falsification: a key16 of the original survives after best_collapsed evolved."""
+    ind = QEAIndividual.from_dict(_qea_state(b"evolved", seed_key(b"original")))
+    assert ind.seed_key == seed_key(b"original")
+
+
+def test_qea_resume_unrecoverable_key_kept():
+    """Adversarial: stale key of an evolved seed cannot be inverted; left as is."""
+    stale = _legacy_key(b"original")
+    assert QEAIndividual.from_dict(_qea_state(b"evolved", stale)).seed_key == stale
+
+
+def test_qea_resume_empty_seed():
+    """Adversarial: no best_collapsed, no key."""
+    assert QEAIndividual.from_dict(_qea_state(b"", "")).seed_key == ""
