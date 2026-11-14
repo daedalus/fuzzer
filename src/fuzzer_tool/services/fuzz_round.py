@@ -30,6 +30,8 @@ import os
 import resource
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import _NO_VALUE_DISTANCE
 from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
@@ -37,6 +39,7 @@ from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cmplog import CmplogRecords, CountsDrain
+from fuzzer_tool.core.crash_cov import SigNovelty
 from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
 from fuzzer_tool.core.orbit_dedup import run_probe
 from fuzzer_tool.core.ro_rd import classify_operator_name
@@ -2005,12 +2008,23 @@ class FuzzRound:
 
     # ── Exits ────────────────────────────────────────────────────────
 
+    def _crash_edges(self) -> np.ndarray:
+        # Read before triage: its ptrace rerun may overwrite the map.
+        return self._f._get_current_edge_array()
+
+    def _note_crash_cov(self, edges: np.ndarray, crash_name) -> None:
+        # Crash-only virgin map (core/crash_cov.py); falsy name = signature dup.
+        sig = SigNovelty.NEW if crash_name else SigNovelty.DUP
+        self._f._crash_cov.record(edges, sig)
+
     def _on_crash(self) -> bool:
         f = self._f
         mutated = self._mutated
         f.crash_count += 1
+        edges = self._crash_edges()
         self._triage_crash()
         crash_name = f.save_crash(mutated, self._returncode, self._stderr)
+        self._note_crash_cov(edges, crash_name)
         f._prune_crash_data()
         # Generate GDB/strace trace report if enabled; with the background
         # queue it shares the sidecar's gdb run instead of blocking here.
@@ -2260,7 +2274,9 @@ class FuzzRound:
         # Count, triage (fault address for the signature), save, bound.
         f = self._f
         f.crash_count += 1
+        edges = self._crash_edges()
         self._triage_crash()
-        f.save_crash(self._mutated, self._returncode, self._stderr)
+        crash_name = f.save_crash(self._mutated, self._returncode, self._stderr)
+        self._note_crash_cov(edges, crash_name)
         f._prune_crash_data()
         return True

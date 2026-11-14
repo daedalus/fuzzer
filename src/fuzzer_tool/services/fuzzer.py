@@ -70,6 +70,7 @@ from fuzzer_tool.core.coverage_noise import (
     classify_noise,
     tail_variants,
 )
+from fuzzer_tool.core.crash_cov import CrashCoverage
 from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK, EdgeStore, EvictTie
@@ -89,6 +90,7 @@ from fuzzer_tool.core.metropolis import accept_prob, path_energy
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
 from fuzzer_tool.core.novelty_confirm import confirm
+from fuzzer_tool.core.novelty_hist import NoveltyHist
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
@@ -2533,6 +2535,14 @@ class Fuzzer:
         # Gravity-model splice donor (core/gravity.py): staged in
         # OperatorEngine._donor, credited in fuzz_one with the round's yield
         self._gravity = GravityModel() if splice_donor is SpliceDonor.GRAVITY else None
+
+        # New edges per admitted seed (core/novelty_hist.py): fed in
+        # CorpusManager._after_admit, printed in the run summary
+        self._novelty_hist = NoveltyHist()
+
+        # Crash-only virgin map (core/crash_cov.py): fed in FuzzRound's
+        # crash exits, printed in the run summary
+        self._crash_cov = CrashCoverage()
 
         # Corpus size boost: normal-distribution seed resizing
         self._corpus_boost = corpus_boost
@@ -5739,7 +5749,7 @@ class Fuzzer:
         self._state_store.set("strata", state)
 
     def _save_learned(self) -> None:
-        """Persist op_credit, burn-front, PLL, WFC, dict-thompson and gravity for ``--resume``."""
+        """Persist op_credit, burn-front, PLL, WFC, dict-thompson, gravity, novelty and crash coverage for ``--resume``."""
         from fuzzer_tool.core.wfc_chunks import WFC_MUTATOR
 
         if self._op_credit is not None:
@@ -5765,6 +5775,8 @@ class Fuzzer:
             self._state_store.set("dict_picker", self._dict_picker.to_dict())
         if self._gravity is not None:
             self._state_store.set("gravity", self._gravity.state_dict())
+        self._state_store.set("novelty_hist", self._novelty_hist.to_dict())
+        self._state_store.set("crash_cov", self._crash_cov.to_dict())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -5799,6 +5811,8 @@ class Fuzzer:
             self._dict_picker.from_dict(self._state_store.get("dict_picker", {}))
         if self._gravity is not None:
             self._gravity.load_state_dict(self._state_store.get("gravity", {}))
+        self._novelty_hist.from_dict(self._state_store.get("novelty_hist", {}))
+        self._crash_cov.from_dict(self._state_store.get("crash_cov", {}))
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""
@@ -8221,6 +8235,10 @@ class Fuzzer:
         byte-bitmap ptrace coverage (non-zero byte positions).
         """
         return self._stats.get_current_edge_set()
+
+    def _get_current_edge_array(self) -> "np.ndarray":
+        """Currently-active edge ids as an array (see ``_get_current_edge_set``)."""
+        return self._stats.get_current_edge_array()
 
     def _current_scheduling_badness(self) -> float:
         """Badness score in [0, 1] for badness-indexed scheduler floors.

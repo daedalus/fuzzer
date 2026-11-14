@@ -1464,6 +1464,10 @@ class CorpusManager:
             hmm.on_admit(f.corpus, f.seed_meta)
         # Mutator feedback hook (e.g. wfc_reorder_learned's adjacency tables).
         REGISTRY.notify_new_coverage(data, getattr(f, "_last_new_edge_count", 0))
+        # New-edges-per-seed histogram (core/novelty_hist.py).
+        novelty = getattr(f, "_novelty_hist", None)
+        if novelty is not None:
+            novelty.add(getattr(f, "_last_new_edge_count", 0))
         f._corpus_size_history.append(len(data))
         # The contextual schedulers' corpus-size percentile feature reads
         # this; nothing fed it before, so its guard (count >= 5) never
