@@ -328,6 +328,11 @@ ARMS: dict[str, list[str]] = {
     # the arm's own synthetic edges inflate "edges". ctl is baseline again (Rule 46).
     "alloc-sizes": ["--alloc-sizes"],
     "alloc-sizes-ctl": [],
+    # GA crossover (silennai NAS: crossover r=-0.47). Paired against "ga";
+    # ctl is "ga" again (Rule 46).
+    "ga": ["--ga"],
+    "ga-no-crossover": ["--ga", "--ga-crossover-rate", "0.0"],
+    "ga-ctl": ["--ga"],
 }
 
 STRATA_ARMS = (
@@ -431,6 +436,9 @@ ARM_BASELINES: dict[str, str] = {
     "colorize-ctl": "baseline",
     "alloc-sizes": "baseline",
     "alloc-sizes-ctl": "baseline",
+    "ga": "baseline",
+    "ga-no-crossover": "ga",
+    "ga-ctl": "ga",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

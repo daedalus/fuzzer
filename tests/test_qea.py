@@ -10,7 +10,6 @@ Test categories:
 7. Integration
 """
 
-import hashlib
 import math
 import random
 
@@ -32,6 +31,7 @@ from fuzzer_tool.core.qea import (
     mutate_amplitudes,
     rotation_gate,
 )
+from fuzzer_tool.services.corpus_manager import seed_key
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -523,7 +523,7 @@ class TestQEALifecycle:
         et = EdgeTracker()
         corpus = [b"seed_%d" % i for i in range(5)]
         for i, data in enumerate(corpus):
-            key = hashlib.sha256(data).hexdigest()[:16]
+            key = seed_key(data)
             et.seed_edges[key] = {i * 10 + j for j in range(5)}
         et.cumulative_edges = set(range(50))
         qea.initialize(corpus, et)
@@ -785,7 +785,7 @@ class TestQEALifecycle:
         et = EdgeTracker()
         for i in range(10):
             data = b"x_%d" % i
-            key = __import__("hashlib").sha256(data).hexdigest()[:16]
+            key = seed_key(data)
             et.seed_edges[key] = {i * 10 + j for j in range(5)}
             qea.population.append(
                 QEAIndividual(
@@ -920,7 +920,7 @@ class TestIntegration:
         # Create diverse inputs and register in edge_tracker
         for i in range(10):
             data = bytes([i] * 16)
-            key = __import__("hashlib").sha256(data).hexdigest()[:16]
+            key = seed_key(data)
             et.seed_edges[key] = {i * 10 + j for j in range(10)}
             et.cumulative_edges.update(range(i * 10, i * 10 + 10))
 

@@ -7,12 +7,12 @@ and generational replacement with elitism.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 from .mutations import (
@@ -46,7 +46,7 @@ class Individual:
 
     def __post_init__(self):
         if not self.seed_key:
-            self.seed_key = hashlib.sha256(self.data).hexdigest()[:16]
+            self.seed_key = key16(self.data)
 
     def to_dict(self) -> dict:
         return {
@@ -68,7 +68,7 @@ class Individual:
             species_id=d.get("species_id", -1),
             generation=d.get("generation", 0),
             crash=d.get("crash", False),
-            seed_key=d.get("seed_key", ""),
+            # Recomputed, not read: pre-XXH64 states stored sha256 keys.
         )
 
 
@@ -283,7 +283,7 @@ class GALifecycle:
         """Seed population from existing corpus."""
         self._speciation = Speciation(edge_tracker, self.speciation_threshold)
         for data in corpus[: self.pop_size]:
-            seed_key = hashlib.sha256(data).hexdigest()[:16]
+            seed_key = key16(data)
             edge_set = edge_tracker.seed_edges.get(seed_key, set())
             ind = Individual(
                 data=data,
@@ -310,7 +310,7 @@ class GALifecycle:
         self.iterations_since_gen += 1
 
         if new_coverage:
-            seed_key = hashlib.sha256(data).hexdigest()[:16]
+            seed_key = key16(data)
             ind = Individual(
                 data=data,
                 edge_count=edge_count,
@@ -407,13 +407,13 @@ class GALifecycle:
             parent_a = self.select_parent()
             parent_b = self.select_parent()
 
+            # Clones always mutate: an unmutated clone re-runs its parent.
             if self._rng.random() < self.crossover_rate:
                 child_data = self._crossover(parent_a.data, parent_b.data)
+                if self._rng.random() < self.mutation_rate:
+                    child_data = self._mutate(child_data)
             else:
-                child_data = parent_a.data  # clone
-
-            if self._rng.random() < self.mutation_rate:
-                child_data = self._mutate(child_data)
+                child_data = self._mutate(parent_a.data)
 
             child = Individual(
                 data=child_data,
