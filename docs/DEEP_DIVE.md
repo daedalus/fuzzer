@@ -455,6 +455,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Delta snapshotting**: caps chain depth at 20 hops, prevents unbounded reconstruction cost
 - **Auto-minimize**: corpus pruning guided by Wasserstein spatial diversity
 - **Hamming fuzzy dedup**: near-duplicate detection via Hamming distance on equal-length seeds (`--fuzzy-dedup N`)
+- **New edges per seed** (`core/novelty_hist.py`, always on; Fuzzilli's corpus diagnostic): each admission is bucketed by `_last_new_edge_count` into `0 | 1 | 2-5 | 6-10 | 11+`; the exit summary prints `New edges/seed:` with counts and shares. A large `1` share (Fuzzilli: 48% on JavaScriptCore) means features are found one at a time, not combined. `0` = admitted without new edges (seeds, hit-count gains). Persists across `--resume` (`novelty_hist` section). Cost: ~140 ns per admission.
 
 ### Pruned Seed Cuckoo Filter (`--cuckoo-seed-filter`)
 - **Purpose**: When enabled, tracks seeds that have been pruned during corpus minimization so their mutations are skipped during fuzzing, preventing re-discovery of low-value seeds.

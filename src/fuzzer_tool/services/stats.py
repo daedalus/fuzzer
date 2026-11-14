@@ -40,6 +40,7 @@ from fuzzer_tool.core.edge_stats import CurveShape
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.lineage import LineageTree
+from fuzzer_tool.core.novelty_hist import BUCKET_LABELS
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
@@ -758,6 +759,17 @@ class StatsReporter:
             f"{st['refits']} refits)"
         )
 
+    def _print_summary_novelty(self, f) -> None:
+        """New edges per admitted seed, e.g. ``1:48 (48%)``; mostly ``1`` = single-feature finds."""
+        hist = getattr(f, "_novelty_hist", None)
+        if hist is None or hist.total() == 0:
+            return
+        parts = [
+            f"{label}:{c} ({share:.0%})"
+            for label, c, share in zip(BUCKET_LABELS, hist.counts(), hist.shares(), strict=True)
+        ]
+        print(f"  New edges/seed:    {' '.join(parts)}")
+
     def _print_summary_confirm(self, f) -> None:
         """Say what --confirm-novelty did: reruns paid, successes it withdrew."""
         if not getattr(f, "_confirm_novelty", False):
@@ -973,6 +985,7 @@ class StatsReporter:
             )
         self._print_summary_coverage(f)
         self._print_summary_seeds(f)
+        self._print_summary_novelty(f)
         self._print_summary_rarity(f)
         self._print_summary_gravity(f)
 
