@@ -232,3 +232,41 @@ class TestEdgeCases:
         stat, p = g.ljung_box()
         assert stat == 0.0
         assert p == 1.0
+
+
+class TestSampleVarianceStability:
+    """Welford M2 vs. the textbook E[x^2] - E[x]^2 (catastrophic cancellation)."""
+
+    _OFFSET = 1e9
+
+    @staticmethod
+    def _two_pass(xs):
+        mean = sum(xs) / len(xs)
+        return sum((x - mean) ** 2 for x in xs) / len(xs)
+
+    def test_regression_large_offset_variance(self):
+        # Wikipedia example: 1e9 + {4, 7, 13, 16} has variance 22.5 (pop).
+        xs = [self._OFFSET + d for d in (4.0, 7.0, 13.0, 16.0)]
+        g = _feed(OnlineGarch11(), xs)
+        assert g._sample_variance() == pytest.approx(self._two_pass(xs), rel=1e-9)
+
+    def test_constant_large_stream_hits_floor(self):
+        # Adversarial: zero true variance must not leak rounding noise.
+        g = _feed(OnlineGarch11(), [self._OFFSET + 0.1] * 1000)
+        assert g._sample_variance() == pytest.approx(1e-12)
+
+    def test_shift_invariance(self):
+        # Falsification: variance must not depend on the offset.
+        base = [1.0, 5.0, 2.0, 9.0, 1.0, 7.0, 3.0, 8.0]
+        lo = _feed(OnlineGarch11(), base)._sample_variance()
+        hi = _feed(OnlineGarch11(), [self._OFFSET + x for x in base])._sample_variance()
+        assert lo == pytest.approx(self._two_pass(base), rel=1e-12)
+        assert hi == pytest.approx(lo, rel=1e-6)
+
+    def test_legacy_sum_sq_state_loads(self):
+        # Pre-Welford state carried sum_sq; load must rebuild M2 from it.
+        xs = [1.0, 5.0, 2.0, 9.0]
+        legacy = {"count": 4, "sum": sum(xs), "sum_sq": sum(x * x for x in xs)}
+        g = OnlineGarch11()
+        g.load(legacy)
+        assert g._sample_variance() == pytest.approx(self._two_pass(xs), rel=1e-12)
