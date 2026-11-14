@@ -22,6 +22,7 @@ from collections.abc import Iterable, Mapping
 
 import numpy as np
 
+from fuzzer_tool.adapters import native_scan
 from fuzzer_tool.core.edge_matrix import DEFAULT_REFIT_INTERVAL, RefitCadence
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
 
@@ -73,6 +74,7 @@ class EdgeClusters:
     def _reset(self) -> None:
         self._canon = EdgeCanonicalizer()
         self._heads = _EMPTY  # class head edge ids, ascending
+        self._head_index = native_scan.sorted_index(_EMPTY)
         self._owners = _EMPTY  # seeds per class
         self._sizes = _EMPTY  # edges per class
         self._leader = _EMPTY  # class index of each class's cluster leader
@@ -119,6 +121,7 @@ class EdgeClusters:
         edge_cls = cls[first]
 
         self._heads, self._owners = heads, owners
+        self._head_index = native_scan.sorted_index(heads)
         self._sizes = np.bincount(edge_cls, minlength=n_cls)
         self._singleton_edges = int(np.count_nonzero(owners[edge_cls] == 1))
         self._leader = self._medoid = np.arange(n_cls)
@@ -196,7 +199,7 @@ class EdgeClusters:
         if not self._heads.size:
             return np.full(len(edges), -1, dtype=np.int64)
         heads = self._canon.class_array(np.asarray(edges, dtype=np.int64))
-        at = np.searchsorted(self._heads, heads).clip(max=self._heads.size - 1)
+        at = self._head_index.lower_bound(heads).clip(max=self._heads.size - 1)
         return np.where(self._heads[at] == heads, at, -1)
 
     def _seen(self, edges: Iterable[int]) -> np.ndarray:
