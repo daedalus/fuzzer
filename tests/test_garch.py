@@ -8,6 +8,7 @@ import random
 import pytest
 
 from fuzzer_tool.core.analyzers.analyzer_garch import (
+    _VARIANCE_FLOOR,
     OVERLAP_ARTIFACT_LAGS,
     OnlineGarch11,
     squared_acf,
@@ -247,17 +248,19 @@ class TestSampleVarianceStability:
     def test_regression_large_offset_variance(self):
         # Wikipedia example: 1e9 + {4, 7, 13, 16} has variance 22.5 (pop).
         xs = [self._OFFSET + d for d in (4.0, 7.0, 13.0, 16.0)]
+        assert self._two_pass(xs) == 90.0 / 4  # oracle control (Rule 46)
         g = _feed(OnlineGarch11(), xs)
         assert g._sample_variance() == pytest.approx(self._two_pass(xs), rel=1e-9)
 
     def test_constant_large_stream_hits_floor(self):
         # Adversarial: zero true variance must not leak rounding noise.
         g = _feed(OnlineGarch11(), [self._OFFSET + 0.1] * 1000)
-        assert g._sample_variance() == pytest.approx(1e-12)
+        assert g._sample_variance() == _VARIANCE_FLOOR
 
     def test_shift_invariance(self):
         # Falsification: variance must not depend on the offset.
         base = [1.0, 5.0, 2.0, 9.0, 1.0, 7.0, 3.0, 8.0]
+        assert self._two_pass(base) == 72.0 / 8  # oracle control (Rule 46)
         lo = _feed(OnlineGarch11(), base)._sample_variance()
         hi = _feed(OnlineGarch11(), [self._OFFSET + x for x in base])._sample_variance()
         assert lo == pytest.approx(self._two_pass(base), rel=1e-12)
@@ -270,3 +273,18 @@ class TestSampleVarianceStability:
         g = OnlineGarch11()
         g.load(legacy)
         assert g._sample_variance() == pytest.approx(self._two_pass(xs), rel=1e-12)
+
+    def test_regression_legacy_load_uses_buffer(self):
+        # Legacy sum_sq cancels at offset 1e9; a full buf rebuilds M2 exactly.
+        xs = [self._OFFSET + d for d in (4.0, 7.0, 13.0, 16.0)]
+        legacy = {"count": 4, "sum": sum(xs), "sum_sq": sum(x * x for x in xs), "buf": xs}
+        g = OnlineGarch11()
+        g.load(legacy)
+        assert g._sample_variance() == pytest.approx(90.0 / 4, rel=1e-9)
+
+    def test_regression_save_keeps_legacy_keys(self):
+        # Older loaders read sum/sum_sq; a downgrade must not reset the stats.
+        xs = [1.0, 5.0, 2.0, 9.0]
+        data = _feed(OnlineGarch11(), xs).save()
+        assert data["sum"] == pytest.approx(17.0)
+        assert data["sum_sq"] == pytest.approx(111.0)

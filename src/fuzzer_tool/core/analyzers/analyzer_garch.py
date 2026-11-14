@@ -361,6 +361,9 @@ class OnlineGarch11:
             "count": self._count,
             "mean": self._mean,
             "m2": self._m2,
+            # Derived legacy keys: older loaders read sum/sum_sq.
+            "sum": self._mean * self._count,
+            "sum_sq": self._m2 + self._count * self._mean * self._mean,
             "sigma2": self._sigma2,
             "eps": self._eps,
             "last_fit_at": self._last_fit_at,
@@ -372,6 +375,12 @@ class OnlineGarch11:
         count = data.get("count", 0)
         if not count:
             return 0.0
+
+        # buf holds every observation: exact two-pass, no cancellation.
+        buf = data.get("buf", [])
+        if len(buf) == count:
+            mean = math.fsum(buf) / count
+            return math.fsum((v - mean) ** 2 for v in buf)
 
         total = data.get("sum", 0.0)
         return max(data.get("sum_sq", 0.0) - total * total / count, 0.0)
