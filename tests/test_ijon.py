@@ -252,7 +252,9 @@ def ijon_exe(tmp_path_factory):
 
 def _run(exe, ijon: IjonMaxShm | None, *argv: str) -> tuple[int, ShmCoverage]:
     shm = ShmCoverage(size=MAP_ENTRIES)
-    env = _clean_env(__AFL_SHM_ID=shm.env_id, AFL_MAP_SIZE=str(MAP_ENTRIES))
+    # Edge ids are exec-stable only without ASLR or base-relative; the fuzzer
+    # disables ASLR, pytest does not. IJON_STATE runs on the ctx-hashing slow path.
+    env = _clean_env(__AFL_SHM_ID=shm.env_id, AFL_MAP_SIZE=str(MAP_ENTRIES), FUZZER_KEEP_ASLR="1")
     if ijon is not None:
         env[IJON_ENV] = ijon.env_id
     rc = subprocess.run([str(exe), *argv], env=env, timeout=30).returncode

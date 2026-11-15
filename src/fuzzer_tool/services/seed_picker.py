@@ -1307,7 +1307,7 @@ class SeedPicker:
             return hint
 
         # --ijon: the max queue takes its IJON_SCHEDULE_MAXMAP share.
-        ijon = f._ijon
+        ijon = getattr(f, "_ijon", None)
         best = ijon.pick(rng) if ijon is not None else None
         if best is not None:
             f._seed_strategy = IJON_MAXMAP

@@ -126,12 +126,13 @@ typedef enum {
     DECODE_API_SUBTITLE,  /* avcodec_decode_subtitle2 */
 } DecodeApi;
 
-/* IJON (--ijon): per codec, the most frames one input decoded. Slot =
- * codec id (wraps at the 512-slot max-map), so the input that drives a
- * decoder furthest is kept and scheduled (adapters/ijon.h). Inert without
- * --ijon; compiled out without the shim (frontier _cov build). */
+/* IJON (--ijon): per codec, the most frames one input decoded, so the
+ * input that drives a decoder furthest is kept and scheduled
+ * (adapters/ijon.h). Slot = hashed codec id: raw ids alias at the 512-slot
+ * wrap (PCM_S16LE 0x10000 -> slot 0). Inert without --ijon; compiled out
+ * without the shim (frontier _cov build). */
 #if defined(__AFL_EDGE) && __AFL_EDGE
-#define FUZZ_IJON_MAX(slot, v) ijon_max((uint32_t)(slot), (uint64_t)(v))
+#define FUZZ_IJON_MAX(slot, v) ijon_max(ijon_hashint(0, (uint32_t)(slot)), (uint64_t)(v))
 #else
 #define FUZZ_IJON_MAX(slot, v) ((void)0)
 #endif
