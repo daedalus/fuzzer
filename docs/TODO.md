@@ -336,6 +336,19 @@ Ported: time-normalised Elo strategy credit (`--elo-time-credit`).
 - [ ] **`op_autofz` arm** — prep phase: equal round-robin windows; early exit when best − worst new edges > θ; θ += θ_init on early exit, else θ /= 2 (AIMD). Focus: winner-take-all on early exit, else split by new edges. Ship only if it beats Elo on fuzzgoat.
 - Skip: seed sync, cgroups, multi-core (single process, one corpus); exclusive-edge credit (already exclusive: one exec finds each edge).
 
+## OneFuzz port candidates (2026-11-15, microsoft/onefuzz agent)
+Plan for P1/P2: `docs/action_plan_onefuzz_port.md`. Already have: tmin/cmin, ptrace coverage, SARIF, push/email, crash-bisect, gdb replay.
+- [ ] **P2 `--stack-ignore` + `func_hash`** — user regexes extend runtime-frame stripping (prototype: `av_free` wrappers stop being the signature); function-name hash survives rebuilds; blocklist accepts `# func-hash v1`.
+- [ ] **P1 `--repro-gate N`** — replay novel crashes ≤N times before save; no signature match → `crashes/no_repro/`, no alert.
+- [ ] **Regression mode for `verify`** — per bucket: fixed / still crashing / new signature against a new build.
+- [ ] **Pre-flight** — unresolved shared libs (`LD_DEBUG=libs`), seeds crashing/timing out at start.
+- [ ] **Placeholders** — `{input}`, `{target_exe}`, `{crashes}`, `{input_file_name}` in `adapters/process.py` (only `{file}` today).
+- [ ] **`--analyzer-cmd`** — external tool per novel crash, output beside sidecars. Needs placeholders.
+- [ ] **Source coverage** — module allow/deny list + DWARF line map for `ptrace_coverage`, lcov/Cobertura out. Large.
+- [ ] **Issue filing** — opt-in GitHub issue per bucket, dedup by `func_hash`.
+- [ ] **Corpus sync** between parallel local workers — only if multi-process runs land.
+- Skip: Azure orchestration (pools, scalesets, blob containers), repro VMs, Windows cdb/dbghelp, AFL/honggfuzz supervisors, telemetry.
+
 ## WEIZZ port gaps (2026-11-15, ISSTA 2020)
 Ported: passive tags (`core/weizz_tags.py`), field/chunk/repair ops, P4 restricted solve, P5 inheritance. Fixed 2026-11-15: collected tags were discarded (copy in `attach_tags_to_meta`, mutant meta replaced on admission), initial seeds never tagged, length-changing ops disabled the parent's map for good, tags lost on `--resume` (`tests/test_regression_weizz_tags_lifecycle.py`).
 - [ ] **A/B `--weizz-tags`** (E1) — `bench_paired.py` arm; fuzzgoat + a nested-chunk target. No ledger row exists; every claim below is unmeasured.
