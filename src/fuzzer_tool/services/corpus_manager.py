@@ -63,6 +63,15 @@ _TIMEOUTS = "timeouts"
 # Never in the in-memory corpus, so no kept set names them.
 _PROTECTED = frozenset((_IRREPLACEABLE, _CRASHING, _TIMEOUTS))
 
+# Weizz tag-map keys carried across --resume (see weizz_tags.attach_tags_to_meta).
+_WEIZZ_TAG_KEYS = (
+    "weizz_tags_rle",
+    "weizz_tags_len",
+    "weizz_tags_ntypes",
+    "weizz_tags_dirty",
+    "weizz_tags_inherited",
+)
+
 # AFL trim_case: chunks len/2 .. len/1024, never under 4 bytes (TRIM_MIN_BYTES).
 # Budget caps a 64 KiB walk (~2k execs uncapped) per new-coverage seed.
 _TRIM_START_DIV = 2
@@ -686,6 +695,8 @@ class CorpusManager:
                 "record_stride": meta.get("record_stride", None),
                 "c11": meta.get("c11", 0),
             }
+            # Weizz tags: only when collected, so untagged seeds stay unarmed.
+            state["seed_meta"][key].update({k: meta[k] for k in _WEIZZ_TAG_KEYS if k in meta})
         # Seeds before state: state must never name seeds not yet on disk.
         seed_zip.flush_all()
         store = f._state_store
@@ -851,6 +862,7 @@ class CorpusManager:
                         "c11": sm.get("c11", 0),
                     }
                 )
+                f.seed_meta[seed].update({k: sm[k] for k in _WEIZZ_TAG_KEYS if k in sm})
                 rm_ser = sm.get("redqueen_matches", [])
                 if rm_ser:
                     f.seed_meta[seed]["redqueen_matches"] = [
