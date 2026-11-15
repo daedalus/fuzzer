@@ -199,6 +199,7 @@ from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
+from fuzzer_tool.services.c11_channel import C11Channel
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.crash_gdb import CrashGdbQueue
 from fuzzer_tool.services.crash_shrink import CrashShrinker
@@ -218,6 +219,7 @@ from fuzzer_tool.services.seed_stage import SeedStage
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.target_arena import TargetArena
 from fuzzer_tool.services.uninit_probe import UninitProbe
+from fuzzer_tool.services.value_profile import ValueProfile, ValueProfileChannel
 
 log = logging.getLogger(__name__)
 
@@ -2138,6 +2140,10 @@ class Fuzzer:
         ijon=False,
         # --ijon-schedule-maxmap: percent of picks left to the normal queue.
         ijon_schedule_maxmap=DEFAULT_SCHEDULE_MAXMAP,
+        # --c11: local-variable seed weight (services/c11_channel.py). Appended.
+        c11=False,
+        # --value-profile: comparison distance ids (services/value_profile.py). Appended.
+        value_profile=ValueProfile.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2800,6 +2806,12 @@ class Fuzzer:
         if self.shm_cov and not self.multi_targets:
             self._block_bitmap = self._open_block_bitmap(target)
             self._sancov_tables = self._open_sancov_tables()
+
+        # --c11: rides the block bitmap's guard marks and the pc-table dump.
+        self._c11: C11Channel | None = self._open_c11(target) if c11 else None
+
+        # --value-profile: exported before any target spawns.
+        self._vp: ValueProfileChannel | None = self._open_vp(target, value_profile)
 
         # --ijon: max-map segment for IJON_MAX/MIN. Single target only, like
         # the block bitmap: targets sharing os.environ share one segment.
@@ -5633,6 +5645,37 @@ class Fuzzer:
         if detect_ijon_capable(target) is False:
             print("[!] --ijon: target shim has no IJON runtime (ijon_max); rebuild it")
         return IjonChannel.open(schedule_maxmap)
+
+    def _open_c11(self, target: str) -> C11Channel | None:
+        """Open the C11 channel; it needs the single-target block bitmap."""
+        if self._block_bitmap is None or self._sancov_tables is None:
+            print("[!] --c11: needs SHM coverage on a single target; disabled")
+            return None
+        return C11Channel.open(target, self._sancov_tables, self._block_bitmap.size_bytes * 8)
+
+    def _open_vp(self, target: str, mode: ValueProfile) -> ValueProfileChannel | None:
+        """Open the value-profile switch; warn when the shim cannot mark."""
+        if mode is ValueProfile.OFF:
+            return None
+        from fuzzer_tool.core.elf import detect_vp_capable
+
+        if detect_vp_capable(target) is False:
+            print("[!] --value-profile: target shim has no value profile; rebuild with --cmplog")
+        return ValueProfileChannel.open(mode)
+
+    def _vp_on_stall(self) -> None:
+        """Stall engaged: --value-profile stall switches distance ids on."""
+        if self._vp is not None:
+            self._vp.on_stall()
+
+    def _note_c11(self, seed: bytes) -> None:
+        """Record the last exec's max locals on *seed* (--c11; 0 = unmeasured)."""
+        c11 = getattr(self, "_c11", None)  # partial Fuzzers (tests) skip __init__
+        if c11 is None:
+            return
+        meta = self.seed_meta.get(seed)
+        if meta is not None:
+            meta["c11"] = c11.measure(self.shm_cov.read_generation())
 
     def _open_sancov_tables(self) -> SancovTables:
         """Reserve the pc-table / control-flow dump path; the shim writes it."""
@@ -8578,6 +8621,7 @@ class Fuzzer:
         prev = self._stall_last_engage_exec
         self._stall_recovery_count += 1
         self._stall_recovery_active = True
+        self._vp_on_stall()
         self._stall_engaged_at = self.exec_count
         self._stall_last_engage_exec = self.exec_count
         self._stall_edges_in_recovery = 0
@@ -9520,6 +9564,7 @@ class Fuzzer:
                 hw_branch_misses=self._last_perf_deltas.get("branch_misses", 0),
             )
             baseline_edges += len(new)
+            self._note_c11(seed)
             entries += len(edge_ids)
             if entries > entries_limit:
                 # Bound RAM by edge entries, not seed count: wide seeds blow

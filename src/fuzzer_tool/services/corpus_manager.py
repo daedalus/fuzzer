@@ -668,6 +668,7 @@ class CorpusManager:
                 "new_edge_count": meta.get("new_edge_count", 0),
                 "coverage_edges_baseline": meta.get("coverage_edges_baseline", 0),
                 "record_stride": meta.get("record_stride", None),
+                "c11": meta.get("c11", 0),
             }
         # Seeds before state: state must never name seeds not yet on disk.
         seed_zip.flush_all()
@@ -830,6 +831,8 @@ class CorpusManager:
                         "new_edge_count": sm.get("new_edge_count", 0),
                         "coverage_edges_baseline": sm.get("coverage_edges_baseline", 0),
                         "record_stride": sm.get("record_stride", None),
+                        # --c11 locals; 0 = unmeasured (older state, flag off).
+                        "c11": sm.get("c11", 0),
                     }
                 )
                 rm_ser = sm.get("redqueen_matches", [])

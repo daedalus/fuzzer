@@ -48,8 +48,8 @@ edges → no crash file. Fixed: crash → `save_crash`; changed trace with confi
 | 1 | Multi-instance sync (`-M/-S/-F`) | `afl-fuzz-run.c:sync_fuzzers` | absent; one-shot `import` only | high: only way a Python fuzzer scales past one core | M |
 | 2 | AFL `trim_case` (len/16…len/1024 chunk removal) | `afl-fuzz-one.c:trim_case` | only one halving try | high: smaller seeds → faster execs, cleaner splices | S |
 | 3 | Starve mode, full | `afl-main.c:afl_advance_queue_cycle`, `afl-fuzz-queue.c:1426` | partial: `--stall` → random-mode mutations | med–high | M |
-| 4 | Value-profile frontier | `afl-fuzz-valprof.c`, `docs/value_profiling.md` | partial: cmp-distance *operators* (`gradient_cmp`, `mb_cbh`), no distance *feedback* | high on magic-heavy targets | M |
-| 5 | C11 local-variable seed weight (ICSE'26) | `afl-fuzz-queue.c:368,519` | absent | med; cheap via DWARF | S |
+| 4 | Value profile | `afl-fuzz-valprof.c`, `docs/value_profiling.md` | **done 2026-11-15** (`--value-profile`). Correction: COMPCOV (`--compcov-level`) already gave byte-prefix distance feedback; the port adds Hamming + magnitude ids and stall activation | high on magic-heavy targets | M |
+| 5 | C11 local-variable seed weight (ICSE'26) | `afl-fuzz-queue.c:368,519` | **done 2026-11-15** (`--c11`) | med; cheap via DWARF | S |
 | 6 | SAND sanitizer forwarding | `afl-fuzz-sanfuzz.c`, `docs/SAND.md` | partial: `--asan-target` replays crashes only (backlog G1) | high on ASAN-slow targets | M |
 | 7 | BUG_SCALAR max-per-arith-site | `afl-llvm-bug-pass.so.cc` | absent (IJON max is manual) | med | M (sancov can't see arith; needs pass or IJON auto-annotation) |
 | 8 | Dynamic coverage filter | `utils/dynamic_covfilter` | absent | med for big targets (FFmpeg) | S |

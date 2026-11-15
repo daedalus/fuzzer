@@ -2148,6 +2148,7 @@ class FuzzRound:
         mutated = self._mutated
         _corpus_len_before = len(f.corpus)
         f.save_to_corpus(mutated, parent=data)
+        f._note_c11(mutated)
         self._tag_distance()
         # Validity is a property of this execution, so it is recorded
         # here rather than reconstructed later: the seed picker reads it
@@ -2245,6 +2246,7 @@ class FuzzRound:
             return False
         _corpus_len_before = len(f.corpus)
         f.save_to_corpus(mutated, parent=data)
+        f._note_c11(mutated)
         self._tag_distance()
         f._record_lineage_insert(mutated, data, _corpus_len_before)
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
