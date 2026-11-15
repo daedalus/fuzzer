@@ -1,7 +1,7 @@
 """Mutation operators and dictionary handling."""
 
 import itertools
-from enum import IntEnum
+from enum import Enum, IntEnum
 from functools import cache
 
 import numpy as np
@@ -3713,6 +3713,30 @@ def _is_texty(data: bytes) -> bool:
     """>= 90% printable ASCII; counted in C (was a per-byte Python sum)."""
     printable = len(data) - len(data.translate(None, _PRINTABLE))
     return printable >= len(data) * 9 // 10
+
+
+# AFL++ check_if_text_buf counts whitespace as text; _PRINTABLE does not.
+_TEXTISH = _PRINTABLE + b"\t\n\r"
+
+
+class InputMode(Enum):
+    """Text/binary/mixed, as AFL++ splits its op tables (``input_mode``)."""
+
+    TEXT = "text"  # >= 90% printable, the _is_texty bar
+    MIXED = "mixed"  # 50-90%: text framing around binary fields
+    BINARY = "binary"  # < 50%, or empty
+
+
+def input_mode(data: bytes) -> InputMode:
+    """Classify *data* by printable share. Example: an HTTP request is TEXT."""
+    n = len(data)
+    if not n:
+        return InputMode.BINARY
+
+    printable = n - len(bytes(data).translate(None, _TEXTISH))
+    if printable >= n * 9 // 10:
+        return InputMode.TEXT
+    return InputMode.MIXED if 2 * printable >= n else InputMode.BINARY
 
 
 def _build_verse(data, rng):

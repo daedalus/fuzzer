@@ -2144,6 +2144,10 @@ class Fuzzer:
         c11=False,
         # --value-profile: comparison distance ids (services/value_profile.py). Appended.
         value_profile=ValueProfile.OFF,
+        # --rq-add-key: redqueen through an additive key (core/rq_encodings.py). Appended.
+        rq_add_key=False,
+        # --stall-mode: op choice during stall recovery (services/operators.py). Appended.
+        stall_mode=None,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2474,6 +2478,9 @@ class Fuzzer:
         from fuzzer_tool.core.rq_encodings import XorKeyStage, set_xor_key_stage  # noqa: PLC0415
 
         set_xor_key_stage(XorKeyStage.ON if rq_xor_key else XorKeyStage.OFF)
+        from fuzzer_tool.core.rq_encodings import AddKeyStage, set_add_key_stage  # noqa: PLC0415
+
+        set_add_key_stage(AddKeyStage.ON if rq_add_key else AddKeyStage.OFF)
         self.checksum_sites = checksum_sites
         self.merkle_sites = merkle_sites
         self.grimoire = grimoire
@@ -3106,6 +3113,8 @@ class Fuzzer:
 
         # ── Extracted modules ──────────────────────────────────────────
         self._operators = OperatorEngine(self)
+        if stall_mode is not None:
+            self._operators.bind_stall_mode(stall_mode)
         self._seed_picker = SeedPicker(self)
         self._runner = TargetRunner(self)
         self._stats = StatsReporter(self, rng=self._rng)

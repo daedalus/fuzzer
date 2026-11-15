@@ -182,6 +182,8 @@ class SeedScorer:
         "entropic",
         "katz",
         "doppler",
+        "seek",
+        "exploit",
     )
     COOLING = ("exp", "log", "lin", "quad")
 
@@ -314,6 +316,9 @@ class SeedScorer:
         elif self.schedule == "mopt":
             factor = self._mopt_factor(max_depth, depth)
             perf_score *= factor
+        elif self.schedule == "exploit":
+            # AFL++ EXPLOIT: vanilla AFL's constant, factor MAX_FACTOR.
+            perf_score *= self.max_factor / self.power_beta
         elif self.schedule == "coe":
             if mean_log_n_fuzz > 0 and self.coe_skip(n_fuzz, mean_log_n_fuzz, favored):
                 # COE skip: floor energy (documented domain is 1..max_mult*100).
@@ -386,8 +391,8 @@ class SeedScorer:
         """Schedule-independent base energy: 100 x speed x bitmap x handicap x depth."""
         perf_score = 100.0
 
-        # Speed adjustment (skip for rare schedule)
-        if self.schedule != "rare" and avg_exec_us > 0:
+        # Speed adjustment; rare and seek ignore timings (AFL++: schedule >= RARE)
+        if self.schedule not in ("rare", "seek") and avg_exec_us > 0:
             perf_score *= self._speed_factor(exec_us, avg_exec_us)
 
         # Bitmap size adjustment

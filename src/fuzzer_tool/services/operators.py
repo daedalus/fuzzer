@@ -75,6 +75,7 @@ from fuzzer_tool.core.mutations import (
     splice_diff_located,
 )
 from fuzzer_tool.core.mutations.afl_det import det_variant
+from fuzzer_tool.core.mutations.generic import InputMode, input_mode
 from fuzzer_tool.core.mutations.int_encodings import (
     bcd_pack,
     bit_compress,
@@ -348,9 +349,10 @@ _CONTEXT_FORMAT_CATEGORIES = (
     "other",
 )
 # 6 scalar features (log-size, entropy, edge-coverage frac, lineage depth,
-# cmplog-pairs-exist, corpus-size percentile) + format one-hot + 1 per-arm
+# cmplog-pairs-exist, corpus-size percentile) + format one-hot + input-mode
+# one-hot (text/mixed/binary, AFL++ input_mode) + 1 per-arm
 # operator-cost feature appended in _context_vector().
-CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
+CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + len(InputMode) + 1
 
 # ── deterministic stage ───────────────────────────────────────────────────
 # Effector-map codes. A position is skipped by the arithmetic and
@@ -1447,6 +1449,17 @@ class _SegAction(Enum):
 _POS_SLOT_COUNT = 11
 
 
+class StallMode(Enum):
+    """Op choice during stall recovery (--stall-mode)."""
+
+    RANDOM = "random"  # uniform over every available op
+    EXPLOIT = "exploit"  # AFL++ -P: only the precise bands (EXPLOIT_BANDS)
+
+
+# Bands an exploit-mode stall draws from: input-to-state, solvers, dictionary.
+EXPLOIT_BANDS = ("adaptive", "dict")
+
+
 def _round_mutations(f) -> int:
     """Mutations this round: -M scaled by seed energy and the 1/5 rule, floored at 16 in stall recovery."""
     n_mutations = f.mutations_per_input
@@ -1503,6 +1516,7 @@ class OperatorEngine:
 
     def __init__(self, fuzzer):
         self.f = fuzzer
+        self.bind_stall_mode(StallMode.RANDOM)  # Fuzzer rebinds from --stall-mode
         # Position plan for the current mutate() round (_pos_plan); None
         # falls back to select_position.
         self._round_pos_plan: tuple | None = None
@@ -4329,6 +4343,65 @@ class OperatorEngine:
                 ]
             )
 
+    def _op_c_source_mutate(self, buf, _byte_idx, _data):
+        """AFL++ compiler-fuzzer rule (core/mutations/source_rules.py); text inputs only."""
+        from fuzzer_tool.core.mutations.source_rules import source_mutate  # noqa: PLC0415
+
+        out = source_mutate(bytes(buf), self.ctx._rng, self.ctx.max_len or len(buf) * 2 + 64)
+        return bytearray(out) if out is not None else None
+
+    # ── Gramatron walks (core/gramatron.py) ──
+    # A seed this engine produced has a remembered walk and is mutated as one;
+    # any other input is replaced by a fresh walk (Gramatron fuzzes walks only).
+
+    def _gramatron(self):
+        engine = getattr(self, "_gramatron_engine", None)
+        if engine is None or engine.grammar is not self.ctx.grammar:
+            from fuzzer_tool.core.gramatron import Gramatron  # noqa: PLC0415
+
+            engine = self._gramatron_engine = Gramatron(self.ctx.grammar)
+        return engine
+
+    def _gramatron_emit(self, engine, walk: list[int], out: bytes) -> bytearray:
+        engine.remember(out, walk)
+        return bytearray(out[: self.ctx.max_len or None])
+
+    def _gramatron_seed(self, engine, buf):
+        """The input's walk, or a fresh (walk, out) when it has none."""
+        walk = engine.walk_for(bytes(buf))
+        if walk is None:
+            return None, engine.random_walk(self.ctx._rng)
+        return walk, None
+
+    def _op_gramatron_random(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine = self._gramatron()
+        walk, fresh = self._gramatron_seed(engine, buf)
+        return self._gramatron_emit(engine, *(fresh or engine.mutate_random(walk, self.ctx._rng)))
+
+    def _op_gramatron_splice(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine, rng = self._gramatron(), self.ctx._rng
+        walk, fresh = self._gramatron_seed(engine, buf)
+        if fresh is not None:
+            return self._gramatron_emit(engine, *fresh)
+
+        donor = engine.donor(rng)
+        res = engine.mutate_splice(walk, donor, rng) if donor is not None else None
+        return self._gramatron_emit(engine, *(res or engine.mutate_random(walk, rng)))
+
+    def _op_gramatron_recurse(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine, rng = self._gramatron(), self.ctx._rng
+        walk, fresh = self._gramatron_seed(engine, buf)
+        if fresh is not None:
+            return self._gramatron_emit(engine, *fresh)
+        res = engine.mutate_recurse(walk, rng)
+        return self._gramatron_emit(engine, *(res or engine.mutate_random(walk, rng)))
+
     def _op_fsm_regen(self, buf, _byte_idx, _data):
         """Keep a valid FSM prefix, regenerate a valid tail (core/format_fsm.py)."""
         fsm = self.ctx.fsm
@@ -6229,6 +6302,8 @@ class OperatorEngine:
 
         fmt = self._classify_format(data)
         fmt_onehot = [1.0 if fmt == cat else 0.0 for cat in _CONTEXT_FORMAT_CATEGORIES]
+        mode = input_mode(data)
+        mode_onehot = [1.0 if mode is m else 0.0 for m in InputMode]
 
         return [
             log_size,
@@ -6238,6 +6313,7 @@ class OperatorEngine:
             cmplog_exists,
             pctile,
             *fmt_onehot,
+            *mode_onehot,
         ]
 
     def _op_cost_feature(self, op: str) -> float:
@@ -6288,14 +6364,33 @@ class OperatorEngine:
         f._meta_strategy_key = strategy
         return strategy
 
+    def bind_stall_mode(self, mode: StallMode) -> None:
+        """Fix the stall-recovery op picker once (ifs up: no per-call mode test)."""
+        if mode is StallMode.RANDOM:
+            self._stall_pick = self._stall_pick_random
+            return
+        self._exploit_ops = frozenset(n for b in EXPLOIT_BANDS for n in REGISTRY.categories()[b])
+        self._stall_pick = self._stall_pick_exploit
+
+    def _stall_pick_random(self, ops: list[str]) -> str:
+        self.f._meta_strategy = "random_stall"
+        return self.ctx._rng.choice(ops)
+
+    def _stall_pick_exploit(self, ops: list[str]) -> str:
+        # Sorted: the candidate order must not depend on set hashing.
+        precise = sorted(op for op in ops if op in self._exploit_ops)
+        if not precise:
+            return self._stall_pick_random(ops)
+        self.f._meta_strategy = "exploit_stall"
+        return self.ctx._rng.choice(precise)
+
     def select_op(self, ops: list[str]) -> str:
         """Select a mutation operator using the active scheduling strategy."""
         f = self.f
 
         if f._stall_recovery_active:
-            f._meta_strategy = "random_stall"
             f._op_selector = None
-            return self.ctx._rng.choice(ops)
+            return self._stall_pick(ops)
 
         # Ballot and strategy are fixed for the exec: resolve on the first
         # mutation, reuse on the rest. mutate() clears the cache per exec; a

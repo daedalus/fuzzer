@@ -44,6 +44,7 @@ from fuzzer_tool.services.crash_cluster import CLUSTER_THRESHOLD, REDUCE_EXECS, 
 from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, Fuzzer
 from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
+from fuzzer_tool.services.operators import StallMode
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
 from fuzzer_tool.services.value_profile import ValueProfile
 
@@ -921,6 +922,8 @@ def cmd_fuzz(args):
         ijon_schedule_maxmap=getattr(args, "ijon_schedule_maxmap", DEFAULT_SCHEDULE_MAXMAP),
         c11=getattr(args, "c11", False),
         value_profile=ValueProfile(getattr(args, "value_profile", ValueProfile.OFF.value)),
+        rq_add_key=getattr(args, "rq_add_key", False),
+        stall_mode=StallMode(getattr(args, "stall_mode", StallMode.RANDOM.value)),
         hw_perf_counters=getattr(args, "hw_perf_counters", None),
         hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
@@ -3114,6 +3117,7 @@ _HAIL_MARY_FLAGS = (
     "op_append",
     "op_line_code",
     "rq_xor_key",
+    "rq_add_key",
     "checksum_sites",
     "merkle_sites",
     "grimoire",
@@ -6794,8 +6798,11 @@ def main() -> int:
             "aflgo",
             "entropic",
             "doppler",
+            "seek",
+            "exploit",
         ),
-        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic|doppler "
+        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic|doppler|"
+        "seek|exploit (seek = base ignoring exec time; exploit = AFL's x32 constant) "
         "(aflgo = exact AFLGo distance annealing, see --t-x; "
         "entropic = libFuzzer -entropic, log-scaled rare-feature energy; "
         "doppler = power Doppler flow energy, SHM coverage only)",
@@ -6922,6 +6929,13 @@ def main() -> int:
         metavar="N",
         help="Run N calibration execs (seed replay + cheap mutations) to bootstrap "
         "coverage stats before the main fuzz loop (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
+        "--stall-mode",
+        choices=[m.value for m in StallMode],
+        default=StallMode.RANDOM.value,
+        help="Op choice once --stall triggers: random (default, uniform over every op) or "
+        "exploit (AFL++ -P: only the precise bands -- redqueen, I2S, solvers, dictionary).",
     )
     fuzz_parser.add_argument(
         "--stall",
@@ -7322,6 +7336,14 @@ def main() -> int:
         help=(
             "Redqueen through an unknown repeating XOR key (1-8 bytes): input "
             "deobfuscated before a compare. Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--rq-add-key",
+        action="store_true",
+        help=(
+            "Redqueen through an unknown repeating additive key (1-8 bytes, mod 256): "
+            "ROT-n, `c - '0'` decodes (AFL++ cmplog arith). Off by default."
         ),
     )
     fuzz_parser.add_argument(

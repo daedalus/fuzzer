@@ -164,6 +164,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "region_shuffle",
         "punctuation_insert",
         "special_strings",
+        "c_source_mutate",
         "magic_values",
         "splice_common_prefix",
         "corpus_literal_insert",
@@ -364,6 +365,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "regex_bomb",
         "grammar_mutate",
         "grammar_tree_mutate",
+        "gramatron_random",
+        "gramatron_splice",
+        "gramatron_recurse",
         "fsm_regen",
         "crc_learn",
         "prng_predict",
@@ -919,6 +923,13 @@ def _has_grammar(f, _d) -> bool:
     return bool(getattr(f, "grammar", None))
 
 
+def _is_text_input(_f, d) -> bool:
+    """c_source_mutate: source-level rules only make sense on text."""
+    from fuzzer_tool.core.mutations.generic import InputMode, input_mode  # noqa: PLC0415
+
+    return input_mode(d) is InputMode.TEXT
+
+
 def _has_delims(_f, d) -> bool:
     return _tree_mutator_has_delims(d)
 
@@ -976,6 +987,9 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     ),
     "grammar_mutate": _has_grammar,
     "grammar_tree_mutate": _has_grammar,
+    "gramatron_random": _has_grammar,
+    "gramatron_splice": _has_grammar,
+    "gramatron_recurse": _has_grammar,
     "fsm_regen": lambda f, _d: bool(getattr(f, "fsm", None)),
     "region_shuffle": _region_sized,
     # sequence edits need a message-boundary model; sniffed from the input
@@ -1044,6 +1058,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "rs_fix": lambda f, _d: getattr(f, "rs_nsym", None) is not None,
     # Manchester and friends; --op-line-code
     "line_code": lambda f, _d: bool(getattr(f, "op_line_code", False)),
+    "c_source_mutate": _is_text_input,
     # Grimoire (--grimoire): extend/string need generalized inputs in the book;
     # recurse also needs this parent to be one of them.
     "grimoire_extend": lambda f, _d: _grimoire_book(f) is not None and _grimoire_book(f).seeds > 0,
