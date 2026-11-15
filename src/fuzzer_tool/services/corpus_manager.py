@@ -40,6 +40,7 @@ from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.inverse_lottery import inverse_lottery_victims
+from fuzzer_tool.core.mutations.custom_mutator import AflHook
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.pool_drift import PoolDrift
@@ -1305,6 +1306,10 @@ class CorpusManager:
             # Purely observational bookkeeping for CorpusFlux (P4-T6); must
             # never be able to break a save.
             f._corpus_flux.record_addition()
+            # afl_custom_queue_new_entry: new seed, its parent (None for a root).
+            plugin = getattr(f, "_afl_custom", None)
+            if plugin is not None and plugin.has(AflHook.QUEUE_NEW_ENTRY):
+                plugin.queue_new_entry(data, parent)
             # Mix the newly-admitted seed's bytes into the campaign's shared
             # RandPool. This is deliberately gated on save_to_corpus()'s own
             # novelty check (seen_hashes/bloom) above, not on the Poisson-disk
@@ -1558,7 +1563,7 @@ class CorpusManager:
         if current_edges is None:
             return
 
-        trimmed, trimmed_dist = self._trim_walk(data, current_edges)
+        trimmed, trimmed_dist = self._trim_strategy()(data, current_edges)
         if trimmed is data:
             return
 
@@ -1621,6 +1626,41 @@ class CorpusManager:
                     }
                 )
             log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
+
+    def _trim_strategy(self):
+        """The plugin's trim trio when it serves one (AFL++ precedence), else trim_case."""
+        plugin = getattr(self.f, "_afl_custom", None)
+        if plugin is not None and plugin.has(AflHook.TRIM):
+            return self._custom_trim
+        return self._trim_walk
+
+    def _custom_trim(self, seed: bytes, base_edges: set[int]) -> tuple[bytes, float | None]:
+        """AFL++ custom trim: init_trim -> (trim, run, post_trim)* until done.
+
+        A cut is kept when the trace is unchanged and it is no longer than the
+        current input; post_trim returns the next step (< 0 aborts).
+        """
+        plugin = self.f._afl_custom
+        steps = plugin.init_trim(seed)
+        data, dist = seed, None
+        step = execs = 0
+
+        while 0 <= step < steps and execs < _TRIM_MAX_EXECS:
+            cut = plugin.trim()
+            if cut is None or len(cut) > len(data) or cut in self.f.seed_meta:
+                step = plugin.post_trim(False)
+                continue
+
+            execs += 1
+            outcome, cut_dist = self._try_cut(cut, seed, base_edges)
+            if outcome is _Cut.CRASH:
+                break
+            kept = outcome is _Cut.KEPT
+            if kept:
+                data, dist = cut, cut_dist
+            step = plugin.post_trim(kept)
+
+        return data, dist
 
     def _trim_walk(self, seed: bytes, base_edges: set[int]) -> tuple[bytes, float | None]:
         """AFL ``trim_case``: cut chunks len/2 .. len/1024, keep trace-preserving cuts.
