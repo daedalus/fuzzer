@@ -210,10 +210,20 @@ class EdgeClusters:
         """Head edge id of *edge*'s class (the edge itself if unseen)."""
         return self._canon.class_of(edge)
 
+    def _class_at(self, edge: int) -> int:
+        """Class index of one edge; -1 if unseen.
+
+        Scalar path: a dict lookup and one array-method search, ~10x under
+        the batch round trip (``_seen``: wrap, two searches, unwrap).
+        """
+        head = self._canon.class_of(edge)
+        i = int(self._heads.searchsorted(head))
+        return i if i < self._heads.size and self._heads[i] == head else -1
+
     def cluster_of(self, edge: int) -> int:
         """Head edge id of *edge*'s cluster leader; -1 if unseen."""
-        idx = self._seen([edge])
-        return int(self._heads[self._leader[idx[0]]]) if idx.size else -1
+        i = self._class_at(edge)
+        return int(self._heads[self._leader[i]]) if i >= 0 else -1
 
     def rare_classes(self, edges: Iterable[int], max_owners: int = RARE_OWNERS) -> int:
         """Distinct classes among *edges* held by at most *max_owners* seeds."""
@@ -227,8 +237,8 @@ class EdgeClusters:
 
     def medoid_of(self, edge: int) -> int:
         """Head edge id of *edge*'s cluster medoid; -1 if unseen."""
-        idx = self._seen([edge])
-        return int(self._heads[self._medoid[idx[0]]]) if idx.size else -1
+        i = self._class_at(edge)
+        return int(self._heads[self._medoid[i]]) if i >= 0 else -1
 
     def gaps(self, edges: Iterable[int], limit: int = GAP_LIMIT) -> list[int]:
         """Head edges of member classes *edges* lack, in clusters whose medoid they hold.
