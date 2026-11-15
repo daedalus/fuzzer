@@ -81,7 +81,7 @@ def test_state_roundtrip():
     t = IjonMax()
     t.observe(_vals(s5=42))
     u = IjonMax()
-    u.from_dict(t.to_dict())
+    u.from_dict(t.to_dict(), {}.get)
     assert not u.observe(_vals(s5=42))
     assert u.observe(_vals(s5=43))
 
@@ -90,7 +90,7 @@ def test_state_roundtrip():
 def test_adversarial_bad_state_starts_fresh(bad):
     """Corrupt or size-mismatched state must not crash --resume."""
     u = IjonMax()
-    u.from_dict(bad)
+    u.from_dict(bad, {}.get)
     assert u.observe(_vals(s0=1))
 
 
@@ -144,9 +144,9 @@ def test_channel_reports_new_max():
     ch = _channel()
     try:
         _poke(ch, 2, 5)
-        assert ch.observe(Exec.CLEAN)
+        assert ch.observe(Exec.CLEAN, b"in")
         _poke(ch, 2, 5)
-        assert not ch.observe(Exec.CLEAN)
+        assert not ch.observe(Exec.CLEAN, b"in")
     finally:
         ch.close()
 
@@ -156,11 +156,11 @@ def test_adversarial_truncated_run_clears_but_never_reports():
     ch = _channel()
     try:
         _poke(ch, 2, 5)
-        assert not ch.observe(Exec.TRUNCATED)
+        assert not ch.observe(Exec.TRUNCATED, b"in")
         assert not ch._shm.dirty()
-        assert not ch.observe(Exec.CLEAN)
+        assert not ch.observe(Exec.CLEAN, b"in")
         _poke(ch, 2, 5)
-        assert ch.observe(Exec.CLEAN), "truncated value must not have raised the max"
+        assert ch.observe(Exec.CLEAN, b"in"), "truncated value must not have raised the max"
     finally:
         ch.close()
 
@@ -168,7 +168,7 @@ def test_adversarial_truncated_run_clears_but_never_reports():
 def test_clean_untouched_segment_is_not_new():
     ch = _channel()
     try:
-        assert not ch.observe(Exec.CLEAN)
+        assert not ch.observe(Exec.CLEAN, b"in")
     finally:
         ch.close()
 
@@ -540,3 +540,242 @@ def test_disable_feedback_suppresses_ijon(api_exe):
 @requires_clang
 def test_strdist_progress_is_coverage(api_exe):
     assert _synth(api_exe, "strdist", "MAxxx") != _synth(api_exe, "strdist", "MAGxx")
+
+
+# ── Paper parity (Aschermann et al., S&P 2020, §III, §IV-A) ──────────
+
+
+def test_tracker_keeps_one_input_per_slot():
+    """§IV-A4: the best input per slot; a better one replaces it."""
+    t = IjonMax()
+    t.observe(_vals(s3=5), b"five")
+    t.observe(_vals(s3=5, s4=1), b"tie")
+    assert t.slot_inputs() == {3: b"five", 4: b"tie"}
+    t.observe(_vals(s3=9), b"nine")
+    assert t.slot_inputs() == {3: b"nine", 4: b"tie"}
+
+
+def test_falsify_lower_value_never_replaces_slot_input():
+    t = IjonMax()
+    t.observe(_vals(s3=9), b"nine")
+    t.observe(_vals(s3=8), b"eight")
+    assert t.slot_inputs() == {3: b"nine"}
+
+
+def test_slot_inputs_roundtrip_by_hash():
+    t = IjonMax()
+    t.observe(_vals(s2=4), b"seed-a")
+    u = IjonMax()
+    from fuzzer_tool.core.hashing import key16
+
+    u.from_dict(t.to_dict(), {key16(b"seed-a"): b"seed-a"}.get)
+    assert u.slot_inputs() == {2: b"seed-a"}
+
+
+def test_adversarial_missing_slot_input_dropped_on_resume():
+    """A slot input pruned from the corpus must not resurrect."""
+    t = IjonMax()
+    t.observe(_vals(s2=4), b"gone")
+    u = IjonMax()
+    u.from_dict(t.to_dict(), {}.get)
+    assert u.slot_inputs() == {}
+    assert not u.observe(_vals(s2=4), b"x"), "the max itself is kept"
+
+
+def _sched(pct: int, randints, choice_idxs=()):
+    from tests.support.scripted_rng import ScriptedRng
+
+    ch = _channel(slots=IJON_MAP_SLOTS)
+    ch.schedule_maxmap = pct
+    ch.tracker.observe(_vals(s1=1, s5=2), b"a")
+    ch.tracker.observe(_vals(s5=3), b"b")
+    rng = ScriptedRng(randints=randints, choice_idxs=choice_idxs)
+    try:
+        return ch.pick(rng)
+    finally:
+        ch.close()
+
+
+def test_schedule_draw_above_threshold_picks_max_queue():
+    """§IV-A4: draw 0..99; >= IJON_SCHEDULE_MAXMAP picks a slot input."""
+    assert _sched(50, randints=[50], choice_idxs=[1]) == b"b"
+
+
+def test_schedule_draw_below_threshold_defers_to_queue():
+    assert _sched(50, randints=[49]) is None
+
+
+def test_schedule_100_never_uses_max_queue():
+    assert _sched(100, randints=[99]) is None
+
+
+def test_schedule_0_always_uses_max_queue():
+    assert _sched(0, randints=[0], choice_idxs=[0]) == b"a"
+
+
+def test_adversarial_schedule_empty_max_queue():
+    from tests.support.scripted_rng import ScriptedRng
+
+    ch = _channel()
+    try:
+        assert ch.pick(ScriptedRng(randints=[99])) is None
+    finally:
+        ch.close()
+
+
+def test_seed_picker_takes_ijon_pick():
+    from types import SimpleNamespace
+
+    from fuzzer_tool.services.seed_picker import IJON_MAXMAP, SeedPicker
+
+    f = SimpleNamespace(
+        _rng=None,
+        _stall_recovery_active=False,
+        _target_arena=None,
+        _ijon=SimpleNamespace(pick=lambda rng: b"slot-input"),
+        _seed_strategy=None,
+    )
+    sp = SeedPicker.__new__(SeedPicker)
+    sp.f = f
+    sp._update_temperature = lambda: None
+    assert sp.pick_seed() == b"slot-input"
+    assert f._seed_strategy == IJON_MAXMAP
+
+
+_PAPER_SRC = r"""
+#include "ijon.h"
+#include <stdlib.h>
+#include <string.h>
+
+static volatile int sink;
+__attribute__((noinline)) static void work(int a) {
+    if (a > 3) sink = a * 2;
+    else sink = a;
+}
+
+int main(int argc, char **argv) {
+    const char *mode = argv[1];
+    int n = argc > 2 ? atoi(argv[2]) : 0;
+    if (!strcmp(mode, "state")) {           /* IJON_STATE(n) then the same code */
+        IJON_STATE(n);
+        work(7);
+    } else if (!strcmp(mode, "state2")) {   /* two calls cancel */
+        IJON_STATE(n);
+        IJON_STATE(n);
+        work(7);
+    } else if (!strcmp(mode, "off")) {      /* IJON_DISABLE masks edges */
+        IJON_DISABLE();
+        work(7);
+        work(1);
+    } else if (!strcmp(mode, "max2")) {     /* IJON_MAX(slot, x) */
+        IJON_MAX(3, 40);
+        IJON_MIN(4, 2);
+        IJON_MAX(41);
+    } else if (!strcmp(mode, "hash")) {
+        unsigned a = IJON_HASH_INT(1, 2), b = IJON_HASH_STR(1, (char *)"x"),
+                 c = IJON_HASH_MEM(1, (char *)"x", 1), d = IJON_HASH_STACK(0);
+        (void)d;   /* stack hash depends on the call site; compile check only */
+        return (a == ijon_hashint(1, 2) && b == ijon_hashstr(1, (char *)"x") &&
+                c == ijon_hashmem(1, (char *)"x", 1))
+                   ? 0 : 5;
+    }
+    return 0;
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def paper_exe(tmp_path_factory):
+    return _build(
+        tmp_path_factory.mktemp("ijon_paper"),
+        _PAPER_SRC,
+        "-fsanitize-coverage=trace-pc-guard",
+        f"-I{SHIM.parent}",
+    )
+
+
+def _real(exe, *argv: str) -> set[int]:
+    _, shm = _run(exe, None, *argv)
+    try:
+        return {e for e in shm.get_edge_ids() if not e & 0x80000000}
+    finally:
+        shm.cleanup()
+
+
+@requires_clang
+def test_state_moves_real_edges(paper_exe):
+    """§IV-A3: same code under another state is different coverage."""
+    base, five = _real(paper_exe, "state", "0"), _real(paper_exe, "state", "5")
+    assert base != five
+    assert five == _real(paper_exe, "state", "5"), "deterministic"
+
+
+@requires_clang
+def test_state_twice_cancels(paper_exe):
+    """Same branch of main, so only the state differs: 5^5 == 0^0."""
+    assert _real(paper_exe, "state2", "5") == _real(paper_exe, "state2", "0")
+
+
+@requires_clang
+def test_disable_masks_real_edges(paper_exe):
+    """§IV-A1: after IJON_DISABLE, work() adds no edges."""
+    off = _real(paper_exe, "off")
+    on = _real(paper_exe, "state", "0")
+    assert len(off) < len(on)
+
+
+@requires_clang
+def test_max_two_arg_slot(paper_exe):
+    s = IjonMaxShm(slots=IJON_MAP_SLOTS)
+    try:
+        rc, shm = _run(paper_exe, s, "max2")
+        shm.cleanup()
+        assert rc == 0
+        v = _slots(s)
+        assert int(v[3]) == 40
+        assert int(v[4]) == U64_MAX - 2
+        assert int(np.count_nonzero(v)) == 3, "1-arg IJON_MAX uses a site slot"
+    finally:
+        s.cleanup()
+
+
+@requires_clang
+def test_paper_hash_macros(paper_exe):
+    rc, shm = _run(paper_exe, None, "hash")
+    shm.cleanup()
+    assert rc == 0
+
+
+# ── CLI ──────────────────────────────────────────────────────────────
+
+
+def test_cli_schedule_maxmap_parses(monkeypatch):
+    from tests.test_lightweight_mode import _cli
+
+    args, _ = _cli(monkeypatch, "--ijon", "--ijon-schedule-maxmap", "30")
+    assert args.ijon is True
+    assert args.ijon_schedule_maxmap == 30
+
+
+@pytest.mark.parametrize("bad", ["-1", "101", "x"])
+def test_adversarial_cli_schedule_maxmap_out_of_range(monkeypatch, bad):
+    from tests.test_lightweight_mode import _cli
+
+    with pytest.raises(SystemExit):
+        _cli(monkeypatch, "--ijon-schedule-maxmap", bad)
+
+
+def test_observe_without_data_keeps_max_queue():
+    """Adversarial: a caller passing no input must not enqueue b''."""
+    t = IjonMax()
+    assert t.observe(_vals(s1=1))
+    assert t.slot_inputs() == {}
+
+
+def test_from_dict_without_resolver_restores_maxima_only():
+    t = IjonMax()
+    t.observe(_vals(s1=4), b"in")
+    u = IjonMax()
+    u.from_dict(t.to_dict())
+    assert u.slot_inputs() == {}
+    assert not u.observe(_vals(s1=4))

@@ -639,6 +639,15 @@ enum __afl_path {
     __AFL_PATH_LEAF,   /* FAST, main stack only: elsewhere the caller falls back */
 };
 static int __afl_fast = 0;
+
+/* IJON per-thread state (ijon_xor_state, IJON_STATE) and feedback switch
+ * (ijon_disable_feedback, IJON_DISABLE). Both enter every edge id in the
+ * paper (§IV-A1, §IV-A3), which the FAST path cannot carry, so the first
+ * call sets __ijon_edges and drops __afl_fast for the rest of the process.
+ * A target that never calls either keeps the FAST path unchanged. */
+static __thread uint32_t __ijon_state = 0;
+static __thread uint32_t __ijon_off = 0;
+static int __ijon_edges = 0;
 /* noinline: kept out of its callers' bodies, so its mode-dependent branches
  * never become edges should a caller be instrumented. */
 __AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void);
@@ -1884,9 +1893,18 @@ static inline uint32_t __afl_edge_hash_as(uint32_t cur_loc, enum __afl_path path
     }
     h ^= cur_loc;
     h *= 16777619u;
+    if (path == __AFL_PATH_ANY && __builtin_expect(__ijon_edges, 0))
+        h ^= __ijon_state & __afl_loc_mask;   /* IJON_STATE */
     return __afl_caller_ctx_as(path, NULL) ^ h;
 #else
-    return __afl_caller_ctx_as(path, NULL) ^ __afl_prev_loc ^ cur_loc;
+    /* IJON_STATE: state ^ (prev ^ cur), the paper's state ⊕ (ids*2) ⊕ idt.
+     * Masked to location width so ids stay on Python's dense path. FAST
+     * folds this away: __ijon_edges keeps a stateful process off it. The
+     * global is tested first: a TLS load in a .so can be a call. */
+    uint32_t st = 0;
+    if (path == __AFL_PATH_ANY && __builtin_expect(__ijon_edges, 0))
+        st = __ijon_state & __afl_loc_mask;
+    return __afl_caller_ctx_as(path, NULL) ^ __afl_prev_loc ^ cur_loc ^ st;
 #endif
 }
 
@@ -2341,6 +2359,10 @@ static inline void __afl_map_loc_push(uint32_t cur_loc, enum __afl_path path,
                                       uint32_t next_prev) {
     const int any = path == __AFL_PATH_ANY;
     if (any && !__afl_area) return;
+    if (any && __builtin_expect(__ijon_edges, 0) && __ijon_off) {   /* IJON_DISABLE */
+        __afl_push_prev(next_prev);
+        return;
+    }
     __afl_wtok_t wk = any ? __afl_wguard_open() : 0;
     if (__afl_stack_on) __afl_note_stack();
 
@@ -2441,7 +2463,8 @@ static struct __afl_dist_entry *__afl_dist_table;
 __AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void) {
     __afl_fast = __afl_area && __afl_gen_word && __afl_path_hash &&
                  __afl_wguard_mode == __AFL_WGUARD_OFF && !__afl_mapping &&
-                 __afl_ctx_on && !__afl_ctx_use_relative() && !__afl_id_tag
+                 __afl_ctx_on && !__afl_ctx_use_relative() && !__afl_id_tag &&
+                 !__ijon_edges
 #if __AFL_DISTANCE_MODE
                  && !__afl_dist_table
 #endif
@@ -3407,9 +3430,9 @@ __AFL_GCC_NO_COV static void __afl_map_block_shm(void) {
  *   ijon_max/ijon_min  raise a u64 slot in the max-map segment
  *                      ($__AFL_IJON_SHM_ID); Python admits an input that
  *                      beats the campaign max of any slot.
- *   ijon_xor_state     per-thread state xored into map_set/inc addresses.
- *                      Upstream also xors it into every real edge; here it
- *                      does not, to keep the edge hot path unchanged.
+ *   ijon_xor_state     per-thread state xored into map_set/inc addresses
+ *                      and every real edge id (ANY path; see __ijon_edges).
+ *   ijon_disable_*     no edge or IJON write until ijon_enable_feedback.
  *
  * Max-map segment, owned by adapters/shm.py IjonMaxShm:
  *
@@ -3420,7 +3443,11 @@ __AFL_GCC_NO_COV static void __afl_map_block_shm(void) {
  *
  * A separate segment, so the edge segment layout (and __AFL_SHM_LAYOUT)
  * is unchanged. Python zeroes the slots after every read. No-op without
- * the segment, and in a target with no annotations nothing calls here. */
+ * the segment, and in a target with no annotations nothing calls here.
+ *
+ * Every entry point is noinline: -include puts this file in the target's
+ * TU, and an inlined body's branches become edges of the caller (the
+ * __afl_run_reset lesson). Upstream links them from a separate object. */
 #define IJON_SET_SALT 0x494a4f4e53455431ULL   /* "IJONSET1" */
 #define IJON_INC_SALT 0x494a4f4e494e4331ULL   /* "IJONINC1" */
 #define IJON_MAX_WORDS (1u << 20)             /* header sanity cap */
@@ -3439,9 +3466,7 @@ struct __ijon_seen_entry {
 
 static __thread struct __ijon_seen_entry __ijon_seen[IJON_SEEN_SLOTS];
 static __thread uint32_t __ijon_epoch = 1;
-static __thread uint32_t __ijon_state = 0;
 static __thread uint32_t __ijon_state_log = 0;
-static __thread uint32_t __ijon_off = 0;      /* ijon_disable_feedback */
 
 static uint64_t *__ijon_slots = NULL;
 static uint32_t *__ijon_dirty = NULL;
@@ -3484,7 +3509,7 @@ __AFL_NO_COV static inline uint32_t __ijon_id(uint64_t salt, uint32_t addr) {
 
 /* ── map channel ── */
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV void ijon_map_set(uint32_t addr) {
     if (!__afl_area || __ijon_off) return;
 
@@ -3497,7 +3522,7 @@ __AFL_GCC_NO_COV void ijon_map_set(uint32_t addr) {
     __afl_map_id(id);
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV void ijon_map_inc(uint32_t addr) {
     if (!__afl_area || __ijon_off) return;
     __afl_map_id(__ijon_id(IJON_INC_SALT, addr));
@@ -3506,7 +3531,7 @@ __AFL_GCC_NO_COV void ijon_map_inc(uint32_t addr) {
 /* ── max channel ── */
 
 /* CAS loop: two threads raising one slot must keep the larger value. */
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV void ijon_max(uint32_t addr, uint64_t value) {
     uint64_t *slots = __atomic_load_n(&__ijon_slots, __ATOMIC_ACQUIRE);
     if (!slots || __ijon_off) return;
@@ -3523,41 +3548,51 @@ __AFL_GCC_NO_COV void ijon_max(uint32_t addr, uint64_t value) {
 }
 
 /* Smallest value = largest complement; 0 stays "never set". */
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV void ijon_min(uint32_t addr, uint64_t value) {
     ijon_max(addr, UINT64_MAX - value);
 }
 
 /* ── state ── */
 
-__attribute__((visibility("default")))
+/* First use: leave the FAST path for good (see __ijon_edges). */
+__AFL_NO_COV static inline __attribute__((always_inline)) void __ijon_need_edges(void) {
+    if (__builtin_expect(__ijon_edges, 1)) return;
+    __ijon_edges = 1;
+    __afl_fast = 0;
+}
+
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV void ijon_xor_state(uint32_t value) {
+    __ijon_need_edges();
     __ijon_state ^= value;
 }
 
 /* State = xor of the last four pushed bytes: order-sensitive history.
  * Example: push(1), push(2) and push(2), push(1) are different states. */
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV void ijon_push_state(uint32_t value) {
+    __ijon_need_edges();
     __ijon_state ^= __ijon_state_log;
     __ijon_state_log = (__ijon_state_log << 8) | (value & 0xff);
     __ijon_state ^= __ijon_state_log;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV void ijon_enable_feedback(void) {
     __ijon_off = 0;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV void ijon_disable_feedback(void) {
+    __ijon_need_edges();
     __ijon_off = 1;
 }
 
 /* ── helpers (upstream definitions) ── */
 
 /* Bytes equal before the first mismatch or NUL. */
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV uint32_t ijon_strdist(char *a, char *b) {
     uint32_t i = 0;
     while (a[i] && b[i] && a[i] == b[i]) i++;
@@ -3565,7 +3600,7 @@ __AFL_GCC_NO_COV uint32_t ijon_strdist(char *a, char *b) {
 }
 
 /* Bytes equal before the first mismatch, NULs included. */
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV uint32_t ijon_memdist(char *a, char *b, size_t len) {
     uint32_t i = 0;
     while (i < len && a[i] == b[i]) i++;
@@ -3573,27 +3608,27 @@ __AFL_GCC_NO_COV uint32_t ijon_memdist(char *a, char *b, size_t len) {
 }
 
 /* splitmix64 finalizer. */
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV uint64_t ijon_simple_hash(uint64_t x) {
     x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
     x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
     return x ^ (x >> 31);
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV uint32_t ijon_hashint(uint32_t old, uint32_t val) {
     return (uint32_t)ijon_simple_hash(((uint64_t)old << 32) | val);
 }
 
 /* (char) cast kept from upstream: bytes >= 0x80 hash sign-extended. */
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV uint32_t ijon_hashmem(uint32_t old, char *val, size_t len) {
     old = ijon_hashint(old, (uint32_t)len);
     for (size_t i = 0; i < len; i++) old = ijon_hashint(old, (uint32_t)(int)val[i]);
     return old;
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("default"), noinline))
 __AFL_GCC_NO_COV uint32_t ijon_hashstr(uint32_t old, char *val) {
     return ijon_hashmem(old, val, strlen(val));
 }

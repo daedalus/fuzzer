@@ -86,6 +86,7 @@ from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
 from fuzzer_tool.core.fox_newton import SecantLog
 from fuzzer_tool.core.gravity import GravityModel, SpliceDonor
+from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.metropolis import accept_prob, path_energy
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
@@ -204,7 +205,7 @@ from fuzzer_tool.services.crash_shrink import CrashShrinker
 from fuzzer_tool.services.favored_cover import favored_cover
 from fuzzer_tool.services.fuzz_round import FuzzRound
 from fuzzer_tool.services.i2s_fixpoint import I2SFixpoint
-from fuzzer_tool.services.ijon_channel import IjonChannel
+from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP, IjonChannel
 from fuzzer_tool.services.maintenance import MaintenanceJob, MaintenanceQueue
 from fuzzer_tool.services.operators import _DELOCALISED_OPS, OperatorEngine, operator_strategy_pool
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
@@ -2135,6 +2136,8 @@ class Fuzzer:
         influence=False,
         # --ijon: IJON max-map channel (services/ijon_channel.py). Appended.
         ijon=False,
+        # --ijon-schedule-maxmap: percent of picks left to the normal queue.
+        ijon_schedule_maxmap=DEFAULT_SCHEDULE_MAXMAP,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2802,7 +2805,7 @@ class Fuzzer:
         # the block bitmap: targets sharing os.environ share one segment.
         self._ijon: IjonChannel | None = None
         if ijon and self.shm_cov and not self.multi_targets:
-            self._ijon = self._open_ijon(target)
+            self._ijon = self._open_ijon(target, ijon_schedule_maxmap)
 
         # --shared-virgin: one novelty store across the per-target tables.
         self._shared_virgin: SharedVirgin | None = None
@@ -5623,13 +5626,13 @@ class Fuzzer:
         os.environ["__AFL_BLOCK_BITMAP_ID"] = bb.env_id
         return bb
 
-    def _open_ijon(self, target: str) -> IjonChannel | None:
+    def _open_ijon(self, target: str, schedule_maxmap: int) -> IjonChannel | None:
         """Open the IJON channel; warn when the target's shim predates it."""
         from fuzzer_tool.core.elf import detect_ijon_capable
 
         if detect_ijon_capable(target) is False:
             print("[!] --ijon: target shim has no IJON runtime (ijon_max); rebuild it")
-        return IjonChannel.open()
+        return IjonChannel.open(schedule_maxmap)
 
     def _open_sancov_tables(self) -> SancovTables:
         """Reserve the pc-table / control-flow dump path; the shim writes it."""
@@ -5839,7 +5842,8 @@ class Fuzzer:
         self._novelty_hist.from_dict(self._state_store.get("novelty_hist", {}))
         self._crash_cov.from_dict(self._state_store.get("crash_cov", {}))
         if self._ijon is not None:
-            self._ijon.tracker.from_dict(self._state_store.get("ijon", {}))
+            by_key = {key16(s): s for s in self.corpus}
+            self._ijon.tracker.from_dict(self._state_store.get("ijon", {}), by_key.get)
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""

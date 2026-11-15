@@ -986,7 +986,8 @@ class FuzzRound:
         if ijon is None:
             return
         clean = not self._is_crash and not self._is_timeout
-        self._is_ijon_max = bool(ijon.observe(Exec.CLEAN if clean else Exec.TRUNCATED))
+        run = Exec.CLEAN if clean else Exec.TRUNCATED
+        self._is_ijon_max = bool(ijon.observe(run, self._mutated))
 
     def _cmp_progress(self) -> None:
         # Comparison progress: a callback family this input satisfied more
