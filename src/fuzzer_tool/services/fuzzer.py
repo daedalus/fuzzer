@@ -2926,6 +2926,8 @@ class Fuzzer:
         self.crash_count = 0
         self.timeout_count = 0
         self.start_time = self._clock.time()
+        # Host-clock start for the status line; start_time may be virtual.
+        self._wall_start = time.time()
         self.last_report: SanitizerReport | None = None
         self.op_counts: dict[str, int] = {}
         self.op_success: dict[str, int] = {}

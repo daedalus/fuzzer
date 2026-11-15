@@ -1503,6 +1503,17 @@ class StatsReporter:
             del f._eps_history[: -f._eps_history_max]
         return elapsed, eps
 
+    def _wall_eps(self, f) -> tuple[float, float]:
+        """Host-clock (elapsed, eps) for display; decisions keep ``_update_eps``."""
+        # Partial fuzzers (mocks, ``__new__``-built) carry no wall stamp.
+        start = getattr(f, "_wall_start", None)
+        if not isinstance(start, float):
+            start = f.start_time
+        elapsed = time.time() - start
+        base = getattr(f, "_resume_baseline_exec", 0)
+        eps = (f.exec_count - base) / elapsed if elapsed > 0 else 0
+        return elapsed, eps
+
     def _print_stats_cmplog_str(self, f) -> str:
         """Cmplog token/pair counts, evictions and comparison totals."""
         cmplog_str = ""
@@ -2053,6 +2064,7 @@ class StatsReporter:
     def print_stats(self):
         f = self.f
         elapsed, eps = self._update_eps(f)
+        wall_elapsed, wall_eps = self._wall_eps(f)
 
         dict_str = f" | dict: {len(f.dictionary)}" if f.dictionary else ""
         markov_str = " | markov: trained" if f.markov_trained else ""
@@ -2133,9 +2145,9 @@ class StatsReporter:
         line += "\n"
         line += (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
-            f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f}"
+            f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {wall_eps:.0f}"
             f"{self._print_stats_timer_str(f)} | "
-            f"time: {elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
+            f"time: {wall_elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
             f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{kc_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"
