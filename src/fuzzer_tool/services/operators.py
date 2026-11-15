@@ -75,6 +75,7 @@ from fuzzer_tool.core.mutations import (
     splice_diff_located,
 )
 from fuzzer_tool.core.mutations.afl_det import det_variant
+from fuzzer_tool.core.mutations.generic import InputMode, input_mode
 from fuzzer_tool.core.mutations.int_encodings import (
     bcd_pack,
     bit_compress,
@@ -348,9 +349,10 @@ _CONTEXT_FORMAT_CATEGORIES = (
     "other",
 )
 # 6 scalar features (log-size, entropy, edge-coverage frac, lineage depth,
-# cmplog-pairs-exist, corpus-size percentile) + format one-hot + 1 per-arm
+# cmplog-pairs-exist, corpus-size percentile) + format one-hot + input-mode
+# one-hot (text/mixed/binary, AFL++ input_mode) + 1 per-arm
 # operator-cost feature appended in _context_vector().
-CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
+CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + len(InputMode) + 1
 
 # ── deterministic stage ───────────────────────────────────────────────────
 # Effector-map codes. A position is skipped by the arithmetic and
@@ -6229,6 +6231,8 @@ class OperatorEngine:
 
         fmt = self._classify_format(data)
         fmt_onehot = [1.0 if fmt == cat else 0.0 for cat in _CONTEXT_FORMAT_CATEGORIES]
+        mode = input_mode(data)
+        mode_onehot = [1.0 if mode is m else 0.0 for m in InputMode]
 
         return [
             log_size,
@@ -6238,6 +6242,7 @@ class OperatorEngine:
             cmplog_exists,
             pctile,
             *fmt_onehot,
+            *mode_onehot,
         ]
 
     def _op_cost_feature(self, op: str) -> float:
