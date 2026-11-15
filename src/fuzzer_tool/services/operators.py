@@ -4343,6 +4343,58 @@ class OperatorEngine:
                 ]
             )
 
+    # ── Gramatron walks (core/gramatron.py) ──
+    # A seed this engine produced has a remembered walk and is mutated as one;
+    # any other input is replaced by a fresh walk (Gramatron fuzzes walks only).
+
+    def _gramatron(self):
+        engine = getattr(self, "_gramatron_engine", None)
+        if engine is None or engine.grammar is not self.ctx.grammar:
+            from fuzzer_tool.core.gramatron import Gramatron  # noqa: PLC0415
+
+            engine = self._gramatron_engine = Gramatron(self.ctx.grammar)
+        return engine
+
+    def _gramatron_emit(self, engine, walk: list[int], out: bytes) -> bytearray:
+        engine.remember(out, walk)
+        return bytearray(out[: self.ctx.max_len or None])
+
+    def _gramatron_seed(self, engine, buf):
+        """The input's walk, or a fresh (walk, out) when it has none."""
+        walk = engine.walk_for(bytes(buf))
+        if walk is None:
+            return None, engine.random_walk(self.ctx._rng)
+        return walk, None
+
+    def _op_gramatron_random(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine = self._gramatron()
+        walk, fresh = self._gramatron_seed(engine, buf)
+        return self._gramatron_emit(engine, *(fresh or engine.mutate_random(walk, self.ctx._rng)))
+
+    def _op_gramatron_splice(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine, rng = self._gramatron(), self.ctx._rng
+        walk, fresh = self._gramatron_seed(engine, buf)
+        if fresh is not None:
+            return self._gramatron_emit(engine, *fresh)
+
+        donor = engine.donor(rng)
+        res = engine.mutate_splice(walk, donor, rng) if donor is not None else None
+        return self._gramatron_emit(engine, *(res or engine.mutate_random(walk, rng)))
+
+    def _op_gramatron_recurse(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine, rng = self._gramatron(), self.ctx._rng
+        walk, fresh = self._gramatron_seed(engine, buf)
+        if fresh is not None:
+            return self._gramatron_emit(engine, *fresh)
+        res = engine.mutate_recurse(walk, rng)
+        return self._gramatron_emit(engine, *(res or engine.mutate_random(walk, rng)))
+
     def _op_fsm_regen(self, buf, _byte_idx, _data):
         """Keep a valid FSM prefix, regenerate a valid tail (core/format_fsm.py)."""
         fsm = self.ctx.fsm
