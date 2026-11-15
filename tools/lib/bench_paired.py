@@ -482,6 +482,9 @@ _UNIQUE = re.compile(r"Crashes:\s+\d+ \((\d+) unique")
 _EPS = re.compile(r"(?:Avg eps|Avg throughput):\s+([\d.]+)")
 # Run summary "Executions:        10,000": execs actually run.
 _EXECS = re.compile(r"Executions:\s+([\d,]+)")
+# Guard sites hit / instrumented, on every stats line; the bitmap is
+# cumulative, so the last line is the campaign's figure.
+_BLOCKS = re.compile(r" blocks: (\d+)/\d+")
 
 
 def _parse(log: str) -> dict:
@@ -489,7 +492,7 @@ def _parse(log: str) -> dict:
         m = rx.search(log)
         return int(m.group(1)) if m else default
 
-    return {
+    row = {
         "edges": one(_EDGES),
         "corpus": one(_CORPUS),
         "crashes": one(_CRASHES),
@@ -498,13 +501,18 @@ def _parse(log: str) -> dict:
         "execs": int(m.group(1).replace(",", "")) if (m := _EXECS.search(log)) else 0,
         "coverage_attached": _EDGES.search(log) is not None and one(_EDGES) > 0,
     }
+    # Absent, not 0: analyse skips a cell without the field (no block bitmap).
+    blocks = _BLOCKS.findall(log)
+    if blocks:
+        row["blocks"] = int(blocks[-1])
+    return row
 
 
 # Time to exposure: a cell's first exec_count per sanitizer error_type, read
 # from its crash records. tte_<kind> scores it; a kind that never fired is
 # censored at iters + 1 (later than any exec in the budget).
 TTE_PREFIX = "tte_"
-_PLAIN_METRICS = ("edges", "real_edges", "corpus", "crashes", "unique", "eps", "cpu_user")
+_PLAIN_METRICS = ("edges", "real_edges", "blocks", "corpus", "crashes", "unique", "eps", "cpu_user")
 
 # Synthetic edge channels (COMPCOV, dataflow, allocation sizes) set bit 31;
 # real ids never do (afl_shim.c, __AFL_SYNTH_ID_BIT).

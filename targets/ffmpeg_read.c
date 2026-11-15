@@ -137,6 +137,64 @@ typedef enum {
 #define FUZZ_IJON_MAX(slot, v) ((void)0)
 #endif
 
+/* IJON variant (-DFUZZ_IJON, build_targets.sh ffmpeg OPTS "ijon"). These
+ * change coverage with or without --ijon, so default builds leave them out:
+ *
+ *   stream log  IJON_SET over the last 4 packet stream indices: a new
+ *               interleaving is coverage (paper §III-D, state-change log).
+ *               e.g. streams 0,1,0 and 0,0,1 visit the same edges.
+ *   output fmt  IJON_SET per (codec, frame format, size or channel/rate
+ *               bucket): decoded output shape is data, not edges.
+ *   container   IJON_STATE(hash(demuxer name)) over the packet loop: the
+ *               same decoder edge behind another demuxer is a new edge
+ *               (paper §III-E). Moves the process off the FAST edge path.
+ *
+ * Helpers are __AFL_NO_COV: their bodies add no guard sites, so the variant
+ * and the default build count blocks over the same sites. */
+#define IJON_SALT_STREAMS 0x53544d53u   /* "STMS" */
+#define IJON_SALT_FORMAT  0x464d5453u   /* "FMTS" */
+#define IJON_SALT_DEMUX   0x444d5558u   /* "DMUX" */
+#define IJON_STREAM_BITS  8
+
+#if defined(FUZZ_IJON) && defined(__AFL_EDGE) && __AFL_EDGE
+/* Bucket by bit length: 640 and 700 share one, 640 and 1280 do not. */
+__AFL_NO_COV static uint32_t fuzz_ijon_log2b(int64_t x) {
+    return x > 0 ? 64u - (uint32_t)__builtin_clzll((uint64_t)x) : 0u;
+}
+
+__AFL_NO_COV static void fuzz_ijon_stream(uint32_t *log, int si) {
+    *log = (*log << IJON_STREAM_BITS) | ((uint32_t)si & 0xFFu);
+    ijon_map_set(ijon_hashint(IJON_SALT_STREAMS, *log));
+}
+
+__AFL_NO_COV static void fuzz_ijon_frame(int codec_id, const AVFrame *f) {
+    uint32_t shape = f->width > 0
+        ? (fuzz_ijon_log2b(f->width) << 8) | fuzz_ijon_log2b(f->height)
+        : ((uint32_t)f->ch_layout.nb_channels << 8) | fuzz_ijon_log2b(f->sample_rate);
+    uint32_t key = ijon_hashint(ijon_hashint(IJON_SALT_FORMAT, (uint32_t)codec_id),
+                                (uint32_t)f->format);
+    ijon_map_set(ijon_hashint(key, shape));
+}
+
+/* xor in on entry, the same value out on exit: state is 0 outside. */
+__AFL_NO_COV static uint32_t fuzz_ijon_demux(const AVFormatContext *fmt) {
+    const char *name = fmt->iformat && fmt->iformat->name ? fmt->iformat->name : "";
+    uint32_t st = ijon_hashstr(IJON_SALT_DEMUX, (char *)name);
+    ijon_xor_state(st);
+    return st;
+}
+
+#define FUZZ_IJON_STREAM(log, si) fuzz_ijon_stream((log), (si))
+#define FUZZ_IJON_FRAME(codec, f) fuzz_ijon_frame((codec), (f))
+#define FUZZ_IJON_DEMUX_ON(fmt) fuzz_ijon_demux(fmt)
+#define FUZZ_IJON_DEMUX_OFF(st) ijon_xor_state(st)
+#else
+#define FUZZ_IJON_STREAM(log, si) ((void)(log), (void)(si))
+#define FUZZ_IJON_FRAME(codec, f) ((void)0)
+#define FUZZ_IJON_DEMUX_ON(fmt) 0u
+#define FUZZ_IJON_DEMUX_OFF(st) ((void)(st))
+#endif
+
 typedef struct {
     AVCodecContext *ctx;
     int              codec_id;
@@ -705,6 +763,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     unsigned total_frames  = 0;
     int64_t  total_pixels  = 0;
     unsigned stream_frames[FUZZ_MAX_DECODERS] = {0};   /* IJON progress */
+    uint32_t stream_log = 0;                           /* IJON stream log */
 
     /* Per-stream decoder contexts — reuse existing open decoders when
      * the codec ID matches the new stream, otherwise reset. */
@@ -772,11 +831,13 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
     /* Read and decode frames */
     FUZZ_PHASE_START(t_decode_start);
+    uint32_t demux_state = FUZZ_IJON_DEMUX_ON(fmt_ctx);
     while (av_read_frame(fmt_ctx, g_pkt) >= 0) {
         total_packets++;
         __afl_map_edge(0x1200 + (g_pkt->stream_index & 0x1F));
 
         int si = g_pkt->stream_index;
+        FUZZ_IJON_STREAM(&stream_log, si);
         int valid = si >= 0 && (int)si < (int)nb_streams;
         DecodeApi api = valid && g_decs[si].inited && g_decs[si].ctx
                       ? g_decs[si].api : DECODE_API_NONE;
@@ -813,6 +874,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                     while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
                         total_frames++;
                         FUZZ_IJON_MAX(g_decs[si].codec_id, ++stream_frames[si]);
+                        FUZZ_IJON_FRAME(g_decs[si].codec_id, g_frame);
                         total_pixels += fuzz_frame_pixels(g_frame->width, g_frame->height);
                         __afl_map_edge(0x1400 + (si & 0xFF));
                     }
@@ -843,6 +905,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
         if (total_packets > 500 || total_frames > 500 ||
             total_pixels > FUZZ_PIXEL_BUDGET) break;
     }
+    FUZZ_IJON_DEMUX_OFF(demux_state);
     FUZZ_PHASE_END(t_decode_start, fuzz_phase_stats.t_decode_ns);
     fuzz_report_phase("decode", fuzz_phase_stats.t_decode_ns);
 
