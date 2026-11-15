@@ -219,6 +219,14 @@ FFMPEG_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/ffmpeg_read_9.0.2_noasan.so", "-D dictionaries/wav.dict"),
 ]
 
+# ffmpeg_ijon: the same build with -DFUZZ_IJON (tools/build_targets.sh
+# --ffmpeg-opts=ijon): IJON_SET stream log and output formats, IJON_STATE per
+# container. Edge ids differ from ffmpeg's by construction: compare the two
+# sets on --metric blocks.
+FFMPEG_IJON_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/ffmpeg_read_9.0.2_ijon.so", "-D dictionaries/wav.dict"),
+]
+
 # ffmpeg_asan: FFmpeg 9.0.2 ASAN (tools/build_targets.sh --ffmpeg-opts=asan),
 # libasan preloaded by run_cell's wrapper. Not comparable with others.
 FFMPEG_ASAN_TARGETS: list[tuple[str, str]] = [
@@ -251,6 +259,7 @@ TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "fuzzgoat_dir279": FUZZGOAT_DIR279_TARGETS,
     "fuzzgoat_dir258": FUZZGOAT_DIR258_TARGETS,
     "ffmpeg": FFMPEG_TARGETS,
+    "ffmpeg_ijon": FFMPEG_IJON_TARGETS,
     "ffmpeg_asan": FFMPEG_ASAN_TARGETS,
     "ffmpeg_803": FFMPEG_803_TARGETS,
 }

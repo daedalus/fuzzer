@@ -1712,6 +1712,7 @@ STUBEOF
 #   noasan   ffmpeg-<ver>/*.a            (coverage only)             no-ASAN pass
 #   ubsan    ffmpeg-<ver>/*.a            -fsanitize=undefined        ASAN pass
 #   ng2/ng3  ffmpeg-<ver>/*.a            trace-pc + __AFL_NGRAM_K=k  --ngram
+#   ijon     ffmpeg-<ver>/*.a            -DFUZZ_IJON (IJON_SET/STATE) no-ASAN pass
 #
 # ubsan and ng* reuse the coverage-only tree: UBSAN needs no ASAN-instrumented
 # archives (linking them without -fsanitize=address leaves __asan_* undefined),
@@ -1768,6 +1769,12 @@ build_ffmpeg_versions() {
 build_ffmpeg_version_ubsan() {
     command -v clang &>/dev/null || { warn "clang not found — skipping ffmpeg_read_<ver>_ubsan"; return 0; }
     build_ffmpeg_versions "_ubsan" "-fsanitize=undefined" "clang"
+}
+# IJON_SET / IJON_STATE annotations in ffmpeg_read.c change coverage even
+# without --ijon (synthetic edges; IJON_STATE moves edge ids), so they live
+# in their own variant and the default builds stay annotation-free.
+build_ffmpeg_version_ijon() {
+    build_ffmpeg_versions "_ijon" "-DFUZZ_IJON"
 }
 build_ffmpeg_version_ngram() {
     [ "$WITH_NGRAM" -eq 1 ] || return 0
@@ -3080,6 +3087,7 @@ if [ "$BUILD_NOSAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan_tcg" "" "No-ASAN"
     build_vendored_ffmpeg_sancov ""
     build_ffmpeg_versions "_noasan" ""
+    build_ffmpeg_version_ijon
     build_simple_so_targets "_nosan" "" "No-ASAN"
     build_standalone_so_targets "_nosan" "" "No-ASAN"
 fi
