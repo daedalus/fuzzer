@@ -39,7 +39,12 @@ from collections.abc import Callable, Iterable
 import numpy as np
 
 from fuzzer_tool.adapters.cmp_shm import CMP_SHM_ENV, SITE_SLOTS, CmpCounterShm
-from fuzzer_tool.adapters.cmplog_rec_shm import CMPLOG_REC_ENV, CmpRecordShm
+from fuzzer_tool.adapters.cmplog_rec_shm import (
+    CMPLOG_REC_ENV,
+    CmpRecordShm,
+    RecDrops,
+    site_slots_for,
+)
 from fuzzer_tool.adapters.track_parser import (
     CondStmt,
     cond_tuples_from_cmplog_text,
@@ -770,6 +775,8 @@ class CmplogCollector:
         record_channel: RecordChannel.SHM offers the shim a shared record
             table ($_CMPLOG_RECORDS_SHM); a shim that cannot attach keeps
             writing text, which is still read.
+        record_call_sites: The target's trace-cmp call-site count; sizes the
+            record table's site index (None: default size).
         preload: Preload.NONE keeps the shim off LD_PRELOAD (see Preload).
     """
 
@@ -788,6 +795,7 @@ class CmplogCollector:
         site_cap: int = 0,
         dedup_scope: DedupScope = DedupScope.DRAIN,
         record_channel: RecordChannel = RecordChannel.TEXT,
+        record_call_sites: int | None = None,
     ):
         self.log_path: str | None = None
         self.preload = preload
@@ -924,8 +932,10 @@ class CmplogCollector:
         # Record table (RecordChannel.SHM), created on first setup_env.
         self.record_channel = record_channel
         self.records_shm: CmpRecordShm | None = None
-        # Records the table refused (site or array full), run total.
+        self._record_sites = site_slots_for(record_call_sites)
+        # Records the table refused, run totals: sum and by cause.
         self.records_dropped = 0
+        self.records_drops = RecDrops(0, 0, 0, 0)
 
     def start(self) -> bool:
         """Compile the LD_PRELOAD comparison-logging shim.
@@ -1120,7 +1130,7 @@ class CmplogCollector:
             return None
         if self.records_shm is None:
             try:
-                self.records_shm = CmpRecordShm()
+                self.records_shm = CmpRecordShm(int_sites=self._record_sites)
             except OSError:
                 log.warning("Cmplog: no record table segment; records stay on text")
                 self.record_channel = RecordChannel.TEXT
@@ -1133,7 +1143,10 @@ class CmplogCollector:
         if shm is None or not shm.attached:
             return []
         conds = shm.drain()
-        self.records_dropped += sum(shm.take_dropped())
+        drops = shm.take_dropped()
+        if any(drops):
+            self.records_drops = RecDrops(*map(sum, zip(self.records_drops, drops, strict=True)))
+            self.records_dropped += sum(drops)
         return conds
 
     def _counts_shm_id(self) -> str | None:

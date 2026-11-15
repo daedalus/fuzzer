@@ -15,7 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from fuzzer_tool.adapters.cmplog_rec_shm import CMPLOG_REC_ENV, CmpRecordShm
+from fuzzer_tool.adapters.cmplog_rec_shm import (
+    CMPLOG_REC_ENV,
+    INT_SITES,
+    MAX_SITES,
+    MIN_SITES,
+    CmpRecordShm,
+    site_slots_for,
+)
 from fuzzer_tool.adapters.track_parser import cond_tuples_from_cmplog_text
 from tests.conftest import requires_clang
 
@@ -134,6 +141,13 @@ class TestEquivalence:
         lines = _run(rec_target, tmp_path, "shm", shm)
         assert any(ln.startswith("DIV ") for ln in lines)
 
+    def test_int_records_in_text_order(self, rec_target, tmp_path, shm):
+        """Shared record array: trace-cmp records come back in write order."""
+        text = cond_tuples_from_cmplog_text(_run(rec_target, tmp_path, "text"))
+        _run(rec_target, tmp_path, "shm", shm)
+        ints = [c for c in shm.drain() if c[4] is not None]
+        assert ints == [c for c in text if c[4] is not None]
+
     def test_drain_empties_table(self, rec_target, tmp_path, shm):
         _run(rec_target, tmp_path, "shm", shm)
         assert shm.drain()
@@ -160,7 +174,7 @@ class TestBounds:
             conds = seg.drain()
             loop = [c for c in conds if c[2] == 4 and 1000 <= int.from_bytes(c[0], "little") < 1070]
             assert len(loop) == 4
-            assert seg.take_dropped()[0] >= _LOOP - 4
+            assert seg.take_dropped().hit >= _LOOP - 4
         finally:
             seg.close()
 
@@ -171,7 +185,27 @@ class TestBounds:
             _run(rec_target, tmp_path, "tiny", seg)
             got = set(seg.drain())
             assert got < text
-            assert seg.take_dropped()[0] > 0
+            assert seg.take_dropped().site > 0
+        finally:
+            seg.close()
+
+    def test_full_record_array_keeps_first_records(self, rec_target, tmp_path):
+        text = cond_tuples_from_cmplog_text(_run(rec_target, tmp_path, "text"))
+        seg = CmpRecordShm(rec_slots=3)
+        try:
+            _run(rec_target, tmp_path, "rec", seg)
+            ints = [c for c in seg.drain() if c[4] is not None]
+            assert ints == [c for c in text if c[4] is not None][:3]
+            assert seg.take_dropped().rec > 0
+        finally:
+            seg.close()
+
+    def test_take_dropped_zeroes(self, rec_target, tmp_path):
+        seg = CmpRecordShm(rec_slots=3)
+        try:
+            _run(rec_target, tmp_path, "rec", seg)
+            assert sum(seg.take_dropped()) > 0
+            assert sum(seg.take_dropped()) == 0
         finally:
             seg.close()
 
@@ -189,3 +223,26 @@ class TestBounds:
         lines = _run(rec_target, tmp_path, "plain")
         assert _cmp_lines(lines)
         assert not shm.attached
+
+
+class TestSiteSlots:
+    """Site table sized from the target's trace-cmp call-site count."""
+
+    def test_unknown_count_takes_default(self):
+        assert site_slots_for(None) == INT_SITES
+
+    @pytest.mark.parametrize("sites", [0, 1, 1008])
+    def test_small_targets_get_the_floor(self, sites):
+        assert site_slots_for(sites) == MIN_SITES
+
+    def test_ffmpeg_count_keeps_load_at_most_half(self):
+        n = 132_959
+        slots = site_slots_for(n)
+        assert slots & (slots - 1) == 0
+        assert 2 * n <= slots < 4 * n
+
+    def test_adversarial_huge_count_is_capped(self):
+        assert site_slots_for(10**9) == MAX_SITES
+
+    def test_adversarial_negative_count_takes_floor(self):
+        assert site_slots_for(-5) == MIN_SITES

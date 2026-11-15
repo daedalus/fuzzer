@@ -4609,45 +4609,47 @@ static int __afl_cmplog_cfg = 0;   /* records configured at init */
  * of hex text on the FIFO: no formatting, no write(2), no parse, nothing
  * lost to a full pipe. DIV/GEP records stay on the text stream.
  *
- *   hdr | touched u32[S] | sites[S] | ints[S * H] | bytes[B]
+ *   hdr | sites[S] | recs[R] | bytes[B]
  *
- * Trace-cmp records go to the site keyed by (pc, width): at most H per
- * site per generation, sites listed in first-touch order. Libc records
- * (no pc) go to a flat array. The fuzzer drains, zeroes the used counts
- * and bumps gen; a site with another stamp is free, so reset is O(1).
+ * Trace-cmp records append to one shared array in write order, each
+ * tagged with its site; the site table (keyed by (pc, width), sized per
+ * target by the fuzzer) holds pc, width and a count capped at H per
+ * generation. Memory is S + R entries, not S x H. Libc records (no pc) go
+ * to a flat array. The fuzzer drains, zeroes the used counts and bumps
+ * gen; a site with another stamp is free, so reset is O(1).
  * Mirrors adapters/cmplog_rec_shm.py. A separate segment, not part of the
  * edge map: __AFL_SHM_LAYOUT is unchanged (as for __afl_cmp_shm). */
-#define __AFL_REC_MAGIC 0x3130434552504d43ULL   /* "CMPREC01" LE */
+#define __AFL_REC_MAGIC 0x3230434552504d43ULL   /* "CMPREC02" LE */
 #define __AFL_REC_PROBES 8
 #define __AFL_REC_OPERAND 64   /* == CMPLOG_MAX_OPERAND */
 
 struct __afl_rec_hdr {
     uint64_t magic;
     uint32_t gen, int_sites, int_hits, byte_slots;
-    uint32_t int_used, byte_used;
-    uint64_t int_dropped, byte_dropped;
-    uint64_t pad[2];
+    uint32_t rec_slots, rec_used, byte_used, pad;
+    uint64_t site_dropped, hit_dropped, rec_dropped, byte_dropped;
+    uint64_t pad2;
 };
 struct __afl_rec_site { uint64_t pc; uint32_t gen, count; uint8_t width, pad[7]; };
-struct __afl_rec_int { uint64_t a, b; };
+struct __afl_rec_int { uint64_t a, b; uint32_t site, pad; };
 struct __afl_rec_bytes {
     unsigned char a[__AFL_REC_OPERAND], b[__AFL_REC_OPERAND];
     uint32_t n;
     int32_t result;
     uint8_t k, pad[3];
 };
-_Static_assert(sizeof(struct __afl_rec_hdr) == 64, "cmplog_rec_shm.py _HEADER");
+_Static_assert(sizeof(struct __afl_rec_hdr) == 80, "cmplog_rec_shm.py _HEADER");
 _Static_assert(sizeof(struct __afl_rec_site) == 24, "cmplog_rec_shm.py _SITE");
+_Static_assert(sizeof(struct __afl_rec_int) == 24, "cmplog_rec_shm.py _REC");
 _Static_assert(sizeof(struct __afl_rec_bytes) == 140, "cmplog_rec_shm.py _BYTES");
 
 static struct __afl_rec_hdr *__afl_rec;   /* NULL: records go to text */
-static uint32_t *__afl_rec_touched;
 static struct __afl_rec_site *__afl_rec_sites;
 static struct __afl_rec_int *__afl_rec_ints;
 static struct __afl_rec_bytes *__afl_rec_bytes_tab;
 /* Sizes copied at attach: the header is the fuzzer's to rewrite, so no
  * index is ever bounded by a value read back from it. */
-static uint32_t __afl_rec_nsites, __afl_rec_nhits, __afl_rec_nbytes;
+static uint32_t __afl_rec_nsites, __afl_rec_nhits, __afl_rec_nrecs, __afl_rec_nbytes;
 
 /* Value profile attached: callbacks stay live even while its `on` word is
  * 0 (--value-profile stall), since only init and pause re-gate them. */
@@ -4694,21 +4696,21 @@ __AFL_NO_COV static int __afl_rec_attach(void) {
     if (p == (void *)-1) return 0;
 
     struct __afl_rec_hdr *h = p;
-    uint64_t ns = h->int_sites, nh = h->int_hits, nb = h->byte_slots;
-    uint64_t need = sizeof *h + ns * (sizeof(uint32_t) + sizeof(struct __afl_rec_site))
-                  + ns * nh * sizeof(struct __afl_rec_int) + nb * sizeof(struct __afl_rec_bytes);
-    if (ns < 2 || (ns & (ns - 1)) || nh == 0 || nb == 0 || need > ds.shm_segsz) {
+    uint64_t ns = h->int_sites, nh = h->int_hits, nr = h->rec_slots, nb = h->byte_slots;
+    uint64_t need = sizeof *h + ns * sizeof(struct __afl_rec_site)
+                  + nr * sizeof(struct __afl_rec_int) + nb * sizeof(struct __afl_rec_bytes);
+    if (ns < 2 || (ns & (ns - 1)) || nh == 0 || nr == 0 || nb == 0 || need > ds.shm_segsz) {
         shmdt(p);
         return 0;
     }
 
     char *base = p;
-    __afl_rec_touched = (uint32_t *)(base + sizeof *h);
-    __afl_rec_sites = (struct __afl_rec_site *)(__afl_rec_touched + ns);
+    __afl_rec_sites = (struct __afl_rec_site *)(base + sizeof *h);
     __afl_rec_ints = (struct __afl_rec_int *)(__afl_rec_sites + ns);
-    __afl_rec_bytes_tab = (struct __afl_rec_bytes *)(__afl_rec_ints + ns * nh);
+    __afl_rec_bytes_tab = (struct __afl_rec_bytes *)(__afl_rec_ints + nr);
     __afl_rec_nsites = (uint32_t)ns;
     __afl_rec_nhits = (uint32_t)nh;
+    __afl_rec_nrecs = (uint32_t)nr;
     __afl_rec_nbytes = (uint32_t)nb;
     __afl_rec = h;
     __atomic_store_n(&h->magic, __AFL_REC_MAGIC, __ATOMIC_RELEASE);
@@ -4719,8 +4721,7 @@ __AFL_NO_COV static int __afl_rec_attach(void) {
  * the probe run is full. Caller holds the cmplog lock. */
 __AFL_NO_COV static struct __afl_rec_site *__afl_rec_site(uint64_t pc, uint8_t width,
                                                           uint32_t *slot) {
-    struct __afl_rec_hdr *h = __afl_rec;
-    uint32_t gen = h->gen, mask = __afl_rec_nsites - 1;
+    uint32_t gen = __afl_rec->gen, mask = __afl_rec_nsites - 1;
     uint64_t idx = __afl_cmp_site_hash(pc, width);
     for (int probe = 0; probe < __AFL_REC_PROBES; probe++) {
         uint32_t i = (uint32_t)(idx + (uint64_t)probe) & mask;
@@ -4731,15 +4732,11 @@ __AFL_NO_COV static struct __afl_rec_site *__afl_rec_site(uint64_t pc, uint8_t w
         }
         if (s->gen == gen) continue;
 
-        /* Free this generation: claim it and list it. */
-        uint32_t used = h->int_used;
-        if (used >= __afl_rec_nsites) return NULL;
+        /* Free this generation: claim it. */
         s->pc = pc;
         s->width = width;
         s->count = 0;
         s->gen = gen;
-        __afl_rec_touched[used] = i;
-        h->int_used = used + 1;
         *slot = i;
         return s;
     }
@@ -4748,16 +4745,28 @@ __AFL_NO_COV static struct __afl_rec_site *__afl_rec_site(uint64_t pc, uint8_t w
 
 /* One trace-cmp record; caller holds the lock. */
 __AFL_NO_COV static void __afl_rec_put_int(uint64_t a, uint64_t b, size_t n, void *pc) {
+    struct __afl_rec_hdr *h = __afl_rec;
     uint32_t slot = 0;
     struct __afl_rec_site *s = __afl_rec_site((uint64_t)(uintptr_t)pc, (uint8_t)n, &slot);
-    if (!s || s->count >= __afl_rec_nhits) {
-        __afl_rec->int_dropped++;
+    if (!s) {
+        h->site_dropped++;
+        return;
+    }
+    if (s->count >= __afl_rec_nhits) {
+        h->hit_dropped++;
+        return;
+    }
+    uint32_t used = h->rec_used;
+    if (used >= __afl_rec_nrecs) {
+        h->rec_dropped++;
         return;
     }
 
-    struct __afl_rec_int *e = &__afl_rec_ints[(uint64_t)slot * __afl_rec_nhits + s->count];
+    struct __afl_rec_int *e = &__afl_rec_ints[used];
     e->a = a;
     e->b = b;
+    e->site = slot;
+    h->rec_used = used + 1;
     s->count++;
 }
 

@@ -2660,6 +2660,7 @@ class Fuzzer:
                     "shim compilation will be attempted"
                 )
             from fuzzer_tool.core.cmplog import CmplogCollector, Preload
+            from fuzzer_tool.core.elf import trace_cmp_call_sites
 
             self._cmplog = CmplogCollector(
                 max_tokens=cmplog_max_tokens,
@@ -2677,6 +2678,12 @@ class Fuzzer:
                 site_cap=cmplog_site_cap,
                 dedup_scope=cmplog_dedup_scope,
                 record_channel=cmplog_records,
+                # Sizes the record table's site index; scanned only when used.
+                record_call_sites=(
+                    trace_cmp_call_sites(self.target)
+                    if cmplog_records is RecordChannel.SHM
+                    else None
+                ),
                 # A target with the shim compiled in already intercepts
                 # libc; a preloaded copy would count every call twice.
                 preload=Preload.NONE if has_cmplog else Preload.SHIM,

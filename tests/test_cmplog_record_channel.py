@@ -18,7 +18,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fuzzer_tool.adapters.cmplog_rec_shm import CMPLOG_REC_ENV
+from fuzzer_tool.adapters.cmplog_rec_shm import (
+    CMPLOG_REC_ENV,
+    INT_SITES,
+    RecDrops,
+    site_slots_for,
+)
 from fuzzer_tool.cli import commands
 from fuzzer_tool.core.cmplog import CmplogCollector, Preload, RecordChannel
 from fuzzer_tool.services.fuzzer import Fuzzer
@@ -167,17 +172,49 @@ def test_adversarial_unknown_channel_rejected(monkeypatch, tmp_path):
 
 
 def test_fuzzer_hands_channel_to_collector():
-    assert "record_channel=cmplog_records" in inspect.getsource(Fuzzer.__init__)
+    src = inspect.getsource(Fuzzer.__init__)
+    assert "record_channel=cmplog_records" in src
+    assert "record_call_sites=" in src
+
+
+# ── Site table sized per target ─────────────────────────────────────────
+
+
+def _shm_collector(tmp_path, **kw) -> CmplogCollector:
+    c = CmplogCollector(
+        workdir=str(tmp_path), preload=Preload.NONE, record_channel=RecordChannel.SHM, **kw
+    )
+    c._shim_path = str(tmp_path / "unused_shim.so")
+    return c
+
+
+def test_site_table_sized_from_call_sites(tmp_path):
+    c = _shm_collector(tmp_path, record_call_sites=132_959)
+    try:
+        c.setup_env({})
+        assert c.records_shm.int_sites == site_slots_for(132_959)
+    finally:
+        c.stop()
+
+
+def test_falsify_unknown_call_sites_take_default(tmp_path):
+    c = _shm_collector(tmp_path)
+    try:
+        c.setup_env({})
+        assert c.records_shm.int_sites == INT_SITES
+    finally:
+        c.stop()
 
 
 # ── Stats + bench ───────────────────────────────────────────────────────
 
 
-def _stats(dropped: int) -> str:
+def _stats(dropped: int, drops: RecDrops | None = None) -> str:
     cmplog = SimpleNamespace(
         tokens=[],
         pairs=[],
         records_dropped=dropped,
+        records_drops=drops or RecDrops(0, 0, dropped, 0),
         get_eviction_stats=lambda: (0, 0),
         total_comparisons=lambda: (0, 0),
     )
@@ -186,6 +223,10 @@ def _stats(dropped: int) -> str:
 
 def test_stats_show_table_drops():
     assert "rdrop:7" in _stats(7)
+
+
+def test_stats_break_drops_down_by_cause():
+    assert "rdrop:10(s1/h2/r3/b4)" in _stats(10, RecDrops(1, 2, 3, 4))
 
 
 def test_stats_hide_zero_drops():
