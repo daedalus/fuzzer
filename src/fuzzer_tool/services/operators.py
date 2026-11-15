@@ -4343,6 +4343,13 @@ class OperatorEngine:
                 ]
             )
 
+    def _op_c_source_mutate(self, buf, _byte_idx, _data):
+        """AFL++ compiler-fuzzer rule (core/mutations/source_rules.py); text inputs only."""
+        from fuzzer_tool.core.mutations.source_rules import source_mutate  # noqa: PLC0415
+
+        out = source_mutate(bytes(buf), self.ctx._rng, self.ctx.max_len or len(buf) * 2 + 64)
+        return bytearray(out) if out is not None else None
+
     # ── Gramatron walks (core/gramatron.py) ──
     # A seed this engine produced has a remembered walk and is mutated as one;
     # any other input is replaced by a fresh walk (Gramatron fuzzes walks only).
