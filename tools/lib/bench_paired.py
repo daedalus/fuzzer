@@ -345,6 +345,13 @@ ARMS: dict[str, list[str]] = {
     # frames decoded per codec); inert elsewhere. ctl is baseline again (Rule 46).
     "ijon": ["--ijon"],
     "ijon-ctl": [],
+    # honggfuzz stack-depth novelty. ctl is baseline again (Rule 46).
+    "stack-depth-max": ["--stack-depth-max"],
+    "stack-depth-max-ctl": [],
+    # cmp_solve op: no flag; `baseline` from a tree with the op is the on arm,
+    # these two run from a tree without it (UNWIRED_ARMS). ctl pairs off vs off.
+    "cmp-solve-off": [],
+    "cmp-solve-off-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -457,6 +464,9 @@ ARM_BASELINES: dict[str, str] = {
     "cmp-cap-dedup-ctl": "baseline",
     "ijon": "baseline",
     "ijon-ctl": "baseline",
+    "stack-depth-max": "baseline",
+    "stack-depth-max-ctl": "baseline",
+    "cmp-solve-off-ctl": "cmp-solve-off",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
@@ -476,6 +486,9 @@ UNWIRED_ARMS = {
     "boltzmann-cost": "services/seed_picker.py: n = effective_fuzz_count(meta, mean_exec)",
     # Off arm: a tree without the op (no per-op CLI switch). 2026-10-17 used a master worktree.
     "literal-mismatch": "core/operator_registry.py: drop literal_mismatch from _CATEGORIES['dict']",
+    # On arm is `baseline` (analyse --baseline cmp-solve-off).
+    "cmp-solve-off": "core/operator_registry.py: drop cmp_solve from _CATEGORIES['adaptive']",
+    "cmp-solve-off-ctl": "core/operator_registry.py: drop cmp_solve from _CATEGORIES['adaptive']",
 }
 
 # ── Running ────────────────────────────────────────────────────────────
