@@ -26,6 +26,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
+| C11 seed weight (`--c11`) | Weight `1.1 + 0.9 t^2` by most locals entered (AFL++ C11) | U | fuzzgoat built `-g --sancov=trace-pc-guard,pc-table`, 20 seeds, vs default + A/A; metric real edges |
 | Packed edge sets (`--packed-edges`) | Survivors' `seed_edges` as sorted uint32 (`EdgeSet`) | N | fuzzgoat + FFmpeg 10k null (ledger 94-95); owed: FFmpeg >= 60k execs at the 1,000-seed cap, live RSS + wall, A/A |
 | Prune cost tie (`--prune-cost`) | Evict the costliest of equally redundant tracked seeds first | U | needs > 1,000 tracked seeds (FFmpeg, or a long fuzzgoat run); vs default, A/A control |
 | Seed stage (`--stage-execs K`) | One pick serves up to K execs, sized by perf score | S | fuzzgoat exe K=8 vs 1, 8 paired reps: wall -5% (8/8, p=0.008; A/A 4/8), edges unchanged (p=0.73). Open: K in {4, 16}, FFmpeg, edges at fixed wall time; default flip |
@@ -141,6 +142,7 @@ Off arm needs a tree without the op.
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
+| Value profile (`--value-profile on/stall`) | `popcount(a^b)`, `bitlen|a-b|` per cmp site as synthetic edges | U | fuzzgoat `--cmplog` build, `on` and `stall` vs off, 20 seeds + A/A; metric real edges on a non-marking replay (marks inflate campaign edges) |
 | Edge clusters (`--edge-clusters`) | Class rarity + near-miss bonus | N | fuzzgoat null; FFmpeg/png |
 | Inline sancov modes | `inline-8bit-counters`, `inline-bool-flag` | N | −23/−38 edges; fold buckets, 20×20k rerun |
 | Shim bit tricks | SWAR fold, masked probe, `bit_compress` | S | rebuild + fuzzgoat calibration |

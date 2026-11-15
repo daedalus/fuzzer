@@ -668,6 +668,7 @@ class CorpusManager:
                 "new_edge_count": meta.get("new_edge_count", 0),
                 "coverage_edges_baseline": meta.get("coverage_edges_baseline", 0),
                 "record_stride": meta.get("record_stride", None),
+                "c11": meta.get("c11", 0),
             }
         # Seeds before state: state must never name seeds not yet on disk.
         seed_zip.flush_all()
@@ -830,6 +831,8 @@ class CorpusManager:
                         "new_edge_count": sm.get("new_edge_count", 0),
                         "coverage_edges_baseline": sm.get("coverage_edges_baseline", 0),
                         "record_stride": sm.get("record_stride", None),
+                        # --c11 locals; 0 = unmeasured (older state, flag off).
+                        "c11": sm.get("c11", 0),
                     }
                 )
                 rm_ser = sm.get("redqueen_matches", [])
@@ -1547,7 +1550,14 @@ class CorpusManager:
         if trimmed in f.seed_meta:
             return
 
-        rc, _ = f._runner.run_target(trimmed)
+        rc, stderr = f._runner.run_target(trimmed)
+
+        # The trim exec is a real exec: its crash is a crash (AFL++ 5.03c
+        # `op:trim`). Checked before the timeout sentinels, as is_crash is.
+        if f._is_crash(rc, stderr):
+            self._save_trim_crash(trimmed, rc, stderr)
+            return
+
         if rc in (-2, -1):
             return
         trimmed_dist = f._exec_distance()
@@ -1556,8 +1566,10 @@ class CorpusManager:
         if trimmed_edges is None:
             return
 
-        # AFL rule: keep the trim only if the trace is unchanged.
+        # AFL rule: keep the trim only if the trace is unchanged. A changed
+        # trace may still be new coverage: admit it beside the original.
         if trimmed_edges != current_edges:
+            self._admit_trim_find(trimmed, data)
             return
 
         seed_key = self.seed_key(data)
@@ -1619,6 +1631,32 @@ class CorpusManager:
                     }
                 )
             log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
+
+    def _save_trim_crash(self, trimmed: bytes, rc: int, stderr: str) -> None:
+        # Same bookkeeping as the seed-replay crash path in Fuzzer.run.
+        f = self.f
+        f.crash_count += 1
+        f.save_crash(trimmed, rc, stderr)
+        f._prune_crash_data()
+
+    def _admit_trim_find(self, trimmed: bytes, parent: bytes) -> None:
+        # SHM only: the trimmed run's trace is still in the map. Edges are
+        # recorded before save_to_corpus, the order fuzz_one admits in.
+        f = self.f
+        shm = f.shm_cov
+        if not shm:
+            return
+
+        has_new, edge_ids = shm.is_new_coverage_with_edges()
+        has_new, edge_ids = f._confirm_new_coverage(trimmed, shm, has_new, edge_ids)
+        if not has_new:
+            return
+
+        f._edge_tracker.record_edges(
+            self.seed_key(trimmed), edge_ids, hit_counts=f._only_confirmed(shm.get_edge_counts())
+        )
+        f.save_to_corpus(trimmed, parent=parent)
+        log.debug("Trim found new coverage: %d bytes admitted", len(trimmed))
 
     def _mds_select_optional(
         self, scored: list[tuple[float, bytes]], target_size: int, mandatory_count: int

@@ -21,6 +21,7 @@ from collections import Counter
 import numpy as np
 
 from fuzzer_tool.core.analyzers.analyzer_recurrence import Recurrence
+from fuzzer_tool.core.c11 import c11_bounds, c11_weight
 from fuzzer_tool.core.cadence import bucket, due, phase_of
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
@@ -2067,6 +2068,22 @@ class SeedPicker:
             return w
         return w * VALID_SEED_BONUS
 
+    def _c11_range(self, f) -> tuple[int, int] | None:
+        """(min, max) measured c11 over the corpus, once per pass; None = off.
+
+        Off without --c11 and during stall recovery, where AFL++ drops the
+        factor too (starved: more variability, not more focus).
+        """
+        if getattr(f, "_c11", None) is None or getattr(f, "_stall_recovery_active", False):
+            return None
+        return c11_bounds(m.get("c11", 0) for m in f.seed_meta.values())
+
+    def _weight_c11(self, meta: dict, w: float, c11_range: tuple[int, int] | None) -> float:
+        """AFL++ C11 factor (1.1 + 0.9 t^2) for a seed with measured locals."""
+        if c11_range is None:
+            return w
+        return w * c11_weight(meta.get("c11", 0), *c11_range)
+
     def _weight_fake_novelty(self, meta: dict, w: float) -> float:
         """Demote seeds whose mutants flood the corpus (BranchTrap fake paths)."""
         return w * fake_novelty_factor(meta["fuzz_count"], meta.get("child_count", 0))
@@ -2308,6 +2325,7 @@ class SeedPicker:
             getattr(f, "_use_overlap_density", False)
             and getattr(f, "_overlap_mode", "") == "pareto4d"
         )
+        c11_range = self._c11_range(f)
         try:
             for i, seed in enumerate(corpus):
                 if not has_meta[i]:
@@ -2328,6 +2346,7 @@ class SeedPicker:
                 w = self._weight_fractal_diversity(seed, w, f)
                 w = self._weight_validity(meta, w, f)
                 w = self._weight_fake_novelty(meta, w)
+                w = self._weight_c11(meta, w, c11_range)
                 w *= lineage_div.get(sk, 1.0)
                 w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
 

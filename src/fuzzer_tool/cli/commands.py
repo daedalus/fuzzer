@@ -45,6 +45,7 @@ from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, Fuzzer
 from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
+from fuzzer_tool.services.value_profile import ValueProfile
 
 _original_print = builtins.print
 _patched_print = builtins.print
@@ -918,6 +919,8 @@ def cmd_fuzz(args):
         hw_perf=getattr(args, "hw_perf", False),
         ijon=getattr(args, "ijon", False),
         ijon_schedule_maxmap=getattr(args, "ijon_schedule_maxmap", DEFAULT_SCHEDULE_MAXMAP),
+        c11=getattr(args, "c11", False),
+        value_profile=ValueProfile(getattr(args, "value_profile", ValueProfile.OFF.value)),
         hw_perf_counters=getattr(args, "hw_perf_counters", None),
         hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
@@ -3096,6 +3099,7 @@ _HAIL_MARY_FLAGS = (
     "honggfuzz",
     "hw_perf",
     "ijon",
+    "c11",
     "intel_pt",
     "lbr",
     "colorize",
@@ -6695,6 +6699,22 @@ def main() -> int:
         action="store_true",
         help="IJON state feedback: keep inputs that raise an IJON_MAX/IJON_MIN "
         "annotated value (adapters/ijon.h). IJON_SET/IJON_INC work without it.",
+    )
+    fuzz_parser.add_argument(
+        "--c11",
+        action="store_true",
+        help="AFL++ C11 seed weight (ICSE'26): favour seeds that enter functions with "
+        "more locals (params + variables, from DWARF). Needs a target built with -g and "
+        "--sancov=trace-pc-guard,pc-table; off during stall recovery.",
+    )
+    fuzz_parser.add_argument(
+        "--value-profile",
+        choices=[m.value for m in ValueProfile],
+        default=ValueProfile.OFF.value,
+        help="Comparison distance feedback (libFuzzer -use_value_profile, AFL++ -r): per "
+        "trace-cmp site, popcount(a^b) and bitlen(|a-b|) become coverage, so an input "
+        "getting closer is kept. off (default) | on | stall (switch on at the first stall, "
+        "then keep on). Needs a --cmplog build; complements --compcov-level.",
     )
     fuzz_parser.add_argument(
         "--ijon-schedule-maxmap",

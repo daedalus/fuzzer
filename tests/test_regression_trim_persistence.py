@@ -35,6 +35,9 @@ class _FakeShm:
     def get_edge_ids(self):
         return set(self._edges)
 
+    def is_new_coverage_with_edges(self):
+        return False, set(self._edges)
+
 
 class _FakeRunner:
     def __init__(self, rc=0):
@@ -65,6 +68,12 @@ class _FakeFuzzer:
     # stand-in for EdgeTracker.get_seed_edge_count
     def get_seed_edge_count(self, key):
         return 3
+
+    def _is_crash(self, rc, stderr):
+        return False
+
+    def _confirm_new_coverage(self, data, shm, has_new, edge_ids):
+        return has_new, edge_ids
 
     # not directed: trim_new_coverage measures no distance
     def _exec_distance(self):

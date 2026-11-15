@@ -1819,6 +1819,22 @@ def detect_ijon_capable(target: str) -> bool | None:
     return "ijon_max" in names
 
 
+def detect_vp_capable(target: str) -> bool | None:
+    """Say whether *target*'s shim carries value profile (``__afl_value_profile``).
+
+    True when present; False when the symbol table was read and it is
+    absent (an older shim, or no cmplog build); None when unreadable.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("value-profile detection failed for %s: %s", target, e)
+        return None
+    if not names:
+        return None
+    return "__afl_value_profile" in names
+
+
 def detect_edge_id_scheme(target: str) -> int | None:
     """Say which edge-id function *target*'s shim uses.
 

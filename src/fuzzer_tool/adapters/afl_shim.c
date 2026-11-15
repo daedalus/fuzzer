@@ -276,6 +276,7 @@ static void __afl_map_node_shm(void);
 #endif
 static void __afl_map_block_shm(void);
 static void __afl_map_ijon_shm(void);
+static void __afl_map_c11_shm(void);
 
 /* ── Health counters ──────────────────────────────────────────────────
  *
@@ -1351,6 +1352,7 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     __afl_map_node_shm();
 #endif
     __afl_map_block_shm();
+    __afl_map_c11_shm();
     __afl_map_ijon_shm();
     __afl_mapping = 0;
     __afl_fast_refresh();
@@ -2497,6 +2499,40 @@ static uint8_t  *__afl_block_bitmap = NULL;
 static uint32_t *__afl_block_sites = NULL;
 static uint32_t  __afl_block_bits = 0;
 
+/* C11 segment (AFL++ C11 mode, ICSE'26): local-variable count per function
+ * entry guard, filled by core/c11.py from DWARF + the pc-table. The leaf
+ * marks below raise a per-exec max, stamped with the generation word so
+ * Python reads it only at admission and never resets it per exec.
+ *
+ *   [u32 head = 12 + entries][u32 gen][u32 max][u32 pad][u8 locals[entries]]
+ *
+ * Example: main (3 locals) calls parse (11): max = 11 for that exec. */
+struct __afl_c11_seg {
+    uint32_t head;
+    uint32_t gen;
+    uint32_t max;
+    uint32_t pad;
+    uint8_t  locals[];
+};
+#define __AFL_C11_HEAD_BYTES 12  /* gen/max/pad past the u32 head */
+
+static struct __afl_c11_seg *__afl_c11 = NULL;
+static uint32_t __afl_c11_entries = 0;
+
+/* Raise this exec's C11 max. A stale gen means the first mark of a new exec. */
+__AFL_NO_COV static inline void __afl_c11_raise(uint32_t idx) {
+    uint32_t l = __afl_c11->locals[idx];
+    if (!l || !__afl_gen_word) return;
+
+    uint32_t g = *__afl_gen_word;
+    if (__afl_c11->gen != g) {
+        __afl_c11->gen = g;
+        __afl_c11->max = l;
+        return;
+    }
+    if (l > __afl_c11->max) __afl_c11->max = l;
+}
+
 /* One region per module, so the scan is 1-2 compares in practice. Indices
  * past the payload are dropped: the header is a write bound. */
 __AFL_NO_COV __attribute__((noinline))
@@ -2506,6 +2542,7 @@ static void __afl_block_mark(const uint32_t *guard) {
         if (guard < r->start || guard >= r->stop) continue;
 
         uint32_t idx = r->first + (uint32_t)(guard - r->start);
+        if (__afl_c11 && idx < __afl_c11_entries) __afl_c11_raise(idx);
         if (idx >= __afl_block_bits) return;
 
         /* Test first: a set bit is the common case, and a read keeps the
@@ -3417,6 +3454,22 @@ __AFL_GCC_NO_COV static void __afl_map_block_shm(void) {
     __afl_block_bitmap = (uint8_t *)p + 8;
 }
 
+/* C11 segment (see struct __afl_c11_seg). Once, like the block bitmap. */
+__AFL_GCC_NO_COV static void __afl_map_c11_shm(void) {
+    if (__afl_c11) return;
+    void *p = __afl_attach_sized("__AFL_C11_SHM_ID", 1);
+    if (!p) return;
+
+    uint32_t head = *(uint32_t *)p;
+    if (head <= __AFL_C11_HEAD_BYTES || head > (1u << 28)) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return;
+    }
+    __afl_c11_entries = head - __AFL_C11_HEAD_BYTES;
+    __afl_c11 = (struct __afl_c11_seg *)p;
+}
+
 /* ── IJON annotations (ijon.h) ────────────────────────────────────────
  *
  * The target names the state it cares about; the fuzzer rewards progress
@@ -4251,7 +4304,86 @@ __AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b
         if (z == w) return;
     }
 }
+
+/* ── VALUE PROFILE: operand distance as synthetic edges ───────────────
+ *
+ * COMPCOV sees a comparison get closer one matching low byte at a time.
+ * Value profile (libFuzzer -use_value_profile, AFL++ -r) also sees bit
+ * and magnitude progress: per site, the Hamming distance popcount(a^b)
+ * and the bit length of |a-b| each become a synthetic edge, so an input
+ * reaching a distance no earlier input reached is new coverage.
+ *
+ *   cmp4(0x41424344, 0x41424345): ham 1, arith bitlen(1) = 1
+ *   cmp4(100, 4096) (a `<` bound): ham 5, arith bitlen(3996) = 12
+ *
+ * At most 65 + 65 ids per site, so corpus growth per site is bounded.
+ * Each id enters once per run (epoch-tagged dedup, IJON's epoch), so its
+ * hit count stays 1 and a loop around the compare adds no bucket noise.
+ * The table is 2-way: a direct-mapped one let two colliding ids in one
+ * loop evict each other every iteration (measured: count 100 for 100).
+ * Live only with $__AFL_VP_SHM_ID attached; its `on` word lets Python
+ * switch it on mid-run (--value-profile stall). */
+#define VP_HAM_SALT   0x56414c50524f4631ULL   /* "VALPROF1" */
+#define VP_ARITH_SALT 0x56414c50524f4632ULL   /* "VALPROF2" */
+#define VP_SEEN_SETS  512   /* 2-way: 1024 ids per run before eviction */
+
+/* Capability marker: core/elf.detect_vp_capable reads it by name. */
+__attribute__((visibility("default"), used)) const uint32_t __afl_value_profile = 1;
+
+static volatile uint32_t *__afl_vp_on = NULL;   /* segment word 1; NULL = no channel */
+struct __afl_vp_set {
+    struct __ijon_seen_entry way[2];
+    uint32_t mru;   /* way hit or filled last */
+};
+static __thread struct __afl_vp_set __afl_vp_seen[VP_SEEN_SETS];
+
+/* True when *id* was already marked this run; else records it. */
+__AFL_NO_COV static inline int __afl_vp_seen_run(uint32_t id) {
+    struct __afl_vp_set *set = &__afl_vp_seen[id & (VP_SEEN_SETS - 1)];
+    uint32_t ep = __ijon_epoch;
+    for (uint32_t w = 0; w < 2; w++) {
+        if (set->way[w].id == id && set->way[w].epoch == ep) {
+            set->mru = w;
+            return 1;
+        }
+    }
+
+    /* Victim: a stale way first, else the least recently used. */
+    uint32_t v = set->way[0].epoch != ep ? 0 : set->way[1].epoch != ep ? 1 : set->mru ^ 1;
+    set->way[v].id = id;
+    set->way[v].epoch = ep;
+    set->mru = v;
+    return 0;
+}
+
+__AFL_NO_COV static inline void __afl_vp_mark(uint64_t site, uint64_t salt, uint32_t tag) {
+    uint64_t h = 1469598103934665603ULL;   /* FNV-1a, as __afl_compcov_mark */
+    h = (h ^ site) * 1099511628211ULL;
+    h = (h ^ salt) * 1099511628211ULL;
+    h = (h ^ tag) * 1099511628211ULL;
+    uint32_t id = __AFL_SYNTH_ID(h >> 32);
+
+    if (__afl_vp_seen_run(id)) return;
+    __afl_map_id(id);
+}
+
+/* a, b: an n-byte comparison's operands (n in {1,2,4,8}). */
+__AFL_NO_COV static inline void __afl_vp_ints(uint64_t a, uint64_t b, size_t n, void *pc) {
+    if (!__afl_vp_on || !*__afl_vp_on || !__afl_area) return;
+
+    uint64_t mask = n >= 8 ? ~0ULL : ((1ULL << (n * 8)) - 1);
+    a &= mask;
+    b &= mask;
+    uint64_t site = __afl_compcov_site(pc);
+    __afl_vp_mark(site, VP_HAM_SALT, (uint32_t)__builtin_popcountll(a ^ b));
+
+    uint64_t d = a > b ? a - b : b - a;
+    __afl_vp_mark(site, VP_ARITH_SALT, d ? 64u - (uint32_t)__builtin_clzll(d) : 0u);
+}
 #else /* !__AFL_EDGE: __AFL_PRELOAD_ONLY has no edge map to mark into */
+__AFL_NO_COV static inline void __afl_vp_ints(uint64_t a, uint64_t b, size_t n, void *pc) {
+    (void)a; (void)b; (void)n; (void)pc;
+}
 __AFL_NO_COV static inline void __afl_compcov_ints(uint64_t a, uint64_t b, size_t n,
                                                     void *pc, int is_const) {
     (void)a; (void)b; (void)n; (void)pc; (void)is_const;
@@ -4472,9 +4604,20 @@ __AFL_NO_COV static int __afl_cmp_shm_attach(int want_sites) {
 static int __afl_cmp_on = 0;
 static int __afl_cmplog_cfg = 0;   /* records configured at init */
 
+/* Value profile attached: callbacks stay live even while its `on` word is
+ * 0 (--value-profile stall), since only init and pause re-gate them. */
+__AFL_NO_COV static inline int __afl_vp_attached(void) {
+#if __AFL_EDGE
+    return __afl_vp_on != NULL;
+#else
+    return 0;
+#endif
+}
+
 __AFL_NO_COV static void __afl_cmp_refresh(void) {
     __afl_cmp_on = __AFL_CMP_COUNTS_ON || __AFL_CMP_SITES_ON ||
-                   __afl_compcov_level > 0 || (__afl_cmplog_cfg && !__afl_cmplog_paused);
+                   __afl_compcov_level > 0 || __afl_vp_attached() ||
+                   (__afl_cmplog_cfg && !__afl_cmplog_paused);
 }
 
 /* splitmix64's finalizer. The low bits of a return address are nearly
@@ -5783,35 +5926,41 @@ __AFL_NO_COV static inline int __afl_const_pruned(uint64_t c, size_t n) {
 
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 1, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP1, a == b);
     __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp2(uint16_t a, uint16_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 2, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP2, a == b);
     __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 2, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp4(uint32_t a, uint32_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 4, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP4, a == b);
     __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 4, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp8(uint64_t a, uint64_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 8, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP8, a == b);
     __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 8, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 1, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP1, a == b);
     if (!__afl_const_pruned(a, 1))
         __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 2, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP2, a == b);
     if (!__afl_const_pruned(a, 2))
         __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
@@ -5819,6 +5968,7 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 4, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP4, a == b);
     if (!__afl_const_pruned(a, 4))
         __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
@@ -5826,6 +5976,7 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 8, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP8, a == b);
     if (!__afl_const_pruned(a, 8))
         __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
@@ -6003,6 +6154,11 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
         int v = atoi(compcov);
         __afl_compcov_level = v < 0 ? 0 : (v > 2 ? 2 : v);
     }
+#if __AFL_EDGE
+    /* Value profile segment: [u32 head = 1][u32 on]. */
+    void *vp = __afl_attach_sized("__AFL_VP_SHM_ID", 4);
+    if (vp) __afl_vp_on = (volatile uint32_t *)vp + 1;
+#endif
     const char *prune = getenv("__AFL_CMP_PRUNE_CONST");
     __afl_prune_const = prune && prune[0] && atoi(prune) != 0;
     /* Opened before the _CMPLOG_OUT check, and on its own fd: the counters
