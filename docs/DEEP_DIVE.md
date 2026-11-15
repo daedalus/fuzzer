@@ -1916,6 +1916,15 @@ progress-handler opcode budget, and `sqlite3_hard_heap_limit64`. A corrupt
 file returning `SQLITE_CORRUPT`/`SQLITE_NOTADB` is the expected outcome and
 not a finding; a segfault or an assertion failure is.
 
+### Cmplog record cap and dedup scope (`--cmplog-site-cap`, `--cmplog-dedup-scope`)
+
+Two shim record filters (afl_shim.c "Per-site record cap", "Dedup scope"), off by default:
+
+- `--cmplog-site-cap N` (`$__AFL_CMPLOG_SITE_CAP`): a trace-cmp site writes at most N distinct integer records per drain. Loop compares write one record per iteration, which dedup cannot drop.
+- `--cmplog-dedup-scope campaign` (`$__AFL_CMPLOG_DEDUP_SCOPE`): the dedup table survives `__cmplog_reset`, so input-invariant records are written once per campaign and the 10k-line read window fills with new ones. Per-input consumers (`last_conds`, FOX) then see only new records; the I2S probe calls `__cmplog_rescope()` for a full set. Fork children start fresh.
+
+The cap counts records written, not dropped repeats, so under campaign scope the window moves: drain 1 logs iterations 0..N-1, drain 2 logs N..2N-1. Bench arm `cmp-cap-dedup` (N=32 + campaign); A/B: `docs/AB_PENDING.md`. Tests: `tests/test_cmplog_site_cap_scope.py`, `tests/test_cmplog_record_knobs.py`.
+
 ### Constant-Compare Pruning (`--cmp-prune-const`)
 
 Port of WingFuzz's `LoadCmpTracer` few-bits-set rule. With the flag, the shim

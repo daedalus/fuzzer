@@ -20,6 +20,7 @@ from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
+from fuzzer_tool.core.cmplog import DedupScope
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.count_items import CountItems
 from fuzzer_tool.core.crash_graph import Linkage
@@ -879,6 +880,8 @@ def cmd_fuzz(args):
         cmplog_fifo_sink_size=getattr(args, "cmplog_fifo_sink_size", None),
         compcov_level=getattr(args, "compcov_level", 0),
         cmp_prune_const=getattr(args, "cmp_prune_const", False),
+        cmplog_site_cap=getattr(args, "cmplog_site_cap", 0),
+        cmplog_dedup_scope=getattr(args, "cmplog_dedup_scope", DedupScope.DRAIN),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -6266,6 +6269,29 @@ def main() -> int:
             "with fewer than 2 bits set or 2 bits clear (0, 1, -1, 0x80, 0x7f, ...), which "
             "give input-to-state nothing to replace with. Counters and COMPCOV are unchanged. "
             "Off by default; needs cmplog."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cmplog-site-cap",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "A trace-cmp site writes at most N cmplog records per drain (AFL++ keeps 32), "
+            "so loop compares stop flooding the read window. 0 = off (default)."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cmplog-dedup-scope",
+        type=DedupScope,
+        choices=list(DedupScope),
+        default=DedupScope.DRAIN,
+        metavar="{drain,campaign}",
+        help=(
+            "Lifetime of the shim's cmplog record dedup. drain (default): each drain holds "
+            "one exec's full set. campaign: a record is written once per campaign, so "
+            "input-invariant compares stop filling the window; per-input consumers see "
+            "only new records (the I2S probe still gets a full set)."
         ),
     )
     fuzz_parser.add_argument(

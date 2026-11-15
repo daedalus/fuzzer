@@ -144,6 +144,7 @@ Off arm needs a tree without the op.
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
 | Value profile (`--value-profile on/stall`) | `popcount(a^b)`, `bitlen|a-b|` per cmp site as synthetic edges | U | fuzzgoat `--cmplog` build, `on` and `stall` vs off, 20 seeds + A/A; metric real edges on a non-marking replay (marks inflate campaign edges) |
+| Cmplog record cap + campaign dedup (`--cmplog-site-cap 32 --cmplog-dedup-scope campaign`, arm `cmp-cap-dedup`) | Per-site record cap per drain; dedup table kept across drains | U | Frozen 2026-11-15: `--set fuzzgoat_tcg`, 20 seeds × 10k, arms `baseline`, `cmp-cap-dedup`, `cmp-cap-dedup-ctl`; metric `real_edges`; Wilcoxon signed-rank two-sided, α 0.05; WIN/LOSS only with A/A n.s. Secondary: `cpu_user`. FFmpeg after (pool-frozen case) |
 | Edge clusters (`--edge-clusters`) | Class rarity + near-miss bonus | N | fuzzgoat null; FFmpeg/png |
 | Inline sancov modes | `inline-8bit-counters`, `inline-bool-flag` | N | −23/−38 edges; fold buckets, 20×20k rerun |
 | Shim bit tricks | SWAR fold, masked probe, `bit_compress` | S | rebuild + fuzzgoat calibration |
