@@ -102,7 +102,7 @@ def test_splice_is_prefix_plus_donor_tail(gram):
     """At a matched state, output = w1's bytes before step i + w2's bytes after step j."""
     pool = _walks(gram, 30)
     checked = 0
-    for (w1, out1), (w2, out2) in zip(pool, pool[1:]):
+    for (w1, out1), (w2, out2) in zip(pool, pool[1:], strict=False):
         _, off1 = gram.trace(w1)
         _, off2 = gram.trace(w2)
         for i, j in gram.splice_points(w1, w2)[:10]:
@@ -118,7 +118,9 @@ def test_splice_is_prefix_plus_donor_tail(gram):
 def test_mutate_splice_uses_a_splice_point(gram):
     rng = RandPool(seed=5)
     pool = _walks(gram, 30)
-    results = [gram.mutate_splice(w1, w2, rng) for (w1, _), (w2, _) in zip(pool, pool[1:])]
+    results = [
+        gram.mutate_splice(w1, w2, rng) for (w1, _), (w2, _) in zip(pool, pool[1:], strict=False)
+    ]
     done = [r for r in results if r is not None]
     assert done and all(_valid(out) for _, out in done)
 
