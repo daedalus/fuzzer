@@ -62,6 +62,21 @@ _TIMEOUTS = "timeouts"
 # Never in the in-memory corpus, so no kept set names them.
 _PROTECTED = frozenset((_IRREPLACEABLE, _CRASHING, _TIMEOUTS))
 
+# AFL trim_case: chunks len/2 .. len/1024, never under 4 bytes (TRIM_MIN_BYTES).
+# Budget caps a 64 KiB walk (~2k execs uncapped) per new-coverage seed.
+_TRIM_START_DIV = 2
+_TRIM_END_DIV = 1024
+_TRIM_MIN_BYTES = 4
+_TRIM_MAX_EXECS = 512
+
+
+class _Cut(Enum):
+    """Outcome of one trim exec."""
+
+    KEPT = "kept"  # trace unchanged: the cut replaces the walk's input
+    CHANGED = "changed"  # trace differs, timeout or no trace: try the next cut
+    CRASH = "crash"  # saved; the walk stops
+
 
 def _live_seed_files(seeds_dir: Path):
     """``id_*`` files under *seeds_dir*, minus pruned/ and the protected trees.
@@ -1543,33 +1558,8 @@ class CorpusManager:
         if current_edges is None:
             return
 
-        trimmed = data[: len(data) // 2]
-
-        # Trimmed bytes already a seed (e.g. the parent): swapping would
-        # clobber its meta with ours, parent_key == own key -> lineage cycle.
-        if trimmed in f.seed_meta:
-            return
-
-        rc, stderr = f._runner.run_target(trimmed)
-
-        # The trim exec is a real exec: its crash is a crash (AFL++ 5.03c
-        # `op:trim`). Checked before the timeout sentinels, as is_crash is.
-        if f._is_crash(rc, stderr):
-            self._save_trim_crash(trimmed, rc, stderr)
-            return
-
-        if rc in (-2, -1):
-            return
-        trimmed_dist = f._exec_distance()
-
-        trimmed_edges = self._edge_snapshot()
-        if trimmed_edges is None:
-            return
-
-        # AFL rule: keep the trim only if the trace is unchanged. A changed
-        # trace may still be new coverage: admit it beside the original.
-        if trimmed_edges != current_edges:
-            self._admit_trim_find(trimmed, data)
+        trimmed, trimmed_dist = self._trim_walk(data, current_edges)
+        if trimmed is data:
             return
 
         seed_key = self.seed_key(data)
@@ -1625,12 +1615,76 @@ class CorpusManager:
                     {
                         "parent_key": orig_meta.get("parent_key"),
                         "parent_ops": list(orig_meta.get("parent_ops", [])) + ["trim"],
-                        "parent_sites": list(orig_meta.get("parent_sites", [])) + [len(data) // 2],
+                        "parent_sites": list(orig_meta.get("parent_sites", [])) + [len(trimmed)],
                         "new_edge_count": orig_meta.get("new_edge_count", 0),
                         "coverage_edges_baseline": orig_meta.get("coverage_edges_baseline", 0),
                     }
                 )
             log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
+
+    def _trim_walk(self, seed: bytes, base_edges: set[int]) -> tuple[bytes, float | None]:
+        """AFL ``trim_case``: cut chunks len/2 .. len/1024, keep trace-preserving cuts.
+
+        Each round slides from ``pos = chunk``, so byte 0 is never cut; a kept
+        cut retries the same ``pos``. Returns the shortest kept input (``seed``
+        itself when none) and its run's distance.
+        Example: HEAD + 56x + TAIL -> HEADTAIL (the middle goes in 16/8/4 B cuts).
+        """
+        n = len(seed)
+        floor = max(n // _TRIM_END_DIV, _TRIM_MIN_BYTES)
+        chunk = n // _TRIM_START_DIV
+        data, dist = seed, None
+        execs = 0
+
+        while chunk >= floor:
+            pos = chunk
+            while pos < len(data) and execs < _TRIM_MAX_EXECS:
+                cut = data[:pos] + data[pos + chunk :]
+
+                # Already a seed (e.g. the parent): swapping would clobber its
+                # meta with ours, parent_key == own key -> lineage cycle.
+                if cut in self.f.seed_meta:
+                    pos += chunk
+                    continue
+
+                execs += 1
+                outcome, cut_dist = self._try_cut(cut, seed, base_edges)
+                if outcome is _Cut.CRASH:
+                    return data, dist
+                if outcome is _Cut.KEPT:
+                    data, dist = cut, cut_dist
+                    continue
+                pos += chunk
+            chunk //= 2
+
+        return data, dist
+
+    def _try_cut(self, cut: bytes, seed: bytes, base_edges: set[int]) -> tuple[_Cut, float | None]:
+        """Run one trim candidate; returns its outcome and, when kept, its distance."""
+        f = self.f
+        rc, stderr = f._runner.run_target(cut)
+
+        # The trim exec is a real exec: its crash is a crash (AFL++ 5.03c
+        # `op:trim`). Checked before the timeout sentinels, as is_crash is.
+        if f._is_crash(rc, stderr):
+            self._save_trim_crash(cut, rc, stderr)
+            return _Cut.CRASH, None
+
+        if rc in (-2, -1):
+            return _Cut.CHANGED, None
+        dist = f._exec_distance()
+
+        edges = self._edge_snapshot()
+        if edges is None:
+            return _Cut.CHANGED, None
+
+        # AFL rule: keep the cut only if the trace is unchanged. A changed
+        # trace may still be new coverage: admit it beside the original.
+        if edges != base_edges:
+            self._admit_trim_find(cut, seed)
+            return _Cut.CHANGED, None
+
+        return _Cut.KEPT, dist
 
     def _save_trim_crash(self, trimmed: bytes, rc: int, stderr: str) -> None:
         # Same bookkeeping as the seed-replay crash path in Fuzzer.run.

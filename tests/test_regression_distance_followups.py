@@ -302,8 +302,12 @@ def _trim(f, trimmed_tail: tuple[int, int]) -> None:
     f.save_to_corpus(LONG, parent=PARENT)
     f.seed_meta[LONG]["avg_distance"] = OLD_DIST
 
+    # Only the first cut keeps the trace; later cuts change it, nothing new.
+    shm.is_new_coverage_with_edges = lambda: (False, set(shm.edges))
+
     def run(data):
         shm.tail = trimmed_tail if data == TRIMMED else NO_TAIL
+        shm.edges = {1, 2} if data == TRIMMED else {7}
         return _CLEAN
 
     with patch.object(f._runner, "run_target", side_effect=run):
@@ -337,7 +341,7 @@ def test_falsify_rejected_trim_tags_nothing(fuzzer):
 
     def run(data):
         shm.tail = TAIL
-        shm.edges = {9} if data == TRIMMED else {1, 2}
+        shm.edges = {9}
         return _CLEAN
 
     with patch.object(fuzzer._runner, "run_target", side_effect=run):
