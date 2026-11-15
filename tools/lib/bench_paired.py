@@ -442,6 +442,8 @@ ARM_BASELINES: dict[str, str] = {
     "ga": "baseline",
     "ga-no-crossover": "ga",
     "ga-ctl": "ga",
+    "fox-newton": "baseline",
+    "fox-newton-ctl": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

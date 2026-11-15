@@ -2877,6 +2877,25 @@ build_tracecmp_targets() {
         fi
     done
 
+    # fuzzgoat_read_tcg.so: the calibration target with trace-cmp in the
+    # library object too. The default .so instruments edges only, so cmplog
+    # logs nothing there ("0t 0p"). Object without the shim, shim only in the
+    # wrapper (multiple-definition rule), as in compile_fuzzgoat_object.
+    if [ "$HAS_FUZZGOAT" -eq 1 ]; then
+        rc=0
+        $CC -O2 $DEBUG_CFLAGS $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $FUZZGOAT_CFLAGS -fPIC \
+            -I"$VENDOR/fuzzgoat" -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o /tmp/fuzzgoat_tcg.o 2>>"$BUILD_LOG" || rc=$?
+        [ $rc -eq 0 ] && $CC -O2 $DEBUG_CFLAGS $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS \
+            -D__AFL_PRIVATE_HEAP=1 -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" -I"$VENDOR/fuzzgoat" \
+            -o "$TARGETS/fuzzgoat_read_tcg.so" "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" \
+            /tmp/fuzzgoat_tcg.o -lm $CMPLOG_LIBS 2>>"$BUILD_LOG" || rc=1
+        if [ $rc -eq 0 ]; then
+            ok "fuzzgoat_read_tcg.so (trace-cmp + no-builtin)"
+        else
+            warn "failed: fuzzgoat_read_tcg.so (trace-cmp)"
+        fi
+    fi
+
     # Verify the callbacks are DEFINED (T) in the target, not left undefined
     # for a preload that cannot win the lookup, and not the runtime's weak
     # no-op stub (W).

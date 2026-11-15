@@ -85,13 +85,47 @@ def _read(data: bytes, win: _Window, width: int) -> int:
     return int.from_bytes(data[win.start : win.start + width], win.order)
 
 
+class _Fit(NamedTuple):
+    """Newest-first fitting pair, oriented, with the windows it fits on."""
+
+    new: _Obs
+    old: _Obs
+    windows: tuple[_Window, ...]
+    signs: frozenset[int]
+
+
+def _orient(new: _Obs, old: _Obs) -> tuple[_Obs, _Obs] | None:
+    """Pair with ``src`` varying and ``const`` fixed; swap if the input side is b."""
+    if new.const == old.const and new.src != old.src:
+        return new, old
+    if new.src == old.src and new.const != old.const:
+        return new._replace(src=new.const, const=new.src), old._replace(
+            src=old.const, const=old.src
+        )
+    return None
+
+
+def _sign(obs: _Obs) -> int:
+    return (obs.src > obs.const) - (obs.src < obs.const)
+
+
 class SecantLog:
-    """Per-site operand records tied to the inputs that produced them."""
+    """Per-site operand records tied to the inputs that produced them.
+
+    ``observe`` refits only the sites it touched, so ``ready`` is a cached
+    list and ``propose`` never searches::
+
+        observe(run)  ->  spans(run vs each live input)  ->  refit touched PCs
+        propose       ->  pick fitted PC  ->  window  ->  goal  ->  root
+    """
 
     def __init__(self) -> None:
         self._gen = 0
         self._inputs: dict[int, bytes] = {}
         self._sites: dict[int, deque[_Obs]] = {}
+        # (older gen, newer gen) -> first/last differing byte; same-length only.
+        self._spans: dict[tuple[int, int], tuple[int, int]] = {}
+        self._fits: dict[int, _Fit] = {}
         self._ready: list[int] | None = None
 
     # ── recording ────────────────────────────────────────────────────
@@ -105,9 +139,12 @@ class SecantLog:
         self._gen += 1
         self._inputs[self._gen] = data
         if len(self._inputs) > MAX_INPUTS:
-            del self._inputs[next(iter(self._inputs))]
+            self._drop_input(next(iter(self._inputs)))
+        self._add_spans(self._gen)
 
         self._push(recs)
+        for pc in recs:
+            self._refit(pc)
         self._ready = None
 
     def _records(self, conds) -> dict[int, _Obs]:
@@ -128,6 +165,22 @@ class SecantLog:
             recs[pc] = _Obs(gen, decode(a, "little"), decode(b, "little"), width)
         return recs
 
+    def _drop_input(self, gen: int) -> None:
+        del self._inputs[gen]
+        for key in [k for k in self._spans if gen in k]:
+            del self._spans[key]
+
+    def _add_spans(self, gen: int) -> None:
+        # One numpy compare per live input (<= MAX_INPUTS), shared by all sites.
+        data = self._inputs[gen]
+        n = len(data)
+        for old, other in self._inputs.items():
+            if old == gen or len(other) != n:
+                continue
+            span = _span(other, data)
+            if span is not None:
+                self._spans[(old, gen)] = span
+
     def _push(self, recs: dict[int, _Obs]) -> None:
         # LRU: re-insert each site at the end, then drop the oldest past the
         # cap once per batch (+7-34% over evicting per insert, same result).
@@ -143,6 +196,75 @@ class SecantLog:
         excess = len(sites) - MAX_SITES
         for pc in list(islice(sites, max(excess, 0))):
             del sites[pc]
+            self._fits.pop(pc, None)
+
+    # ── fitting ──────────────────────────────────────────────────────
+
+    def _refit(self, pc: int) -> None:
+        fit = self._fit(pc)
+        if fit is None:
+            self._fits.pop(pc, None)
+        else:
+            self._fits[pc] = fit
+
+    def _fit(self, pc: int) -> _Fit | None:
+        """Newest pair one field-edit apart whose secant the checks accept."""
+        live = [o for o in reversed(self._sites[pc]) if o.gen in self._inputs]
+        n = len(live)
+        for i in range(n):
+            for j in range(i + 1, n):
+                fit = self._fit_pair(live[i], live[j], live)
+                if fit is not None:
+                    return fit
+        return None
+
+    def _fit_pair(self, new: _Obs, old: _Obs, live: list[_Obs]) -> _Fit | None:
+        span = self._spans.get((old.gen, new.gen))
+        pair = _orient(new, old) if span is not None else None
+        if pair is None:
+            return None
+
+        # Checks read the same side as the pair.
+        if pair[0] is not new:
+            live = [o._replace(src=o.const, const=o.src) for o in live]
+        width, size = new.width, len(self._inputs[new.gen])
+        wins = tuple(w for w in _windows(*span, width, size) if self._agrees(pair, w, live))
+        if not wins:
+            return None
+        return _Fit(*pair, wins, frozenset((_sign(pair[0]), _sign(pair[1]))))
+
+    def _agrees(self, pair: tuple[_Obs, _Obs], win: _Window, live: list[_Obs]) -> bool:
+        """Records whose input differs from the pair's only inside *win* lie on the line.
+
+        Example: runs x=10, 20, 30 at one field; a line through two of them
+        must predict the third (x*x fails). A run that also changed other
+        bytes says nothing about this field and is skipped.
+        """
+        new, old = pair
+        slope = self._slope(new, old, win)
+        if slope is None:
+            return False
+
+        lo, hi = win.start, win.start + new.width - 1
+        x_new = _read(self._inputs[new.gen], win, new.width)
+        for o in live:
+            if o.gen in (new.gen, old.gen) or not self._inside(o.gen, new.gen, lo, hi):
+                continue
+            x = _read(self._inputs[o.gen], win, new.width)
+            if new.src + slope * (x - x_new) != o.src:
+                return False
+        return True
+
+    def _inside(self, a: int, b: int, lo: int, hi: int) -> bool:
+        span = self._spans.get((min(a, b), max(a, b)))
+        return span is not None and lo <= span[0] and span[1] <= hi
+
+    def _slope(self, new: _Obs, old: _Obs, win: _Window) -> Fraction | None:
+        x_new = _read(self._inputs[new.gen], win, new.width)
+        x_old = _read(self._inputs[old.gen], win, new.width)
+        if x_new == x_old:
+            return None
+        return Fraction(new.src - old.src, x_new - x_old)
 
     # ── queries ──────────────────────────────────────────────────────
 
@@ -156,32 +278,16 @@ class SecantLog:
         return bool(self._ready_sites())
 
     def _ready_sites(self) -> list[int]:
+        # Fits go stale only when observe evicts an input; observe resets this.
         if self._ready is None:
-            self._ready = [pc for pc in self._sites if self._fit_set(pc)]
+            live = self._inputs
+            stale = [
+                pc for pc, f in self._fits.items() if f.new.gen not in live or f.old.gen not in live
+            ]
+            for pc in stale:
+                del self._fits[pc]
+            self._ready = list(self._fits)
         return self._ready
-
-    def _fit_set(self, pc: int) -> list[_Obs] | None:
-        """Live records, oriented so ``src`` varies and ``const`` does not.
-
-        Newest two (equal input length, distinct inputs) fit; older live
-        ones of that length check. None when nothing fits.
-        """
-        live = [o for o in reversed(self._sites[pc]) if o.gen in self._inputs]
-        if len(live) < 2:
-            return None
-        n = len(self._inputs[live[0].gen])
-        same = [o for o in live if len(self._inputs[o.gen]) == n]
-        if len(same) < 2 or self._inputs[same[0].gen] == self._inputs[same[1].gen]:
-            return None
-
-        o1, o2 = same[0], same[1]
-        if o1.const != o2.const:
-            # The input-derived side may be the right operand.
-            same = [o._replace(src=o.const, const=o.src) for o in same]
-            o1, o2 = same[0], same[1]
-        if o1.const != o2.const or o1.src == o2.src:
-            return None
-        return same
 
     # ── solving ──────────────────────────────────────────────────────
 
@@ -193,49 +299,19 @@ class SecantLog:
         ready = self._ready_sites()
         if not ready:
             return None
-        obs = self._fit_set(rng.choice(ready))
-        if obs is None:
-            return None
+        fit = self._fits[rng.choice(ready)]
+        win = rng.choice(fit.windows)
+        goal = rng.choice(flip_goals(set(fit.signs), fit.new.const, fit.new.width))
+        return self._apply(buf, fit, win, goal)
 
-        fits = self._valid_windows(obs)
-        if not fits:
-            return None
-        win = rng.choice(fits)
-
-        width, const = obs[0].width, obs[0].const
-        signs = {(o.src > const) - (o.src < const) for o in obs}
-        goal = rng.choice(flip_goals(signs, const, width))
-        return self._apply(buf, obs, win, goal)
-
-    def _valid_windows(self, obs: list[_Obs]) -> list[_Window]:
-        """Windows on which every checking record lies on the secant line."""
-        d1, d2 = self._inputs[obs[0].gen], self._inputs[obs[1].gen]
-        span = _span(d1, d2)
-        if span is None:
-            return []
-        width = obs[0].width
-        return [w for w in _windows(*span, width, len(d1)) if self._on_line(obs, w) is not None]
-
-    def _on_line(self, obs: list[_Obs], win: _Window) -> Fraction | None:
-        """Slope dy/dx of the newest two, if the older records agree."""
-        width = obs[0].width
-        xs = [_read(self._inputs[o.gen], win, width) for o in obs]
-        if xs[0] == xs[1]:
-            return None
-        slope = Fraction(obs[0].src - obs[1].src, xs[0] - xs[1])
-        for x, o in zip(xs[2:], obs[2:], strict=True):
-            if obs[0].src + slope * (x - xs[0]) != o.src:
-                return None
-        return slope
-
-    def _apply(self, buf: bytes, obs: list[_Obs], win: _Window, goal: int) -> bytes | None:
+    def _apply(self, buf: bytes, fit: _Fit, win: _Window, goal: int) -> bytes | None:
         """Newton/secant root ``x* = x1 + (goal - y1) / k``, rounded."""
-        width = obs[0].width
+        width = fit.new.width
         if len(buf) < win.start + width:
             return None
-        slope = self._on_line(obs, win)
-        x1 = _read(self._inputs[obs[0].gen], win, width)
-        root = round(x1 + (goal - obs[0].src) / slope)
+        slope = self._slope(fit.new, fit.old, win)
+        x1 = _read(self._inputs[fit.new.gen], win, width)
+        root = round(x1 + (goal - fit.new.src) / slope)
         if not 0 <= root < 1 << 8 * width:
             return None
 

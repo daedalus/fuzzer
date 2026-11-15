@@ -8,6 +8,8 @@ derived from the target model, never echoed from the solver.
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import pytest
 
 from fuzzer_tool.core.cond_stmt import CondStmt
@@ -200,3 +202,39 @@ def test_stale_observations_expire():
         log.observe(_input(x, size=SIZE + 1), [_cond(7, pc=PC + 4)])
     assert log.live_inputs() == MAX_INPUTS
     assert not log.ready()
+
+
+def test_regression_far_pair_does_not_hide_near_pair():
+    # Real runs: the newest two records at a site often come from unrelated
+    # seeds (many bytes differ). An older run one field-edit away from the
+    # newest must still fit, and ready() must mean propose can succeed.
+    log = SecantLog()
+    far = bytearray(_input(20))
+    far[0], far[SIZE - 1] = 0xAA, 0xBB  # differs outside any WIDTH window
+    log.observe(_input(10), [_cond(_affine(10))])
+    log.observe(bytes(far), [_cond(_affine(20))])
+    log.observe(_input(20), [_cond(_affine(20) + 3)])  # newest; near run 1
+    assert log.ready()
+    out = log.propose(_input(10), ScriptedRng(choice_idxs=[0, 0, 0]))
+    # Line through (10, 37) and (20, 70): slope 3.3, root of 1000 at 301.8.
+    assert abs(37 + Fraction(33, 10) * (_field(out) - 10) - CONST) <= 2
+
+
+def test_regression_ready_implies_fit():
+    # Two records whose inputs differ across 7 bytes: orientable, not fittable.
+    log = SecantLog()
+    a, b = bytearray(_input(10)), bytearray(_input(20))
+    b[0] = 0xFF
+    log.observe(bytes(a), [_cond(_affine(10))])
+    log.observe(bytes(b), [_cond(_affine(20))])
+    assert not log.ready()
+
+
+def test_input_side_on_right_operand():
+    # if (1000 == 3x + 7): the constant is op_a, the field drives op_b.
+    log = SecantLog()
+    for x in (10, 20):
+        a, b = CONST.to_bytes(WIDTH, "little"), _affine(x).to_bytes(WIDTH, "little")
+        log.observe(_input(x), [CondStmt.from_cmplog_pair(0, a, b, WIDTH, result=1, pc=PC)])
+    out = log.propose(_input(10), ScriptedRng(choice_idxs=[0, 0, 0]))
+    assert abs(_affine(_field(out)) - CONST) <= 1
