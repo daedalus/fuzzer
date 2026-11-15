@@ -1185,18 +1185,24 @@ class FuzzRound:
         f._seed_dpp.maybe_refit(f._edge_tracker, f.exec_count)
 
     def _feed_weizz(self) -> None:
-        # Weizz structure tags: once-per-lineage passive collection after a
-        # coverage gain, gated by --weizz-tags and max_len. Uses existing
-        # cmplog pairs (+ optional colorize taints); no second tracer.
+        # Weizz structure tags for the round's seed (initial, admitted or
+        # resumed) while it lacks a clean map. Collecting on the mutant was
+        # lost: save_to_corpus replaces its meta. Retries on rounds 1, 2, 4,
+        # 8, ...: the cmplog pool may be empty early, and log2 attempts keep
+        # the scan cost bounded. Reads existing cmplog pairs; no extra execs.
         f = self._f
-        mutated = self._mutated
-        if (
-            self._has_new_coverage
-            and f.weizz_tags
-            and f._cmplog is not None
-            and len(mutated) <= f.weizz_tags_max_len
-        ):
-            f._maybe_collect_weizz_tags(mutated)
+        meta = self._meta
+        if meta is None or not f.weizz_tags or f._cmplog is None:
+            return
+        if meta.get("weizz_tags_rle") and not meta.get("weizz_tags_dirty"):
+            return
+
+        rounds = meta["fuzz_count"]
+        if rounds < 1 or rounds & (rounds - 1):
+            return
+        if len(self._data) > f.weizz_tags_max_len:
+            return
+        f._maybe_collect_weizz_tags(self._data)
 
     def _feed_katz(self) -> None:
         # K-Scheduler bitmap sampling runs EVERY exec (beta needs R_i over
