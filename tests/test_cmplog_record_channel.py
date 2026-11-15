@@ -238,3 +238,18 @@ def test_arm_and_control():
     assert ARM_BASELINES["cmp-rec-shm"] == "baseline"
     assert ARMS["cmp-rec-shm-ctl"] == ARMS["baseline"]
     assert ARM_BASELINES["cmp-rec-shm-ctl"] == "baseline"
+
+
+def test_campaign_arm_is_shm_plus_campaign_scope(monkeypatch):
+    """The combined arm adds exactly the two knobs; its control is baseline."""
+    from fuzzer_tool.core.cmplog import DedupScope
+
+    assert ARM_BASELINES["cmp-rec-shm-campaign"] == "baseline"
+    captured: dict = {}
+    monkeypatch.setattr(commands, "cmd_fuzz", lambda args: captured.update(args=args) or 0)
+    flags = ARMS["cmp-rec-shm-campaign"]
+    monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", *flags])
+    assert commands.main() == 0
+    args = captured["args"]
+    assert args.cmplog_records is RecordChannel.SHM
+    assert args.cmplog_dedup_scope is DedupScope.CAMPAIGN
