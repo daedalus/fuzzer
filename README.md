@@ -102,6 +102,7 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 - **Perf counters** via `perf_event_open` (`--hw-perf`): grouped, multiplex-scaled reads on every backend; campaign-max instruction/branch novelty, per-seed energy, `--hw-instr-limit` deterministic hangs, leak restarts for `--persistent`; software events without a PMU
 - **AFLGo directed fuzzing**: harmonic call-graph + CFG distance to targets (function names, addresses, or `file.c:line` via pure-Python DWARF), with the exact AFLGo power schedule (`--schedule aflgo --t-x N`) and a runtime SHM-tail distance channel on `trace-pc` builds (`build_targets.sh --distance`)
 - **n-gram edge coverage** (`build_targets.sh --ngram`): k=2 keeps byte-identical legacy edge ids; k=3+ hashes a predecessor ring with FNV-1a for path-sensitive feedback — `png_read_ng2.so` / `png_read_ng3.so` ship with trace-pc vendored libpng/zlib and feed the K-Scheduler node channel
+- **IJON annotations** (`adapters/ijon.h`, `--ijon`): upstream-compatible `IJON_SET/INC/MAX/MIN/CMP/DIST/STRDIST/CTX` — the target names the state worth exploring (maze position, checksum bits)
 - **PerfFuzz-style hit-count maxima**: a per-edge high-water mark of execution count, so an
   input that runs the *same* edges far more times than any predecessor is interesting even
   with zero new edges — the signal that finds algorithmic blowups, not just new branches

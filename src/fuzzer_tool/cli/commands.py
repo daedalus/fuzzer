@@ -915,6 +915,7 @@ def cmd_fuzz(args):
         save_smaller=getattr(args, "save_smaller", False),
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
+        ijon=getattr(args, "ijon", False),
         hw_perf_counters=getattr(args, "hw_perf_counters", None),
         hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
@@ -3092,6 +3093,7 @@ _HAIL_MARY_FLAGS = (
     "save_smaller",
     "honggfuzz",
     "hw_perf",
+    "ijon",
     "intel_pt",
     "lbr",
     "colorize",
@@ -6670,6 +6672,12 @@ def main() -> int:
         help="Enable performance counters via perf_event_open (instructions, cycles, "
         "branches, branch misses, L1D, CPU time, page faults, context switches). "
         "Software events only without a PMU. Requires CAP_PERFMON or root.",
+    )
+    fuzz_parser.add_argument(
+        "--ijon",
+        action="store_true",
+        help="IJON state feedback: keep inputs that raise an IJON_MAX/IJON_MIN "
+        "annotated value (adapters/ijon.h). IJON_SET/IJON_INC work without it.",
     )
     fuzz_parser.add_argument(
         "--hw-perf-counters",

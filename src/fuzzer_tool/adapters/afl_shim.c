@@ -275,6 +275,7 @@ static void __afl_map_dist_shm(void);
 static void __afl_map_node_shm(void);
 #endif
 static void __afl_map_block_shm(void);
+static void __afl_map_ijon_shm(void);
 
 /* ── Health counters ──────────────────────────────────────────────────
  *
@@ -1341,6 +1342,7 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     __afl_map_node_shm();
 #endif
     __afl_map_block_shm();
+    __afl_map_ijon_shm();
     __afl_mapping = 0;
     __afl_fast_refresh();
 }
@@ -3392,6 +3394,228 @@ __AFL_GCC_NO_COV static void __afl_map_block_shm(void) {
     __afl_block_bitmap = (uint8_t *)p + 8;
 }
 
+/* ── IJON annotations (ijon.h) ────────────────────────────────────────
+ *
+ * The target names the state it cares about; the fuzzer rewards progress
+ * in it (Aschermann et al., S&P 2020). API and helper hashes follow the
+ * upstream runtime (RUB-SysSec/ijon llvm_mode/afl-llvm-rt.o.c). Channels:
+ *
+ *   ijon_map_set/inc   (state ^ addr) becomes a synthetic edge, like
+ *                      __sfuzz_state, so every coverage consumer sees it.
+ *                      __afl_map_id, not the prev_loc chain: the real edge
+ *                      after an annotation keeps its id (COMPCOV's rule).
+ *   ijon_max/ijon_min  raise a u64 slot in the max-map segment
+ *                      ($__AFL_IJON_SHM_ID); Python admits an input that
+ *                      beats the campaign max of any slot.
+ *   ijon_xor_state     per-thread state xored into map_set/inc addresses.
+ *                      Upstream also xors it into every real edge; here it
+ *                      does not, to keep the edge hot path unchanged.
+ *
+ * Max-map segment, owned by adapters/shm.py IjonMaxShm:
+ *
+ *   offset 0  uint32  head    8-byte words, header included (slots + 1)
+ *   offset 4  uint32  dirty   set here on any raise, cleared by Python
+ *   offset 8  uint64  slots[head - 1]   power of two; slot ids wrap
+ *   ...       4 pad bytes: __afl_attach_sized checks 4 + head * 8
+ *
+ * A separate segment, so the edge segment layout (and __AFL_SHM_LAYOUT)
+ * is unchanged. Python zeroes the slots after every read. No-op without
+ * the segment, and in a target with no annotations nothing calls here. */
+#define IJON_SET_SALT 0x494a4f4e53455431ULL   /* "IJONSET1" */
+#define IJON_INC_SALT 0x494a4f4e494e4331ULL   /* "IJONINC1" */
+#define IJON_MAX_WORDS (1u << 20)             /* header sanity cap */
+#define IJON_STACK_FRAMES 16                  /* upstream hashstack depth */
+
+/* Per-run dedup of map_set ids: direct-mapped, epoch-tagged, so a run
+ * reset is one increment instead of a clear. A collision re-maps an id
+ * (one extra hit), never drops one. Example: IJON_SET(3) in a loop of
+ * 50 leaves count 1, so the hit-count bucket does not move with reps. */
+#define IJON_SEEN_SLOTS 256
+
+struct __ijon_seen_entry {
+    uint32_t id;
+    uint32_t epoch;
+};
+
+static __thread struct __ijon_seen_entry __ijon_seen[IJON_SEEN_SLOTS];
+static __thread uint32_t __ijon_epoch = 1;
+static __thread uint32_t __ijon_state = 0;
+static __thread uint32_t __ijon_state_log = 0;
+static __thread uint32_t __ijon_off = 0;      /* ijon_disable_feedback */
+
+static uint64_t *__ijon_slots = NULL;
+static uint32_t *__ijon_dirty = NULL;
+static uint32_t  __ijon_mask  = 0;
+
+/* Once: a resize re-runs map_shm, and the segment never changes. */
+__AFL_GCC_NO_COV static void __afl_map_ijon_shm(void) {
+    if (__ijon_slots) return;
+    void *p = __afl_attach_sized("__AFL_IJON_SHM_ID", sizeof(uint64_t));
+    if (!p) return;
+
+    /* Slots must be a power of two: the slot wrap is a mask. */
+    uint32_t head = *(uint32_t *)p;
+    uint32_t n = head - 1;
+    if (head < 2 || head > IJON_MAX_WORDS || (n & (n - 1))) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return;
+    }
+    __ijon_dirty = (uint32_t *)p + 1;
+    __ijon_mask  = n - 1;
+    __atomic_store_n(&__ijon_slots, (uint64_t *)p + 1, __ATOMIC_RELEASE);
+}
+
+/* Per-run reset (__afl_run_reset): set-dedup, state and the feedback
+ * switch must not leak from one input into the next. */
+__AFL_NO_COV static inline void __ijon_run_reset(void) {
+    __ijon_epoch++;
+    __ijon_state = 0;
+    __ijon_state_log = 0;
+    __ijon_off = 0;
+}
+
+__AFL_NO_COV static inline uint32_t __ijon_id(uint64_t salt, uint32_t addr) {
+    uint64_t h = 1469598103934665603ULL;   /* FNV-1a, as __sfuzz_state */
+    h = (h ^ salt) * 1099511628211ULL;
+    h = (h ^ (addr ^ __ijon_state)) * 1099511628211ULL;
+    return __AFL_SYNTH_ID(h >> 32);
+}
+
+/* ── map channel ── */
+
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void ijon_map_set(uint32_t addr) {
+    if (!__afl_area || __ijon_off) return;
+
+    uint32_t id = __ijon_id(IJON_SET_SALT, addr);
+    struct __ijon_seen_entry *e = &__ijon_seen[id & (IJON_SEEN_SLOTS - 1)];
+    if (e->id == id && e->epoch == __ijon_epoch) return;   /* set this run */
+
+    e->id = id;
+    e->epoch = __ijon_epoch;
+    __afl_map_id(id);
+}
+
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void ijon_map_inc(uint32_t addr) {
+    if (!__afl_area || __ijon_off) return;
+    __afl_map_id(__ijon_id(IJON_INC_SALT, addr));
+}
+
+/* ── max channel ── */
+
+/* CAS loop: two threads raising one slot must keep the larger value. */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void ijon_max(uint32_t addr, uint64_t value) {
+    uint64_t *slots = __atomic_load_n(&__ijon_slots, __ATOMIC_ACQUIRE);
+    if (!slots || __ijon_off) return;
+
+    uint64_t *p = &slots[addr & __ijon_mask];
+    uint64_t cur = __atomic_load_n(p, __ATOMIC_RELAXED);
+    while (value > cur) {
+        if (!__atomic_compare_exchange_n(p, &cur, value, 1,
+                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            continue;
+        __atomic_store_n(__ijon_dirty, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+}
+
+/* Smallest value = largest complement; 0 stays "never set". */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void ijon_min(uint32_t addr, uint64_t value) {
+    ijon_max(addr, UINT64_MAX - value);
+}
+
+/* ── state ── */
+
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void ijon_xor_state(uint32_t value) {
+    __ijon_state ^= value;
+}
+
+/* State = xor of the last four pushed bytes: order-sensitive history.
+ * Example: push(1), push(2) and push(2), push(1) are different states. */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void ijon_push_state(uint32_t value) {
+    __ijon_state ^= __ijon_state_log;
+    __ijon_state_log = (__ijon_state_log << 8) | (value & 0xff);
+    __ijon_state ^= __ijon_state_log;
+}
+
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void ijon_enable_feedback(void) {
+    __ijon_off = 0;
+}
+
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV void ijon_disable_feedback(void) {
+    __ijon_off = 1;
+}
+
+/* ── helpers (upstream definitions) ── */
+
+/* Bytes equal before the first mismatch or NUL. */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV uint32_t ijon_strdist(char *a, char *b) {
+    uint32_t i = 0;
+    while (a[i] && b[i] && a[i] == b[i]) i++;
+    return i;
+}
+
+/* Bytes equal before the first mismatch, NULs included. */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV uint32_t ijon_memdist(char *a, char *b, size_t len) {
+    uint32_t i = 0;
+    while (i < len && a[i] == b[i]) i++;
+    return i;
+}
+
+/* splitmix64 finalizer. */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV uint64_t ijon_simple_hash(uint64_t x) {
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV uint32_t ijon_hashint(uint32_t old, uint32_t val) {
+    return (uint32_t)ijon_simple_hash(((uint64_t)old << 32) | val);
+}
+
+/* (char) cast kept from upstream: bytes >= 0x80 hash sign-extended. */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV uint32_t ijon_hashmem(uint32_t old, char *val, size_t len) {
+    old = ijon_hashint(old, (uint32_t)len);
+    for (size_t i = 0; i < len; i++) old = ijon_hashint(old, (uint32_t)(int)val[i]);
+    return old;
+}
+
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV uint32_t ijon_hashstr(uint32_t old, char *val) {
+    return ijon_hashmem(old, val, strlen(val));
+}
+
+/* Hash of the call stack. Return addresses are made load-base relative
+ * under FUZZER_KEEP_ASLR, the __afl_compcov_site rule, so ids are
+ * exec-stable. Frame 0 (this function) is skipped. */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV uint32_t ijon_hashstack(void) {
+    void *frames[IJON_STACK_FRAMES];
+    int n = backtrace(frames, IJON_STACK_FRAMES);
+    int rel = __afl_ctx_use_relative();
+
+    uint64_t h = 0;
+    for (int i = 1; i < n; i++) {
+        uintptr_t a = (uintptr_t)frames[i];
+        uintptr_t base = rel ? __afl_ctx_resolve_base(frames[i]) : 0;
+        h ^= ijon_simple_hash(a - base);
+    }
+    return (uint32_t)h;
+}
+
 #if __AFL_DISTANCE_MODE
 /* An id change under a concurrently probing thread can still pair one
  * table with the other's bounds; ids change only at campaign setup. */
@@ -3495,7 +3719,7 @@ __AFL_GCC_NO_COV static void __afl_write_distance_tail(void) {
 /* ── Per-run state ─────────────────────────────────────────────────────
  * What a run must not inherit from the previous one in the same process:
  * the prev_loc chain (else the first edge id depends on the last input),
- * path hash, stack window, and the calling thread's SGFuzz/LTL state.
+ * path hash, stack window, and the calling thread's SGFuzz/LTL/IJON state.
  * Table, generation and header are left alone, so it stacks with the
  * fuzzer's reset_edge_map(). Uninstrumented and out of line: inlined into
  * the instrumented guard, its sfuzz branch became an edge of the run. */
@@ -3508,6 +3732,7 @@ __AFL_NO_COV static void __afl_run_reset(void) {
     __afl_prev_loc = 0;
 #endif
     __ltl_prev_event = LTL_NO_OFFSET;
+    __ijon_run_reset();
     __afl_path_hash_acc = 0;
     __afl_max_stack_depth = 0;
     __afl_stack_base = 0;
