@@ -20,7 +20,7 @@ from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
-from fuzzer_tool.core.cmplog import DedupScope
+from fuzzer_tool.core.cmplog import DedupScope, RecordChannel
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.count_items import CountItems
 from fuzzer_tool.core.crash_graph import Linkage
@@ -882,6 +882,7 @@ def cmd_fuzz(args):
         cmp_prune_const=getattr(args, "cmp_prune_const", False),
         cmplog_site_cap=getattr(args, "cmplog_site_cap", 0),
         cmplog_dedup_scope=getattr(args, "cmplog_dedup_scope", DedupScope.DRAIN),
+        cmplog_records=getattr(args, "cmplog_records", RecordChannel.TEXT),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -6292,6 +6293,19 @@ def main() -> int:
             "one exec's full set. campaign: a record is written once per campaign, so "
             "input-invariant compares stop filling the window; per-input consumers see "
             "only new records (the I2S probe still gets a full set)."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cmplog-records",
+        type=RecordChannel,
+        choices=list(RecordChannel),
+        default=RecordChannel.TEXT,
+        metavar="{text,shm}",
+        help=(
+            "Where the shim writes CMP records. text (default): hex lines on the cmplog "
+            "FIFO/file. shm: binary operands in a shared table (~9 MiB, fixed): no "
+            "formatting, parsing or FIFO drops; at most 32 records per compare site per "
+            "drain. DIV/GEP records stay on text. Targets built before this fall back to text."
         ),
     )
     fuzz_parser.add_argument(

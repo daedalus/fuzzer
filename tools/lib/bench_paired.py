@@ -341,6 +341,10 @@ ARMS: dict[str, list[str]] = {
     # baseline again (Rule 46).
     "cmp-cap-dedup": ["--cmplog-site-cap", "32", "--cmplog-dedup-scope", "campaign"],
     "cmp-cap-dedup-ctl": [],
+    # Cmplog records in a shared binary table instead of FIFO text. Needs a
+    # trace-cmp build (--set fuzzgoat_tcg, ffmpeg). ctl is baseline again (Rule 46).
+    "cmp-rec-shm": ["--cmplog-records", "shm"],
+    "cmp-rec-shm-ctl": [],
     # IJON max-map + max queue. Needs an IJON_MAX-annotated target (ffmpeg_read:
     # frames decoded per codec); inert elsewhere. ctl is baseline again (Rule 46).
     "ijon": ["--ijon"],
@@ -455,6 +459,8 @@ ARM_BASELINES: dict[str, str] = {
     "fox-newton-ctl": "baseline",
     "cmp-cap-dedup": "baseline",
     "cmp-cap-dedup-ctl": "baseline",
+    "cmp-rec-shm": "baseline",
+    "cmp-rec-shm-ctl": "baseline",
     "ijon": "baseline",
     "ijon-ctl": "baseline",
 }

@@ -39,6 +39,7 @@ from collections.abc import Callable, Iterable
 import numpy as np
 
 from fuzzer_tool.adapters.cmp_shm import CMP_SHM_ENV, SITE_SLOTS, CmpCounterShm
+from fuzzer_tool.adapters.cmplog_rec_shm import CMPLOG_REC_ENV, CmpRecordShm
 from fuzzer_tool.adapters.track_parser import (
     CondStmt,
     cond_tuples_from_cmplog_text,
@@ -394,6 +395,17 @@ class Preload(enum.Enum):
 
     SHIM = "shim"
     NONE = "none"
+
+
+class RecordChannel(enum.Enum):
+    """Where the shim writes CMP records.
+
+    TEXT: hex lines on ``_CMPLOG_OUT`` (FIFO or file). SHM: binary operands
+    in a shared table (adapters/cmplog_rec_shm.py); DIV/GEP stay on text.
+    """
+
+    TEXT = "text"
+    SHM = "shm"
 
 
 class DedupScope(enum.Enum):
@@ -755,6 +767,9 @@ class CmplogCollector:
         site_cap: Sets $__AFL_CMPLOG_SITE_CAP: a trace-cmp site writes at
             most this many records per drain. <= 0 is off.
         dedup_scope: Sets $__AFL_CMPLOG_DEDUP_SCOPE (see DedupScope).
+        record_channel: RecordChannel.SHM offers the shim a shared record
+            table ($_CMPLOG_RECORDS_SHM); a shim that cannot attach keeps
+            writing text, which is still read.
         preload: Preload.NONE keeps the shim off LD_PRELOAD (see Preload).
     """
 
@@ -772,6 +787,7 @@ class CmplogCollector:
         prune_const: bool = False,
         site_cap: int = 0,
         dedup_scope: DedupScope = DedupScope.DRAIN,
+        record_channel: RecordChannel = RecordChannel.TEXT,
     ):
         self.log_path: str | None = None
         self.preload = preload
@@ -905,6 +921,11 @@ class CmplogCollector:
         self._sites_offset: int = 0
         # Counters segment ($_CMPLOG_COUNTS_SHM); used once a shim marks it.
         self.counts_shm: CmpCounterShm | None = None
+        # Record table (RecordChannel.SHM), created on first setup_env.
+        self.record_channel = record_channel
+        self.records_shm: CmpRecordShm | None = None
+        # Records the table refused (site or array full), run total.
+        self.records_dropped = 0
 
     def start(self) -> bool:
         """Compile the LD_PRELOAD comparison-logging shim.
@@ -1081,6 +1102,9 @@ class CmplogCollector:
         if self.prune_const:
             env[_PRUNE_CONST_ENV] = "1"
         env.update(self._knobs)
+        rec_id = self._records_shm_id()
+        if rec_id:
+            env[CMPLOG_REC_ENV] = rec_id
 
         # Prepend the unified shim to LD_PRELOAD
         if self._shim_path and self.preload is Preload.SHIM:
@@ -1089,6 +1113,28 @@ class CmplogCollector:
             env["ASAN_OPTIONS"] = _asan_link_order_off(env.get("ASAN_OPTIONS"))
 
         return env
+
+    def _records_shm_id(self) -> str | None:
+        """Id of the record table (SHM channel), created on first use; None otherwise."""
+        if self.record_channel is not RecordChannel.SHM:
+            return None
+        if self.records_shm is None:
+            try:
+                self.records_shm = CmpRecordShm()
+            except OSError:
+                log.warning("Cmplog: no record table segment; records stay on text")
+                self.record_channel = RecordChannel.TEXT
+                return None
+        return self.records_shm.env_id
+
+    def _drain_records(self) -> list[tuple]:
+        """Cond tuples the shim wrote to the record table since the last drain."""
+        shm = self.records_shm
+        if shm is None or not shm.attached:
+            return []
+        conds = shm.drain()
+        self.records_dropped += sum(shm.take_dropped())
+        return conds
 
     def _counts_shm_id(self) -> str | None:
         """Id of the counters segment, created on first use; None if unavailable."""
@@ -1140,6 +1186,7 @@ class CmplogCollector:
                     _PRUNE_CONST_ENV,
                     _SITE_CAP_ENV,
                     _DEDUP_SCOPE_ENV,
+                    CMPLOG_REC_ENV,
                 )
             }
 
@@ -1159,6 +1206,9 @@ class CmplogCollector:
             _put_env(_PRUNE_CONST_ENV, "1")
         for key, value in self._knobs.items():
             _put_env(key, value)
+        rec_id = self._records_shm_id()
+        if rec_id:
+            _put_env(CMPLOG_REC_ENV, rec_id)
 
         if not self._shim_path or self.preload is Preload.NONE:
             return
@@ -1368,13 +1418,15 @@ class CmplogCollector:
             self.collect_counts()
         # Early returns below mean "this drain saw nothing", not "same as last".
         self.last_pairs = []
+        # Table records first: the text stream may be empty while they are not.
+        table = self._drain_records()
 
         if self.fifo_sink:
-            return self._collect_tokens_fifo()
+            return self._collect_tokens_fifo(table)
 
         if not self.log_path or not os.path.exists(self.log_path):
             log.debug("collect_tokens: log missing or empty path=%s", self.log_path)
-            return []
+            return self._parse_lines([], table) if table else []
 
         try:
             if os.path.getsize(self.log_path) > CMPLOG_FILE_MAX_BYTES:
@@ -1411,7 +1463,7 @@ class CmplogCollector:
 
         log.debug("collect_tokens: read %d new lines from %s", len(new_lines), self.log_path)
 
-        new_tokens = self._parse_lines(new_lines)
+        new_tokens = self._parse_lines(new_lines, table)
 
         with contextlib.suppress(OSError), open(self.log_path, "w") as f:
             f.truncate(0)
@@ -1419,26 +1471,20 @@ class CmplogCollector:
 
         return new_tokens
 
-    def _collect_tokens_fifo(self) -> list[bytes]:
+    def _collect_tokens_fifo(self, table: list[tuple]) -> list[bytes]:
         """FIFO-sink variant of collect_tokens.
 
         Drains the background thread's buffer instead of reading a file.
         No seek/truncate/rotate: the pipe is continuously emptied by
         _FifoDrain, so there is no on-disk backlog to manage.
         """
-        if not self._fifo:
-            return []
-
-        data = self._fifo.drain()
-        if not data:
-            return []
-
-        # Reassemble lines split across drain boundaries. The carried
-        # partial holds no newline, so it only extends the first line.
+        data = self._fifo.drain() if self._fifo else b""
         last_nl = data.rfind(b"\n")
         if last_nl == -1:
+            # Reassemble lines split across drain boundaries. The carried
+            # partial holds no newline, so it only extends the first line.
             self._fifo_partial += data
-            return []
+            return self._parse_lines([], table) if table else []
         head = self._fifo_partial
         self._fifo_partial = data[last_nl + 1 :]
 
@@ -1446,10 +1492,13 @@ class CmplogCollector:
         # Cap before joining, so dropped lines are never copied.
         end = _lines_end(data, CMPLOG_MAX_LINES_PER_READ, last_nl + 1)
         new_lines = (head + data[:end]).decode("latin-1").splitlines()
-        return self._parse_lines(new_lines)
+        return self._parse_lines(new_lines, table)
 
-    def _parse_lines(self, new_lines: list[str]) -> list[bytes]:
-        """Shared line parser for both file and FIFO paths."""
+    def _parse_lines(self, new_lines: list[str], table: list[tuple] = ()) -> list[bytes]:
+        """Shared line parser for both file and FIFO paths.
+
+        *table*: cond tuples from the record table, merged after the text's.
+        """
         # Insertion-ordered rather than sets: the order these land in
         # self.tokens is the order eviction retires them in, and iterating a
         # set of bytes follows PYTHONHASHSEED. See _evict_tokens.
@@ -1465,6 +1514,8 @@ class CmplogCollector:
         # C level (order kept) instead of stripping and probing each copy.
         new_lines = list(dict.fromkeys(new_lines))
         cond_tuples = cond_tuples_from_cmplog_text(new_lines, cache=self._cond_cache)
+        if table:
+            cond_tuples = list(dict.fromkeys(cond_tuples + table))
         self._last_cond_tuples = cond_tuples
         self._last_conds = None
         self._ingest_conds(cond_tuples, tokens, new_pairs, batch_pairs)
@@ -2181,6 +2232,9 @@ class CmplogCollector:
         if self.counts_shm is not None:
             self.counts_shm.close()
             self.counts_shm = None
+        if self.records_shm is not None:
+            self.records_shm.close()
+            self.records_shm = None
         if self.counts_path and os.path.exists(self.counts_path):
             with contextlib.suppress(OSError):
                 os.unlink(self.counts_path)

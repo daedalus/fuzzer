@@ -145,6 +145,7 @@ Off arm needs a tree without the op.
 |---|---|---|---|
 | Value profile (`--value-profile on/stall`) | `popcount(a^b)`, `bitlen|a-b|` per cmp site as synthetic edges | U | fuzzgoat `--cmplog` build, `on` and `stall` vs off, 20 seeds + A/A; metric real edges on a non-marking replay (marks inflate campaign edges) |
 | Cmplog record cap + campaign dedup (`--cmplog-site-cap 32 --cmplog-dedup-scope campaign`, arm `cmp-cap-dedup`) | Per-site record cap per drain; dedup table kept across drains | N | NULL on both: fuzzgoat_tcg ledger #138, FFmpeg 9.0.2 #139 (9/11, p=0.93; CPU −9% median, p=0.14). Owed only if CPU matters: a cpu_user rerun at ≥ 40 seeds on FFmpeg. |
+| Cmplog record table (`--cmplog-records shm`, arm `cmp-rec-shm`) | CMP records in a shared binary table instead of FIFO text | U | Frozen 2026-11-15: `--set fuzzgoat_tcg` then `--set ffmpeg`, 20 seeds × 10k each, arms `baseline`, `cmp-rec-shm`, `cmp-rec-shm-ctl`; metric `real_edges`, Wilcoxon two-sided α 0.05; WIN/LOSS only with A/A n.s. Secondary: `cpu_user` (same test). Also peak RSS per arm |
 | Edge clusters (`--edge-clusters`) | Class rarity + near-miss bonus | N | fuzzgoat null; FFmpeg/png |
 | Inline sancov modes | `inline-8bit-counters`, `inline-bool-flag` | N | −23/−38 edges; fold buckets, 20×20k rerun |
 | Shim bit tricks | SWAR fold, masked probe, `bit_compress` | S | rebuild + fuzzgoat calibration |

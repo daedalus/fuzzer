@@ -1916,6 +1916,18 @@ progress-handler opcode budget, and `sqlite3_hard_heap_limit64`. A corrupt
 file returning `SQLITE_CORRUPT`/`SQLITE_NOTADB` is the expected outcome and
 not a finding; a segfault or an assertion failure is.
 
+### Cmplog record table (`--cmplog-records shm`)
+
+CMP records as binary operands in a SysV segment (`$_CMPLOG_RECORDS_SHM`, `adapters/cmplog_rec_shm.py`; afl_shim.c "Record table") instead of hex lines on the FIFO. Removes shim formatting, `write(2)`, FIFO `EAGAIN` drops and the Python text parse; DIV/GEP records stay on text, and a shim without the table keeps writing text, which is still read.
+
+- Trace-cmp records: site slot keyed by (pc, width), ≤ 32 records per site per drain, sites listed in first-touch order. Libc records (no pc): flat array, operands ≤ 64 B.
+- Drain reads this generation, zeroes the used counts, bumps `gen`: O(1) reset. The shim copies the geometry at attach and bounds-checks every index read from the segment.
+- Order: per-site write order is kept; across sites it is first-touch order, not global encounter order.
+- Memory: fixed ~9 MiB shared (16384 sites × 32 × 16 B + 4096 × 140 B). Replaces the text path's shim buffer (256 KiB), pipe (64 KiB), FIFO buffer (≤ 8 MiB) and parse cache (≤ 65,536 entries).
+- Refused records (site table or site full, array full): `rdrop:` on the stats line.
+
+Equivalence: same `(op_a, op_b, width, result, pc)` set as the text parse of the same run (`tests/test_cmplog_record_shm.py`, ASLR off; the text-vs-text control is asserted first). Collector: `tests/test_cmplog_record_channel.py`. Bench arm `cmp-rec-shm`; A/B: `docs/AB_PENDING.md`.
+
 ### Cmplog record cap and dedup scope (`--cmplog-site-cap`, `--cmplog-dedup-scope`)
 
 Two shim record filters (afl_shim.c "Per-site record cap", "Dedup scope"), off by default:

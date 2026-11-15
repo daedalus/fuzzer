@@ -61,7 +61,7 @@ from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due, phase_of
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
-from fuzzer_tool.core.cmplog import CmplogRecords, DedupScope
+from fuzzer_tool.core.cmplog import CmplogRecords, DedupScope, RecordChannel
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.coverage_noise import (
     NOISE_PROBE_VARIANTS,
@@ -1574,6 +1574,8 @@ class Fuzzer:
         # Shim record knobs (afl_shim.c): per-site cap per drain, dedup lifetime.
         cmplog_site_cap=0,
         cmplog_dedup_scope=DedupScope.DRAIN,
+        # CMP records as text lines or in a shared binary table.
+        cmplog_records=RecordChannel.TEXT,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -2674,6 +2676,7 @@ class Fuzzer:
                 prune_const=cmp_prune_const,
                 site_cap=cmplog_site_cap,
                 dedup_scope=cmplog_dedup_scope,
+                record_channel=cmplog_records,
                 # A target with the shim compiled in already intercepts
                 # libc; a preloaded copy would count every call twice.
                 preload=Preload.NONE if has_cmplog else Preload.SHIM,
