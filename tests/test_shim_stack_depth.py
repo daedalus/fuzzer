@@ -182,5 +182,6 @@ def test_export_stack_depth(monkeypatch):
 
 
 def test_fuzzer_exports_its_reader():
-    """The honggfuzz schedule is the only reader, so it decides."""
-    assert "export_stack_depth(honggfuzz)" in inspect.getsource(Fuzzer.__init__)
+    """The honggfuzz schedule and --stack-depth-max are the readers, so they decide."""
+    src = inspect.getsource(Fuzzer.__init__)
+    assert "export_stack_depth(honggfuzz or stack_depth_max)" in src

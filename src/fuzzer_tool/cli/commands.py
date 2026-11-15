@@ -922,6 +922,7 @@ def cmd_fuzz(args):
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
         ijon=getattr(args, "ijon", False),
+        stack_depth_max=getattr(args, "stack_depth_max", False),
         ijon_schedule_maxmap=getattr(args, "ijon_schedule_maxmap", DEFAULT_SCHEDULE_MAXMAP),
         c11=getattr(args, "c11", False),
         value_profile=ValueProfile(getattr(args, "value_profile", ValueProfile.OFF.value)),
@@ -3105,6 +3106,7 @@ _HAIL_MARY_FLAGS = (
     "honggfuzz",
     "hw_perf",
     "ijon",
+    "stack_depth_max",
     "c11",
     "intel_pt",
     "lbr",
@@ -6723,6 +6725,12 @@ def main() -> int:
         help="Enable performance counters via perf_event_open (instructions, cycles, "
         "branches, branch misses, L1D, CPU time, page faults, context switches). "
         "Software events only without a PMU. Requires CAP_PERFMON or root.",
+    )
+    fuzz_parser.add_argument(
+        "--stack-depth-max",
+        action="store_true",
+        help="Keep inputs that recurse deeper than any before (honggfuzz stack-depth "
+        "feedback). Needs AFL SHM coverage and a per-edge callback build.",
     )
     fuzz_parser.add_argument(
         "--ijon",

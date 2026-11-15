@@ -195,6 +195,7 @@ from fuzzer_tool.core.shim_health import (
 )
 from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
+from fuzzer_tool.core.stack_depth import StackMax
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
@@ -2151,6 +2152,8 @@ class Fuzzer:
         rq_add_key=False,
         # --stall-mode: op choice during stall recovery (services/operators.py). Appended.
         stall_mode=None,
+        # --stack-depth-max: admit deeper recursion (core/stack_depth.py). Appended.
+        stack_depth_max=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2168,8 +2171,8 @@ class Fuzzer:
         # Context term on/off (--ctx-sensitive); the shim reads it at attach and
         # the sizing / ASLR / contract code below reads it via effective_ctx_bits.
         export_ctx_sensitive(ctx_sensitive)
-        # Stack-depth sampling: --honggfuzz is its only reader; read at attach.
-        export_stack_depth(honggfuzz)
+        # Stack-depth sampling: --honggfuzz and --stack-depth-max read it; read at attach.
+        export_stack_depth(honggfuzz or stack_depth_max)
         # Allocation-size edges (--alloc-sizes); read at attach.
         export_alloc_sizes(alloc_sizes)
         # In-process modes dlopen the target; an executable cannot be.
@@ -2830,6 +2833,13 @@ class Fuzzer:
         self._ijon: IjonChannel | None = None
         if ijon and self.shm_cov and not self.multi_targets:
             self._ijon = self._open_ijon(target, ijon_schedule_maxmap)
+
+        # --stack-depth-max: the depth comes from the SHM header; no SHM, no signal.
+        self._stack_max: StackMax | None = None
+        if stack_depth_max and self.shm_cov:
+            self._stack_max = StackMax()
+        elif stack_depth_max:
+            print("[!] --stack-depth-max: needs AFL SHM coverage; disabled")
 
         # --shared-virgin: one novelty store across the per-target tables.
         self._shared_virgin: SharedVirgin | None = None
@@ -10204,6 +10214,8 @@ class Fuzzer:
             groups["Execution"].append("honggfuzz")
         if self.hw_perf:
             groups["Execution"].append("hw-perf")
+        if getattr(self, "_stack_max", None) is not None:
+            groups["Execution"].append("stack-depth-max")
         if self.pt_cov:
             groups["Execution"].append("intel-pt")
         if self.branch_cov:
