@@ -6796,8 +6796,11 @@ def main() -> int:
             "aflgo",
             "entropic",
             "doppler",
+            "seek",
+            "exploit",
         ),
-        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic|doppler "
+        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic|doppler|"
+        "seek|exploit (seek = base ignoring exec time; exploit = AFL's x32 constant) "
         "(aflgo = exact AFLGo distance annealing, see --t-x; "
         "entropic = libFuzzer -entropic, log-scaled rare-feature energy; "
         "doppler = power Doppler flow energy, SHM coverage only)",
