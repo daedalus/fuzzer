@@ -14,8 +14,8 @@ Usage:
 
 import base64
 import functools
-import math
 import logging
+import math
 import struct
 import zlib
 from collections.abc import Callable
