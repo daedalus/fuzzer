@@ -34,7 +34,9 @@ class _Shm:
         return self._reads.pop(0) if len(self._reads) > 1 else set(self._reads[0])
 
     def is_new_coverage_with_edges(self):
-        return bool(self._new_ids), set(self._reads[-1])
+        # Novelty is reported once, as the real virgin map does.
+        has_new, self._new_ids = bool(self._new_ids), set()
+        return has_new, set(self._reads[-1])
 
     def get_edge_counts(self):
         return {e: 1 for e in self._reads[-1]}

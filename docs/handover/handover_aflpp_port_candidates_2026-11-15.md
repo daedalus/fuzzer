@@ -46,7 +46,7 @@ edges → no crash file. Fixed: crash → `save_crash`; changed trace with confi
 | # | Item | AFL++ loc | Ours | Value | Effort |
 |---|---|---|---|---|---|
 | 1 | Multi-instance sync (`-M/-S/-F`) | `afl-fuzz-run.c:sync_fuzzers` | absent; one-shot `import` only | high: only way a Python fuzzer scales past one core | M |
-| 2 | AFL `trim_case` (len/16…len/1024 chunk removal) | `afl-fuzz-one.c:trim_case` | only one halving try | high: smaller seeds → faster execs, cleaner splices | S |
+| 2 | AFL `trim_case` (len/16…len/1024 chunk removal) | `afl-fuzz-one.c:trim_case` | **done 2026-11-15**: len/2…len/1024, 512-exec budget (`_trim_walk`) | high: smaller seeds → faster execs, cleaner splices | S |
 | 3 | Starve mode, full | `afl-main.c:afl_advance_queue_cycle`, `afl-fuzz-queue.c:1426` | partial: `--stall` → random-mode mutations | med–high | M |
 | 4 | Value profile | `afl-fuzz-valprof.c`, `docs/value_profiling.md` | **done 2026-11-15** (`--value-profile`). Correction: COMPCOV (`--compcov-level`) already gave byte-prefix distance feedback; the port adds Hamming + magnitude ids and stall activation | high on magic-heavy targets | M |
 | 5 | C11 local-variable seed weight (ICSE'26) | `afl-fuzz-queue.c:368,519` | **done 2026-11-15** (`--c11`) | med; cheap via DWARF | S |

@@ -14,6 +14,7 @@ sees.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 import pytest
@@ -88,7 +89,8 @@ def fuzzer(tmp_path):
 
 
 ORIGINAL = b"A" * 64
-TRIMMED = ORIGINAL[:32]
+# The fake keeps every trace, so the trim_case walk (cuts 32, 16, 8, 4) ends at 4 B.
+TRIMMED = ORIGINAL[:4]
 
 
 def _seed_the_corpus(f: _FakeFuzzer) -> None:
@@ -213,7 +215,7 @@ def test_regression_trim_rejects_lost_edges(fuzzer):
     (trimmed ⊆ current), so coverage loss passed. AFL keeps a trim only when
     the trace is unchanged."""
     _seed_the_corpus(fuzzer)
-    traces = iter([{1, 2, 3}, {1, 2}])
+    traces = itertools.chain([{1, 2, 3}], itertools.repeat({1, 2}))
     fuzzer.shm_cov.get_edge_ids = lambda: next(traces)
 
     CorpusManager(fuzzer).trim_new_coverage(ORIGINAL, ORIGINAL)
