@@ -64,7 +64,21 @@ Limits
   global symbol.  A second ``register_custom_mutator`` call rebinds the
   existing operators to the new plugin.
 * Needs a C compiler (``$CC`` or ``cc``) the first time.
-* AFL++'s ``afl_custom_*`` API is not implemented.
+
+AFL++ ``afl_custom_*`` (``--afl-custom-mutator``)
+-------------------------------------------------
+
+:class:`AflCustomMutator` loads an AFL++ custom mutator: a ``.so`` exporting
+``afl_custom_*`` or a ``.py`` module with AFL++'s Python hook names. Hooks
+served: ``init`` (``afl`` is NULL; seed from the fuzzer rng), ``fuzz`` and
+``havoc_mutation`` (operators ``afl_custom_fuzz`` / ``afl_custom_havoc``),
+``post_process`` (bytes handed to the target; the corpus keeps the
+original), the ``init_trim``/``trim``/``post_trim`` trio (replaces the
+default trim walk), ``queue_get`` (skip a seed), ``queue_new_entry`` (on
+admission), ``deinit`` (at exit). C calls share the guard above. Not
+served: ``fuzz_count``, ``describe``, ``havoc_mutation_probability``,
+``splice_optout``, ``fuzz_send``, ``post_run`` and plugins that read
+``afl_state_t``.
 """
 
 from __future__ import annotations
@@ -72,12 +86,14 @@ from __future__ import annotations
 import atexit
 import contextlib
 import ctypes
+import importlib.util
 import logging
 import os
 import shutil
 import signal
 import subprocess
 import tempfile
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -261,6 +277,23 @@ int fz_guard_cross(fz_cross_fn f, const uint8_t *a, size_t na, const uint8_t *b,
     *ret = rc ? 0 : x.ret;
     return rc;
 }
+
+/* afl_custom_* entry points: every argument is a pointer, size_t, u8 or
+ * u32, all INTEGER class, so one 7-word call shape serves them all on the
+ * SysV x86-64 and AAPCS64 ABIs; callers mask the return to its real width. */
+typedef size_t (*fz_word7_fn)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                              uintptr_t, uintptr_t);
+struct word7_args { fz_word7_fn f; const uintptr_t *a; size_t ret; };
+static void word7_thunk(void *p) {
+    struct word7_args *w = p;
+    w->ret = w->f(w->a[0], w->a[1], w->a[2], w->a[3], w->a[4], w->a[5], w->a[6]);
+}
+int fz_guard_call7(fz_word7_fn f, const uintptr_t *args, int timeout_ms, size_t *ret) {
+    struct word7_args w = {f, args, 0};
+    int rc = run_guarded(word7_thunk, &w, timeout_ms);
+    *ret = rc ? 0 : w.ret;
+    return rc;
+}
 """
 
 # ---------------------------------------------------------------------------
@@ -359,6 +392,28 @@ def _signal_name(num: int) -> str:
         return f"signal {num}"
 
 
+def _status_name(status: int) -> str:
+    return "timeout" if status == _FZ_TIMEOUT else _signal_name(status)
+
+
+def _count_failure(owner: Any, name: str, data: bytes) -> None:
+    """Count a skipped plugin call on *owner* (``failures``, ``last_failure_input``)."""
+    owner.failures[name] = owner.failures.get(name, 0) + 1
+    owner.last_failure_input = bytes(data)
+    total = sum(owner.failures.values())
+    # First few, then one in a hundred: a plugin that dies on every call
+    # would otherwise drown the log.
+    if total <= 5 or total % 100 == 0:
+        log.warning(
+            "custom mutator plugin %s: %s on a %d-byte input (failure #%d, head %s); call skipped",
+            owner.path,
+            name,
+            len(data),
+            total,
+            data[:16].hex(),
+        )
+
+
 _MUTATE_CB = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t)
 
 #: rng for the plugin call in flight; read by the LLVMFuzzerMutate callback.
@@ -437,6 +492,13 @@ def _load_host() -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_size_t),
     ]
     host.fz_guard_cross.restype = ctypes.c_int
+    host.fz_guard_call7.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    host.fz_guard_call7.restype = ctypes.c_int
     _host_cb = _MUTATE_CB(_on_mutate)
     host.fz_set_mutate_cb(ctypes.cast(_host_cb, ctypes.c_void_p))
     _host = host
@@ -521,21 +583,7 @@ class CustomMutatorPlugin:
         return max_len or max(DEFAULT_CAP, 2 * max(lengths))
 
     def _record_failure(self, status: int, data: bytes) -> None:
-        name = "timeout" if status == _FZ_TIMEOUT else _signal_name(status)
-        self.failures[name] = self.failures.get(name, 0) + 1
-        self.last_failure_input = bytes(data)
-        total = sum(self.failures.values())
-        # First few, then one in a hundred: a plugin that dies on every call
-        # would otherwise drown the log.
-        if total <= 5 or total % 100 == 0:
-            log.warning(
-                "custom mutator plugin %s: %s on a %d-byte input (failure #%d, head %s); call skipped",
-                self.path,
-                name,
-                len(data),
-                total,
-                data[:16].hex(),
-            )
+        _count_failure(self, _status_name(status), data)
 
     def mutate(self, data: bytes, max_len: int, rng) -> bytes | None:
         """Call ``LLVMFuzzerCustomMutator``.
@@ -616,6 +664,329 @@ class CustomMutatorPlugin:
 
 
 # ---------------------------------------------------------------------------
+# AFL++ afl_custom_* plugins
+# ---------------------------------------------------------------------------
+#
+#   AflCustomMutator (facade: bytes in/out, failure counting, queue files)
+#        |-- _AflCBackend   .so, afl_custom_<hook> symbols, fz_guard_call7
+#        `-- _AflPyBackend  .py, <hook> functions (AFL_PYTHON_MODULE style)
+
+AFL_PREFIX = "afl_custom_"
+
+
+class AflHook(Enum):
+    """``afl_custom_*`` entry points this host calls; ``init`` is mandatory."""
+
+    INIT = "init"
+    FUZZ = "fuzz"
+    POST_PROCESS = "post_process"
+    HAVOC = "havoc_mutation"
+    INIT_TRIM = "init_trim"
+    TRIM = "trim"
+    POST_TRIM = "post_trim"
+    QUEUE_GET = "queue_get"
+    QUEUE_NEW_ENTRY = "queue_new_entry"
+    DEINIT = "deinit"
+
+
+_TRIM_HOOKS = (AflHook.INIT_TRIM, AflHook.TRIM, AflHook.POST_TRIM)
+_LIFECYCLE_HOOKS = (AflHook.INIT, AflHook.DEINIT)
+_WORDS = 7  # widest afl_custom_* signature (afl_custom_fuzz)
+_U8 = 0xFF
+_U32 = 0xFFFFFFFF
+
+
+def _s32(word: int) -> int:
+    """Low 32 bits of a returned word as a signed int (init_trim / post_trim)."""
+    word &= _U32
+    return word - (1 << 32) if word >> 31 else word
+
+
+class _PluginFault(Exception):
+    """A guarded C call that faulted or timed out; ``args[0]`` names it."""
+
+
+class _AflCBackend:
+    """``afl_custom_<hook>`` symbols of a shared object, called through the guard."""
+
+    def __init__(self, path: str, isolate: bool, timeout_ms: int) -> None:
+        self._host = _load_host()
+        try:
+            self._lib = ctypes.CDLL(os.path.abspath(path))
+        except OSError as exc:
+            raise RuntimeError(f"--afl-custom-mutator: cannot load {path}: {exc}") from exc
+        self._isolate = isolate
+        self._timeout_ms = timeout_ms
+        self._fns: dict[AflHook, Any] = {}
+        for hook in AflHook:
+            fn = getattr(self._lib, AFL_PREFIX + hook.value, None)
+            if fn is None:
+                continue
+            fn.restype = ctypes.c_size_t
+            self._fns[hook] = fn
+        self._data = 0
+
+    def has(self, hook: AflHook) -> bool:
+        return hook in self._fns
+
+    def _call(self, hook: AflHook, *words: int) -> int:
+        fn = self._fns[hook]
+        if not self._isolate:
+            return fn(*(ctypes.c_size_t(w) for w in words))
+
+        args = (ctypes.c_size_t * _WORDS)(*words)
+        ret = ctypes.c_size_t(0)
+        status = self._host.fz_guard_call7(
+            ctypes.cast(fn, ctypes.c_void_p), args, self._timeout_ms, ctypes.byref(ret)
+        )
+        if status:
+            raise _PluginFault(_status_name(status))
+        return ret.value
+
+    @staticmethod
+    def _out(out: ctypes.c_void_p, n: int, cap: int) -> bytes | None:
+        # 0 = decline; a NULL out or an oversized length is a plugin bug, also declined.
+        if n == 0 or n > cap or not out.value:
+            return None
+        return ctypes.string_at(out.value, n)
+
+    @staticmethod
+    def _buf(data: bytes) -> Any:
+        buf = (ctypes.c_uint8 * max(len(data), 1))()
+        ctypes.memmove(buf, data, len(data))
+        return buf
+
+    def init(self, seed: int) -> None:
+        self._data = self._call(AflHook.INIT, 0, seed & _U32)
+        if not self._data:
+            raise RuntimeError("--afl-custom-mutator: afl_custom_init returned NULL")
+
+    def fuzz(self, buf: bytes, add: bytes, max_size: int) -> bytes | None:
+        b, a, out = self._buf(buf), self._buf(add), ctypes.c_void_p()
+        n = self._call(
+            AflHook.FUZZ,
+            self._data,
+            ctypes.addressof(b),
+            len(buf),
+            ctypes.addressof(out),
+            ctypes.addressof(a),
+            len(add),
+            max_size,
+        )
+        return self._out(out, n, max_size)
+
+    def post_process(self, buf: bytes) -> bytes | None:
+        b, out = self._buf(buf), ctypes.c_void_p()
+        n = self._call(
+            AflHook.POST_PROCESS, self._data, ctypes.addressof(b), len(buf), ctypes.addressof(out)
+        )
+        return self._out(out, n, n)
+
+    def havoc_mutation(self, buf: bytes, max_size: int) -> bytes | None:
+        b, out = self._buf(buf), ctypes.c_void_p()
+        n = self._call(
+            AflHook.HAVOC,
+            self._data,
+            ctypes.addressof(b),
+            len(buf),
+            ctypes.addressof(out),
+            max_size,
+        )
+        return self._out(out, n, max_size)
+
+    def init_trim(self, buf: bytes) -> int:
+        b = self._buf(buf)
+        return _s32(self._call(AflHook.INIT_TRIM, self._data, ctypes.addressof(b), len(buf)))
+
+    def trim(self) -> bytes | None:
+        out = ctypes.c_void_p()
+        n = self._call(AflHook.TRIM, self._data, ctypes.addressof(out))
+        return ctypes.string_at(out.value, n) if out.value else None
+
+    def post_trim(self, success: bool) -> int:
+        return _s32(self._call(AflHook.POST_TRIM, self._data, int(success)))
+
+    def queue_get(self, path: str) -> bool:
+        name = ctypes.create_string_buffer(os.fsencode(path))
+        return bool(self._call(AflHook.QUEUE_GET, self._data, ctypes.addressof(name)) & _U8)
+
+    def queue_new_entry(self, path: str, orig: str | None) -> None:
+        new = ctypes.create_string_buffer(os.fsencode(path))
+        old = ctypes.create_string_buffer(os.fsencode(orig)) if orig else None
+        self._call(
+            AflHook.QUEUE_NEW_ENTRY,
+            self._data,
+            ctypes.addressof(new),
+            ctypes.addressof(old) if old is not None else 0,
+        )
+
+    def deinit(self) -> None:
+        self._call(AflHook.DEINIT, self._data)
+
+
+class _AflPyBackend:
+    """A Python module with AFL++'s Python hook names (``init``, ``fuzz``, ...)."""
+
+    def __init__(self, path: str) -> None:
+        name = f"fz_afl_custom_{Path(path).stem}"
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"--afl-custom-mutator: cannot import {path}")
+        self._mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self._mod)
+        self._fns = {
+            hook: getattr(self._mod, hook.value)
+            for hook in AflHook
+            if callable(getattr(self._mod, hook.value, None))
+        }
+
+    def has(self, hook: AflHook) -> bool:
+        return hook in self._fns
+
+    @staticmethod
+    def _out(result: Any, cap: int) -> bytes | None:
+        if not result or len(result) > cap:
+            return None
+        return bytes(result)
+
+    def init(self, seed: int) -> None:
+        self._fns[AflHook.INIT](seed & _U32)
+
+    def fuzz(self, buf: bytes, add: bytes, max_size: int) -> bytes | None:
+        res = self._fns[AflHook.FUZZ](bytearray(buf), bytearray(add), max_size)
+        return self._out(res, max_size)
+
+    def post_process(self, buf: bytes) -> bytes | None:
+        res = self._fns[AflHook.POST_PROCESS](bytearray(buf))
+        return bytes(res) if res else None
+
+    def havoc_mutation(self, buf: bytes, max_size: int) -> bytes | None:
+        return self._out(self._fns[AflHook.HAVOC](bytearray(buf), max_size), max_size)
+
+    def init_trim(self, buf: bytes) -> int:
+        return int(self._fns[AflHook.INIT_TRIM](bytearray(buf)))
+
+    def trim(self) -> bytes | None:
+        res = self._fns[AflHook.TRIM]()
+        return bytes(res) if res is not None else None
+
+    def post_trim(self, success: bool) -> int:
+        return int(self._fns[AflHook.POST_TRIM](success))
+
+    def queue_get(self, path: str) -> bool:
+        return bool(self._fns[AflHook.QUEUE_GET](path))
+
+    def queue_new_entry(self, path: str, orig: str | None) -> None:
+        self._fns[AflHook.QUEUE_NEW_ENTRY](path, orig)
+
+    def deinit(self) -> None:
+        self._fns[AflHook.DEINIT]()
+
+
+class AflCustomMutator:
+    """An AFL++ custom mutator: ``.so`` exporting ``afl_custom_*`` or a ``.py`` module.
+
+    Bytes in, bytes out. A faulting / timed-out C call or a raising Python
+    hook is skipped and counted in :attr:`failures`, then answered with the
+    hook's neutral value (``None``, ``-1`` for trim progress, ``True`` for
+    ``queue_get``). Queue hooks get transient files: the corpus stores
+    deltas, which a plugin cannot parse, so each call writes the raw bytes
+    to a per-plugin temp dir and the path is only valid during the call.
+    """
+
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        seed: int,
+        isolate: bool = True,
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    ) -> None:
+        self.path = str(path)
+        if not os.path.isfile(self.path):
+            raise FileNotFoundError(f"--afl-custom-mutator: no such file: {self.path}")
+
+        if self.path.endswith(".py"):
+            self._backend: Any = _AflPyBackend(self.path)
+            self._faults: tuple[type[BaseException], ...] = (Exception,)
+        else:
+            self._backend = _AflCBackend(self.path, isolate, max(0, int(timeout_ms)))
+            self._faults = (_PluginFault,)
+
+        if not self._backend.has(AflHook.INIT):
+            raise RuntimeError(f"--afl-custom-mutator: {self.path} has no {AFL_PREFIX}init")
+        if not any(self._backend.has(h) for h in AflHook if h not in _LIFECYCLE_HOOKS):
+            raise RuntimeError(f"--afl-custom-mutator: {self.path} has no {AFL_PREFIX}* hooks")
+
+        self.failures: dict[str, int] = {}
+        self.last_failure_input: bytes | None = None
+        self.calls = 0
+        self._backend.init(seed)
+        self._qdir = tempfile.mkdtemp(prefix="fz_afl_q_")
+        self._live = True
+        atexit.register(self.deinit)
+
+    def has(self, hook: AflHook) -> bool:
+        """True when the plugin serves *hook*; trimming needs all three trim hooks."""
+        if hook in _TRIM_HOOKS:
+            return all(self._backend.has(h) for h in _TRIM_HOOKS)
+        return self._backend.has(hook)
+
+    def _guard(self, fallback: Any, data: bytes, fn: Any, *args: Any) -> Any:
+        # One place that turns a plugin failure into a counted, skipped call.
+        self.calls += 1
+        try:
+            return fn(*args)
+        except self._faults as exc:
+            name = exc.args[0] if isinstance(exc, _PluginFault) else type(exc).__name__
+            _count_failure(self, name, data)
+            return fallback
+
+    def _qfile(self, name: str, data: bytes) -> str:
+        path = os.path.join(self._qdir, name)
+        Path(path).write_bytes(data)
+        return path
+
+    def fuzz(self, buf: bytes, add_buf: bytes, max_size: int) -> bytes | None:
+        return self._guard(None, buf, self._backend.fuzz, buf, add_buf, max_size)
+
+    def post_process(self, buf: bytes) -> bytes | None:
+        """The bytes the target should see; ``None`` keeps *buf* as is."""
+        return self._guard(None, buf, self._backend.post_process, buf)
+
+    def havoc_mutation(self, buf: bytes, max_size: int) -> bytes | None:
+        return self._guard(None, buf, self._backend.havoc_mutation, buf, max_size)
+
+    def init_trim(self, buf: bytes) -> int:
+        """Trim steps for *buf*; 0 = nothing to trim, < 0 = error."""
+        return self._guard(-1, buf, self._backend.init_trim, buf)
+
+    def trim(self) -> bytes | None:
+        return self._guard(None, b"", self._backend.trim)
+
+    def post_trim(self, success: bool) -> int:
+        """Next trim step after a kept (*success*) or rejected cut; < 0 = error."""
+        return self._guard(-1, b"", self._backend.post_trim, success)
+
+    def queue_get(self, data: bytes) -> bool:
+        """False when the plugin asks to skip fuzzing *data*."""
+        return self._guard(True, data, self._backend.queue_get, self._qfile("cur", data))
+
+    def queue_new_entry(self, data: bytes, parent: bytes | None) -> None:
+        orig = self._qfile("orig", parent) if parent is not None else None
+        self._guard(None, data, self._backend.queue_new_entry, self._qfile("new", data), orig)
+
+    def deinit(self) -> None:
+        """Call ``afl_custom_deinit`` once and drop the queue temp dir; idempotent."""
+        if not self._live:
+            return
+        self._live = False
+        if self._backend.has(AflHook.DEINIT):
+            self._guard(None, b"", self._backend.deinit)
+        shutil.rmtree(self._qdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # Operators
 # ---------------------------------------------------------------------------
 
@@ -673,11 +1044,53 @@ class CustomCrossoverOp(_PluginOp):
         return self.plugin.crossover(data, bytes(other), max_len, rng)
 
 
+class AflFuzzOp(_PluginOp):
+    """``afl_custom_fuzz``: the plugin's ``afl_custom_fuzz``, spliced with a corpus entry."""
+
+    name = "afl_custom_fuzz"
+
+    def mutate(
+        self,
+        data: bytes,
+        rng: Any,
+        max_len: int = 0,
+        *,
+        context: MutationContext | None = None,
+        **ctx: Any,
+    ) -> bytes | None:
+        # add_buf: another corpus entry, as AFL++ passes a random queue entry.
+        corpus = context.corpus if context is not None else ()
+        add = b""
+        if len(corpus) > 1:
+            other = corpus[rng.randrange(len(corpus))]
+            if isinstance(other, bytes | bytearray) and other != data:
+                add = bytes(other)
+        cap = CustomMutatorPlugin._capacity(max_len, len(data), len(add))
+        return self.plugin.fuzz(data, add, cap)
+
+
+class AflHavocOp(_PluginOp):
+    """``afl_custom_havoc``: the plugin's ``afl_custom_havoc_mutation``."""
+
+    name = "afl_custom_havoc"
+
+    def mutate(
+        self,
+        data: bytes,
+        rng: Any,
+        max_len: int = 0,
+        *,
+        context: MutationContext | None = None,
+        **ctx: Any,
+    ) -> bytes | None:
+        return self.plugin.havoc_mutation(data, CustomMutatorPlugin._capacity(max_len, len(data)))
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
-_OP_NAMES = (CustomMutatorOp.name, CustomCrossoverOp.name)
+_OP_NAMES = (CustomMutatorOp.name, CustomCrossoverOp.name, AflFuzzOp.name, AflHavocOp.name)
 
 
 def register_custom_mutator(
@@ -693,15 +1106,26 @@ def register_custom_mutator(
     ``FileNotFoundError`` / ``RuntimeError`` on a missing, unloadable or
     symbol-less plugin; the caller asked for it by name, so it fails loudly.
     """
-    from fuzzer_tool.core import operator_categories
-    from fuzzer_tool.core.operator_registry import REGISTRY
-
     plugin = CustomMutatorPlugin(path, isolate=isolate, timeout_ms=timeout_ms)
-    existing = {getattr(m, "name", None): m for m in REGISTRY.mutators()}
     wanted: list[tuple[type[_PluginOp], bool]] = [
         (CustomMutatorOp, plugin.has_mutator),
         (CustomCrossoverOp, plugin.has_crossover),
     ]
+    out = _register_ops(wanted, plugin)
+    log.info(
+        "Custom mutator plugin %s: %s",
+        plugin.path,
+        ", ".join(m.name for m in out),
+    )
+    return out
+
+
+def _register_ops(wanted: list[tuple[type[_PluginOp], bool]], plugin: Any) -> list[MutatorBase]:
+    # Register (or rebind) one operator per present entry point.
+    from fuzzer_tool.core import operator_categories
+    from fuzzer_tool.core.operator_registry import REGISTRY
+
+    existing = {getattr(m, "name", None): m for m in REGISTRY.mutators()}
     out: list[MutatorBase] = []
     for cls, present in wanted:
         if not present:
@@ -714,12 +1138,30 @@ def register_custom_mutator(
             REGISTRY.register_mutator(mutator)
         out.append(mutator)
     operator_categories.refresh()
-    log.info(
-        "Custom mutator plugin %s: %s",
-        plugin.path,
-        ", ".join(m.name for m in out),
-    )
     return out
+
+
+def register_afl_custom_mutator(
+    path: str | os.PathLike[str],
+    *,
+    seed: int,
+    isolate: bool = True,
+    timeout_ms: int = DEFAULT_TIMEOUT_MS,
+) -> tuple[AflCustomMutator, list[MutatorBase]]:
+    """Load an AFL++ custom mutator; register ``afl_custom_fuzz`` / ``afl_custom_havoc``.
+
+    The non-operator hooks (post_process, trim, queue_*) are the caller's to
+    wire: the plugin is returned with the operators.
+    """
+    plugin = AflCustomMutator(path, seed=seed, isolate=isolate, timeout_ms=timeout_ms)
+    wanted: list[tuple[type[_PluginOp], bool]] = [
+        (AflFuzzOp, plugin.has(AflHook.FUZZ)),
+        (AflHavocOp, plugin.has(AflHook.HAVOC)),
+    ]
+    ops = _register_ops(wanted, plugin)
+    hooks = [h.value for h in AflHook if h not in _LIFECYCLE_HOOKS and plugin.has(h)]
+    log.info("AFL++ custom mutator %s: %s", plugin.path, ", ".join(hooks))
+    return plugin, ops
 
 
 def unregister_custom_mutators() -> None:
@@ -739,12 +1181,17 @@ def unregister_custom_mutators() -> None:
 
 
 __all__ = [
+    "AflCustomMutator",
+    "AflFuzzOp",
+    "AflHavocOp",
+    "AflHook",
     "CROSSOVER_SYMBOL",
     "MUTATOR_SYMBOL",
     "CustomCrossoverOp",
     "CustomMutatorOp",
     "CustomMutatorPlugin",
     "havoc",
+    "register_afl_custom_mutator",
     "register_custom_mutator",
     "unregister_custom_mutators",
 ]
