@@ -97,7 +97,7 @@ def strategy_arena(key: str) -> Arena:
 # as-is rather than dressed up as op_random_stall / seed_random_stall.
 # ``target_match`` marks a seed handed over by a target-arena matching
 # arm (services/seed_picker.py); same treatment.
-_UNPREFIXED_STRATEGY_NAMES = frozenset({"random_stall", "target_match"})
+_UNPREFIXED_STRATEGY_NAMES = frozenset({"random_stall", "exploit_stall", "target_match"})
 
 
 def strategy_display_name(key: str) -> str:

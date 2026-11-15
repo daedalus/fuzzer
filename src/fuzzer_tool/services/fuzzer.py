@@ -2146,6 +2146,8 @@ class Fuzzer:
         value_profile=ValueProfile.OFF,
         # --rq-add-key: redqueen through an additive key (core/rq_encodings.py). Appended.
         rq_add_key=False,
+        # --stall-mode: op choice during stall recovery (services/operators.py). Appended.
+        stall_mode=None,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3111,6 +3113,8 @@ class Fuzzer:
 
         # ── Extracted modules ──────────────────────────────────────────
         self._operators = OperatorEngine(self)
+        if stall_mode is not None:
+            self._operators.bind_stall_mode(stall_mode)
         self._seed_picker = SeedPicker(self)
         self._runner = TargetRunner(self)
         self._stats = StatsReporter(self, rng=self._rng)

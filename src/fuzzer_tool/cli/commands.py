@@ -44,6 +44,7 @@ from fuzzer_tool.services.crash_cluster import CLUSTER_THRESHOLD, REDUCE_EXECS, 
 from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, Fuzzer
 from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
+from fuzzer_tool.services.operators import StallMode
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
 from fuzzer_tool.services.value_profile import ValueProfile
 
@@ -922,6 +923,7 @@ def cmd_fuzz(args):
         c11=getattr(args, "c11", False),
         value_profile=ValueProfile(getattr(args, "value_profile", ValueProfile.OFF.value)),
         rq_add_key=getattr(args, "rq_add_key", False),
+        stall_mode=StallMode(getattr(args, "stall_mode", StallMode.RANDOM.value)),
         hw_perf_counters=getattr(args, "hw_perf_counters", None),
         hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
@@ -6927,6 +6929,13 @@ def main() -> int:
         metavar="N",
         help="Run N calibration execs (seed replay + cheap mutations) to bootstrap "
         "coverage stats before the main fuzz loop (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
+        "--stall-mode",
+        choices=[m.value for m in StallMode],
+        default=StallMode.RANDOM.value,
+        help="Op choice once --stall triggers: random (default, uniform over every op) or "
+        "exploit (AFL++ -P: only the precise bands -- redqueen, I2S, solvers, dictionary).",
     )
     fuzz_parser.add_argument(
         "--stall",

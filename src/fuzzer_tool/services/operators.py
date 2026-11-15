@@ -1449,6 +1449,17 @@ class _SegAction(Enum):
 _POS_SLOT_COUNT = 11
 
 
+class StallMode(Enum):
+    """Op choice during stall recovery (--stall-mode)."""
+
+    RANDOM = "random"  # uniform over every available op
+    EXPLOIT = "exploit"  # AFL++ -P: only the precise bands (EXPLOIT_BANDS)
+
+
+# Bands an exploit-mode stall draws from: input-to-state, solvers, dictionary.
+EXPLOIT_BANDS = ("adaptive", "dict")
+
+
 def _round_mutations(f) -> int:
     """Mutations this round: -M scaled by seed energy and the 1/5 rule, floored at 16 in stall recovery."""
     n_mutations = f.mutations_per_input
@@ -1505,6 +1516,7 @@ class OperatorEngine:
 
     def __init__(self, fuzzer):
         self.f = fuzzer
+        self.bind_stall_mode(StallMode.RANDOM)  # Fuzzer rebinds from --stall-mode
         # Position plan for the current mutate() round (_pos_plan); None
         # falls back to select_position.
         self._round_pos_plan: tuple | None = None
@@ -6293,14 +6305,33 @@ class OperatorEngine:
         f._meta_strategy_key = strategy
         return strategy
 
+    def bind_stall_mode(self, mode: StallMode) -> None:
+        """Fix the stall-recovery op picker once (ifs up: no per-call mode test)."""
+        if mode is StallMode.RANDOM:
+            self._stall_pick = self._stall_pick_random
+            return
+        self._exploit_ops = frozenset(n for b in EXPLOIT_BANDS for n in REGISTRY.categories()[b])
+        self._stall_pick = self._stall_pick_exploit
+
+    def _stall_pick_random(self, ops: list[str]) -> str:
+        self.f._meta_strategy = "random_stall"
+        return self.ctx._rng.choice(ops)
+
+    def _stall_pick_exploit(self, ops: list[str]) -> str:
+        # Sorted: the candidate order must not depend on set hashing.
+        precise = sorted(op for op in ops if op in self._exploit_ops)
+        if not precise:
+            return self._stall_pick_random(ops)
+        self.f._meta_strategy = "exploit_stall"
+        return self.ctx._rng.choice(precise)
+
     def select_op(self, ops: list[str]) -> str:
         """Select a mutation operator using the active scheduling strategy."""
         f = self.f
 
         if f._stall_recovery_active:
-            f._meta_strategy = "random_stall"
             f._op_selector = None
-            return self.ctx._rng.choice(ops)
+            return self._stall_pick(ops)
 
         # Ballot and strategy are fixed for the exec: resolve on the first
         # mutation, reuse on the rest. mutate() clears the cache per exec; a
