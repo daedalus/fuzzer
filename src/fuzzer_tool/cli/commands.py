@@ -6303,9 +6303,9 @@ def main() -> int:
         metavar="{text,shm}",
         help=(
             "Where the shim writes CMP records. text (default): hex lines on the cmplog "
-            "FIFO/file. shm: binary operands in a shared table (~9 MiB, fixed): no "
-            "formatting, parsing or FIFO drops; at most 32 records per compare site per "
-            "drain. DIV/GEP records stay on text. Targets built before this fall back to text."
+            "FIFO/file. shm: binary operands in a shared table sized from the target's "
+            "compare call sites (~7-31 MiB, fixed per run): no formatting, parsing or FIFO "
+            "drops. DIV/GEP records stay on text. Targets built before this fall back to text."
         ),
     )
     fuzz_parser.add_argument(

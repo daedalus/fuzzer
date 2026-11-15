@@ -45,7 +45,10 @@ MAX_SITES = 1 << 20
 # Open addressing with 8 probes: size the table to at most half full.
 _LOAD_FACTOR_INV = 2
 
-INT_HITS = 32  # records per site per drain (AFL++ keeps 32 hits per site)
+# Records per site per drain. Only keeps one hot site from filling the
+# shared array (costs no memory). 32 (AFL++) refused 944k records / 5k
+# FFmpeg execs that the text path, with no per-site limit, keeps.
+INT_HITS = 1024
 REC_SLOTS = 1 << 18  # trace-cmp records per drain (6 MiB)
 BYTE_SLOTS = 4096  # libc records per drain (560 KiB)
 
