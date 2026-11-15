@@ -333,6 +333,9 @@ ARMS: dict[str, list[str]] = {
     "ga": ["--ga"],
     "ga-no-crossover": ["--ga", "--ga-crossover-rate", "0.0"],
     "ga-ctl": ["--ga"],
+    # FOX secant step (zero-exec operand fit). ctl is baseline again (Rule 46).
+    "fox-newton": ["--fox-newton"],
+    "fox-newton-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -439,6 +442,8 @@ ARM_BASELINES: dict[str, str] = {
     "ga": "baseline",
     "ga-no-crossover": "ga",
     "ga-ctl": "ga",
+    "fox-newton": "baseline",
+    "fox-newton-ctl": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

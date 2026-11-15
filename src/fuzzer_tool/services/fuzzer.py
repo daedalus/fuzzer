@@ -84,6 +84,7 @@ from fuzzer_tool.core.elf import (
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
+from fuzzer_tool.core.fox_newton import SecantLog
 from fuzzer_tool.core.gravity import GravityModel, SpliceDonor
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.metropolis import accept_prob, path_energy
@@ -1524,6 +1525,7 @@ class Fuzzer:
         affine_mod=False,
         affine_mod_execs=AFFINE_MOD_EXECS,
         derived_cmp=False,
+        fox_newton=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
@@ -3973,6 +3975,8 @@ class Fuzzer:
             if affine_mod or derived_cmp
             else None
         )
+        # --fox-newton: per-site operand records for the zero-exec secant op.
+        self._secant_log = SecantLog() if fox_newton else None
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:

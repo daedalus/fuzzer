@@ -472,11 +472,19 @@ class FuzzRound:
             f._cmplog_skip_counter = 0
             # Counters were drained in _execute; a second drain empties them.
             new_tokens = f._cmplog.collect_tokens(CountsDrain.SKIP)
+            self._log_secant()
         else:
             new_tokens = []
         self._cmplog_found = bool(new_tokens)
         self._rewind_shim()
         f._add_dict_tokens(new_tokens)
+
+    def _log_secant(self) -> None:
+        # --fox-newton: records are gated to collect rounds, so this drain
+        # is this exec's (trim runs aside) and pairs with self._mutated.
+        log = getattr(self._f, "_secant_log", None)  # __new__-built test fuzzers
+        if log is not None:
+            log.observe(self._mutated, self._f._cmplog.last_conds)
 
     def _collect_due(self) -> bool:
         # Whether this round's _collect_tokens will drain the records.
