@@ -28,6 +28,13 @@ ambiguous hits. Evidence is grep + read, not measurement. Follows
 | libFuzzer `PersAutoDict` (reuse tokens that paid) | Dirichlet dict picker reward (`fuzz_round._feed_models`) |
 | alias-table seed draw | CDF bisect over cached weights (`_cdf_pick`): O(log n) vs O(1), not worth it |
 
+## Status (2026-11-15, same day)
+
+Shipped: 1 input-mode context, 2 `FloatAsciiEncoder`, 3 `--rq-add-key`, 4 `--stall-mode exploit`,
+6/7 `--schedule seek|exploit`, 8 Gramatron ops, 10 `c_source_mutate`. Covered already: 5 (`op_mopt`
+`min_prob_frac` floor = AFL++ revival). Not ported: 9 ATNwalk (drives a Java ANTLR process over a
+UNIX socket; we have no ANTLR grammars). All unmeasured; A/Bs in `docs/AB_PENDING.md` / TODO.
+
 ## Gaps, ranked (value / effort)
 
 | # | Item | AFL++ loc | Ours | Value | Effort |
