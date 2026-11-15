@@ -2093,3 +2093,62 @@ class BlockBitmapShm:
 
     def __del__(self):
         self.cleanup()
+
+
+# IjonMaxShm header: u32 head (8-byte words incl. header), u32 dirty.
+_IJON_HEAD_BYTES = 8
+_IJON_DIRTY_OFFSET = 4
+
+
+class IjonMaxShm:
+    """IJON max-map shared with the shim (``ijon_max`` / ``ijon_min``).
+
+    The shim raises ``slots[slot & (slots - 1)]`` to the annotated value and
+    sets ``dirty``; Python reads and zeroes after every execution. ``dirty``
+    lets an exec that touched no slot cost one u32 load.
+
+    Layout::
+
+        uint32 head            slots + 1 (8-byte words, header included)
+        uint32 dirty           set by the shim, cleared here
+        uint64 slots[slots]
+        uint8  pad[4]          sizes the segment to 4 + head * 8
+    """
+
+    def __init__(self, slots: int):
+        self._ptr = None  # cleanup() is safe if validation raises
+        self.shm_id = -1
+        if slots <= 0 or slots & (slots - 1):
+            raise ValueError(f"IJON slots must be a power of two, got {slots}")
+        self.slots = slots
+        self._payload = slots * 8
+        # 4 + head * 8: the bound the shim's __afl_attach_sized checks.
+        self.shm_bytes = 4 + (slots + 1) * 8
+
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes, "ijon max-map")
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        ctypes.c_uint32.from_address(self._ptr).value = slots + 1
+        self._dirty = ctypes.c_uint32.from_address(self._ptr + _IJON_DIRTY_OFFSET)
+        self.env_id = str(self.shm_id)
+        _atexit_weak(self)
+
+    def dirty(self) -> bool:
+        """Whether any slot was raised since the last read."""
+        return self._dirty.value != 0
+
+    def read_into(self, out: np.ndarray) -> None:
+        """Copy the slots into *out* (``uint64``, ``slots`` long) and zero them."""
+        ctypes.memmove(out.ctypes.data, self._ptr + _IJON_HEAD_BYTES, self._payload)
+        ctypes.memset(self._ptr + _IJON_HEAD_BYTES, 0, self._payload)
+        self._dirty.value = 0
+
+    def cleanup(self):
+        if self._ptr:
+            libc_shm.shmdt(self._ptr)
+        self._ptr = None
+        if self.shm_id >= 0:
+            libc_shm.shmctl_rmid(self.shm_id)
+            self.shm_id = -1
+
+    def __del__(self):
+        self.cleanup()

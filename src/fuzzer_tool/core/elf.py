@@ -1802,6 +1802,23 @@ def detect_ctx_relative_capable(target: str) -> bool | None:
     return "__afl_ctx_relative_capable" in names
 
 
+def detect_ijon_capable(target: str) -> bool | None:
+    """Say whether *target*'s shim carries the IJON runtime (``ijon_max``).
+
+    Returns:
+        True when present; False when the symbol table was read and it is
+        absent (an older shim); None when no names could be read.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("IJON detection failed for %s: %s", target, e)
+        return None
+    if not names:
+        return None
+    return "ijon_max" in names
+
+
 def detect_edge_id_scheme(target: str) -> int | None:
     """Say which edge-id function *target*'s shim uses.
 

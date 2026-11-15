@@ -47,6 +47,7 @@ from fuzzer_tool.core.run_mode import CrashReward, RunMode, Switch
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.secretary import SecretaryStopping
 from fuzzer_tool.core.validity import Validity
+from fuzzer_tool.services.ijon_channel import Exec
 from fuzzer_tool.services.runner import TargetRunner, ptrace_available
 
 if TYPE_CHECKING:
@@ -132,6 +133,7 @@ class FuzzRound:
         "_has_new_coverage",
         "_is_new_max",
         "_is_hw_max",
+        "_is_ijon_max",
         "_is_cmp_progress",
         "_is_new_valid_coverage",
         "_ltl_new",
@@ -162,6 +164,7 @@ class FuzzRound:
         self._has_new_coverage = False
         self._is_new_max = False
         self._is_hw_max = False
+        self._is_ijon_max = False
         self._is_cmp_progress = False
         self._is_new_valid_coverage = False
         self._ltl_new = False
@@ -922,7 +925,7 @@ class FuzzRound:
             return
         self._is_crash = self._is_crash and explorer.observe(self._edges_now())
         self._is_interesting = self._has_new_coverage = self._is_new_max = False
-        self._is_hw_max = False
+        self._is_hw_max = self._is_ijon_max = False
         self._is_cmp_progress = self._is_new_valid_coverage = self._is_slow = False
 
     # ── Side signals ─────────────────────────────────────────────────
@@ -974,6 +977,17 @@ class FuzzRound:
         # (honggfuzz perfFeedback). Truncated runs skipped as above.
         hw_max = f._hw_max
         self._is_hw_max = bool(clean and hw_max is not None and hw_max.observe(f._last_perf_deltas))
+        self._observe_ijon()
+
+    def _observe_ijon(self) -> None:
+        # --ijon: an annotated value (IJON_MAX/MIN) beat its campaign max.
+        # Read on truncated runs too, so their partial values are discarded.
+        ijon = self._f._ijon
+        if ijon is None:
+            return
+        clean = not self._is_crash and not self._is_timeout
+        run = Exec.CLEAN if clean else Exec.TRUNCATED
+        self._is_ijon_max = bool(ijon.observe(run, self._mutated))
 
     def _cmp_progress(self) -> None:
         # Comparison progress: a callback family this input satisfied more
@@ -1546,6 +1560,7 @@ class FuzzRound:
             or self._is_slow
             or self._is_new_max
             or self._is_hw_max
+            or self._is_ijon_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
         )
@@ -2121,6 +2136,7 @@ class FuzzRound:
             or self._has_new_coverage
             or self._is_new_max
             or self._is_hw_max
+            or self._is_ijon_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
             or self._ltl_new
@@ -2251,11 +2267,12 @@ class FuzzRound:
         self._periodic()
         self._classify()
         self._lite_scan()
+        self._observe_ijon()
         self._record_edges()
 
         if self._is_crash:
             return self._lite_crash()
-        if not (self._has_new_coverage or self._is_interesting):
+        if not (self._has_new_coverage or self._is_interesting or self._is_ijon_max):
             return False
 
         self._f.save_to_corpus(self._mutated, parent=self._data)

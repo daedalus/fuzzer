@@ -336,6 +336,10 @@ ARMS: dict[str, list[str]] = {
     # FOX secant step (zero-exec operand fit). ctl is baseline again (Rule 46).
     "fox-newton": ["--fox-newton"],
     "fox-newton-ctl": [],
+    # IJON max-map + max queue. Needs an IJON_MAX-annotated target (ffmpeg_read:
+    # frames decoded per codec); inert elsewhere. ctl is baseline again (Rule 46).
+    "ijon": ["--ijon"],
+    "ijon-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -444,6 +448,8 @@ ARM_BASELINES: dict[str, str] = {
     "ga-ctl": "ga",
     "fox-newton": "baseline",
     "fox-newton-ctl": "baseline",
+    "ijon": "baseline",
+    "ijon-ctl": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

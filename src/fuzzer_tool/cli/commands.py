@@ -42,6 +42,7 @@ from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.crash_cluster import CLUSTER_THRESHOLD, REDUCE_EXECS, WL_ITERS
 from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, Fuzzer
+from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
 
@@ -915,6 +916,8 @@ def cmd_fuzz(args):
         save_smaller=getattr(args, "save_smaller", False),
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
+        ijon=getattr(args, "ijon", False),
+        ijon_schedule_maxmap=getattr(args, "ijon_schedule_maxmap", DEFAULT_SCHEDULE_MAXMAP),
         hw_perf_counters=getattr(args, "hw_perf_counters", None),
         hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
@@ -3092,6 +3095,7 @@ _HAIL_MARY_FLAGS = (
     "save_smaller",
     "honggfuzz",
     "hw_perf",
+    "ijon",
     "intel_pt",
     "lbr",
     "colorize",
@@ -3160,6 +3164,21 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
     if n < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
+# Upper bound of a percentage argument.
+PERCENT_MAX = 100
+
+
+def _percent_arg(value: str) -> int:
+    """argparse type: a whole percent in 0..100."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if not 0 <= n <= PERCENT_MAX:
+        raise argparse.ArgumentTypeError(f"must be 0..{PERCENT_MAX}, got {n}")
     return n
 
 
@@ -6670,6 +6689,22 @@ def main() -> int:
         help="Enable performance counters via perf_event_open (instructions, cycles, "
         "branches, branch misses, L1D, CPU time, page faults, context switches). "
         "Software events only without a PMU. Requires CAP_PERFMON or root.",
+    )
+    fuzz_parser.add_argument(
+        "--ijon",
+        action="store_true",
+        help="IJON state feedback: keep inputs that raise an IJON_MAX/IJON_MIN "
+        "annotated value (adapters/ijon.h). IJON_SET/IJON_INC work without it.",
+    )
+    fuzz_parser.add_argument(
+        "--ijon-schedule-maxmap",
+        type=_percent_arg,
+        default=DEFAULT_SCHEDULE_MAXMAP,
+        metavar="PCT",
+        help="With --ijon: percent of seed picks left to the normal queue; the rest "
+        "fuzz the best input of a random IJON_MAX slot (the paper's "
+        f"IJON_SCHEDULE_MAXMAP; 0 = always max queue, 100 = never; default "
+        f"{DEFAULT_SCHEDULE_MAXMAP}).",
     )
     fuzz_parser.add_argument(
         "--hw-perf-counters",

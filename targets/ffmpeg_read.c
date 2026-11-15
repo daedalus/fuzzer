@@ -126,6 +126,17 @@ typedef enum {
     DECODE_API_SUBTITLE,  /* avcodec_decode_subtitle2 */
 } DecodeApi;
 
+/* IJON (--ijon): per codec, the most frames one input decoded, so the
+ * input that drives a decoder furthest is kept and scheduled
+ * (adapters/ijon.h). Slot = hashed codec id: raw ids alias at the 512-slot
+ * wrap (PCM_S16LE 0x10000 -> slot 0). Inert without --ijon; compiled out
+ * without the shim (frontier _cov build). */
+#if defined(__AFL_EDGE) && __AFL_EDGE
+#define FUZZ_IJON_MAX(slot, v) ijon_max(ijon_hashint(0, (uint32_t)(slot)), (uint64_t)(v))
+#else
+#define FUZZ_IJON_MAX(slot, v) ((void)0)
+#endif
+
 typedef struct {
     AVCodecContext *ctx;
     int              codec_id;
@@ -693,6 +704,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     unsigned total_packets = 0;
     unsigned total_frames  = 0;
     int64_t  total_pixels  = 0;
+    unsigned stream_frames[FUZZ_MAX_DECODERS] = {0};   /* IJON progress */
 
     /* Per-stream decoder contexts — reuse existing open decoders when
      * the codec ID matches the new stream, otherwise reset. */
@@ -779,6 +791,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                 ret = avcodec_decode_subtitle2(g_decs[si].ctx, &sub, &got_sub, g_pkt);
                 if (ret >= 0 && got_sub) {
                     total_frames++;
+                    FUZZ_IJON_MAX(g_decs[si].codec_id, ++stream_frames[si]);
                     __afl_map_edge(0x1600 + (si & 0xFF));
                     /* Touch the decoded rects so a corrupt region descriptor
                      * is actually observed rather than just allocated. */
@@ -799,6 +812,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                 if (ret >= 0) {
                     while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
                         total_frames++;
+                        FUZZ_IJON_MAX(g_decs[si].codec_id, ++stream_frames[si]);
                         total_pixels += fuzz_frame_pixels(g_frame->width, g_frame->height);
                         __afl_map_edge(0x1400 + (si & 0xFF));
                     }

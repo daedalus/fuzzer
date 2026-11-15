@@ -107,6 +107,10 @@ ZIPF_GROWTH_R2 = 0.9
 # (gale_shapley, auction). Never in _seed_strategy_pool, so the seed arena plays no match for it.
 TARGET_MATCH = "target_match"
 
+# _seed_strategy for a seed from the IJON maximization queue (--ijon, paper
+# §IV-A4). Like TARGET_MATCH, outside the seed arena.
+IJON_MAXMAP = "ijon_maxmap"
+
 # OS / network seed arms (core/schedulers/seed_<name>.py): Elo name -> the
 # fuzzer attribute holding it, and the per-pick signals its select_seed takes
 # after the key list (see _pick_os_seed). Arms absent here take none.
@@ -1301,6 +1305,13 @@ class SeedPicker:
         if hint is not None:
             f._seed_strategy = TARGET_MATCH
             return hint
+
+        # --ijon: the max queue takes its IJON_SCHEDULE_MAXMAP share.
+        ijon = getattr(f, "_ijon", None)
+        best = ijon.pick(rng) if ijon is not None else None
+        if best is not None:
+            f._seed_strategy = IJON_MAXMAP
+            return best
 
         overdue = self._pick_lst_seed(clock_of(self.f).time())
         if overdue is not None:
