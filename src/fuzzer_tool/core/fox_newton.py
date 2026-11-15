@@ -143,8 +143,10 @@ class SecantLog:
         self._add_spans(self._gen)
 
         self._push(recs)
+        sites = self._sites
         for pc in recs:
-            self._refit(pc)
+            if pc in sites:  # a batch wider than MAX_SITES evicts its own head
+                self._refit(pc)
         self._ready = None
 
     def _records(self, conds) -> dict[int, _Obs]:

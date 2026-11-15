@@ -238,3 +238,13 @@ def test_input_side_on_right_operand():
         log.observe(_input(x), [CondStmt.from_cmplog_pair(0, a, b, WIDTH, result=1, pc=PC)])
     out = log.propose(_input(10), ScriptedRng(choice_idxs=[0, 0, 0]))
     assert abs(_affine(_field(out)) - CONST) <= 1
+
+
+def test_regression_batch_wider_than_site_cap():
+    # One exec logging more PCs than MAX_SITES evicted its own sites, then
+    # refit looked them up: KeyError on large targets (FFmpeg ~10k sites).
+    log = SecantLog()
+    for x in (10, 20):
+        log.observe(_input(x), [_cond(_affine(x), pc=PC + 4 * i) for i in range(MAX_SITES + 10)])
+    assert log.site_count() == MAX_SITES
+    assert log.ready()
