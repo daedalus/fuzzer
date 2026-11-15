@@ -1926,7 +1926,7 @@ CMP records as binary operands in a SysV segment (`$_CMPLOG_RECORDS_SHM`, `adapt
 - Memory: fixed ~9 MiB shared (16384 sites × 32 × 16 B + 4096 × 140 B). Replaces the text path's shim buffer (256 KiB), pipe (64 KiB), FIFO buffer (≤ 8 MiB) and parse cache (≤ 65,536 entries).
 - Refused records (site table or site full, array full): `rdrop:` on the stats line.
 
-Equivalence: same `(op_a, op_b, width, result, pc)` set as the text parse of the same run (`tests/test_cmplog_record_shm.py`, ASLR off; the text-vs-text control is asserted first). Collector: `tests/test_cmplog_record_channel.py`. Bench arm `cmp-rec-shm`; A/B: `docs/AB_PENDING.md`.
+Equivalence: same `(op_a, op_b, width, result, pc)` set as the text parse of the same run (`tests/test_cmplog_record_shm.py`, ASLR off; the text-vs-text control is asserted first). Collector: `tests/test_cmplog_record_channel.py`. Bench arm `cmp-rec-shm`. A/B (`docs/AB_LEDGER.md` #140-#141, 20 × 10k): fuzzgoat_tcg 10/10, p=0.79, CPU −6.7% median (p=0.09): NULL; FFmpeg 7/13, p=0.14, med −1.5% edges, CPU unchanged: LEAN-. On FFmpeg the table refuses ~1.1M records / 5k execs (16384 site slots vs 129,561 compare call sites; 32 per site), feeding ~40% fewer pairs; the parse saving (11.2% → 9.1% of samples in `_mine_cmplog`) is partly spent reading the table. Peak RSS unchanged (931 MiB, FFmpeg). Stays opt-in until the table is sized per target.
 
 ### Cmplog record cap and dedup scope (`--cmplog-site-cap`, `--cmplog-dedup-scope`)
 
