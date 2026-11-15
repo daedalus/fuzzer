@@ -372,6 +372,9 @@ class _FakeRunner:
     def run_target(self, data):
         return (0, "")
 
+    def is_crash(self, rc, stderr):
+        return False
+
 
 class TestLineageRecording:
     """Stage 2: ops/sites/new-edge recording into seed_meta."""

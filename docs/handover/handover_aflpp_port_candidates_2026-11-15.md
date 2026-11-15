@@ -30,15 +30,16 @@ mutator parity, redqueen transform parity (`afl-fuzz-redqueen.c` vs
 | skip-det / effector map | `--pos-effector`, `--no-deterministic` |
 | Grimoire, FormatFuzzer, EcoFuzz, LBR, PT | see `docs/port-backlog.md` |
 
-## Inherited bug
+## Inherited bug (fixed 2026-11-15)
 
 **B1. Trimming throws away its finds** (AFL++ fixed in 5.03c: `op:trim` saves).
 `services/corpus_manager.py:1527` `trim_new_coverage`: one extra exec on
 `data[:len//2]`; a crash (rc not in `(-2,-1)`) or a different edge set →
 `return`. Crash never saved, new edges never admitted.
 Repro: target crashing on inputs ≤ N/2 bytes whose N-byte parent has new
-edges → no crash file. Fix per Rule 37: test first; route the trim exec through
-the normal crash/novelty path (`FuzzRound` admission), then keep-or-drop.
+edges → no crash file. Fixed: crash → `save_crash`; changed trace with confirmed novelty →
+`record_edges` + `save_to_corpus` beside the original; neither swaps in.
+`tests/test_regression_trim_keeps_finds.py`.
 
 ## Gaps, ranked (value / effort)
 

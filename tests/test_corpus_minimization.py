@@ -77,6 +77,10 @@ class MockFuzzer:
         """Not directed: trim_new_coverage measures no distance."""
         return None
 
+    def _is_crash(self, rc, stderr):
+        """No crashes: trim_new_coverage asks after every trim exec."""
+        return False
+
     def mean_exec_time(self) -> float:
         """Corpus-wide mean target time per execution, in seconds.
 
