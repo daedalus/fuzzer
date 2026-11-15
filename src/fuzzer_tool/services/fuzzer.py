@@ -61,7 +61,7 @@ from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due, phase_of
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
-from fuzzer_tool.core.cmplog import CmplogRecords
+from fuzzer_tool.core.cmplog import CmplogRecords, DedupScope
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.coverage_noise import (
     NOISE_PROBE_VARIANTS,
@@ -1571,6 +1571,9 @@ class Fuzzer:
         # WingFuzz: drop cmplog records of compares against constants with
         # < 2 bits set or clear. Record filter only; needs cmplog.
         cmp_prune_const=False,
+        # Shim record knobs (afl_shim.c): per-site cap per drain, dedup lifetime.
+        cmplog_site_cap=0,
+        cmplog_dedup_scope=DedupScope.DRAIN,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -2669,6 +2672,8 @@ class Fuzzer:
                 site_counts=True,
                 compcov_level=self._compcov_level,
                 prune_const=cmp_prune_const,
+                site_cap=cmplog_site_cap,
+                dedup_scope=cmplog_dedup_scope,
                 # A target with the shim compiled in already intercepts
                 # libc; a preloaded copy would count every call twice.
                 preload=Preload.NONE if has_cmplog else Preload.SHIM,
@@ -8197,6 +8202,18 @@ class Fuzzer:
         except OSError as e:
             log.debug("__cmplog_reset failed: %s", e)
 
+    def _rescope_cmplog_shim(self) -> None:
+        """Fresh shim dedup scope: campaign scope would hide this exec's repeats."""
+        runner = self._inprocess_runner
+        if not (runner and runner.direct_lite and runner._lib):
+            return
+        # getattr: name mangling, see _rewind_cmplog_shim.
+        rescope = getattr(runner._lib, "__cmplog_rescope", None)
+        if rescope is None:
+            return
+
+        rescope()
+
     def _cmplog_records(self, mode: CmplogRecords) -> None:
         """Switch the direct_lite shim's record emission; no-op on old builds."""
         if mode is self._cmplog_records_mode:
@@ -8237,6 +8254,7 @@ class Fuzzer:
         # Drained tokens are marked known by cmplog; the dictionary must get them.
         self._add_dict_tokens(cmplog.collect_tokens())
         self._rewind_cmplog_shim()
+        self._rescope_cmplog_shim()
         self._cmplog_records(CmplogRecords.ON)
         self._runner.run_target(data)
         self.exec_count += 1

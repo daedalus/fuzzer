@@ -146,6 +146,9 @@ _LEGACY_SHIM_NAME = "fuzz_cmplog_shim.so"
 
 # Shim switch for WingFuzz few-bits-set constant pruning (afl_shim.c).
 _PRUNE_CONST_ENV = "__AFL_CMP_PRUNE_CONST"
+# Shim record knobs (afl_shim.c "Per-site record cap", "Dedup scope").
+_SITE_CAP_ENV = "__AFL_CMPLOG_SITE_CAP"
+_DEDUP_SCOPE_ENV = "__AFL_CMPLOG_DEDUP_SCOPE"
 
 
 def _prune_stale_shims(cmplog_dir: str, keep: str) -> int:
@@ -391,6 +394,17 @@ class Preload(enum.Enum):
 
     SHIM = "shim"
     NONE = "none"
+
+
+class DedupScope(enum.Enum):
+    """Lifetime of the shim's record dedup table.
+
+    DRAIN clears it at every drain (one drain = one exec's full set).
+    CAMPAIGN keeps it, so a record is written once per campaign.
+    """
+
+    DRAIN = "drain"
+    CAMPAIGN = "campaign"
 
 
 class CmplogRecords(enum.Enum):
@@ -696,6 +710,16 @@ def _grown(arr: np.ndarray) -> np.ndarray:
     return np.concatenate([arr, np.zeros_like(arr)])
 
 
+def _record_knobs(site_cap: int, scope: DedupScope) -> dict[str, str]:
+    """Shim env for the record knobs; defaults set nothing (shim stays as before)."""
+    knobs: dict[str, str] = {}
+    if site_cap > 0:
+        knobs[_SITE_CAP_ENV] = str(site_cap)
+    if scope is not DedupScope.DRAIN:
+        knobs[_DEDUP_SCOPE_ENV] = scope.value
+    return knobs
+
+
 def _put_env(key: str, value: str) -> None:
     """Set *key* only when it differs: called per exec, values rarely change.
 
@@ -728,6 +752,9 @@ class CmplogCollector:
         prune_const: Sets $__AFL_CMP_PRUNE_CONST so the shim drops cmplog
             records of compares against a constant with < 2 bits set or
             < 2 bits clear (WingFuzz). Counters and COMPCOV are unaffected.
+        site_cap: Sets $__AFL_CMPLOG_SITE_CAP: a trace-cmp site writes at
+            most this many records per drain. <= 0 is off.
+        dedup_scope: Sets $__AFL_CMPLOG_DEDUP_SCOPE (see DedupScope).
         preload: Preload.NONE keeps the shim off LD_PRELOAD (see Preload).
     """
 
@@ -743,6 +770,8 @@ class CmplogCollector:
         compcov_level: int = 0,
         preload: Preload = Preload.SHIM,
         prune_const: bool = False,
+        site_cap: int = 0,
+        dedup_scope: DedupScope = DedupScope.DRAIN,
     ):
         self.log_path: str | None = None
         self.preload = preload
@@ -761,6 +790,7 @@ class CmplogCollector:
         # with it.
         self.compcov_level = 0 if compcov_level < 0 else (2 if compcov_level > 2 else compcov_level)
         self.prune_const = bool(prune_const)
+        self._knobs = _record_knobs(site_cap, dedup_scope)
         self._fifo: _FifoDrain | None = None
         # Trailing bytes from the last drain with no terminating '\n' yet
         # -- carried over so a line split across two drains isn't parsed
@@ -1050,6 +1080,7 @@ class CmplogCollector:
             env["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
         if self.prune_const:
             env[_PRUNE_CONST_ENV] = "1"
+        env.update(self._knobs)
 
         # Prepend the unified shim to LD_PRELOAD
         if self._shim_path and self.preload is Preload.SHIM:
@@ -1107,6 +1138,8 @@ class CmplogCollector:
                     "ASAN_OPTIONS",
                     "__AFL_COMPCOV_LEVEL",
                     _PRUNE_CONST_ENV,
+                    _SITE_CAP_ENV,
+                    _DEDUP_SCOPE_ENV,
                 )
             }
 
@@ -1124,6 +1157,8 @@ class CmplogCollector:
             _put_env("__AFL_COMPCOV_LEVEL", str(self.compcov_level))
         if self.prune_const:
             _put_env(_PRUNE_CONST_ENV, "1")
+        for key, value in self._knobs.items():
+            _put_env(key, value)
 
         if not self._shim_path or self.preload is Preload.NONE:
             return

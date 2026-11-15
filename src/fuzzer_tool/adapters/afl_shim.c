@@ -5009,6 +5009,67 @@ __AFL_NO_COV static int __afl_cmplog_seen(uint64_t fp) {
     return 0;
 }
 
+/* Dedup scope ($__AFL_CMPLOG_DEDUP_SCOPE). "drain" (default): the table
+ * clears at every __cmplog_reset, so each drain holds one exec's full set.
+ * "campaign": it survives drains, so input-invariant records (init code,
+ * format probes) are written once per campaign and the 10k-line read
+ * window fills with new ones. __cmplog_rescope() clears it on demand for
+ * consumers that need one exec's full set (the I2S probe). Fork children
+ * start a fresh scope either way. A saturated table fails open. */
+static int __afl_cmplog_scope_campaign;
+
+/* ── Per-site record cap ($__AFL_CMPLOG_SITE_CAP) ─────────────────────
+ * A loop compare (i < n, buf[i] == c) writes one distinct record per
+ * iteration, which dedup cannot catch. With a cap N, a trace-cmp site
+ * writes at most N records per drain (AFL++ keeps 32 hits per site).
+ * Repeats dropped by dedup do not use the cap, so under campaign scope
+ * the window advances: drain 1 logs i = 0..N-1, drain 2 logs N..2N-1.
+ *
+ * A slot is one word: pc hash high 32 bits | 16-bit generation | 16-bit
+ * count. Generation as in the dedup table; a full probe run fails open. */
+#define CMPLOG_SITE_SLOTS   (1u << 16)
+#define CMPLOG_SITE_PROBES  4
+#define CMPLOG_SITE_KEY_MASK 0xffffffff00000000ULL
+#define CMPLOG_SITE_GEN_SHIFT 16
+#define CMPLOG_SITE_COUNT_MASK 0xffffULL
+#define CMPLOG_SITE_CAP_MAX 0xffff
+
+static uint64_t __afl_cmplog_site_tab[CMPLOG_SITE_SLOTS];
+static uint64_t __afl_cmplog_site_gen = 1;
+static uint32_t __afl_cmplog_site_cap;   /* 0 = off */
+
+/* New drain for the site counters: O(1), wipe on wrap. */
+__AFL_NO_COV static void __afl_cmplog_site_epoch(void) {
+    if (++__afl_cmplog_site_gen <= CMPLOG_SITE_COUNT_MASK) return;
+    memset(__afl_cmplog_site_tab, 0, sizeof __afl_cmplog_site_tab);
+    __afl_cmplog_site_gen = 1;
+}
+
+/* Counter slot of *pc* this drain, claimed at count 0 when new; NULL when
+ * the cap is off or the probe run is full. Caller holds the lock. */
+__AFL_NO_COV static uint64_t *__afl_cmplog_site_slot(void *pc) {
+    if (!__afl_cmplog_site_cap) return NULL;
+
+    uint64_t h = __afl_rec_mix((uint64_t)(uintptr_t)pc);
+    uint64_t key = h & CMPLOG_SITE_KEY_MASK;
+    uint64_t gen = __afl_cmplog_site_gen << CMPLOG_SITE_GEN_SHIFT;
+    for (int probe = 0; probe < CMPLOG_SITE_PROBES; probe++) {
+        uint64_t *e = &__afl_cmplog_site_tab[((uint32_t)h + (uint32_t)probe) & (CMPLOG_SITE_SLOTS - 1)];
+        if ((*e & ~CMPLOG_SITE_KEY_MASK & ~CMPLOG_SITE_COUNT_MASK) != gen) {
+            *e = key | gen;
+            return e;
+        }
+        if ((*e & CMPLOG_SITE_KEY_MASK) == key) return e;
+    }
+    return NULL;
+}
+
+/* Drain boundary (__cmplog_reset, persistent iteration). */
+__AFL_NO_COV static void __afl_cmplog_drain_scope(void) {
+    __afl_cmplog_site_epoch();
+    if (!__afl_cmplog_scope_campaign) __afl_cmplog_new_scope();
+}
+
 /* Fingerprint of a layer-1 record: every field its line prints. */
 __AFL_NO_COV static uint64_t __afl_bytes_fp(const unsigned char *a, const unsigned char *b,
                                             size_t k, size_t n, int result) {
@@ -5063,12 +5124,20 @@ __AFL_NO_COV static inline void __afl_cmplog_ints(uint64_t a, uint64_t b, size_t
      * its own trace-cmp callbacks, finds the lock held, and returns
      * instead of recursing until the stack is gone. */
     if (!__afl_cmplog_acquire()) return;
+    /* Cap before dedup: a capped record must stay unseen, or campaign
+     * scope would never write it. */
+    uint64_t *site = __afl_cmplog_site_slot(pc);
+    if (site && (*site & CMPLOG_SITE_COUNT_MASK) >= __afl_cmplog_site_cap) {
+        __afl_cmplog_release();
+        return;
+    }
     /* a and b fix the printed sign field; 'I' keeps it apart from operands. */
     uint64_t fp = __afl_rec_mix(__afl_rec_mix(a ^ 'I') ^ b);
     if (__afl_cmplog_seen(__afl_rec_mix(fp ^ ((uint64_t)n << 56) ^ (uint64_t)(uintptr_t)pc))) {
         __afl_cmplog_release();
         return;
     }
+    if (site) (*site)++;
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
         __afl_cmplog_flush_locked();
     unsigned char ab[8], bb[8];
@@ -6137,6 +6206,7 @@ __AFL_NO_COV static void __afl_cmplog_atfork_child(void) {
      * wipe what the parent (or the fuzzer, in direct_lite) has not read. */
     if (!__afl_cmp_shm_on) __afl_cmp_counts_zero();
     __afl_cmplog_new_scope();
+    __afl_cmplog_site_epoch();
     /* Forkserver: the parent never flushes, so each child retries. */
     __afl_cmplog_retry();
 }
@@ -6161,6 +6231,13 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
 #endif
     const char *prune = getenv("__AFL_CMP_PRUNE_CONST");
     __afl_prune_const = prune && prune[0] && atoi(prune) != 0;
+    /* Record knobs; see "Dedup scope" and "Per-site record cap". */
+    const char *cap = getenv("__AFL_CMPLOG_SITE_CAP");
+    long cap_v = cap && cap[0] ? strtol(cap, NULL, 10) : 0;
+    __afl_cmplog_site_cap = cap_v <= 0 ? 0
+        : (cap_v > CMPLOG_SITE_CAP_MAX ? CMPLOG_SITE_CAP_MAX : (uint32_t)cap_v);
+    const char *scope = getenv("__AFL_CMPLOG_DEDUP_SCOPE");
+    __afl_cmplog_scope_campaign = scope && strcmp(scope, "campaign") == 0;
     /* Opened before the _CMPLOG_OUT check, and on its own fd: the counters
      * are useful on their own (a target's comparison profile costs no
      * record stream at all), and the record stream gets truncated and
@@ -6210,7 +6287,7 @@ __AFL_NO_COV static void __afl_cmplog_fini(void) {
 __AFL_NO_COV __attribute__((visibility("default")))
 void __cmplog_reset(void) {
     __afl_cmplog_flush();
-    __afl_cmplog_new_scope();
+    __afl_cmplog_drain_scope();
     /* The per-iteration sync point in direct_lite/persistent modes. Dumping
      * here (not from __afl_cmplog_flush, which also runs on buffer-full in
      * the hot path) keeps the counts channel off the fast path. */
@@ -6233,6 +6310,13 @@ void __cmplog_reset(void) {
             lseek(__afl_cmplog_fd, 0, SEEK_SET);
         }
     }
+}
+
+/* Fresh dedup scope and site counters, whatever the scope knob says. */
+__AFL_NO_COV __attribute__((visibility("default")))
+void __cmplog_rescope(void) {
+    __afl_cmplog_new_scope();
+    __afl_cmplog_site_epoch();
 }
 
 /* paused != 0: drop CMP/DIV/GEP records until called again with 0. */
@@ -8526,7 +8610,7 @@ __AFL_GCC_NO_COV static void __afl_persist_sync(void) {
     __afl_cmp_dump_sites();
     /* A fork child starts a scope; a parked one dropped every record an
      * earlier input had already emitted. */
-    __afl_cmplog_new_scope();
+    __afl_cmplog_drain_scope();
 #endif
 }
 

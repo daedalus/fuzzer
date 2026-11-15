@@ -336,6 +336,11 @@ ARMS: dict[str, list[str]] = {
     # FOX secant step (zero-exec operand fit). ctl is baseline again (Rule 46).
     "fox-newton": ["--fox-newton"],
     "fox-newton-ctl": [],
+    # Cmplog per-site record cap + campaign dedup scope (TODO "Cmplog pool
+    # frozen"). Needs --set fuzzgoat_tcg or another trace-cmp build. ctl is
+    # baseline again (Rule 46).
+    "cmp-cap-dedup": ["--cmplog-site-cap", "32", "--cmplog-dedup-scope", "campaign"],
+    "cmp-cap-dedup-ctl": [],
     # IJON max-map + max queue. Needs an IJON_MAX-annotated target (ffmpeg_read:
     # frames decoded per codec); inert elsewhere. ctl is baseline again (Rule 46).
     "ijon": ["--ijon"],
@@ -448,6 +453,8 @@ ARM_BASELINES: dict[str, str] = {
     "ga-ctl": "ga",
     "fox-newton": "baseline",
     "fox-newton-ctl": "baseline",
+    "cmp-cap-dedup": "baseline",
+    "cmp-cap-dedup-ctl": "baseline",
     "ijon": "baseline",
     "ijon-ctl": "baseline",
 }
