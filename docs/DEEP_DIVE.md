@@ -1917,6 +1917,18 @@ progress-handler opcode budget, and `sqlite3_hard_heap_limit64`. A corrupt
 file returning `SQLITE_CORRUPT`/`SQLITE_NOTADB` is the expected outcome and
 not a finding; a segfault or an assertion failure is.
 
+### Cmplog record table (`--cmplog-records shm`)
+
+CMP records as binary operands in a SysV segment (`$_CMPLOG_RECORDS_SHM`, `adapters/cmplog_rec_shm.py`; afl_shim.c "Record table") instead of hex lines on the FIFO. Removes shim formatting, `write(2)`, FIFO `EAGAIN` drops and the Python text parse; DIV/GEP records stay on text, and a shim without the table keeps writing text, which is still read.
+
+- Trace-cmp records: one shared array in write order, each tagged with its site. The site index (keyed by (pc, width)) is sized from the target's trace-cmp call-site count (`core/elf.py::trace_cmp_call_sites`, `next_pow2(2n)` in [4096, 2^20]; FFmpeg 132,959 → 524,288) and caps each site at 1024 records per drain. Libc records (no pc): flat array, operands ≤ 64 B.
+- Drain reads this generation, zeroes the used counts, bumps `gen`: O(1) reset. The shim copies the geometry at attach and bounds-checks every index read from the segment.
+- Order: trace-cmp records in write order (the text order); libc records after them.
+- Memory: sites × 24 B + 2^18 records × 24 B + 4096 × 140 B: 6.7 MiB (fuzzgoat) to 18.6 MiB (FFmpeg), shared. Replaces the text path's shim buffer (256 KiB), pipe (64 KiB), FIFO buffer (≤ 8 MiB) and parse cache (≤ 65,536 entries).
+- Refused records: `rdrop:N(s/h/r/b)` on the stats line (site index full / site at its cap / record array full / libc array full).
+
+Equivalence: same `(op_a, op_b, width, result, pc)` set as the text parse of the same run (`tests/test_cmplog_record_shm.py`, ASLR off; the text-vs-text control is asserted first). Collector: `tests/test_cmplog_record_channel.py`. Bench arm `cmp-rec-shm`. A/B (`docs/AB_LEDGER.md` #141-#142, 20 × 10k): fuzzgoat_tcg 10/10, p=0.79, CPU −6.7% median (p=0.09): NULL; FFmpeg 7/13, p=0.14, med −1.5% edges, CPU unchanged: LEAN-. On FFmpeg the table refuses ~1.1M records / 5k execs (16384 site slots vs 129,561 compare call sites; 32 per site), feeding ~40% fewer pairs; the parse saving (11.2% → 9.1% of samples in `_mine_cmplog`) is partly spent reading the table. Peak RSS unchanged (931 MiB, FFmpeg). Since `af06c83`: site index sized per target and records in a shared array; FFmpeg seed 0 × 5k then refused 0 records for lack of a site, 944k at a 32-per-site cap, so the cap went to 1024. Rerun (#143): VOID, the A/A failed (ctl vs baseline 5/15, p=0.005; the baseline arm ran high and fast); shm vs ctl 10/10, p=0.70, med +126 edges, CPU equal: exploratory only. Rerun 2 (#144-#145, 20 seeds × 2 reps, 4 arms, A/A 19/21 p=0.54): shm 23/16, p=0.67, CPU equal: NULL; shm + campaign dedup 20/20, p=0.48, CPU −5% (25/40, p=0.038): NULL on edges. Stays opt-in.
+
 ### Cmplog record cap and dedup scope (`--cmplog-site-cap`, `--cmplog-dedup-scope`)
 
 Two shim record filters (afl_shim.c "Per-site record cap", "Dedup scope"), off by default:
