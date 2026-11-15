@@ -921,6 +921,7 @@ def cmd_fuzz(args):
         ijon_schedule_maxmap=getattr(args, "ijon_schedule_maxmap", DEFAULT_SCHEDULE_MAXMAP),
         c11=getattr(args, "c11", False),
         value_profile=ValueProfile(getattr(args, "value_profile", ValueProfile.OFF.value)),
+        rq_add_key=getattr(args, "rq_add_key", False),
         hw_perf_counters=getattr(args, "hw_perf_counters", None),
         hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
@@ -3114,6 +3115,7 @@ _HAIL_MARY_FLAGS = (
     "op_append",
     "op_line_code",
     "rq_xor_key",
+    "rq_add_key",
     "checksum_sites",
     "merkle_sites",
     "grimoire",
@@ -7322,6 +7324,14 @@ def main() -> int:
         help=(
             "Redqueen through an unknown repeating XOR key (1-8 bytes): input "
             "deobfuscated before a compare. Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--rq-add-key",
+        action="store_true",
+        help=(
+            "Redqueen through an unknown repeating additive key (1-8 bytes, mod 256): "
+            "ROT-n, `c - '0'` decodes (AFL++ cmplog arith). Off by default."
         ),
     )
     fuzz_parser.add_argument(
