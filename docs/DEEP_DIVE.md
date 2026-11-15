@@ -2061,6 +2061,11 @@ Targets built by this path are suffixed `_tcg`
 variants). The build verifies after linking that the callbacks are `T`
 (strong) rather than `W` (weak no-op), and that `memcmp` survived as a call.
 
+`fuzzgoat_read_tcg.so` is the calibration target with trace-cmp in the
+library object; the default fuzzgoat `.so` has none (`cmplog: 0t 0p`). The
+build counts its compare call sites. Bench set: `--set fuzzgoat_tcg`
+(`tools/lib/eval_set.py`), not comparable with `--set fuzzgoat`.
+
 The trace-cmp shim intercepts:
 - `__sanitizer_cov_trace_cmp{1,2,4,8}` — typed comparison callbacks
 - `__sanitizer_cov_trace_const_cmp{1,2,4,8}` — constant-operand variants

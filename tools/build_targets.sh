@@ -2930,6 +2930,17 @@ build_tracecmp_targets() {
             warn "$(basename "$f"): memcmp folded away — check \$NOBUILTIN_CMP"
         fi
     done
+
+    # fuzzgoat_read_tcg.so: the default fuzzgoat .so has 0 compare call sites
+    # ("cmplog: 0t 0p"); count them so this build cannot regress to that.
+    local fg="$TARGETS/fuzzgoat_read_tcg.so" sites
+    [ -f "$fg" ] || return 0
+    sites=$(objdump -d "$fg" 2>/dev/null | grep -cE "call.*<__sanitizer_cov_trace_(const_)?cmp[1248]>" || true)
+    if [ "$sites" -gt 0 ]; then
+        ok "fuzzgoat_read_tcg.so: $sites trace-cmp call sites"
+    else
+        warn "fuzzgoat_read_tcg.so: no trace-cmp call sites — cmplog will see nothing"
+    fi
 }
 
 # ── Print build feature matrix ──────────────────────────────────
