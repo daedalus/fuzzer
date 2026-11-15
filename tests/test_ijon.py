@@ -781,3 +781,87 @@ def test_from_dict_without_resolver_restores_maxima_only():
     u.from_dict(t.to_dict())
     assert u.slot_inputs() == {}
     assert not u.observe(_vals(s1=4))
+
+
+# ── Annotations add no guard sites (ijon.h helpers are uninstrumented) ─
+
+
+def _guard_calls(tmp_path, body: str, opt: str) -> int:
+    """Calls to the edge callback in a TU whose f() runs *body*."""
+    src = tmp_path / f"t{opt}.c"
+    src.write_text(f'#include "ijon.h"\nvolatile int sink;\nvoid f(unsigned a) {{ {body} }}\n')
+    obj = tmp_path / f"t{opt}.o"
+    cc = ["clang", f"-{opt}", "-c", "-fsanitize-coverage=trace-pc-guard", f"-I{SHIM.parent}"]
+    subprocess.run([*cc, str(src), "-o", str(obj)], check=True, timeout=60)
+    dis = subprocess.run(["objdump", "-dr", str(obj)], capture_output=True, text=True).stdout
+    return sum(1 for ln in dis.splitlines() if "__sanitizer_cov_trace_pc_guard-0x4" in ln)
+
+
+_ANNOTATED = (
+    "IJON_SET(a); IJON_INC(a); IJON_MAX(a); IJON_MIN(3, a); IJON_DIST(a, 7);"
+    " sink = IJON_BITS(a); sink = IJON_CTX(a + 1); IJON_CMP(a, 5);"
+)
+
+
+@requires_clang
+@pytest.mark.parametrize("opt", ["O0", "O1", "O2"])
+def test_annotations_add_no_guard_sites(tmp_path, opt):
+    """-O0 used to instrument _ijon_site's loop and the DIST/BITS ternaries."""
+    base = _guard_calls(tmp_path, "sink = a;", opt)
+    assert base >= 1, "control: f() itself is instrumented"
+    assert _guard_calls(tmp_path, _ANNOTATED, opt) == base
+
+
+@requires_clang
+def test_falsify_guard_counter_sees_branches(tmp_path):
+    """Control: a real branch in f() must raise the count (the oracle can fail)."""
+    base = _guard_calls(tmp_path, "sink = a;", "O0")
+    assert _guard_calls(tmp_path, "if (a > 3) sink = a; else sink = 1;", "O0") > base
+
+
+_ONCE_SRC = r"""
+#include "ijon.h"
+int main(void) {
+    unsigned i = 10, j = 0, k = 4;
+    IJON_DIST(i++, 7);
+    int b = IJON_BITS(j++);
+    IJON_DIST(7, k++);
+    return (i == 11 && j == 1 && k == 5 && b == 0) ? 0 : 1;
+}
+"""
+
+
+@requires_clang
+def test_adversarial_dist_bits_evaluate_args_once(tmp_path):
+    """Side-effecting arguments run once (the old macros ran them twice)."""
+    exe = _build(tmp_path, _ONCE_SRC, "-fsanitize-coverage=trace-pc-guard", f"-I{SHIM.parent}")
+    assert subprocess.run([str(exe)], env=_clean_env(), timeout=30).returncode == 0
+
+
+_DIST_SRC = r"""
+#include "ijon.h"
+#include <stdio.h>
+int main(void) {
+    const uint64_t v[] = {0, 1, 6, 7, 8, 0x7fffffffffffffffULL, 0xffffffffffffffffULL};
+    for (int i = 0; i < 7; i++)
+        for (int j = 0; j < 7; j++)
+            printf("%llu\n", (unsigned long long)_ijon_abs_dist(v[i], v[j]));
+    const uint32_t b[] = {0, 1, 7, 0x80000000u, 0xffffffffu};
+    for (int i = 0; i < 5; i++) printf("%d\n", _ijon_bits(b[i]));
+    return 0;
+}
+"""
+
+
+@requires_clang
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_dist_bits_values_at_extremes(tmp_path, opt):
+    """|x - y| over u64 extremes and clz, against Python, at both opt levels."""
+    exe = _build(tmp_path, _DIST_SRC, opt, f"-I{SHIM.parent}")
+    out = [
+        int(x) for x in subprocess.run([str(exe)], capture_output=True, text=True).stdout.split()
+    ]
+    v = [0, 1, 6, 7, 8, 2**63 - 1, 2**64 - 1]
+    want = [abs(a - b) for a in v for b in v]
+    want += [0 if x == 0 else 32 - x.bit_length() for x in (0, 1, 7, 2**31, 2**32 - 1)]
+    assert out == want

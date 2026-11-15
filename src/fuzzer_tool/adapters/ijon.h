@@ -52,9 +52,25 @@ uint32_t ijon_hashstr(uint32_t old, char *val);
 uint32_t ijon_hashmem(uint32_t old, char *val, size_t len);
 uint32_t ijon_hashstack(void);
 
+/* Helpers below compile into the target's TU, which is instrumented; at -O0
+ * they stay out of line and their branches became target edges (+3 guard
+ * sites per IJON_SET, and hit counts that grow with call count). Own macro,
+ * not the shim's __AFL_NO_COV: library TUs include this without the shim.
+ * No-op at -O1+: the helpers fold away, code is byte-identical. */
+#if defined(__has_attribute)
+#if __has_attribute(no_sanitize_coverage)
+#define _IJON_NO_COV __attribute__((no_sanitize_coverage))
+#elif defined(__clang__)
+#define _IJON_NO_COV __attribute__((no_sanitize("coverage")))
+#endif
+#endif
+#ifndef _IJON_NO_COV
+#define _IJON_NO_COV
+#endif
+
 /* Per-site id. Upstream calls ijon_hashstr(__LINE__, __FILE__) on every
  * annotation; this FNV-1a fold is constant at -O1+ for a literal path. */
-static inline uint32_t _ijon_site(uint32_t line, const char *file) {
+_IJON_NO_COV static inline uint32_t _ijon_site(uint32_t line, const char *file) {
     uint32_t h = 2166136261u;
     for (; *file; file++) h = (h ^ (uint8_t)*file) * 16777619u;
     return h ^ (line * 0x9E3779B1u);
@@ -64,7 +80,16 @@ static inline uint32_t _ijon_site(uint32_t line, const char *file) {
 #define _IJON_CONCAT2(x, y) x##y
 #define _IJON_CONCAT(x, y) _IJON_CONCAT2(x, y)
 #define _IJON_UNIQ_NAME() _IJON_CONCAT(_ijon_tmp_, __LINE__)
-#define _IJON_ABS_DIST(x, y) ((x) < (y) ? (y) - (x) : (x) - (y))
+
+/* Functions, not ternaries in the caller: no caller branch, and each
+ * argument is evaluated once (IJON_DIST(i++, 7) increments i once). */
+_IJON_NO_COV static inline uint64_t _ijon_abs_dist(uint64_t x, uint64_t y) {
+    return x < y ? y - x : x - y;
+}
+
+_IJON_NO_COV static inline int _ijon_bits(uint32_t x) {
+    return x == 0 ? 0 : __builtin_clz(x);
+}
 
 #define IJON_SET(x) ijon_map_set(_IJON_SITE ^ (uint32_t)(x))
 #define IJON_INC(x) ijon_map_inc(_IJON_SITE ^ (uint32_t)(x))
@@ -77,9 +102,9 @@ static inline uint32_t _ijon_site(uint32_t line, const char *file) {
 #define IJON_MAX(...) _IJON_ARITY(__VA_ARGS__, _IJON_MAX2, _IJON_MAX1)(__VA_ARGS__)
 #define IJON_MIN(...) _IJON_ARITY(__VA_ARGS__, _IJON_MIN2, _IJON_MIN1)(__VA_ARGS__)
 #define IJON_CMP(x, y) IJON_INC(__builtin_popcountll((uint64_t)(x) ^ (uint64_t)(y)))
-#define IJON_DIST(x, y) IJON_MIN(_IJON_ABS_DIST((uint64_t)(x), (uint64_t)(y)))
+#define IJON_DIST(x, y) IJON_MIN(_ijon_abs_dist((uint64_t)(x), (uint64_t)(y)))
 #define IJON_STRDIST(x, y) IJON_SET(ijon_hashint(ijon_hashstack(), ijon_strdist(x, y)))
-#define IJON_BITS(x) ((uint32_t)(x) == 0 ? 0 : __builtin_clz((uint32_t)(x)))
+#define IJON_BITS(x) _ijon_bits((uint32_t)(x))
 
 #define IJON_STATE(n) ijon_xor_state((uint32_t)(n))
 #define IJON_ENABLE() ijon_enable_feedback()
