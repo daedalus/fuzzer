@@ -590,6 +590,9 @@ def _current_rss_kb() -> int | None:
 
 # Symbols that mean the target can populate an edge bitmap: the shim's own
 # (linked or preloaded) and clang's sancov callbacks.
+# afl_custom_queue_get refusals in a row before a seed is fuzzed regardless.
+_QUEUE_GET_MAX_SKIPS = 64
+
 _AFL_SYMS = ("__afl_area", "__afl_map_shm", "__sanitizer_cov")
 
 
@@ -1891,6 +1894,7 @@ class Fuzzer:
         custom_mutator=None,
         custom_mutator_isolation="guard",
         custom_mutator_timeout_ms=1000,
+        afl_custom_mutator=None,
         # Successive-elimination / racing bandit for operator scheduling.
         successive_elim=False,
         successive_elim_delta=0.1,
@@ -2460,6 +2464,19 @@ class Fuzzer:
 
             register_custom_mutator(
                 custom_mutator,
+                isolate=custom_mutator_isolation != "none",
+                timeout_ms=custom_mutator_timeout_ms,
+            )
+        # --afl-custom-mutator: operators register here, before the engine is
+        # built; post_process / queue_get bind after the runner (_bind_afl_hooks).
+        self._afl_custom = None
+        self._queue_skips = 0
+        if afl_custom_mutator:
+            from fuzzer_tool.core.mutations.custom_mutator import register_afl_custom_mutator
+
+            self._afl_custom, _ = register_afl_custom_mutator(
+                afl_custom_mutator,
+                seed=seed,
                 isolate=custom_mutator_isolation != "none",
                 timeout_ms=custom_mutator_timeout_ms,
             )
@@ -3134,6 +3151,8 @@ class Fuzzer:
         self._runner = TargetRunner(self)
         self._stats = StatsReporter(self, rng=self._rng)
         self._corpus_manager = CorpusManager(self)
+        if self._afl_custom is not None:
+            self._bind_afl_hooks()
         self._poisson_admission = None  # lazy-init; created on first save_to_corpus()
         # PoissonDiskAdmission holds a reference to _edge_tracker._minhash,
         # which is only fully initialized after corpus init; lazily create it
@@ -7681,6 +7700,31 @@ class Fuzzer:
         if changed and engine.wants_det_edges(seed_key):
             edge_ids = self.shm_cov.get_edge_arrays()[0]
         engine.note_deterministic_result(changed, current, magnitude, edge_ids)
+
+    def _bind_afl_hooks(self) -> None:
+        """Bind the plugin's per-exec hooks once (ifs up): no check per exec."""
+        from fuzzer_tool.core.mutations.custom_mutator import AflHook
+
+        plugin = self._afl_custom
+        if plugin.has(AflHook.POST_PROCESS):
+            self._runner.bind_post_process(plugin.post_process)
+        if plugin.has(AflHook.QUEUE_GET):
+            self._fuzz_ungated = self.fuzz_one
+            self.fuzz_one = self._queue_gated
+
+    def _queue_gated(self, data: bytes) -> bool:
+        """fuzz_one behind ``afl_custom_queue_get``.
+
+        A refusal skips the seed. After _QUEUE_GET_MAX_SKIPS refusals in a row
+        the next seed runs anyway, so a plugin refusing everything cannot stall
+        the loop (a skip executes nothing, so exec-count stop rules never fire).
+        """
+        if self._queue_skips < _QUEUE_GET_MAX_SKIPS and not self._afl_custom.queue_get(data):
+            self._queue_skips += 1
+            return False
+
+        self._queue_skips = 0
+        return self._fuzz_ungated(data)
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.

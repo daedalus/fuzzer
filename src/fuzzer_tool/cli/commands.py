@@ -1249,6 +1249,7 @@ def cmd_fuzz(args):
         custom_mutator=getattr(args, "custom_mutator", None),
         custom_mutator_isolation=getattr(args, "custom_mutator_isolation", "guard"),
         custom_mutator_timeout_ms=getattr(args, "custom_mutator_timeout", 1000),
+        afl_custom_mutator=getattr(args, "afl_custom_mutator", None),
         email_on_crash=_mail_config_from_args(args),
         push_on_crash=_push_targets_from_args(args),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
@@ -7185,6 +7186,18 @@ def main() -> int:
             "LLVMFuzzerMutate, served by the fuzzer's own byte havoc. Runs "
             "in-process, so a crash in the plugin ends the fuzzer. Needs a "
             "C compiler on first use. See core/mutations/custom_mutator.py"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--afl-custom-mutator",
+        metavar="PATH",
+        default=None,
+        help=(
+            "AFL++ custom mutator: .so exporting afl_custom_* or .py module "
+            "(AFL_PYTHON_MODULE hook names). fuzz/havoc_mutation become "
+            "operators (afl_custom_fuzz, afl_custom_havoc); post_process, "
+            "the trim trio, queue_get and queue_new_entry are wired in. "
+            "Shares --custom-mutator-isolation/--custom-mutator-timeout"
         ),
     )
     fuzz_parser.add_argument(

@@ -335,7 +335,8 @@ def test_weizz_chunk_dup_grows():
     out = eng._op_weizz_chunk_dup(bytearray(data), 0, data)
     assert out is not None
     assert len(out) > len(data)
-    assert f.seed_meta[data].get("weizz_tags_dirty") is True
+    assert not f.seed_meta[data].get("weizz_tags_dirty")
+    assert eng._weizz_structure_map(data, out) is None  # offsets shifted
 
 
 def test_weizz_chunk_delete_shrinks():
@@ -350,7 +351,8 @@ def test_weizz_chunk_delete_shrinks():
     out = eng._op_weizz_chunk_delete(bytearray(data), 0, data)
     assert out is not None
     assert len(out) < len(data)
-    assert f.seed_meta[data].get("weizz_tags_dirty") is True
+    assert not f.seed_meta[data].get("weizz_tags_dirty")
+    assert eng._weizz_structure_map(data, out) is None  # offsets shifted
 
 
 def test_weizz_chunk_swap():

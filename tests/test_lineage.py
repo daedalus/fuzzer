@@ -479,11 +479,12 @@ class TestLineageRecording:
         f._corpus_manager.trim_new_coverage(seed, seed)
         assert len(f.corpus) == 1
         trimmed = f.corpus[0]
-        assert trimmed == seed[:20]
+        # Fake keeps every trace: trim_case cuts 20, 10, 5 (next, 2, is under 4 B).
+        assert trimmed == seed[:5]
         tm = f.seed_meta[trimmed]
         assert tm["parent_key"] == key + "x"  # original's lineage preserved
         assert tm["parent_ops"] == ["bitflip", "trim"]
-        assert tm["parent_sites"] == [3, 20]  # cut at len(seed) // 2
+        assert tm["parent_sites"] == [3, len(trimmed)]
         assert tm["new_edge_count"] == 4
         assert tm["coverage_edges_baseline"] == 1
         assert tm["lineage_depth"] == 3
