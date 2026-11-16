@@ -1526,6 +1526,11 @@ class StatsReporter:
             fired, asserted = f._cmplog.total_comparisons()
             if fired:
                 cmplog_str += f" {_format_count(fired)}c/{_format_count(asserted)}a"
+            # Records the shared table refused (--cmplog-records shm).
+            rdrop = getattr(f._cmplog, "records_dropped", 0)
+            if rdrop:
+                s, h, r, b = (_format_count(n) for n in f._cmplog.records_drops)
+                cmplog_str += f" rdrop:{_format_count(rdrop)}(s{s}/h{h}/r{r}/b{b})"
 
             # Shim record loss, from the periodic health read (direct mode only).
             shim = getattr(f, "_shim_counters", None)
