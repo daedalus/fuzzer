@@ -48,7 +48,11 @@ targeting arms (cmplog, grammar, dictionaries, IJON).
 Decision: mutate **`fuzzgoatNoVulns.c`** (same parser, planted bugs removed).
 Corpora still come from fuzzing `fuzzgoat.c`; inputs are JSON either way.
 
-## P1 — `core/ir_mutants.py`: site enumeration + apply (pure, no I/O)
+## P1 — `core/ir_mutants.py`: site enumeration + apply (pure, no I/O) (shipped)
+
+Measured on fuzzgoatNoVulns: 612 sites (store 230, br 155, eq/ne 140,
+add/sub 52, boundary 15, sign 15, call 3, alloc 2); all 612 mutants pass
+`llvm-as`. `find_sites` 3.9 ms (gate-union pre-filter; 4.9 ms without).
 
 Line-level operators on `-O0`-shaped IR, subset of paper Table 10:
 

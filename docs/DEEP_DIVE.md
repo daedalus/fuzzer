@@ -1677,6 +1677,22 @@ of these five named configurations), use `tools/lib/bench_sweep.sh`. Both script
 share common helpers (SHM cleanup, log metric extraction, coverage
 verification) from `tools/lib/bench_common.sh`.
 
+### Mutant-kill metric (in progress)
+
+Plan: `docs/action_plan_mutant_kill_metric.md` (Görz et al. 2023, Phase I).
+Score an A/B cell by how many injected source faults its corpus exposes,
+not only edges reached.
+
+Shipped: `core/ir_mutants.py` (P1). `find_sites(ll)` lists `Site(line, op)`
+in textual LLVM IR; `apply_site` yields a first-order mutant; `sample_sites`
+caps the set (RandPool). Operators: icmp boundary / sign / eq-ne, branch
+negate, store delete, add-sub swap, alloc size -16, void call delete.
+Argument spills (`store %x, %x.addr`) and `%cleanup.dest.slot` are excluded.
+Emit IR with `clang -fsanitize=address -Xclang -disable-llvm-passes
+-emit-llvm -S`: without `-fsanitize` at emit, functions lack
+`sanitize_address` and mutants are never instrumented. fuzzgoatNoVulns:
+612 sites, all `llvm-as`-valid.
+
 ### SMT Solver Evaluation (`--enable-smt-z3`)
 
 The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations. **Concolic mode is now the default** (`--mod-solving concolic`), providing full constraint modeling with z3 across whole execution traces. Override with `--mod-solving heuristic` or `--mod-solving trace` if needed. The concolic whole-input solve is capped at `_CONCOLIC_MAX_BYTES` (32 KiB) in `core/smt_solver.py`: it models one z3 `BitVec` per input byte, and over multi-MB seeds that model alone transiently exceeds a GB of memory (measured ~1.3 GB spikes), enough to OOM the fuzzer. Oversized inputs skip the whole-input solve (the per-pair cmplog solving is unaffected).
