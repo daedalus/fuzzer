@@ -354,7 +354,7 @@ Plan for P1/P2: `docs/action_plan_onefuzz_port.md`. Already have: tmin/cmin, ptr
 
 ## WEIZZ port gaps (2026-11-15, ISSTA 2020)
 Ported: passive tags (`core/weizz_tags.py`), field/chunk/repair ops, P4 restricted solve, P5 inheritance. Fixed 2026-11-15: collected tags were discarded (copy in `attach_tags_to_meta`, mutant meta replaced on admission), initial seeds never tagged, length-changing ops disabled the parent's map for good, tags lost on `--resume` (`tests/test_regression_weizz_tags_lifecycle.py`).
-- [ ] **A/B `--weizz-tags`** (E1) — `bench_paired.py` arm; fuzzgoat + a nested-chunk target. No ledger row exists; every claim below is unmeasured.
+- [ ] **A/B `--weizz-tags`** (E1) — FFmpeg 9.0.2 done (ledger #147): NULL on edges (med +1.2%, p=0.81), CPU +43% (20/20, p=1.9e-6). Open: (a) profile where the CPU goes (collection scan vs ops) and cut it; (b) fuzzgoat (Rule 52) + a nested-chunk target; (c) items below remain unmeasured.
 - [ ] **Wire differential `get_deps`** — tests-only today. Per-seed, probabilistic, exec-budgeted on fresh-coverage seeds; Weizz first/last-bit-per-byte sampling; per-run cmplog (`last_conds`) instead of the campaign pool.
 - [ ] **Comparison order in shim** — sequence id per CMP record (`__AFL_SHM_LAYOUT` +1, rebuild targets) for chunk nesting; `counter` is a shortest-operand rank today.
 - [ ] **Checksum cmp patching** — disable flagged checksum site, fuzz, repair, verify. Repair today: CRC-32 over the whole prefix, not the dependent bytes.
