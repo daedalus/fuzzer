@@ -340,7 +340,8 @@ Ported: time-normalised Elo strategy credit (`--elo-time-credit`).
 Plan for P1/P2: `docs/action_plan_onefuzz_port.md`. Already have: tmin/cmin, ptrace coverage, SARIF, push/email, crash-bisect, gdb replay.
 - [x] **P2 `--stack-ignore` + `func_hash`** — shipped (`tests/test_stack_filter.py`).
 - [ ] **P2 follow-ups** — warn on `--resume` when the ignore file changed (signatures shift); apply `--stack-ignore` to `verify`/`replay`/`crash-cluster`.
-- [ ] **P1 `--repro-gate N`** — replay novel crashes ≤N times before save; no signature match → `crashes/no_repro/`, no alert.
+- [x] **P1 `--repro-gate N`** — shipped (`tests/test_repro_gate.py`). Matches bug class (existing `_replay_verdict`), not full signature.
+- [ ] **P1 follow-ups** — `no_repro: K` in the end-of-run summary; fuzzgoat in-run check with a flaky target.
 - [ ] **Regression mode for `verify`** — per bucket: fixed / still crashing / new signature against a new build.
 - [ ] **Pre-flight** — unresolved shared libs (`LD_DEBUG=libs`), seeds crashing/timing out at start.
 - [ ] **Placeholders** — `{input}`, `{target_exe}`, `{crashes}`, `{input_file_name}` in `adapters/process.py` (only `{file}` today).
@@ -413,6 +414,7 @@ Already covered: 64 KiB signal altstack (`afl_shim.c` `__AFL_ALTSTACK_SIZE`), si
 - Skip: tunnel search (length-change byte deepening; effector maps in `position_arena.py` supersede), instruction-length probing and opcode blacklists (CPU fuzzing, out of scope).
 
 ## Standing notes
+- [ ] **Master test debt (2026-11-16)**: `test_perf_group_read.py::test_real_software_counters_count_own_work` fails in this container; `test_regression_end_of_run_persistence.py` lets the probe's KeyboardInterrupt abort the pytest session (later files never run); 16 failures across `test_regression_cli_fuzzer_kwargs`/`elo_all`/`fuzzer`/`one_fifth`/… also red on master.
 - [ ] **`test_regression_novel_crash_reward.py`: 2 failures on master** — stub `SimpleNamespace` lacks `_is_hw_max` (2026-11-16).
 
 These are not work items. They are the lessons the closed work left behind, and

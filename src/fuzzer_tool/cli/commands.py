@@ -949,6 +949,7 @@ def cmd_fuzz(args):
         alloc_sizes=getattr(args, "alloc_sizes", False),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
+        repro_gate=getattr(args, "repro_gate", 0),
         crash_tmin_execs=getattr(args, "crash_tmin_execs", 0),
         asan_target=getattr(args, "asan_target", None),
         ubsan_target=getattr(args, "ubsan_target", None),
@@ -3202,6 +3203,17 @@ def _positive_ms_arg(value: str) -> int:
     if ms < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1 ms, got {ms}")
     return ms
+
+
+def _non_negative_int_arg(value: str) -> int:
+    """argparse type: a whole number, at least 0."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
 
 
 def _positive_int_arg(value: str) -> int:
@@ -6646,6 +6658,14 @@ def main() -> int:
         default=0,
         metavar="N",
         help="Replay each crash N times for reproducibility scoring (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
+        "--repro-gate",
+        type=_non_negative_int_arg,
+        default=0,
+        metavar="N",
+        help="Replay each novel crash up to N times before saving; none reproducing "
+        "the bug class -> crashes/no_repro/, no alert (default: 0 = off)",
     )
     fuzz_parser.add_argument(
         "--asan-target",

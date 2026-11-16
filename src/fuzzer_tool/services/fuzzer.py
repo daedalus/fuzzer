@@ -1606,6 +1606,7 @@ class Fuzzer:
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
+        repro_gate=0,
         crash_tmin_execs=0,
         crash_blocklist=None,
         crash_allowlist=None,
@@ -3033,6 +3034,11 @@ class Fuzzer:
         # None when that crash was not written. Set by CorpusManager.save_crash.
         self._last_crash_signature: str | None = None
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
+        # --repro-gate N: novel crashes replayed <= N times before saving;
+        # failures land in crashes/no_repro/ under their own dedup maps.
+        self.repro_gate: int = repro_gate
+        self.no_repro_hashes: set[str] = set()
+        self.no_repro_sigs: dict[str, int] = {}
         # --crash-tmin-execs: shrink novel crashes at maintenance ticks (None = off).
         # Lambdas: the runner and corpus manager are built later in __init__.
         self._crash_shrinker: CrashShrinker | None = None
@@ -6809,6 +6815,14 @@ class Fuzzer:
         """
         if len(self.crash_hashes) > MAX_CRASH_HASHES:
             self.crash_hashes.clear()
+
+        # --repro-gate maps: clearing only lets a flaky crash re-enter no_repro/.
+        # getattr: partial fuzzer stand-ins in tests predate these maps.
+        for nr, cap in (("no_repro_hashes", MAX_CRASH_HASHES), ("no_repro_sigs", MAX_CRASH_SIGS)):
+            m = getattr(self, nr, None)
+            if m is not None and len(m) > cap:
+                m.clear()
+
         if len(self.crash_sigs) <= MAX_CRASH_SIGS:
             return
         # Keep top 75%: count descending, then newest first; insertion order kept.

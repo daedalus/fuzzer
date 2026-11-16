@@ -14,7 +14,7 @@ Survey and ranking: `docs/TODO.md` §OneFuzz port candidates.
                            save_crash ──► crashes/
 ```
 
-## P1 — Repro gate (`--repro-gate N`)
+## P1 — Repro gate (`--repro-gate N`) (shipped; matches bug class via `_replay_verdict`, not full signature)
 
 **Gap.** `--replay-n` scores crashes after they are saved
 (`services/stats_reporter.py:159`). Crashes that never reproduce sit in

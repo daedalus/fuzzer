@@ -1617,6 +1617,9 @@ MIN_CRASH_EXT = ".min"
 _CRASH_EXTS = (".bin", ".txt", ".sh", ".hex", ".json", MIN_CRASH_EXT)
 
 
+# Novel crashes that failed --repro-gate, kept apart from crashes/.
+NO_REPRO_DIR = "no_repro"
+
 # Crash .json sidecars written by save_crash().
 CRASH_SIDECAR_GLOB = "crash_*.json"
 
