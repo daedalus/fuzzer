@@ -153,7 +153,12 @@ class KillScorer:
 Original replay once → clean mask → mutants in a process pool, each early
 stopping on first kill. Inputs that crash or hang the original never count.
 
-## P4 — CLI (`cli/commands.py`, `cmd_replay` pattern)
+## P4 — CLI (`cli/commands.py`, `cmd_replay` pattern) (shipped)
+
+Shipped as flat `mutants-build` / `mutants-score`: the CLI has no nested
+subcommands and multi-word commands are hyphenated (`crash-bisect`,
+`compact-seeds`). Both route through `services/mutant_kill.py`
+(`build_kill_set`, `KillScorer.open`), never the adapter (Rule 36b).
 
 ```
 fuzzer-tool mutants build SRC.c --wrapper targets/fuzzgoat_read.c -o DIR [--cap N] [--seed S]
