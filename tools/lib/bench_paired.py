@@ -61,6 +61,7 @@ from fuzzer_tool.core.exact_tests import (  # noqa: E402
     wilcoxon_signed_rank,
 )
 from fuzzer_tool.core.state_store import StateStore  # noqa: E402
+from fuzzer_tool.services.mutant_kill import KillScorer, KillSetError  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 # $FUZZ_BENCH_RESULTS keeps results out of the source tree (AGENTS.md Rule 17).
@@ -552,7 +553,17 @@ def _parse(log: str) -> dict:
 # from its crash records. tte_<kind> scores it; a kind that never fired is
 # censored at iters + 1 (later than any exec in the budget).
 TTE_PREFIX = "tte_"
-_PLAIN_METRICS = ("edges", "real_edges", "blocks", "corpus", "crashes", "unique", "eps", "cpu_user")
+_PLAIN_METRICS = (
+    "edges",
+    "real_edges",
+    "blocks",
+    "corpus",
+    "crashes",
+    "unique",
+    "eps",
+    "cpu_user",
+    "kills",
+)
 
 # Synthetic edge channels (COMPCOV, dataflow, allocation sizes) set bit 31;
 # real ids never do (afl_shim.c, __AFL_SYNTH_ID_BIT).
@@ -569,6 +580,19 @@ def _real_edges(corpus: Path) -> int | None:
     if edges is None:
         return None
     return sum(1 for e in edges if not int(e) & SYNTH_ID_BIT)
+
+
+def _kill_fields(scorer: KillScorer | None, workdir: Path) -> dict[str, int]:
+    """Mutant-kill columns for one cell's corpus; none without ``--kill-set``."""
+    if scorer is None:
+        return {}
+    got = scorer.score(workdir)
+    return {
+        "kills": got.kills,
+        "kill_hangs": got.hangs,
+        "kill_flaky": got.flaky,
+        "clean_inputs": got.clean_inputs,
+    }
 
 
 def _first_crash_execs(crashes: Path) -> dict[str, int]:
@@ -615,9 +639,20 @@ def _seed_workdir(target: str, workdir: Path) -> None:
 
 
 def run_cell(
-    arm: str, target: str, flags: str, seed: int, iters: int, timeout: int, rep: int = 0
+    arm: str,
+    target: str,
+    flags: str,
+    seed: int,
+    iters: int,
+    timeout: int,
+    rep: int = 0,
+    scorer: KillScorer | None = None,
 ) -> dict:
-    """Run one campaign and return its parsed outcome."""
+    """Run one campaign and return its parsed outcome.
+
+    With *scorer* (``--kill-set``), the final corpus is also scored by the
+    mutants it kills, after the timed run: ``secs``/``cpu_user`` exclude it.
+    """
     workdir = Path(tempfile.mkdtemp(prefix=f"paired_{arm}_"))
     _seed_workdir(target, workdir)
     # Per cell: a shared crashes dir re-syncs earlier cells' signatures.
@@ -646,6 +681,7 @@ def run_cell(
         run = run_timed(cmd, timeout, cwd=REPO)
         tte = _first_crash_execs(crashes)
         real = _real_edges(workdir)
+        kills = _kill_fields(scorer, workdir)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     log = run.log
@@ -666,13 +702,27 @@ def run_cell(
     }
     if real is not None:  # absent key: analyse skips the cell, never scores 0
         row["real_edges"] = real
+    row.update(kills)
     # Short of the budget: not a result. Keep the log for diagnosis.
     if row["execs"] < iters:
         row["log"] = log
     return row
 
 
+def _open_scorer(args: argparse.Namespace) -> KillScorer | None:
+    """The ``--kill-set`` scorer, or None. Raises KillSetError on an unbuilt set."""
+    if not args.kill_set:
+        return None
+    return KillScorer.open(Path(args.kill_set), args.kill_jobs)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    try:
+        scorer = _open_scorer(args)
+    except KillSetError as exc:
+        print(f"--kill-set: {exc}", file=sys.stderr)
+        return 2
+
     # Refuse to share the machine with another campaign when asked to:
     # contention perturbs mean_exec, which the Boltzmann arm reads.
     lock = bench_lock.engage(getattr(args, "lock_single_thread", False))
@@ -704,7 +754,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     done = 0
     for arm in arms:
-        done = _run_arm(args, arm, matrix, done, total)
+        done = _run_arm(args, arm, matrix, done, total, scorer)
     if lock:
         lock.release()
     return 0
@@ -763,7 +813,14 @@ def _keep_early(out: Path, row: dict) -> None:
     )
 
 
-def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total: int) -> int:
+def _run_arm(
+    args: argparse.Namespace,
+    arm: str,
+    matrix: list,
+    done: int,
+    total: int,
+    scorer: KillScorer | None = None,
+) -> int:
     """Run every missing cell of one arm, checkpointing each; returns updated *done*."""
     out = RESULTS / f"{args.set}_{arm}.json"
     # Resume from whatever is already on disk. A full matrix is hours of
@@ -782,12 +839,14 @@ def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total:
             done += 1
             if (target, seed, rep) in have:
                 continue
-            row = run_cell(arm, target, flags, seed, args.iters, args.timeout, rep)
+            row = run_cell(arm, target, flags, seed, args.iters, args.timeout, rep, scorer)
             if "log" in row:
                 _keep_early(out, row)
                 continue
             rows.append(row)
             flag = "" if row["coverage_attached"] else "  [NO COVERAGE]"
+            if "kills" in row:
+                flag += f" kills={row['kills']}"
             print(
                 f"  [{done:>4}/{total}] {arm:<18} {Path(target).name:<18} "
                 f"seed={seed:<3} rep={rep} edges={row['edges']:<6} "
@@ -1290,6 +1349,18 @@ def main() -> int:
         ),
     )
     r.add_argument("--timeout", type=int, default=900, help="per-campaign timeout, seconds")
+    r.add_argument(
+        "--kill-set",
+        default=None,
+        help=(
+            "mutant set from `fuzzer-tool mutants-build`: also score each cell's final corpus "
+            "by mutants killed (row key `kills`, read with `analyse --metric kills`). Scored "
+            "after the timed run; secs/cpu_user exclude it"
+        ),
+    )
+    r.add_argument(
+        "--kill-jobs", type=int, default=os.cpu_count() or 1, help="parallel mutants when scoring"
+    )
     r.add_argument(
         "--restart",
         action="store_true",
