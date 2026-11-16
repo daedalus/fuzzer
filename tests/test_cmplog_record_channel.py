@@ -253,3 +253,10 @@ def test_campaign_arm_is_shm_plus_campaign_scope(monkeypatch):
     args = captured["args"]
     assert args.cmplog_records is RecordChannel.SHM
     assert args.cmplog_dedup_scope is DedupScope.CAMPAIGN
+
+
+def test_campaign_only_arm_isolates_dedup_scope():
+    """Text channel + campaign scope: separates the dedup's CPU effect from the table's."""
+    assert ARMS["cmp-campaign"] == ["--cmplog-dedup-scope", "campaign"]
+    assert ARM_BASELINES["cmp-campaign"] == "baseline"
+    assert "--cmplog-records" not in ARMS["cmp-campaign"]

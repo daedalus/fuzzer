@@ -348,6 +348,8 @@ ARMS: dict[str, list[str]] = {
     # Table + campaign dedup scope: records the pool already holds are not
     # re-sent every collect round. ctl is cmp-rec-shm-ctl (baseline).
     "cmp-rec-shm-campaign": ["--cmplog-records", "shm", "--cmplog-dedup-scope", "campaign"],
+    # Campaign dedup on the text channel: isolates #145's CPU drop from the table.
+    "cmp-campaign": ["--cmplog-dedup-scope", "campaign"],
     # IJON max-map + max queue. Needs an IJON_MAX-annotated target (ffmpeg_read:
     # frames decoded per codec); inert elsewhere. ctl is baseline again (Rule 46).
     "ijon": ["--ijon"],
@@ -465,6 +467,7 @@ ARM_BASELINES: dict[str, str] = {
     "cmp-rec-shm": "baseline",
     "cmp-rec-shm-ctl": "baseline",
     "cmp-rec-shm-campaign": "baseline",
+    "cmp-campaign": "baseline",
     "ijon": "baseline",
     "ijon-ctl": "baseline",
 }
