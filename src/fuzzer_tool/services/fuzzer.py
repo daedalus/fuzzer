@@ -2123,7 +2123,7 @@ class Fuzzer:
         push_on_crash=None,
         # Direct in-process input placement (--input-placement). Appended.
         input_placement=InputPlacement.EXACT,
-        state_restore=StateRestore.OFF,
+        state_restore=StateRestore.GLOBALS,
         # 'branch' seed arm over the Katz channel's ICFG (--seed-branch-scheduler). Appended.
         seed_branch_scheduler=False,
         # Viterbi field segmentation (core/field_hmm.py, --field-hmm). Appended.

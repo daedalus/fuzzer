@@ -951,7 +951,7 @@ def cmd_fuzz(args):
         input_placement=InputPlacement(
             getattr(args, "input_placement", InputPlacement.EXACT.value)
         ),
-        state_restore=StateRestore(getattr(args, "snapshot_restore", StateRestore.OFF.value)),
+        state_restore=StateRestore(getattr(args, "snapshot_restore", StateRestore.GLOBALS.value)),
         touched_atomic=getattr(args, "touched_atomic", None),
         ctx_sensitive=getattr(args, "ctx_sensitive", None),
         alloc_sizes=getattr(args, "alloc_sizes", False),
@@ -3674,9 +3674,16 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--snapshot-restore",
         choices=[m.value for m in StateRestore],
-        default=StateRestore.OFF.value,
+        default=StateRestore.GLOBALS.value,
         help="Direct in-process modes: 'globals' restores the target .so's .data/.bss "
-        "before each exec (wtf-style snapshot; heap not restored). Default: off.",
+        "before each exec (wtf-style snapshot; heap not restored). Default: globals.",
+    )
+    fuzz_parser.add_argument(
+        "--no-snapshot-restore",
+        dest="snapshot_restore",
+        action="store_const",
+        const=StateRestore.OFF.value,
+        help="Disable --snapshot-restore: target globals carry over between execs.",
     )
     fuzz_parser.add_argument(
         "--no-cfg-cache",

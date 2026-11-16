@@ -238,12 +238,46 @@ def _fuzz_kwargs(monkeypatch, tmp_path, extra: list[str]) -> dict:
 
 
 class TestCli:
-    def test_default_off(self, monkeypatch, tmp_path):
+    def test_default_globals(self, monkeypatch, tmp_path):
         from fuzzer_tool.core.run_mode import StateRestore
 
         kw = _fuzz_kwargs(monkeypatch, tmp_path, [])
 
+        assert kw["state_restore"] is StateRestore.GLOBALS
+
+    def test_gate_disables(self, monkeypatch, tmp_path):
+        """Falsification: the disable gate must reach the Fuzzer as OFF."""
+        from fuzzer_tool.core.run_mode import StateRestore
+
+        kw = _fuzz_kwargs(monkeypatch, tmp_path, ["--no-snapshot-restore"])
+
         assert kw["state_restore"] is StateRestore.OFF
+
+    @pytest.mark.parametrize(
+        ("argv", "want"),
+        [
+            (["--no-snapshot-restore", "--snapshot-restore", "globals"], "globals"),
+            (["--snapshot-restore", "globals", "--no-snapshot-restore"], "off"),
+        ],
+    )
+    def test_gate_last_wins(self, monkeypatch, tmp_path, argv, want):
+        """Adversarial: conflicting flags resolve to the last one, never silently mixed."""
+        from fuzzer_tool.core.run_mode import StateRestore
+
+        kw = _fuzz_kwargs(monkeypatch, tmp_path, argv)
+
+        assert kw["state_restore"] is StateRestore(want)
+
+    def test_fuzzer_default_globals(self):
+        """API callers (not just the CLI) get restore on by default."""
+        import inspect
+
+        from fuzzer_tool.core.run_mode import StateRestore
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        default = inspect.signature(Fuzzer.__init__).parameters["state_restore"].default
+
+        assert default is StateRestore.GLOBALS
 
     def test_globals_reaches_fuzzer(self, monkeypatch, tmp_path):
         from fuzzer_tool.core.run_mode import StateRestore
