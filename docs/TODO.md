@@ -338,7 +338,8 @@ Ported: time-normalised Elo strategy credit (`--elo-time-credit`).
 
 ## OneFuzz port candidates (2026-11-15, microsoft/onefuzz agent)
 Plan for P1/P2: `docs/action_plan_onefuzz_port.md`. Already have: tmin/cmin, ptrace coverage, SARIF, push/email, crash-bisect, gdb replay.
-- [ ] **P2 `--stack-ignore` + `func_hash`** — user regexes extend runtime-frame stripping (prototype: `av_free` wrappers stop being the signature); function-name hash survives rebuilds; blocklist accepts `# func-hash v1`.
+- [x] **P2 `--stack-ignore` + `func_hash`** — shipped (`tests/test_stack_filter.py`).
+- [ ] **P2 follow-ups** — warn on `--resume` when the ignore file changed (signatures shift); apply `--stack-ignore` to `verify`/`replay`/`crash-cluster`.
 - [ ] **P1 `--repro-gate N`** — replay novel crashes ≤N times before save; no signature match → `crashes/no_repro/`, no alert.
 - [ ] **Regression mode for `verify`** — per bucket: fixed / still crashing / new signature against a new build.
 - [ ] **Pre-flight** — unresolved shared libs (`LD_DEBUG=libs`), seeds crashing/timing out at start.
@@ -412,6 +413,7 @@ Already covered: 64 KiB signal altstack (`afl_shim.c` `__AFL_ALTSTACK_SIZE`), si
 - Skip: tunnel search (length-change byte deepening; effector maps in `position_arena.py` supersede), instruction-length probing and opcode blacklists (CPU fuzzing, out of scope).
 
 ## Standing notes
+- [ ] **`test_regression_novel_crash_reward.py`: 2 failures on master** — stub `SimpleNamespace` lacks `_is_hw_max` (2026-11-16).
 
 These are not work items. They are the lessons the closed work left behind, and
 they keep costing time when forgotten.

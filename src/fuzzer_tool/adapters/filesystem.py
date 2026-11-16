@@ -1178,13 +1178,9 @@ def classify_crash(
     if h in crash_hashes:
         return CrashVerdict(False, h, sig, stack_h, report, None, False, True)
 
-    # Blocklist check: skip crashes with known stack hashes unless allowlisted
-    if (
-        crash_blocklist
-        and stack_h
-        and stack_h in crash_blocklist
-        and stack_h not in (crash_allowlist or set())
-    ):
+    # Blocklist check: skip crashes with known stack or function hashes
+    # unless allowlisted.
+    if crash_blocklist and _is_blocked(report, stack_h, crash_blocklist, crash_allowlist):
         return CrashVerdict(False, h, sig, stack_h, report, None, True, False)
 
     # Deduplicate by signature: skip if this crash signature was already seen,
@@ -1205,6 +1201,24 @@ def classify_crash(
             return CrashVerdict(False, h, sig, stack_h, report, existing_sig, False, False)
 
     return CrashVerdict(True, h, sig, stack_h, report, None, False, False)
+
+
+def _is_blocked(
+    report: SanitizerReport | None,
+    stack_h: str,
+    blocklist: set[str],
+    allowlist: set[str] | None,
+) -> bool:
+    """True when the stack hash or func_hash is listed and neither is allowed."""
+    if not stack_h or report is None:
+        return False
+
+    fh = report.func_hash()
+    if stack_h not in blocklist and not (fh and fh in blocklist):
+        return False
+
+    allow = allowlist or ()
+    return stack_h not in allow and not (fh and fh in allow)
 
 
 def crash_signature(
@@ -1430,6 +1444,7 @@ def save_crash(
 
     metadata.build_cluster_id(sig)
     metadata.stack_hash = v.stack_hash
+    metadata.func_hash = report.func_hash() if report else ""
 
     # Derive error short name for filename
     error_short, sanitizer_short = _crash_name_parts(report, returncode)

@@ -91,7 +91,7 @@ existing pickle state machinery (Hard Rule 15).
 - Speed: fuzzgoat run with the gate on vs off. Execs/s must match within
   noise (Hard Rule 41).
 
-## P2 — Configurable stack filter and function hash
+## P2 — Configurable stack filter and function hash (shipped; `--resume` warning deferred to TODO)
 
 **Gap.** Frame stripping uses hardcoded sets (`core/sanitizer.py:152-166`).
 Project wrappers such as `av_free`, `xmalloc` and `g_free` become the
