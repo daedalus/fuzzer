@@ -20,6 +20,13 @@ _M128 = (1 << 128) - 1
 _BLOOM_VERSION = 2
 #: v1 predates :meth:`BloomFilter.fold`: its slice width is always log2(m).
 _BLOOM_V1 = 1
+#: Serialised counters; each must be a non-negative int.
+_COUNTERS = ("n_added", "n_queries", "n_accepted", "n_rejected")
+
+
+def _is_int(value: object) -> bool:
+    """True for a real ``int`` (``bool`` excluded)."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 class ProbeCount(Enum):
@@ -210,11 +217,12 @@ class BloomFilter:
                 it before inserting.  Keeps the realised false-positive rate at
                 the configured bound for unbounded streams at the cost of
                 forgetting older keys — a generational filter in one array.
+                Query counters stay cumulative across wipes.
         """
         # Inlined, not delegated to update_digest: the extra call frames cost
         # ~10% on the default exec-dedup path (64-byte inputs).
         if reset_on_full and self.n_added >= self.capacity:
-            self.clear()
+            self._wipe()
         value = int.from_bytes(hashlib.sha256(key).digest(), "big")
         self.n_queries += 1
         if self._check(value):
@@ -232,7 +240,7 @@ class BloomFilter:
     def update_digest(self, value: int, reset_on_full: bool = False) -> bool:
         """:meth:`update_bytes` on a precomputed :meth:`digest_bytes` value."""
         if reset_on_full and self.n_added >= self.capacity:
-            self.clear()
+            self._wipe()
         self.n_queries += 1
         if self._check(value):
             self.n_rejected += 1
@@ -291,7 +299,8 @@ class BloomFilter:
 
         Raises:
             ValueError: on a missing/wrong version, a bit-length mismatch,
-                or an invalid capacity/error_rate.
+                an invalid capacity/error_rate/m/k/double, or a negative
+                counter.
         """
         if not isinstance(state, dict):
             raise ValueError("bloom state must be a dict")
@@ -305,6 +314,9 @@ class BloomFilter:
         if not isinstance(error_rate, float) or not (0.0 < error_rate < 1.0):
             raise ValueError(f"invalid bloom error_rate {error_rate!r}")
 
+        cls._check_layout(state)
+        cls._check_counters(state)
+
         bf = cls.__new__(cls)
         bf.capacity = capacity
         bf.error_rate = error_rate
@@ -313,6 +325,8 @@ class BloomFilter:
         bf._bits_per_slice = cls._slice_bits(state, bf.m)
         bf._k = state["k"]
         bf._double = state["double"]
+        if bf._double is not (bf._k * bf._bits_per_slice > cls.DIGEST_BITS):
+            raise ValueError(f"bloom double={bf._double!r} disagrees with k and slice width")
         bf._byte_len = (bf.m + 7) // 8
         bits = state["bits"]
         if not isinstance(bits, bytes | bytearray) or len(bits) != bf._byte_len:
@@ -333,6 +347,28 @@ class BloomFilter:
             bf._refit_capacity()
         return bf
 
+    @staticmethod
+    def _check_layout(state: dict[str, object]) -> None:
+        """Reject an ``m`` / ``k`` / ``double`` that would crash or lose keys.
+
+        ``k=0`` answers "seen" for every key; a non-power-of-two ``m`` moves
+        every probe (false negatives); ``m=0`` raises at the first query.
+        """
+        m, k, double = state["m"], state["k"], state["double"]
+        if not _is_int(m) or m < 2 or m & (m - 1):  # type: ignore[operator]
+            raise ValueError(f"invalid bloom m {m!r}: need a power of two >= 2")
+        if not _is_int(k) or k < 1:  # type: ignore[operator]
+            raise ValueError(f"invalid bloom k {k!r}")
+        if not isinstance(double, bool):
+            raise ValueError(f"invalid bloom double {double!r}")
+
+    @staticmethod
+    def _check_counters(state: dict[str, object]) -> None:
+        for name in _COUNTERS:
+            value = state[name]
+            if not _is_int(value) or value < 0:  # type: ignore[operator]
+                raise ValueError(f"invalid bloom {name} {value!r}")
+
     @classmethod
     def _slice_bits(cls, state: dict[str, object], m: int) -> int:
         """Slice width from *state*; v1 payloads are never folded.
@@ -345,8 +381,7 @@ class BloomFilter:
             return width
 
         bits = state.get("slice_bits")
-        valid = isinstance(bits, int) and not isinstance(bits, bool)
-        if not valid or not width <= bits <= cls.DIGEST_BITS:  # type: ignore[operator]
+        if not _is_int(bits) or not width <= bits <= cls.DIGEST_BITS:  # type: ignore[operator]
             raise ValueError(f"invalid bloom slice_bits {bits!r} for m={m}")
         return bits  # type: ignore[return-value]
 
@@ -379,6 +414,9 @@ class BloomFilter:
         ``n_added``.  Example: k=10, fill 0.40 -> 1.0e-4; one fold, fill
         ~0.64 -> 1.2e-2.
 
+        A target looser than ``error_rate`` becomes the new ``error_rate``
+        once a fold applies.
+
         Returns:
             Number of folds applied (0 when the first already exceeds).
 
@@ -394,6 +432,9 @@ class BloomFilter:
             fill = int(np.bitwise_count(folded).sum()) / (self.m // 2)
             if fill**self._k > target_fpr:
                 break
+            # The caller accepted target_fpr: refit capacity against it, or a
+            # looser target leaves capacity below n_added (next reset wipes).
+            self.error_rate = max(self.error_rate, target_fpr)
             self._apply_fold(folded)
             folds += 1
         return folds
@@ -428,11 +469,15 @@ class BloomFilter:
         return int.from_bytes(self._bits, "little").bit_count() / self.m
 
     def clear(self) -> None:
-        self._bits = bytearray(self._byte_len)
-        self.n_added = 0
+        self._wipe()
         self.n_queries = 0
         self.n_accepted = 0
         self.n_rejected = 0
+
+    def _wipe(self) -> None:
+        """Forget every key; query counters stay cumulative (generational reset)."""
+        self._bits = bytearray(self._byte_len)
+        self.n_added = 0
         if self._recent_keys is not None:
             self._recent_keys.clear()
 

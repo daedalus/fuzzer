@@ -535,7 +535,7 @@ class CorpusManager:
         # a previous process.
         f._corpus_entropy = CumulativeByteEntropy()
         f.corpus, f.seen_hashes, f.irreplaceable_hashes = load_corpus(
-            f.corpus_dir, f.bloom, entropy_tracker=f._corpus_entropy
+            f.corpus_dir, entropy_tracker=f._corpus_entropy
         )
         # Ensure the irreplaceable/ directory exists inside seeds/ so seeds can be
         # promoted to irreplaceable without a late mkdir.
@@ -1177,7 +1177,7 @@ class CorpusManager:
         if f.corpus_dir and (
             verdict.novel or f.crash_sigs.get(counted_sig, 0) < CRASHING_SEEDS_PER_SIG
         ):
-            save_crashing_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
+            save_crashing_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes)
 
     def _novel_crash_meta(self, data: bytes, returncode: int, fault_addr, shim_sym=None):
         """Build the CrashMetadata sidecar for a novel crash (enrichment is novel-only)."""
@@ -1331,7 +1331,7 @@ class CorpusManager:
         if not self._hang_is_novel():
             f.hangs_deduped = getattr(f, "hangs_deduped", 0) + 1
             return
-        save_timeout_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
+        save_timeout_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes)
 
     def _hang_is_novel(self) -> bool:
         """The hang's (partial) trace hits an edge no saved hang hit.
@@ -1371,7 +1371,6 @@ class CorpusManager:
             data,
             f.corpus_dir,
             f.seen_hashes,
-            f.bloom,
             parent=parent,
             lineage_depth=parent_depth,
         ):
@@ -1661,7 +1660,7 @@ class CorpusManager:
             # original, which is being retired in the same breath.
             from fuzzer_tool.adapters.filesystem import save_to_corpus as _save_to_corpus
 
-            _save_to_corpus(trimmed, f.corpus_dir, f.seen_hashes, f.bloom)
+            _save_to_corpus(trimmed, f.corpus_dir, f.seen_hashes)
             # Retire, not unlink, so any child stored as a delta against the
             # original can still be rehydrated out of pruned/.
             _retire_seed_file(f.corpus_dir, hash_data(data))
@@ -2274,7 +2273,6 @@ class CorpusManager:
             f.corpus_dir,
             f.seen_hashes,
             f.irreplaceable_hashes,
-            f.bloom,
         )
         # Remove the original from seeds/ to avoid duplicate
         seeds_sub = f.corpus_dir / "seeds" / h[:2] / f"id_{h}"

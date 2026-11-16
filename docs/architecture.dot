@@ -109,7 +109,7 @@ digraph fuzzer_tool {
     subgraph cluster_corpus {
         label="5 · Corpus lifecycle";
         color="#cfc6d8"; fillcolor="#f7f4fa"; fontcolor="#5a4a6b";
-        corpus [label="services/corpus_manager.py\ladmission · prune · sync\lga · qea · rate_distortion · bloom dedup\lstate_store (resume) · parallel workers\l",
+        corpus [label="services/corpus_manager.py\ladmission · prune · sync\lga · qea · rate_distortion · hash dedup\lstate_store (resume) · parallel workers\l",
                 fillcolor="#e6dcee", fontcolor="#453454"];
     }
 

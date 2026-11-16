@@ -2334,7 +2334,6 @@ def cmd_rank(args):
     import time
 
     from fuzzer_tool.adapters.filesystem import load_corpus
-    from fuzzer_tool.core.bloom import BloomFilter
     from fuzzer_tool.core.edge_tracker import EdgeTracker
     from fuzzer_tool.core.elf import estimate_map_size
     from fuzzer_tool.core.state_store import StateStore
@@ -2347,9 +2346,8 @@ def cmd_rank(args):
     store = StateStore(corpus_dir)
     store.load()
 
-    bloom = BloomFilter(capacity=100_000)
     # add_default=False: the synthetic AAAAAAAA seed is not part of the corpus.
-    corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, bloom, add_default=False)
+    corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, add_default=False)
     if not corpus:
         print("[-] Empty corpus", file=sys.stderr)
         return 1
@@ -2446,17 +2444,14 @@ def cmd_ppmd(args):
 
     from fuzzer_tool.adapters.filesystem import load_corpus
     from fuzzer_tool.core.analyzers.analyzer_corpus_compression import CorpusCompressor
-    from fuzzer_tool.core.bloom import BloomFilter
 
     corpus_dir = Path(args.corpus)
     if not corpus_dir.exists():
         print(f"Error: corpus directory {corpus_dir} not found")
         return 1
 
-    bloom = BloomFilter(capacity=100_000)
-    bloom.init_fuzzy(max_recent=200)
     # add_default=False: the synthetic AAAAAAAA seed is not part of the corpus.
-    corpus, _, _ = load_corpus(corpus_dir, bloom, add_default=False)
+    corpus, _, _ = load_corpus(corpus_dir, add_default=False)
 
     if not corpus:
         print(f"No seeds found in {corpus_dir}")
@@ -2762,7 +2757,7 @@ def cmd_sweep(args):
 
     from fuzzer_tool.adapters.filesystem import hash_data, load_corpus
 
-    seeds, _, _ = load_corpus(corpus_dir, bloom=None, add_default=False)
+    seeds, _, _ = load_corpus(corpus_dir, add_default=False)
     if not seeds:
         print("[-] No seeds found in corpus")
         return 0

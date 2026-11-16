@@ -345,7 +345,6 @@ class _TrimFuzzer:
         self.seed_meta: dict[bytes, dict] = {}
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = None
         self.shm_cov = _Shm()
         self.ptrace_cov = None
         self._edge_tracker = self
