@@ -32,7 +32,13 @@ from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD
-from fuzzer_tool.core.run_mode import InputChannel, InputPlacement, RunMode, Switch
+from fuzzer_tool.core.run_mode import (
+    InputChannel,
+    InputPlacement,
+    RunMode,
+    StateRestore,
+    Switch,
+)
 from fuzzer_tool.core.sanitizer import FUNC_HASH_TAG, STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
@@ -945,6 +951,7 @@ def cmd_fuzz(args):
         input_placement=InputPlacement(
             getattr(args, "input_placement", InputPlacement.EXACT.value)
         ),
+        state_restore=StateRestore(getattr(args, "snapshot_restore", StateRestore.OFF.value)),
         touched_atomic=getattr(args, "touched_atomic", None),
         ctx_sensitive=getattr(args, "ctx_sensitive", None),
         alloc_sizes=getattr(args, "alloc_sizes", False),
@@ -3663,6 +3670,13 @@ def main() -> int:
         default=InputPlacement.EXACT.value,
         help="Direct in-process modes: 'guard' ends each input at a PROT_NONE page, so "
         "an overread faults (labelled guard-overread) without ASAN. Default: exact.",
+    )
+    fuzz_parser.add_argument(
+        "--snapshot-restore",
+        choices=[m.value for m in StateRestore],
+        default=StateRestore.OFF.value,
+        help="Direct in-process modes: 'globals' restores the target .so's .data/.bss "
+        "before each exec (wtf-style snapshot; heap not restored). Default: off.",
     )
     fuzz_parser.add_argument(
         "--no-cfg-cache",

@@ -100,7 +100,7 @@ from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD, OrbitProbe, canon
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check, structure_check
-from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, Switch
+from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, StateRestore, Switch
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
@@ -2123,6 +2123,7 @@ class Fuzzer:
         push_on_crash=None,
         # Direct in-process input placement (--input-placement). Appended.
         input_placement=InputPlacement.EXACT,
+        state_restore=StateRestore.OFF,
         # 'branch' seed arm over the Katz channel's ICFG (--seed-branch-scheduler). Appended.
         seed_branch_scheduler=False,
         # Viterbi field segmentation (core/field_hmm.py, --field-hmm). Appended.
@@ -2210,6 +2211,7 @@ class Fuzzer:
         # always-on per-iteration trace in the persistent loader.
         self.use_ptrace = use_ptrace
         self.input_placement = input_placement
+        self.state_restore = state_restore
         # Weight havoc's 11 inline sub-mutations by their measured hit rate
         # instead of drawing them uniformly. On by default: the priors start
         # uniform, the per-draw cost is a bisect over 11 floats, and the
@@ -5390,6 +5392,7 @@ class Fuzzer:
                 use_ptrace=self.use_ptrace,
                 placement=self.input_placement,
                 perf_counters=self._perf_counters,
+                restore=self.state_restore,
             )
             if use_direct_lite and self._rss_limit_mb > 0:
                 # The target shares this process: no per-target cap exists.
@@ -5488,6 +5491,7 @@ class Fuzzer:
                 use_ptrace=self.use_ptrace,
                 placement=self.input_placement,
                 perf_counters=self._perf_counters,
+                restore=self.state_restore,
             )
             mode = "direct ctypes" if direct_ok else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
