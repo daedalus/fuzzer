@@ -165,7 +165,10 @@ fuzzer-tool mutants build SRC.c --wrapper targets/fuzzgoat_read.c -o DIR [--cap 
 fuzzer-tool mutants score DIR -d CORPUS [-j N]      # prints kills/hangs/clean_inputs
 ```
 
-## P5 — bench wiring (`tools/lib/bench_paired.py`)
+## P5 — bench wiring (`tools/lib/bench_paired.py`) (shipped)
+
+Shipped as planned, plus `--kill-jobs`, and row keys `kill_hangs`,
+`kill_flaky`. Remaining: the A/A control, then the cmplog A/B (Statistics).
 
 - `--kill-set DIR`: in `run_cell`, after `run_timed` and next to
   `_real_edges(workdir)`, before the `rmtree`: `row["kills"]`,
