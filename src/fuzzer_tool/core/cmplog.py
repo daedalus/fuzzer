@@ -445,6 +445,11 @@ class CountsDrain(enum.Enum):
     SKIP = 1
 
 
+def _never_stale() -> bool:
+    """Drain scope: the shim already forgets at every drain."""
+    return False
+
+
 def _eviction_victims(pool: list, value: dict, excess: int) -> set[int]:
     """Indices of the *excess* entries smallest by ``(value, index)``.
 
@@ -887,6 +892,13 @@ class CmplogCollector:
         # Overridable caps (0 = use module default)
         self._max_tokens = max_tokens if max_tokens > 0 else CMPLOG_TOKENS_MAX
         self._max_pairs = max_pairs if max_pairs > 0 else CMPLOG_PAIRS_MAX
+
+        # Campaign dedup: the shim drops records it already wrote, but the
+        # pool evicts. Rescope once per pool turnover so evicted pairs can
+        # come back. Decided here, once: drain scope is never stale.
+        self._rescope_mark = 0
+        campaign = dedup_scope is DedupScope.CAMPAIGN
+        self.take_stale_scope = self._stale_campaign if campaign else _never_stale
         # File offset: only read new data since last collection.
         # Without this, collect_tokens re-reads the entire file (5M+ lines)
         # on every call, dominating runtime at 60%+ CPU.
@@ -2231,6 +2243,18 @@ class CmplogCollector:
     def get_tokens(self) -> list[bytes]:
         """Get all collected tokens."""
         return self.tokens
+
+    def _stale_campaign(self) -> bool:
+        """True once ``max_pairs`` pairs were evicted since the last rescope.
+
+        Marks the rescope. Example: max_pairs 5000, 12000 evicted -> True at
+        5000 and 10000, False between.
+        """
+        if self.evicted_pair_count - self._rescope_mark < self._max_pairs:
+            return False
+
+        self._rescope_mark = self.evicted_pair_count
+        return True
 
     def get_eviction_stats(self) -> tuple[int, int]:
         """Return (evicted_token_count, evicted_pair_count)."""
