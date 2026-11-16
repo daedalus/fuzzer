@@ -128,7 +128,12 @@ static int run_one(const unsigned char *b, size_t n, unsigned timeout_s)
 }
 ```
 
-## P3 — `services/mutant_kill.py`
+## P3 — `services/mutant_kill.py` (shipped)
+
+Measured (fuzzgoatNoVulns, 5 stock seeds): 63 kills, 5 hangs, 0 flaky,
+identical on rerun; 23.1 s at 1 job, 7.4 s at 4. Added `KillScore.flaky` and
+`Confirm` (NONE/RERUN) for the kill re-run from Risks; `pack_record` in the
+adapter reads the killing input back.
 
 ```python
 @dataclass(frozen=True, slots=True)
