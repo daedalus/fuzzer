@@ -1070,6 +1070,7 @@ class Fuzzer:
     _run_mode = RunMode.FULL
     _markov_switch = Switch.ON
     _auto_minimize = Switch.ON
+    _trim_new_coverage_on = Switch.OFF
     # Multi-target .so: target -> its in-process runner; __init__ fills it.
     _target_runners: MappingProxyType = MappingProxyType({})
 
@@ -2161,6 +2162,8 @@ class Fuzzer:
         stall_mode=None,
         # --stack-depth-max: admit deeper recursion (core/stack_depth.py). Appended.
         stack_depth_max=False,
+        # --trim-new-coverage: trim each new-coverage seed on admission. Appended.
+        trim_new_coverage=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2351,6 +2354,7 @@ class Fuzzer:
         # --no-auto-minimize: no trim on admission, no corpus-size prune.
         # The memory-pressure prune stays (bounded memory).
         self._auto_minimize = auto_minimize
+        self._trim_new_coverage_on = trim_new_coverage
         # --lightweight: FuzzRound.run picks the lean pipeline.
         self._run_mode = run_mode
         self.prune_corpus_max_memory = prune_corpus_max_memory
