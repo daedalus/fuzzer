@@ -268,3 +268,39 @@ class TestWiring:
             fz._restore_environ()
 
         assert "FUZZ_INPUT_ALIAS" not in os.environ
+
+
+class TestForkserver:
+    def test_regression_alias_reads_loader_input(self, build):
+        """The loader must stage into the memfd FUZZ_INPUT_PATH names.
+
+        Measured before the fix: the loader wrote its own memfd while the
+        target's alias pointed at the Fuzzer's, which nothing wrote, so every
+        exec read the empty file (fuzzgoat: 2 edges instead of 28).
+        """
+        from fuzzer_tool.adapters.forkserver import ForkserverRunner, _ensure_compiled
+        from fuzzer_tool.adapters.memfd_input import MemfdInput
+        from fuzzer_tool.adapters.shm import ShmCoverage
+
+        if _ensure_compiled() is None:
+            pytest.skip("fuzz_loader failed to compile")
+        m = MemfdInput()
+        shm = ShmCoverage(size=8192)
+        env = {
+            "__AFL_SHM_ID": shm.env_id,
+            "AFL_MAP_SIZE": str(shm.size),
+            "FUZZ_INPUT_ALIAS": ALIAS,
+            "FUZZ_INPUT_PATH": m.path,
+        }
+        r = ForkserverRunner(build["exe"], timeout=5.0, env=env, argv=["fopen", ALIAS], input_file=m)
+        try:
+            assert r.start()
+            rcs = [r.run_one(bytes([b]))[0] for b in (6, 13, 6)]
+            assert r.input_path == m.path
+            assert r.exec_mode == "forkserver"
+        finally:
+            r.stop()
+            shm.cleanup()
+            m.close()
+
+        assert rcs == [6, 13, 6]

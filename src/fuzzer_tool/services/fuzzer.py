@@ -5653,6 +5653,7 @@ class Fuzzer:
             env=env,
             perf_counters=self._perf_counters,
             argv=argv,
+            input_file=self._input_file,
         )
         if runner.start():
             self._forkserver = runner

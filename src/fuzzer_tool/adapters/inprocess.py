@@ -227,6 +227,24 @@ def _no_stage(data: bytes) -> None:
     """No input file: the harness gets the buffer only."""
 
 
+def _pre_exec(restore, stage):
+    """One per-exec call for globals restore + input file staging.
+
+    Bound once per load: the off/off case costs the single call master
+    already made for restore alone (Hard Rule 58).
+    """
+    if restore is _no_restore:
+        return stage
+    if stage is _no_stage:
+        return lambda data: restore()
+
+    def both(data: bytes) -> None:
+        restore()
+        stage(data)
+
+    return both
+
+
 # Crash hooks: only guard placement reads the fault address.
 def _crash_plain(r: "InProcessRunner", sig: int) -> None:
     return None
@@ -306,6 +324,7 @@ class InProcessRunner:
         # via $FUZZ_INPUT_PATH (wtf fshooks port).
         self._input_file = input_file
         self._stage = input_file.write if input_file is not None else _no_stage
+        self._pre = _pre_exec(self._restore, self._stage)
         # fd 2 -> reused pipe around direct-mode calls (ASAN reports).
         self._stderr = StderrCapture()
         self._is_c = False
@@ -495,6 +514,7 @@ class InProcessRunner:
         if snap is None:
             return
         self._restore = snap.restore
+        self._pre = _pre_exec(self._restore, self._stage)
         log.info("snapshot-restore: %d bytes of globals per exec", snap.size)
 
     def _bind_fault(self) -> None:
@@ -511,6 +531,7 @@ class InProcessRunner:
 
     def _unbind_guard(self) -> None:
         self._restore = _no_restore
+        self._pre = _pre_exec(self._restore, self._stage)
         self._guard_call = _call_unguarded
         self._guard_fn = None
         self._guard_ptr = None
@@ -830,8 +851,7 @@ class InProcessRunner:
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
-        self._restore()
-        self._stage(data)
+        self._pre(data)
         # No reset_bitmap() here: run_target's reset_edge_map() generation bump
         # already aged out the previous exec. A memset re-claimed every slot
         # cold and bumped edge_count, defeating the _scan_new fast path.
@@ -897,8 +917,7 @@ class InProcessRunner:
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
-        self._restore()
-        self._stage(data)
+        self._pre(data)
 
         n = len(data)
         self._c_buf = self._fill(self, data)

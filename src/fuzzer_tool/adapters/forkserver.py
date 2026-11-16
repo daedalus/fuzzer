@@ -187,11 +187,15 @@ class ForkserverRunner:
         env: dict[str, str] | None = None,
         perf_counters=None,
         argv: list[str] | None = None,
+        input_file: MemfdInput | None = None,
     ):
         """*argv*: target arguments, ``{file}`` -> the input path (``-F`` mode).
 
         None keeps ``<target> <input>`` with stdin from the same file.
+        *input_file*: the caller's memfd, staged into per exec instead of one
+        of our own, so ``$FUZZ_INPUT_PATH`` names what the target reads.
         """
+        self._shared_input = input_file
         self._argv = argv
         self.target = target
         # Attached to the loader before INIT, inherited by every child it
@@ -233,8 +237,9 @@ class ForkserverRunner:
 
         # Memory-backed input: the loader rewrites it per exec, no disk I/O.
         if self._input_file is None:
-            self._memfd = MemfdInput()
-            self._input_file = self._memfd.path
+            if self._shared_input is None:
+                self._memfd = MemfdInput()
+            self._input_file = (self._shared_input or self._memfd).path
 
         # Same env treatment run_target_fast() gives its children: merge the
         # caller's overrides over os.environ, then strip the LD_PRELOAD
@@ -506,10 +511,11 @@ class ForkserverRunner:
         # would otherwise keep the stderr-drain thread blocked forever,
         # leaving the process permanently multi-threaded.
         _close_streams(proc)
+        # The caller's memfd stays open: it owns it.
+        self._input_file = None
         if self._memfd is not None:
             self._memfd.close()
             self._memfd = None
-            self._input_file = None
 
     def __del__(self):
         self.stop()
