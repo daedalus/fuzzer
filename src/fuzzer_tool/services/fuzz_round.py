@@ -482,7 +482,14 @@ class FuzzRound:
             new_tokens = []
         self._cmplog_found = bool(new_tokens)
         self._rewind_shim()
+        self._rescope_shim()
         f._add_dict_tokens(new_tokens)
+
+    def _rescope_shim(self) -> None:
+        # Campaign dedup scope: after a full pool turnover, let the shim
+        # re-send pairs the pool evicted. Only a collect can evict.
+        if self._collect_now and self._f._cmplog.take_stale_scope():
+            self._f._rescope_cmplog_shim()
 
     def _log_secant(self) -> None:
         # --fox-newton: records are gated to collect rounds, so this drain

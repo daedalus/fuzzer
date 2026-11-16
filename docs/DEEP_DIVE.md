@@ -2001,6 +2001,8 @@ Two shim record filters (afl_shim.c "Per-site record cap", "Dedup scope"), off b
 
 The cap counts records written, not dropped repeats, so under campaign scope the window moves: drain 1 logs iterations 0..N-1, drain 2 logs N..2N-1. Bench arm `cmp-cap-dedup` (N=32 + campaign). A/B (`docs/AB_LEDGER.md` #138, fuzzgoat_tcg, 20 × 10k): 12/7/1, Wilcoxon p=0.84, med +14.5 edges, A/A 5/2/13: NULL; CPU unchanged. FFmpeg 9.0.2 noasan (#139, 20 × 10k): 9/11, p=0.93, med −215.5 of 23,090 edges, A/A +96.5: NULL; CPU −9% median, 13/20 cells, p=0.14 (n.s.). The pool no longer freezes on 9.0.2 at baseline (639k pairs evicted / 10k execs), so the case the knobs targeted is gone. Stays opt-in. Tests: `tests/test_cmplog_site_cap_scope.py`, `tests/test_cmplog_record_knobs.py`.
 
+Campaign scope forgets on pool turnover. The shim's table records what it sent, not what the pool holds, and the pool evicts past `max_pairs`, so an evicted pair would never be re-sent (direct_lite: one process, one table; fork children start fresh anyway). After each collect, `CmplogCollector.take_stale_scope()` is true once `max_pairs` pairs were evicted since the last rescope, and `FuzzRound._rescope_shim` calls `__cmplog_rescope()`. Drain scope binds a no-op. Tests: `tests/test_cmplog_campaign_rescope.py` (an evicted pair comes back; without the rescope it does not). No A/B yet: #150 ran without it.
+
 ### Constant-Compare Pruning (`--cmp-prune-const`)
 
 Port of WingFuzz's `LoadCmpTracer` few-bits-set rule. With the flag, the shim
