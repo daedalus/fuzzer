@@ -958,6 +958,7 @@ def cmd_fuzz(args):
         joint_liveness=getattr(args, "joint_liveness", False),
         byte_interaction=getattr(args, "byte_interaction", False),
         influence=getattr(args, "influence", False),
+        cut_damage=getattr(args, "cut_damage", False),
         field_hmm=getattr(args, "field_hmm", False),
         field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
@@ -2833,6 +2834,9 @@ def cmd_sweep(args):
 # seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
 #
+# cut_damage (--cut-damage) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md); inert without --seed-branch-scheduler.
+#
 # seed_gram_scheduler (--seed-gram-scheduler) is excluded as unmeasured: unit tests
 # only, no paired run (docs/AB_PENDING.md).
 #
@@ -4032,6 +4036,13 @@ def main() -> int:
         "(covered block, never-covered successor), by line-graph hops over the Katz "
         "channel's ICFG; needs a trace-pc, undirected run. Elo arm "
         "(core/schedulers/seed_branch.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--cut-damage",
+        action="store_true",
+        help="With --seed-branch-scheduler: rank frontier branches by tail hits / (1 + "
+        "blocks the head alone guards from main), articulation points of the undirected "
+        "ICFG (core/articulation.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--seed-p2c-scheduler",
