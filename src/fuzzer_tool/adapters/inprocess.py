@@ -24,6 +24,7 @@ from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.global_snapshot import GlobalSnapshot
 from fuzzer_tool.adapters.guard_arena import GUARD_OVERREAD, GuardArena
 from fuzzer_tool.adapters.heap_input import HeapInput
+from fuzzer_tool.adapters.memfd_input import INPUT_PATH_ENV
 from fuzzer_tool.adapters.process import run_target_stdin
 from fuzzer_tool.adapters.shim_factory import (
     ShimResult,
@@ -222,6 +223,10 @@ def _no_restore() -> None:
     """``--snapshot-restore off``: nothing to write back."""
 
 
+def _no_stage(data: bytes) -> None:
+    """No input file: the harness gets the buffer only."""
+
+
 # Crash hooks: only guard placement reads the fault address.
 def _crash_plain(r: "InProcessRunner", sig: int) -> None:
     return None
@@ -261,6 +266,7 @@ class InProcessRunner:
         placement: InputPlacement = InputPlacement.EXACT,
         perf_counters=None,
         restore: StateRestore = StateRestore.OFF,
+        input_file=None,
     ):
         self.target = target
         # Handed to the loaders, which attach at spawn (see perf_pid()).
@@ -296,6 +302,10 @@ class InProcessRunner:
         # Globals copy-back before each direct exec, bound once per load.
         self._restore_mode = restore
         self._restore = _no_restore
+        # -F: each input is also written to a MemfdInput the harness opens
+        # via $FUZZ_INPUT_PATH (wtf fshooks port).
+        self._input_file = input_file
+        self._stage = input_file.write if input_file is not None else _no_stage
         # fd 2 -> reused pipe around direct-mode calls (ASAN reports).
         self._stderr = StderrCapture()
         self._is_c = False
@@ -344,6 +354,7 @@ class InProcessRunner:
             placement=self._placement,
             perf_counters=self._perf_counters,
             restore=self._restore_mode,
+            input_file=self._input_file,
         )
 
     def _start(self):
@@ -404,6 +415,8 @@ class InProcessRunner:
         if self.coverage_env_id:
             os.environ["__AFL_SHM_ID"] = self.coverage_env_id
             os.environ["AFL_MAP_SIZE"] = str(self.shm_size)
+        if self._input_file is not None:
+            os.environ[INPUT_PATH_ENV] = self._input_file.path
         if cov and not self._bitmap_out:
             fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
             os.close(fd)
@@ -818,6 +831,7 @@ class InProcessRunner:
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
         self._restore()
+        self._stage(data)
         # No reset_bitmap() here: run_target's reset_edge_map() generation bump
         # already aged out the previous exec. A memset re-claimed every slot
         # cold and bumped edge_count, defeating the _scan_new fast path.
@@ -884,6 +898,7 @@ class InProcessRunner:
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
         self._restore()
+        self._stage(data)
 
         n = len(data)
         self._c_buf = self._fill(self, data)

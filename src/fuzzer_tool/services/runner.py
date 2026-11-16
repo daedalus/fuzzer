@@ -446,6 +446,7 @@ class TargetRunner:
             perf_counters=f._perf_counters,
             pt_session=f._pt_session,
             lbr_session=f._lbr_session,
+            input_file=f._input_file,
         )
         f._last_child_pid = pid
         if f._perf_counters:

@@ -13,6 +13,9 @@ the direct_lite path. An earlier version round-tripped a bitmap through a
 file, which was disconnected from the SHM the target actually wrote to.
 
 Protocol (stdin/stdout binary):
+  Argv:   "ARG <value>\n" (0..MAX_ARGS lines, before INIT) -- the
+          executable's argv[1..]; none means `<target> <input_file>`.
+          Values may hold spaces, not newlines (one line each).
   Init:   "INIT <target> <func> <input_file> <timeout>\n"
           NOTE: paths must not contain whitespace (%s sscanf).
   Run:    "RUN <len>\n<data>"
@@ -126,6 +129,26 @@ static void write_bytes(const uint8_t *buf, size_t n) {
 
 static char target_path_global[256] = {0};
 static char input_path[256] = {0};
+
+/* argv for exec'd targets: [target, ARG..., NULL], or [target, input, NULL]. */
+#define MAX_ARGS 64
+#define MAX_LINE 4096
+static char *exec_argv[MAX_ARGS + 2];
+static int n_args = 0;
+
+/* "ARG <value>" -> exec_argv[1 + n]; 0 when the table is full. */
+static int add_arg(const char *value) {
+    if (n_args >= MAX_ARGS) return 0;
+    exec_argv[1 + n_args++] = strdup(value);
+    return 1;
+}
+
+/* Finish exec_argv once target and input are known (after INIT). */
+static void build_argv(void) {
+    exec_argv[0] = target_path_global;
+    if (n_args == 0) exec_argv[1 + n_args++] = input_path;
+    exec_argv[1 + n_args] = NULL;
+}
 static int input_fd = -1;
 static double timeout_seconds = 5.0;
 
@@ -395,7 +418,7 @@ static int start_forkserver(void) {
         signal(SIGCHLD, SIG_DFL);
         signal(SIGALRM, SIG_DFL);
         apply_rss_limit();
-        execl(target_path_global, target_path_global, input_path, (char *)NULL);
+        execv(target_path_global, exec_argv);
         _exit(127);
     }
 
@@ -500,10 +523,10 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
         redirect_stdout_to_null();
         signal(SIGCHLD, SIG_DFL);
         signal(SIGALRM, SIG_DFL);
-        /* argv[1] = input path, stdin = same file: matches run_target_fast so
-           targets keep whichever of the two they already read. */
+        /* exec_argv: `<target> <input>` by default (argv[1] = input, stdin =
+           same file, as run_target_fast), or the ARG template. */
         apply_rss_limit();
-        execl(target_path_global, target_path_global, input_path, (char *)NULL);
+        execv(target_path_global, exec_argv);
         _exit(127);
     }
 
@@ -732,13 +755,21 @@ static void serve(void) {
 }
 
 int main(void) {
-    char line[512];
+    char line[MAX_LINE];
 
     /* Disable stdio buffering on stdin — fork() inherits the buffer and
        _exit() in the child discards the copy, losing read-ahead data. */
     setvbuf(stdin, NULL, _IONBF, 0);
 
+    /* Optional ARG lines precede INIT. */
     if (!read_line(line, sizeof(line))) return 1;
+    while (strncmp(line, "ARG ", 4) == 0) {
+        if (!add_arg(line + 4)) {
+            fprintf(stderr, "too many ARG lines (max %d)\n", MAX_ARGS);
+            return 1;
+        }
+        if (!read_line(line, sizeof(line))) return 1;
+    }
     char func_name[256];
     char timeout_str[16] = "5";
     sscanf(line, "INIT %255s %255s %255s %15s", target_path_global, func_name, input_path,
@@ -750,6 +781,7 @@ int main(void) {
     timeout_seconds = strtod(timeout_str, NULL);
     if (!(timeout_seconds > 0.0)) timeout_seconds = 5.0;
 
+    build_argv();
     is_executable = !is_shared_lib(target_path_global);
     if (!(is_executable ? setup_exec() : setup_dlopen(func_name))) return 1;
 
@@ -763,7 +795,7 @@ int main(void) {
        additive: callers that only compare the first token, or only read
        parts[1], are unaffected, and a caller that wants TIMEOUT can detect
        support instead of guessing from a binary it did not build. */
-    printf("READY %s retune%s\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen",
+    printf("READY %s retune argv%s\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen",
            shm_fuzz ? " shmfuzz" : "");
     fflush(stdout);
 

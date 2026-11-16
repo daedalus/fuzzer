@@ -1189,6 +1189,13 @@ def _kill_on_timeout(pid: int, flag: threading.Event) -> None:
 # ── File mode ───────────────────────────────────────────────────────────
 
 
+def _file_cmd(target: str, target_args: list[str], path: str) -> list[str]:
+    """argv with ``{file}`` -> *path*; ``<target> <path>`` without args."""
+    if not target_args:
+        return [target, path]
+    return [target] + [a.replace("{file}", path) for a in target_args]
+
+
 def run_target_file(
     target: str,
     data: bytes,
@@ -1199,8 +1206,9 @@ def run_target_file(
     perf_counters=None,
     pt_session=None,
     lbr_session=None,
+    input_file=None,
 ) -> tuple[int, str, int]:
-    """Execute target with data written to a temp file.
+    """Execute target with data written to a temp file (or *input_file*).
 
     Thread-free: ``_spawn_capture`` drains stderr with poll.
 
@@ -1215,10 +1223,17 @@ def run_target_file(
         pt_session: Optional PtTraceSession (opens an Intel PT event on the
             child PID).  Drained by the caller once the child has exited.
         lbr_session: Optional LbrSession, same protocol as pt_session.
+        input_file: Optional ``MemfdInput``: the input goes to memory instead
+            of a create/write/unlink in *tmp_dir* per exec.
 
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
     """
+    if input_file is not None:
+        input_file.write(data)
+        cmd = _file_cmd(target, target_args, input_file.path)
+        return _spawn_capture(cmd, None, timeout, env, (perf_counters, pt_session, lbr_session))
+
     from pathlib import Path
 
     tmp_file = Path(tmp_dir) / f"fuzz_{os.getpid()}"
@@ -1226,10 +1241,7 @@ def run_target_file(
         tmp_file.write_bytes(data)
     except OSError as e:
         return -2, str(e), 0
-    if target_args:
-        cmd = [target] + [a.replace("{file}", str(tmp_file)) for a in target_args]
-    else:
-        cmd = [target, str(tmp_file)]
+    cmd = _file_cmd(target, target_args, str(tmp_file))
 
     try:
         return _spawn_capture(cmd, None, timeout, env, (perf_counters, pt_session, lbr_session))

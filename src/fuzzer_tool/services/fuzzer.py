@@ -37,6 +37,7 @@ except ImportError:
 
 from fuzzer_tool.adapters import process, seed_zip
 from fuzzer_tool.adapters.filesystem import without_timeout_seeds
+from fuzzer_tool.adapters.memfd_input import ALIAS_ENV, INPUT_PATH_ENV, MemfdInput
 from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
@@ -1500,6 +1501,7 @@ class Fuzzer:
         dictionary=None,
         file_mode=False,
         target_args=None,
+        input_alias=None,
         markov_order=1,
         markov_generate=False,
         markov_blend=False,
@@ -2326,6 +2328,8 @@ class Fuzzer:
         self.use_coverage = use_coverage
         self.dictionary = dictionary or []
         self.file_mode = file_mode
+        # --input-alias: hardcoded path the shim swaps for the memfd input.
+        self.input_alias = input_alias
         self.isolate_crash_fields = isolate_crash_fields
         # --rop-gadgets: on each novel crash, statically scan the target's
         # .text for ROP gadgets and record the inventory + syscall-chain
@@ -2816,6 +2820,8 @@ class Fuzzer:
             atexit.register(_cleanup_tmp_dir, self._tmp_dir)
         else:
             self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
+        self._input_file = None
+        self._export_input_env()
 
         self.ptrace_cov: PtraceCoverage | None = None
         self.shm_cov: ShmCoverage | None = None
@@ -5393,6 +5399,7 @@ class Fuzzer:
                 placement=self.input_placement,
                 perf_counters=self._perf_counters,
                 restore=self.state_restore,
+                input_file=self._input_file,
             )
             if use_direct_lite and self._rss_limit_mb > 0:
                 # The target shares this process: no per-target cap exists.
@@ -5492,6 +5499,7 @@ class Fuzzer:
                 placement=self.input_placement,
                 perf_counters=self._perf_counters,
                 restore=self.state_restore,
+                input_file=self._input_file,
             )
             mode = "direct ctypes" if direct_ok else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
@@ -5578,6 +5586,19 @@ class Fuzzer:
         reset_env_cache()
         print("[*] AntiFuzz evasion: self-ptrace faked, input delays dropped (LD_PRELOAD)")
 
+    def _export_input_env(self) -> None:
+        """-F input in memory (wtf fshooks port); publish its path and alias.
+
+        Every backend inherits os.environ: spawn copies it, the loader and
+        in-process loads read it. Rolled back by ``_restore_environ()``.
+        """
+        if not self.file_mode:
+            return
+        self._input_file = MemfdInput()
+        os.environ[INPUT_PATH_ENV] = self._input_file.path
+        if self.input_alias:
+            os.environ[ALIAS_ENV] = self.input_alias
+
     def _setup_forkserver(self) -> None:
         """Start the C fuzz_loader for the default (spawn-per-exec) path.
 
@@ -5592,23 +5613,24 @@ class Fuzzer:
         persistent, ptrace) or needs per-execution setup the
         loader's environment is fixed against (cmplog's file sink truncates
         its log per run; the FIFO sink is run-invariant, and the shim zeroes
-        its counters before forking; file_mode/target_args build their own argv; multi-target needs more
-        than one binary).
+        its counters before forking; target_args without -F are ignored by
+        the spawn path too; multi-target needs more than one binary).
+        -F runs here too: the input is a memfd with one path for every exec,
+        so the argv template (``{file}``) is fixed at exec.
         """
         if (
             self._inprocess_runner
             or self._persistent_runner
             or self.ptrace_cov
             or self.multi_targets
-            or self.file_mode
-            or self.target_args
+            or (self.target_args and not self.file_mode)
             or (self._cmplog and not self._cmplog.fifo_sink)
             or self._pt_session
             or self._lbr_session
         ):
             return
 
-        from fuzzer_tool.adapters.forkserver import ForkserverRunner, mode_env
+        from fuzzer_tool.adapters.forkserver import FILE_PLACEHOLDER, ForkserverRunner, mode_env
 
         # Persistent loop / deferred init, when the harness has the macros.
         env: dict[str, str] = mode_env(self.target)
@@ -5623,8 +5645,14 @@ class Fuzzer:
         if self._cmplog:
             env = self._cmplog.setup_env({**os.environ, **env})
 
+        # -F: argv template, {file} -> the loader's memfd input path.
+        argv = (self.target_args or [FILE_PLACEHOLDER]) if self.file_mode else None
         runner = ForkserverRunner(
-            self.target, timeout=self.timeout, env=env, perf_counters=self._perf_counters
+            self.target,
+            timeout=self.timeout,
+            env=env,
+            perf_counters=self._perf_counters,
+            argv=argv,
         )
         if runner.start():
             self._forkserver = runner

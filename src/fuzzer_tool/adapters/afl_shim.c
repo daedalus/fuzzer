@@ -6539,6 +6539,143 @@ __AFL_NO_COV static void __afl_cmplog_fini_dtor(void) { __afl_cmplog_fini(); }
 
 #if __AFL_EDGE
 
+/* ── Input file alias (wtf fshooks port) ──────────────────────────────
+ *
+ * A library that opens a hardcoded path cannot take the fuzzer's input.
+ * FUZZ_INPUT_ALIAS names that path; the hooks swap it for FUZZ_INPUT_PATH,
+ * the fuzzer's memfd (adapters/memfd_input.py):
+ *
+ *   lib: fopen("/etc/app.conf") -> hook -> real fopen("/proc/<pid>/fd/<n>")
+ *
+ * Hidden, like the signal API: binds every call inside this DSO (library
+ * objects linked in too, -Bsymbolic or not) and nothing outside it. Asm
+ * labels, not C names: _FILE_OFFSET_BITS=64 redirects open to open64 in the
+ * headers, and two C definitions would then share one symbol. Exact string
+ * match only. The alias stands for a regular file: lstat follows the memfd's
+ * /proc symlink, O_NOFOLLOW is dropped. Unset or empty env: pass-through.
+ * Real calls go to RTLD_NEXT (libc), past a sanitizer's open interceptor. */
+#define __AFL_ALIAS_ENV "FUZZ_INPUT_ALIAS"
+#define __AFL_ALIAS_TO_ENV "FUZZ_INPUT_PATH"
+#define __AFL_IO_HOOK __attribute__((visibility("hidden"), used)) __AFL_NO_COV
+
+enum { __AFL_ALIAS_UNREAD, __AFL_ALIAS_ON, __AFL_ALIAS_OFF };
+static int __afl_alias_state = __AFL_ALIAS_UNREAD;
+static const char *__afl_alias_from;
+static const char *__afl_alias_to;
+
+/* Own compare: strcmp is the cmplog hook and would log the shim's compare. */
+__AFL_NO_COV static int __afl_path_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+/* *path*, or the memfd path when *path* is the alias. Env read once, lazily:
+ * in-process targets get it set before their first open, not before load. */
+__AFL_NO_COV static const char *__afl_alias(const char *path) {
+    if (__builtin_expect(__afl_alias_state == __AFL_ALIAS_UNREAD, 0)) {
+        __afl_alias_from = getenv(__AFL_ALIAS_ENV);
+        __afl_alias_to = getenv(__AFL_ALIAS_TO_ENV);
+        int on = __afl_alias_from && *__afl_alias_from && __afl_alias_to && *__afl_alias_to;
+        __afl_alias_state = on ? __AFL_ALIAS_ON : __AFL_ALIAS_OFF;
+    }
+    if (__afl_alias_state != __AFL_ALIAS_ON || !path) return path;
+    return __afl_path_eq(path, __afl_alias_from) ? __afl_alias_to : path;
+}
+
+/* libc's *name*, cached in *slot*; NULL (errno ENOSYS) when unresolvable. */
+__AFL_NO_COV static void *__afl_io_real(void **slot, const char *name) {
+    if (!*slot) *slot = dlsym(RTLD_NEXT, name);
+    if (!*slot) errno = ENOSYS;
+    return *slot;
+}
+
+typedef int (*__afl_open_fn)(const char *, int, ...);
+typedef int (*__afl_openat_fn)(int, const char *, int, ...);
+typedef FILE *(*__afl_fopen_fn)(const char *, const char *);
+typedef int (*__afl_stat_fn)(const char *, struct stat *);
+typedef int (*__afl_stat64_fn)(const char *, struct stat64 *);
+typedef int (*__afl_access_fn)(const char *, int);
+
+/* open(2) passes a mode only with O_CREAT / O_TMPFILE. */
+#define __AFL_OPEN_MODE(flags, mode)                        \
+    do {                                                    \
+        if ((flags) & (O_CREAT | O_TMPFILE)) {              \
+            va_list ap;                                     \
+            va_start(ap, flags);                            \
+            (mode) = va_arg(ap, int);                       \
+            va_end(ap);                                     \
+        }                                                   \
+    } while (0)
+
+/* Swapped path: drop O_NOFOLLOW, the memfd path is a /proc symlink. */
+#define __AFL_ALIAS_FLAGS(orig, p, flags) ((p) == (orig) ? (flags) : ((flags) & ~O_NOFOLLOW))
+
+#define __AFL_DEF_OPEN(cname, sym)                                              \
+    __AFL_IO_HOOK int cname(const char *path, int flags, ...) __asm__(sym);     \
+    __AFL_IO_HOOK int cname(const char *path, int flags, ...) {                 \
+        static void *real;                                                      \
+        int mode = 0;                                                           \
+        __AFL_OPEN_MODE(flags, mode);                                           \
+        const char *p = __afl_alias(path);                                      \
+        __afl_open_fn fn = (__afl_open_fn)__afl_io_real(&real, sym);            \
+        if (!fn) return -1;                                                     \
+        return fn(p, __AFL_ALIAS_FLAGS(path, p, flags), mode);                  \
+    }
+
+#define __AFL_DEF_OPENAT(cname, sym)                                            \
+    __AFL_IO_HOOK int cname(int dirfd, const char *path, int flags, ...)        \
+        __asm__(sym);                                                           \
+    __AFL_IO_HOOK int cname(int dirfd, const char *path, int flags, ...) {      \
+        static void *real;                                                      \
+        int mode = 0;                                                           \
+        __AFL_OPEN_MODE(flags, mode);                                           \
+        const char *p = __afl_alias(path);                                      \
+        __afl_openat_fn fn = (__afl_openat_fn)__afl_io_real(&real, sym);        \
+        if (!fn) return -1;                                                     \
+        return fn(dirfd, p, __AFL_ALIAS_FLAGS(path, p, flags), mode);           \
+    }
+
+#define __AFL_DEF_FOPEN(cname, sym)                                             \
+    __AFL_IO_HOOK FILE *cname(const char *path, const char *mode) __asm__(sym); \
+    __AFL_IO_HOOK FILE *cname(const char *path, const char *mode) {             \
+        static void *real;                                                      \
+        __afl_fopen_fn fn = (__afl_fopen_fn)__afl_io_real(&real, sym);          \
+        return fn ? fn(__afl_alias(path), mode) : NULL;                         \
+    }
+
+/* lstat on the alias stats the memfd (follows the /proc link): real_sym. */
+#define __AFL_DEF_STAT(cname, sym, real_sym, st_t, fn_t)                        \
+    __AFL_IO_HOOK int cname(const char *path, st_t *st) __asm__(sym);           \
+    __AFL_IO_HOOK int cname(const char *path, st_t *st) {                       \
+        static void *real, *follow;                                             \
+        const char *p = __afl_alias(path);                                      \
+        fn_t fn = (fn_t)(p == path ? __afl_io_real(&real, sym)                  \
+                                   : __afl_io_real(&follow, real_sym));         \
+        return fn ? fn(p, st) : -1;                                             \
+    }
+
+__AFL_DEF_OPEN(__afl_io_open, "open")
+__AFL_DEF_OPEN(__afl_io_open64, "open64")
+__AFL_DEF_OPENAT(__afl_io_openat, "openat")
+__AFL_DEF_OPENAT(__afl_io_openat64, "openat64")
+__AFL_DEF_FOPEN(__afl_io_fopen, "fopen")
+__AFL_DEF_FOPEN(__afl_io_fopen64, "fopen64")
+
+/* stat/lstat are libc symbols from glibc 2.33; older ones inline __xstat. */
+#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 33)
+__AFL_DEF_STAT(__afl_io_stat, "stat", "stat", struct stat, __afl_stat_fn)
+__AFL_DEF_STAT(__afl_io_stat64, "stat64", "stat64", struct stat64, __afl_stat64_fn)
+__AFL_DEF_STAT(__afl_io_lstat, "lstat", "stat", struct stat, __afl_stat_fn)
+__AFL_DEF_STAT(__afl_io_lstat64, "lstat64", "stat64", struct stat64, __afl_stat64_fn)
+#endif
+
+__AFL_IO_HOOK int __afl_io_access(const char *path, int mode) __asm__("access");
+__AFL_IO_HOOK int __afl_io_access(const char *path, int mode) {
+    static void *real;
+    __afl_access_fn fn = (__afl_access_fn)__afl_io_real(&real, "access");
+    return fn ? fn(__afl_alias(path), mode) : -1;
+}
+
 /* ── Signal API interposers: real calls ───────────────────────────────
  *
  * sigaction / signal / sigprocmask / pthread_sigmask are interposed for
