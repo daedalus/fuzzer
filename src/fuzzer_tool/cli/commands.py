@@ -847,8 +847,10 @@ def cmd_fuzz(args):
         deep_coverage=args.deep_coverage,
         max_bps=args.max_bps,
         dictionary=dictionary,
-        file_mode=args.file_mode,
+        # --input-alias needs the memfd input, i.e. -F.
+        file_mode=args.file_mode or bool(getattr(args, "input_alias", None)),
         target_args=args.target_args,
+        input_alias=getattr(args, "input_alias", None),
         markov_order=args.markov_order if use_markov else 0,
         markov_generate=args.markov_gen,
         markov=Switch.OFF if getattr(args, "no_markov", False) else Switch.ON,
@@ -3715,6 +3717,13 @@ def main() -> int:
     fuzz_parser.add_argument("-D", "--dict", nargs="+", help="Dictionary file(s)")
     fuzz_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    fuzz_parser.add_argument(
+        "--input-alias",
+        metavar="PATH",
+        default=None,
+        help="Path the target opens by name (hardcoded); afl_shim.c's open/fopen/stat "
+        "hooks serve the fuzz input there from memory. Implies -F.",
     )
     fuzz_parser.add_argument(
         "-A",

@@ -912,7 +912,8 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `-c` | No-op (coverage-guided mode is on by default; `--no-coverage` disables) |
 | `--no-shm` | Skip AFL SHM, force ptrace |
 | `--deep-coverage` | Capstone-based basic block discovery |
-| `-F` | File mode (write input to temp file) |
+| `-F` | File mode: input in a memfd, path as argv `{file}` (forkserver capable) |
+| `--input-alias PATH` | Serve the input at a hardcoded path via shim open/fopen/stat hooks (implies `-F`) |
 | `-D FILE` | Load dictionary tokens |
 | `--dict-thompson` | Dictionary tokens by Thompson sampling over a Dirichlet posterior of winning tokens |
 | `--splice-donor uniform\|gravity` | Splice-family donor pick: uniform, or gravity model over MinHash edge complements with PPML-fitted exponents |
@@ -1477,6 +1478,24 @@ RW PT_LOAD: [.got][.got.plt][.data][afl_shim_data][.bss][afl_shim_bss]
 `core/elf.py:data_ranges` picks SHF_WRITE|SHF_ALLOC, non-TLS sections outside PT_GNU_RELRO, minus loader tables, sancov metadata and the shim's own sections (afl_shim.c `#pragma clang section`). `adapters/global_snapshot.py` copies those spans after load (constructors done) and `InProcessRunner._run_c_direct{,_lite}` writes them back before every exec. A shim-linked target without `afl_shim_{data,bss}` (gcc build, old shim) is refused with a warning: restoring would clobber the shim.
 
 Cost: memoryview slice copy, ~55 ns per span (ctypes.memmove: 640 ns); fuzzgoat (44 B, 2 spans) +0.1-0.25 us/exec microbenchmark, in-run inside A/A spread, identical edges in both arms (ledger #153: fuzzgoat keeps no state across calls, so this measures cost only). Limits: heap and TLS are not restored; a global pointing to heap freed by a later exec gets the freed pointer back (false UAF under ASAN; disable with `--no-snapshot-restore`); loader modes ignore the flag (they fork). Tests: `tests/test_global_snapshot.py`.
+
+### In-memory input file (`-F`, `--input-alias PATH`)
+Port of wtf's fshooks: the input file lives in RAM. `adapters/memfd_input.py:MemfdInput` is a memfd reached as `/proc/<pid>/fd/<n>`: one path for the whole run, a fresh file description (own offset, fstat, mmap) per open, no disk create/write/unlink per exec.
+
+```
+Fuzzer._export_input_env -> MemfdInput, $FUZZ_INPUT_PATH (+ $FUZZ_INPUT_ALIAS)
+  spawn       run_target_file(input_file=)      argv {file} -> memfd path
+  forkserver  ForkserverRunner(argv=, input_file=)  loader stages into the same memfd
+  in-process  InProcessRunner(input_file=)      harness opens $FUZZ_INPUT_PATH
+  shim hooks  open/fopen/stat("<alias>") -> $FUZZ_INPUT_PATH
+```
+
+- **Forkserver for `-F`.** A fixed path means a fixed argv, so `-F` / `-A ... {file}` runs now use the forkserver: `fuzz_loader.c` takes `ARG <value>` lines before `INIT` (max 64, no newlines; READY advertises `argv`). `-A` without `-F` still skips it (the spawn path ignores those args too). fuzzgoat file-reading build, 5 seeds × 5k: 345-356 -> 615-703 execs/s, same edges (ledger #154).
+- **In-process.** With `-F`, each exec also writes the memfd before the call and `$FUZZ_INPUT_PATH` names it, for harnesses wrapping a `parse_file(path)` API. Restore and staging share one bound per-exec call (`_pre_exec`), so `-F` off costs what it did before.
+- **`--input-alias PATH`** (implies `-F`): for a library that opens a hardcoded path. `afl_shim.c` §Input file alias hooks `open`, `open64`, `openat`, `openat64`, `fopen`, `fopen64`, `stat`, `stat64`, `lstat`, `lstat64`, `access`. They are hidden (so they bind inside the target DSO, library objects included, nothing outside) and defined by asm label (`_FILE_OFFSET_BITS=64` safe). Exact string match; lstat follows the memfd symlink, O_NOFOLLOW is dropped. Env read once, lazily.
+- **Limits:** paths opened through other calls (`fstatat`, `statx`, `freopen`, raw syscalls) pass through. Hooked calls go to libc via RTLD_NEXT, past a sanitizer's open interceptor. stat hooks need glibc >= 2.33. Shim-less binaries get no alias. The memfd path has no file extension.
+
+Tests: `tests/test_memfd_input.py`, `tests/test_input_alias.py`.
 
 ### SHM resize in inprocess mode
 When collision risk exceeds the threshold, the coverage SHM (edge table) is resized. In inprocess mode, `InProcessRunner.update_shm_after_resize` re-runs the target's `__afl_map_shm()` (re-reads `__AFL_SHM_ID`/`AFL_MAP_SIZE`, so `__afl_area` and `__afl_map_size` follow the new segment; falls back to patching `__afl_area`) and invalidates the cached SHM attachment, so coverage writes don't go to freed memory. The persistent loader is restarted instead. The shim validates the new segment first, then publishes size, header pointers and table together and detaches the old segment. A refused re-attach detaches and turns coverage off; refusal is sticky only for that segment id.
