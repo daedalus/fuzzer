@@ -1031,6 +1031,7 @@ def cmd_fuzz(args):
         pos_pca=getattr(args, "pos_pca", False),
         pos_learn=getattr(args, "pos_learn", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
+        seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2954,6 +2955,9 @@ def cmd_sweep(args):
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
 #
+# seed_fess_scheduler (--seed-fess-scheduler) is excluded as unmeasured: unit
+# tests only, no paired run (docs/AB_PENDING.md).
+#
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md). The first is also inert without the stride arm.
@@ -4235,6 +4239,14 @@ def main() -> int:
         "probability --seed-newest-p, else a uniform seed (DFS-like corridors vs bushy). Elo arm; "
         "also the no-elo pick when enabled (core/schedulers/seed_newest.py). Not in --hail-mary "
         "until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-fess-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'fess': FESS feature-space search. Seeds map to a log2 grid of "
+        "(edges, rare edges, lineage depth, size); the least-explored cell is fuzzed next, then "
+        "its least-fuzzed seed. Elo arm; also the no-elo pick when enabled "
+        "(core/schedulers/seed_fess.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--frontier-bin",
