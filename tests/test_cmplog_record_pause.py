@@ -163,6 +163,9 @@ class _Cmplog:
         self.collects += 1
         return []
 
+    def take_stale_scope(self):
+        return False
+
 
 def _fake_fuzzer(n_pairs: int):
     modes: list = []
