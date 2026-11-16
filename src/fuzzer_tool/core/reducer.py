@@ -21,6 +21,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from fuzzer_tool.core.lru import LRUCache
+from fuzzer_tool.core.mutations.seq_mutate import split_msgs
 
 # 16-byte keys: 64K entries ≈ a few MB, bounded (Hard Rule 54).
 DEFAULT_CACHE_CAP = 1 << 16
@@ -65,26 +66,64 @@ class ChunkPass:
         return max(1, len(data) // 2), 0
 
     def transform(self, data: bytes, state: tuple[int, int]) -> tuple[bytes, Any] | None:
-        chunk, i = state
-        n = len(data)
-        while True:
-            # Sweep done: next smaller chunk, or stop after single bytes.
-            if i >= n:
-                if chunk <= 1:
-                    return None
-                chunk, i = chunk // 2, 0
-                continue
-
-            # Never propose the empty input.
-            if i == 0 and chunk >= n:
-                i = chunk
-                continue
-
-            return data[:i] + data[i + chunk :], (chunk, i)
+        return _cut(data, state)
 
     def advance(self, data: bytes, state: tuple[int, int]) -> tuple[int, int]:
         chunk, i = state
         return chunk, i + chunk
+
+
+class MsgPass(ChunkPass):
+    """``ChunkPass`` over whole messages (``seq_mutate.split_msgs``).
+
+    VirtFuzz's frame minimizer as delta debugging. Byte cuts break the
+    framing of a message stream; whole-message cuts keep it::
+
+        [3|abc][3|BUG][2|xy]  ->  [3|BUG][2|xy]  ->  [3|BUG]
+
+    State ``(chunk, i)`` counts messages. Data is re-split per candidate:
+    a kept cut may change the boundaries. No boundaries: no candidates.
+    """
+
+    def new(self, data: bytes) -> tuple[int, int]:
+        msgs = split_msgs(data) or ()
+        return max(1, len(msgs) // 2), 0
+
+    def transform(self, data: bytes, state: tuple[int, int]) -> tuple[bytes, Any] | None:
+        msgs = split_msgs(data)
+        if msgs is None:
+            return None
+
+        step = _cut(msgs, state)
+        if step is None:
+            return None
+        kept, state = step
+        return b"".join(kept), state
+
+
+def _cut(seq: Any, state: tuple[int, int]) -> tuple[Any, tuple[int, int]] | None:
+    """Next ``seq[:i] + seq[i+chunk:]`` at or after ``state``, or None when done."""
+    chunk, i = state
+    n = len(seq)
+    while True:
+        # Sweep done: next smaller chunk, or stop after single units.
+        if i >= n:
+            if chunk <= 1:
+                return None
+            chunk, i = chunk // 2, 0
+            continue
+
+        # Never propose the empty input.
+        if i == 0 and chunk >= n:
+            i = chunk
+            continue
+
+        return seq[:i] + seq[i + chunk :], (chunk, i)
+
+
+def shrink_passes() -> list[tuple[Phase, ReducePass]]:
+    """Crash-shrink passes: whole messages first, then byte chunks."""
+    return [(Phase.MAIN, MsgPass()), (Phase.MAIN, ChunkPass())]
 
 
 class Oracle:

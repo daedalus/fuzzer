@@ -56,7 +56,6 @@ class MockFuzzer:
         self.irreplaceable_hashes: set[str] = set()
         # Attributes needed by save_to_corpus
         self.seen_hashes: set[str] = set()
-        self.bloom = None
         self._total_corpus_attempts = 0
         self._duplicate_reject_count = 0
         self._last_bloat_warn_exec = 0

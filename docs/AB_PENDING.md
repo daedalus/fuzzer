@@ -99,7 +99,7 @@ Off arm needs a tree without the op.
 
 | Feature | What | St | A/B owed |
 |---|---|---|---|
-| `cmp_solve` (arms `baseline` on vs `cmp-solve-off`, ctl `cmp-solve-off-ctl`) | Write a cmplog operand (exact / +/-1 LE) over the lowest partial window (honggfuzz) | U | Frozen 2026-11-15: `--set ffmpeg` (9.0.2 noasan clang), 20 seeds x 10k, metric real_edges, Wilcoxon two-sided alpha 0.05; A/A off vs off-ctl first |
+| `cmp_solve` (arms `baseline` on vs `cmp-solve-off`, ctl `cmp-solve-off-ctl`) | Write a cmplog operand (exact / +/-1 LE) over the lowest partial window (honggfuzz) | N | FFmpeg 9.0.2 NULL (ledger #149: 10/10, p=0.67; A/A clean). 0.4% of applied ops. Owed: a magic-heavy target with a small cmplog pool, fuzzgoat (Hard Rule 52) |
 | `overflow_pair` | Two-field overflow sums | S | fuzzgoat; merge with `div_trap` if both null |
 | FXT ops (`rational_pair`, `sum_shift`, `multiset_next`, `haar_coef`, `revbin_permute`, `hilbert_patch`, `hadamard_oa`, `fib_encode`) | Arndt FXT-book ops | S | fuzzgoat, then FFmpeg / png |
 | `pairing_fn` | Szudzik/Cantor pairing op | S | fuzzgoat |
@@ -147,8 +147,7 @@ Off arm needs a tree without the op.
 |---|---|---|---|
 | Value profile (`--value-profile on/stall`) | `popcount(a^b)`, `bitlen|a-b|` per cmp site as synthetic edges | U | fuzzgoat `--cmplog` build, `on` and `stall` vs off, 20 seeds + A/A; metric real edges on a non-marking replay (marks inflate campaign edges) |
 | Cmplog record cap + campaign dedup (`--cmplog-site-cap 32 --cmplog-dedup-scope campaign`, arm `cmp-cap-dedup`) | Per-site record cap per drain; dedup table kept across drains | N | NULL on both: fuzzgoat_tcg ledger #138, FFmpeg 9.0.2 #139 (9/11, p=0.93; CPU −9% median, p=0.14). Owed only if CPU matters: a cpu_user rerun at ≥ 40 seeds on FFmpeg. |
-| Cmplog campaign dedup CPU (`--cmplog-dedup-scope campaign`, arms `cmp-campaign`, `cmp-rec-shm-campaign`) | Does campaign dedup cut CPU, with or without the shm table? #145 lead: −5%, p=0.038 (secondary metric) | N | Frozen 2026-11-16: `--set ffmpeg`, arms `baseline`, `cmp-campaign`, `cmp-rec-shm-campaign`, `cmp-rec-shm-ctl`, 20 seeds × 2 reps × 10k, 4 arm processes concurrent, rep 1 start order reversed, paired per (seed, rep), n=40. Primary `cpu_user`, Wilcoxon two-sided, Holm over the 2 arms vs baseline, α 0.05; WIN/LOSS only with ctl vs baseline n.s. Secondary `real_edges` (non-inferiority read only). Amended 2026-11-16 before any data: first launch aborted (every cell timed out under #357's trim walk); relaunched on `57cadc1`, where new-coverage trim is off by default (`d03b068`), unlike #144's 1-exec trim |
-| Stack-depth novelty (`--stack-depth-max`, arm `stack-depth-max`) | Admit a clean run deeper than the campaign max (honggfuzz) | U | Frozen 2026-11-15: `--set ffmpeg` (9.0.2 noasan clang), 20 seeds x 10k, metric real_edges, Wilcoxon two-sided alpha 0.05; A/A `stack-depth-max-ctl` vs `baseline` first; also report corpus size |
+| Stack-depth novelty (`--stack-depth-max`, arm `stack-depth-max`) | Admit a clean run deeper than the campaign max (honggfuzz) | N | FFmpeg 9.0.2 NULL (ledger #148: 11/9, p=0.70; A/A clean); 7 admissions per 3k execs. Owed: a recursive-parser target (expression grammar, nested containers), fuzzgoat (Hard Rule 52) |
 | Edge clusters (`--edge-clusters`) | Class rarity + near-miss bonus | N | fuzzgoat null; FFmpeg/png |
 | Inline sancov modes | `inline-8bit-counters`, `inline-bool-flag` | N | −23/−38 edges; fold buckets, 20×20k rerun |
 | Shim bit tricks | SWAR fold, masked probe, `bit_compress` | S | rebuild + fuzzgoat calibration |

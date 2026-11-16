@@ -156,3 +156,29 @@ def test_off_by_default(cm_fuzzer) -> None:
     # Falsification: no shrinker, saving works as before.
     f, cm = cm_fuzzer
     assert cm.save_crash(b"in", -11, "")
+
+
+def _framed(*payloads: bytes) -> bytes:
+    return b"".join(len(p).to_bytes(4, "big") + p for p in payloads)
+
+
+def _framed_target(data: bytes) -> tuple[int, str]:
+    """Crashes only on a well-framed BUG message (strict u32 BE walk)."""
+    pos, n, msgs = 0, len(data), []
+    while pos < n:
+        size = int.from_bytes(data[pos : pos + 4], "big")
+        if pos + 4 > n or pos + 4 + size > n:
+            return 0, ""
+        msgs.append(data[pos + 4 : pos + 4 + size])
+        pos += 4 + size
+    return (-11, "S") if _BUG in msgs else (0, "")
+
+
+def test_shrinks_whole_messages(tmp_path) -> None:
+    # Byte cuts break the framing; whole-message cuts reach the trigger frame.
+    s = CrashShrinker(_framed_target, _sig, max_execs=512, budget_ms=1e6)
+    crash = _crash(tmp_path, _framed(b"hello", _BUG, b"world!", b"tail"))
+    s.enqueue(crash, "S")
+    s.tick()
+
+    assert crash.with_suffix(".min").read_bytes() == _framed(_BUG)

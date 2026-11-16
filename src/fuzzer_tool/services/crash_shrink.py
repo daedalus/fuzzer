@@ -3,7 +3,7 @@
 ```
 save_crash (novel) ──enqueue──► CrashShrinker queue (≤ MAX_PENDING)
 maintenance tick ──► tick(): one crash at a time, within budget_ms
-                       reproduce ─► Reducer(ChunkPass) ─► <base>.min
+                       reproduce ─► Reducer(MsgPass, ChunkPass) ─► <base>.min
                        oracle: run_fn(cand) -> sig_fn(rc, stderr) == pinned sig
 ```
 
@@ -19,7 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import save_min_crash
-from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
+from fuzzer_tool.core.reducer import Oracle, Reducer, Verdict, shrink_passes
 
 # Crashes waiting for a tick (Hard Rule 54); later ones are dropped.
 MAX_PENDING = 64
@@ -91,7 +91,7 @@ class CrashShrinker:
         if test(data) is not Verdict.PASS:
             return
 
-        smallest = Reducer(Oracle(test), [(Phase.MAIN, ChunkPass())]).run(data)
+        smallest = Reducer(Oracle(test), shrink_passes()).run(data)
         if len(smallest) < len(data):
             save_min_crash(crash, smallest)
             self.shrunk += 1

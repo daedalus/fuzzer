@@ -24,7 +24,6 @@ from fuzzer_tool.adapters import seed_tar, seed_zip
 from fuzzer_tool.adapters.libc_symbols import libc_symbol
 from fuzzer_tool.adapters.process import signal_number
 from fuzzer_tool.adapters.seed_zip import SeedTree
-from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.crash_symbols import sidecar_pcs
@@ -92,15 +91,9 @@ def _bound_seen_hashes(seen_hashes: set[str]) -> None:
     """Keep ``seen_hashes`` from growing without bound, without forgetting
     everything at once.
 
-    ``bloom`` (see the four call sites below) never forgets a hash once
-    added, so it keeps answering "seen" for anything ever inserted here,
-    forever. That is the whole point of pairing an exact set with an
-    approximate filter: the set only exists to resolve the rare case where
-    ``bloom`` is wrong. Wiping the set entirely (the previous behaviour)
-    broke that pairing for every hash it held: on its next appearance each
-    one would query ``bloom`` as "seen" but the set as "no", fall into the
-    false-positive branch, and get silently re-admitted as if new — every
-    single previously-known hash, not a bounded fraction of them. See P1-3.
+    The set is the only dedup authority for the save paths below. Wiping
+    it entirely (the previous behaviour) re-admitted every previously-known
+    hash on its next appearance, not a bounded fraction of them. See P1-3.
 
     Evicting only half keeps the memory bound (the set never exceeds
     ``SEEN_HASHES_MAX``) while leaving the retained half correctly
@@ -483,7 +476,6 @@ def free_slot(dest: Path, data: bytes) -> Path:
 def _absorb(
     entries,
     seen: set[str],
-    bloom: BloomFilter | None,
     entropy_tracker: CumulativeByteEntropy | None,
     corpus: list[bytes],
 ) -> None:
@@ -492,8 +484,6 @@ def _absorb(
         if h in seen:
             continue
         seen.add(h)
-        if bloom is not None:
-            bloom.add(h)
         if entropy_tracker is not None:
             entropy_tracker.add(data)
         corpus.append(data)
@@ -548,7 +538,6 @@ def _resolve_deltas(
 
 def load_corpus(
     corpus_dir: Path,
-    bloom: BloomFilter | None = None,
     add_default: bool = True,
     load_irreplaceable: bool = True,
     entropy_tracker: CumulativeByteEntropy | None = None,
@@ -569,7 +558,6 @@ def load_corpus(
     Args:
         corpus_dir: Path to corpus directory. seeds/ is scanned recursively
             for full files, and both deltas/ and seeds/ for delta records.
-        bloom: Optional bloom filter to populate for fast dedup.
         add_default: If True and corpus is empty, add b"AAAAAAAA" as a
             synthetic default seed. Set False for commands that need to
             reflect the actual on-disk corpus state (e.g. sweep).
@@ -677,14 +665,14 @@ def load_corpus(
             _collect_deltas_from_dir(base)
 
     # Load full files
-    _absorb(full_files.items(), seen, bloom, entropy_tracker, corpus)
+    _absorb(full_files.items(), seen, entropy_tracker, corpus)
 
     # Reconstruct delta chains via topological resolution.
     # Each delta depends on its parent; resolve in order from full snapshots.
     if delta_files:
         resolved = _resolve_deltas(full_files, delta_files)
         chained = ((h, resolved[h]) for h, _ in delta_files if h in resolved)
-        _absorb(chained, seen, bloom, entropy_tracker, corpus)
+        _absorb(chained, seen, entropy_tracker, corpus)
 
     if not corpus and add_default:
         corpus.append(b"AAAAAAAA")
@@ -893,14 +881,10 @@ def save_to_corpus(
     data: bytes,
     corpus_dir: Path,
     seen_hashes: set[str],
-    bloom: BloomFilter | None = None,
     parent: bytes | None = None,
     lineage_depth: int = 0,
 ) -> bool:
     """Save input to corpus if not already seen.
-
-    Uses bloom filter as fast pre-check when available. False positives
-    (bloom says "seen" but set says "new") fall through to the authoritative set.
 
     When parent is provided and the diff is compact (< 25% of child size),
     stores a delta file instead of the full input. Every SNAPSHOT_INTERVAL
@@ -910,7 +894,6 @@ def save_to_corpus(
         data: Input bytes to save.
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes.
-        bloom: Optional bloom filter for fast pre-check.
         parent: Parent input bytes (for delta encoding).
         lineage_depth: Number of delta hops from the nearest full snapshot.
 
@@ -918,16 +901,8 @@ def save_to_corpus(
         True if saved (new), False if duplicate.
     """
     h = hash_data(data)
-    if bloom is not None:
-        if not bloom.query(h):
-            bloom.add(h)
-        elif h in seen_hashes:
-            return False
-        else:
-            bloom.add(h)
-    else:
-        if h in seen_hashes:
-            return False
+    if h in seen_hashes:
+        return False
     seen_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
     seeds_dir = corpus_dir / "seeds"
@@ -971,7 +946,6 @@ def save_irreplaceable(
     corpus_dir: Path,
     seen_hashes: set[str],
     irreplaceable_hashes: set[str],
-    bloom: BloomFilter | None = None,
 ) -> bool:
     """Save input to corpus/seeds/irreplaceable/ and mark as irreplaceable.
 
@@ -983,22 +957,13 @@ def save_irreplaceable(
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes (updated with new hash).
         irreplaceable_hashes: Set of irreplaceable hashes (updated with new hash).
-        bloom: Optional bloom filter for fast pre-check.
 
     Returns:
         True if saved (new), False if duplicate.
     """
     h = hash_data(data)
-    if bloom is not None:
-        if not bloom.query(h):
-            bloom.add(h)
-        elif h in seen_hashes:
-            return False
-        else:
-            bloom.add(h)
-    else:
-        if h in seen_hashes:
-            return False
+    if h in seen_hashes:
+        return False
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
@@ -1013,7 +978,6 @@ def save_crashing_seed(
     corpus_dir: Path,
     seen_hashes: set[str],
     irreplaceable_hashes: set[str],
-    bloom: BloomFilter | None = None,
 ) -> bool:
     """Save an input observed to crash the target under seeds/crashing/.
 
@@ -1033,7 +997,6 @@ def save_crashing_seed(
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes (updated with new hash).
         irreplaceable_hashes: Set of irreplaceable hashes (updated with hash).
-        bloom: Optional bloom filter for fast pre-check.
 
     Returns:
         True if this input was new to seen_hashes, False if already known.
@@ -1044,16 +1007,7 @@ def save_crashing_seed(
     if h in irreplaceable_hashes and _has_seed(store, SeedTree.CRASHING, h, dest):
         return False
 
-    is_new = True
-    if bloom is not None:
-        if not bloom.query(h):
-            bloom.add(h)
-        elif h in seen_hashes:
-            is_new = False
-        else:
-            bloom.add(h)
-    elif h in seen_hashes:
-        is_new = False
+    is_new = h not in seen_hashes
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
@@ -1067,7 +1021,6 @@ def save_timeout_seed(
     corpus_dir: Path,
     seen_hashes: set[str],
     irreplaceable_hashes: set[str],
-    bloom: BloomFilter | None = None,
 ) -> bool:
     """Save an input that timed out under seeds/timeouts/ and mark irreplaceable.
 
@@ -1080,16 +1033,7 @@ def save_timeout_seed(
     if h in irreplaceable_hashes and _has_seed(store, SeedTree.TIMEOUTS, h, dest):
         return False
 
-    is_new = True
-    if bloom is not None:
-        if not bloom.query(h):
-            bloom.add(h)
-        elif h in seen_hashes:
-            is_new = False
-        else:
-            bloom.add(h)
-    elif h in seen_hashes:
-        is_new = False
+    is_new = h not in seen_hashes
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)

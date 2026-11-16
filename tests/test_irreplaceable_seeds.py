@@ -40,7 +40,6 @@ class MockFuzzer:
         self._seed_quality = None
         self.irreplaceable_hashes: set[str] = set()
         self.seen_hashes: set[str] = set()
-        self.bloom = None
         self._total_corpus_attempts = 0
         self._last_hamming_distance = -1
         self._corpus_size_history: list[int] = []
@@ -175,7 +174,7 @@ class TestIrreplaceableSeeds:
         seen: set[str] = set()
         irreplaceable: set[str] = set()
 
-        result = save_irreplaceable(data, tmp_path, seen, irreplaceable, bloom=None)
+        result = save_irreplaceable(data, tmp_path, seen, irreplaceable)
         assert result is True
 
         h = hash_data(data)

@@ -66,9 +66,13 @@ def build(seeds: Iterable[bytes], base: BloomFilter | None = None) -> BloomFilte
 def build_batched(batches: Iterable[list[bytes]], base: BloomFilter | None = None) -> BloomFilter:
     """:func:`build` over seed batches, one batch in memory at a time.
 
-    The count sizes the filter, so digests are kept (32 B per seed, 6.4 MB
-    for 200k) until the last batch, then inserted.
+    A new filter is sized by the count, so digests are kept (32 B per seed,
+    6.4 MB for 200k) until the last batch, then inserted.  A *base* is
+    already sized: batches stream straight into it.
     """
+    if base is not None:
+        return _extend(batches, base)
+
     digests = bytearray()
     for batch in batches:
         for seed in batch:
@@ -76,11 +80,23 @@ def build_batched(batches: Iterable[list[bytes]], base: BloomFilter | None = Non
     if not digests:
         raise NegativeBloomError("empty corpus: nothing to put in the negative bloom")
 
-    bf = base if base is not None else _sized(len(digests) // _DIGEST_LEN)
+    bf = _sized(len(digests) // _DIGEST_LEN)
     view = memoryview(digests)
     for off in range(0, len(digests), _DIGEST_LEN):
         bf.update_digest(int.from_bytes(view[off : off + _DIGEST_LEN], "big"))
     return bf
+
+
+def _extend(batches: Iterable[list[bytes]], base: BloomFilter) -> BloomFilter:
+    """Insert every seed of *batches* into *base* as it arrives."""
+    count = 0
+    for batch in batches:
+        for seed in batch:
+            base.update_bytes(seed)
+        count += len(batch)
+    if not count:
+        raise NegativeBloomError("empty corpus: nothing to put in the negative bloom")
+    return base
 
 
 def _sized(count: int) -> BloomFilter:

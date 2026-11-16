@@ -46,7 +46,6 @@ class _Fuzzer:
         self.crash_allowlist: set = set()
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = None
 
 
 def _crashing_files(f) -> int:
