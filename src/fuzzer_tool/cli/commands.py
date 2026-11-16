@@ -1032,6 +1032,7 @@ def cmd_fuzz(args):
         pos_learn=getattr(args, "pos_learn", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
+        respawn_backoff=Switch.ON if getattr(args, "respawn_backoff", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2958,6 +2959,9 @@ def cmd_sweep(args):
 # seed_fess_scheduler (--seed-fess-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
 #
+# respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
+#
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md). The first is also inert without the stride arm.
@@ -4247,6 +4251,14 @@ def main() -> int:
         "(edges, rare edges, lineage depth, size); the least-explored cell is fuzzed next, then "
         "its least-fuzzed seed. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_fess.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--respawn-backoff",
+        action="store_true",
+        help="Pace restarts of a persistent/forkserver target that dies within 250 ms of "
+        "starting: 20 ms doubling to 1 s per quick failure in a row; a longer run resets. "
+        "16 in a row abort the run with a clear error (adapters/respawn_backoff.py). "
+        "Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--frontier-bin",

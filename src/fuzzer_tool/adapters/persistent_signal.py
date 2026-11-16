@@ -34,6 +34,7 @@ import time
 
 from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.adapters.process import signal_rc
+from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +72,13 @@ class PersistentRunner:
         # a clean exit, since the exit code alone carries no crash signal.
         self._err = None
         self._err_off = 0
+        # --respawn-backoff pacing; the null object restarts at once.
+        self._backoff = NO_BACKOFF
+
+    def attach_backoff(self, backoff) -> None:
+        """Pace this target's failed restarts (--respawn-backoff)."""
+        self._backoff = backoff
+        backoff.started()
 
     def _read_stderr(self) -> str:
         """Stderr the target wrote since the current iteration began."""
@@ -156,6 +164,7 @@ class PersistentRunner:
                     # Leave the init stop: a stopped target never sees SIGUSR1.
                     os.kill(pid, signal.SIGCONT)
                     self._started = True
+                    self._backoff.started()
                     log.info("Persistent target started (pid=%d)", pid)
                     return True
                 # Child exited/signaled — not a persistent target. Reaped
@@ -184,7 +193,9 @@ class PersistentRunner:
         try:
             os.kill(self.pid, signal.SIGUSR1)
         except ProcessLookupError:
+            # Gone before the input ran: a respawn fault, not a crash.
             self._reaped()
+            self._backoff.failed(Failure.DEATH)
             return -2, "target process not found"
 
         deadline = time.time() + self.timeout
@@ -236,9 +247,15 @@ class PersistentRunner:
         self.pid = None
 
     def restart(self) -> bool:
-        """Replace a dead target (crash, exit, timeout) with a fresh one."""
+        """Replace a dead target (crash, exit, timeout) with a fresh one.
+
+        Only a start that fails is paced: a crash restart is a finding.
+        """
         self.stop()
-        return self.start()
+        if self.start():
+            return True
+        self._backoff.failed(Failure.START)
+        return False
 
     @property
     def alive(self) -> bool:
