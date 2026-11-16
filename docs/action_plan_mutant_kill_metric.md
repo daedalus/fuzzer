@@ -58,23 +58,28 @@ Line-level operators on `-O0`-shaped IR, subset of paper Table 10:
 
 ```python
 class MutOp(Enum):
-    ICMP_BOUNDARY = 1   # slt<->sle, sgt<->sge, ult<->ule, ugt<->uge
-    ICMP_SIGN = 2       # s<pred> <-> u<pred>   (SIGNED_TO_UNSIGNED, ...)
-    ICMP_EQ_NE = 3      # eq <-> ne
-    BR_NEGATE = 4       # br i1 %c, label %a, label %b -> swap labels
-    STORE_DELETE = 5    # drop a store (DELETE_STORE_PATTERN)
-    ARITH_SWAP = 6      # add <-> sub           (SWITCH_PLUS_MINUS)
-    ALLOC_SHRINK = 7    # malloc/calloc/realloc size - 16 (MALLOC/CALLOC)
-    CALL_DELETE = 8     # void call, non-intrinsic (DELETE_CALL_INSTRUCTION)
+    ICMP_BOUNDARY = 1  # slt<->sle, sgt<->sge, ult<->ule, ugt<->uge
+    ICMP_SIGN = 2  # s<pred> <-> u<pred>   (SIGNED_TO_UNSIGNED, ...)
+    ICMP_EQ_NE = 3  # eq <-> ne
+    BR_NEGATE = 4  # br i1 %c, label %a, label %b -> swap labels
+    STORE_DELETE = 5  # drop a store (DELETE_STORE_PATTERN)
+    ARITH_SWAP = 6  # add <-> sub           (SWITCH_PLUS_MINUS)
+    ALLOC_SHRINK = 7  # malloc/calloc/realloc size - 16 (MALLOC/CALLOC)
+    CALL_DELETE = 8  # void call, non-intrinsic (DELETE_CALL_INSTRUCTION)
+
 
 @dataclass(frozen=True, slots=True)
 class Site:
     line: int
     op: MutOp
 
+
 def find_sites(ll: str) -> list[Site]: ...
-def apply_site(ll: str, site: Site) -> str: ...   # exactly one line changed
-                                                   # (ALLOC_SHRINK: +1 `sub` line)
+def apply_site(ll: str, site: Site) -> str:
+    ...  # exactly one line changed
+    # (ALLOC_SHRINK: +1 `sub` line)
+
+
 def sample_sites(sites, cap: int, rng) -> list[Site]: ...  # RandPool (Rule 16)
 ```
 
@@ -83,7 +88,15 @@ text inside string constants/metadata, entry-block spills of arguments
 (`store ptr %x, ptr %x.addr`: compiler artefacts, not source statements —
 deleting them makes trivially killed garbage pointers).
 
-## P2 — `adapters/mutant_build.py` + `adapters/mutant_replay.c`
+## P2 — `adapters/mutant_build.py` + `adapters/mutant_replay.c` (shipped)
+
+Measured (fuzzgoatNoVulns, 4 cores): 467 kept, 145 equivalent, 0 failed;
+build 43.5 s, 34 MB; cached rebuild instant. 5 stock seeds kill 63/467 in
+22 s, dominated by ~47 ms process start per mutant binary. Deviations from
+the sketch: shared ASAN runtime + rpath (23x smaller binaries, same speed);
+IR compiled from stdin (ASAN embeds the input file name in `.rodata`, which
+defeated TCE); TCE hashes the whole object, not `.text` (a mutation can
+change only `.rodata`, e.g. a jump table).
 
 - `emit_ir(src, out)`: `clang -O2 -fsanitize=address -fno-delete-null-pointer-checks -Xclang -disable-llvm-passes -emit-llvm -S` (flags as `compile_fuzzgoat_object`).
 - `build_mutant(ll, out)`: `.ll` → `.o` → link with wrapper object
@@ -121,13 +134,14 @@ static int run_one(const unsigned char *b, size_t n, unsigned timeout_s)
 @dataclass(frozen=True, slots=True)
 class KillScore:
     kills: int
-    hangs: int           # mutant HANG on a clean input; not a kill (paper)
+    hangs: int  # mutant HANG on a clean input; not a kill (paper)
     inputs: int
-    clean_inputs: int    # original CLEAN; the only usable evidence
-    killed: frozenset[int]   # mutant ids, for exploratory union diffs
+    clean_inputs: int  # original CLEAN; the only usable evidence
+    killed: frozenset[int]  # mutant ids, for exploratory union diffs
+
 
 class KillScorer:
-    def __init__(self, kill_set: Path, jobs: int): ...   # loads manifest
+    def __init__(self, kill_set: Path, jobs: int): ...  # loads manifest
     def score(self, corpus: Path) -> KillScore: ...
 ```
 

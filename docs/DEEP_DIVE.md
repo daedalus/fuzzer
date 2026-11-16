@@ -1699,6 +1699,20 @@ Emit IR with `clang -fsanitize=address -Xclang -disable-llvm-passes
 `sanitize_address` and mutants are never instrumented. fuzzgoatNoVulns:
 612 sites, all `llvm-as`-valid.
 
+`adapters/mutant_build.py` (P2): `MutantSet.build(TargetSpec(src, wrapper,
+include_dirs), out_dir, cap, seed, jobs)` builds the original plus one binary
+per kept site, cached by a key over sources, operators, flags and compiler
+(`manifest.pkl`, written last). Binaries link `adapters/mutant_replay.c`
+(fork per input, itimer timeout, child stdio muted) and the shared ASAN
+runtime (72 KB each, not 1.7 MB). `replay(binary, pack, mask, timeout_ms)`
+returns `Status` bytes (CLEAN/CRASH/HANG); with a mask it stops at the first
+eligible crash. `write_pack` streams `(u32 len, bytes)*`, 64 KiB per record.
+Trivial compiler equivalence drops mutants whose object equals the
+original's or an earlier mutant's. IR is compiled from stdin: ASAN writes
+the input file name into `.rodata`, so per-file names made every object
+unique. fuzzgoatNoVulns, 4 cores: 467 kept, 145 equivalent (139 branch
+negations duplicating an eq/ne swap), 43.5 s, 34 MB; 5 stock seeds kill 63.
+
 ### SMT Solver Evaluation (`--enable-smt-z3`)
 
 The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations. **Concolic mode is now the default** (`--mod-solving concolic`), providing full constraint modeling with z3 across whole execution traces. Override with `--mod-solving heuristic` or `--mod-solving trace` if needed. The concolic whole-input solve is capped at `_CONCOLIC_MAX_BYTES` (32 KiB) in `core/smt_solver.py`: it models one z3 `BitVec` per input byte, and over multi-MB seeds that model alone transiently exceeds a GB of memory (measured ~1.3 GB spikes), enough to OOM the fuzzer. Oversized inputs skip the whole-input solve (the per-pair cmplog solving is unaffected).
