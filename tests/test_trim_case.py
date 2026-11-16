@@ -56,7 +56,6 @@ class _Fuzzer:
         self.seed_meta: dict[bytes, dict] = {}
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = None
         self.shm_cov = _Shm()
         self.ptrace_cov = None
         self._runner = _Runner(self.shm_cov, target)
@@ -87,7 +86,7 @@ class _Fuzzer:
 
 
 def _admit(f: _Fuzzer, original: bytes) -> None:
-    save_to_corpus(original, f.corpus_dir, f.seen_hashes, f.bloom)
+    save_to_corpus(original, f.corpus_dir, f.seen_hashes)
     f.corpus.append(original)
     f.seed_meta[original] = {"fuzz_count": 0, "lineage_depth": 0}
 

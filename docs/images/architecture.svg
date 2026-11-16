@@ -36,8 +36,8 @@
 </g>
 <g id="clust6" class="cluster">
 <title>cluster_corpus</title>
-<path fill="#f7f4fa" stroke="#cfc6d8" stroke-width="1.3" d="M1611,-151.5C1611,-151.5 1821,-151.5 1821,-151.5 1827,-151.5 1833,-157.5 1833,-163.5 1833,-163.5 1833,-235.5 1833,-235.5 1833,-241.5 1827,-247.5 1821,-247.5 1821,-247.5 1611,-247.5 1611,-247.5 1605,-247.5 1599,-241.5 1599,-235.5 1599,-235.5 1599,-163.5 1599,-163.5 1599,-157.5 1605,-151.5 1611,-151.5"/>
-<text text-anchor="middle" x="1657.5" y="-234.7" font-family="Helvetica Bold" font-size="11.00" fill="#5a4a6b">5 · Corpus lifecycle</text>
+<path fill="#f7f4fa" stroke="#cfc6d8" stroke-width="1.3" d="M1613,-151.5C1613,-151.5 1819,-151.5 1819,-151.5 1825,-151.5 1831,-157.5 1831,-163.5 1831,-163.5 1831,-235.5 1831,-235.5 1831,-241.5 1825,-247.5 1819,-247.5 1819,-247.5 1613,-247.5 1613,-247.5 1607,-247.5 1601,-241.5 1601,-235.5 1601,-235.5 1601,-163.5 1601,-163.5 1601,-157.5 1607,-151.5 1613,-151.5"/>
+<text text-anchor="middle" x="1659.5" y="-234.7" font-family="Helvetica Bold" font-size="11.00" fill="#5a4a6b">5 · Corpus lifecycle</text>
 </g>
 <g id="clust7" class="cluster">
 <title>cluster_crash</title>
@@ -368,11 +368,11 @@
 <!-- corpus -->
 <g id="node19" class="node">
 <title>corpus</title>
-<path fill="#e6dcee" stroke="transparent" stroke-width="0" d="M1812.5,-219.5C1812.5,-219.5 1619.5,-219.5 1619.5,-219.5 1613.5,-219.5 1607.5,-213.5 1607.5,-207.5 1607.5,-207.5 1607.5,-171.5 1607.5,-171.5 1607.5,-165.5 1613.5,-159.5 1619.5,-159.5 1619.5,-159.5 1812.5,-159.5 1812.5,-159.5 1818.5,-159.5 1824.5,-165.5 1824.5,-171.5 1824.5,-171.5 1824.5,-207.5 1824.5,-207.5 1824.5,-213.5 1818.5,-219.5 1812.5,-219.5"/>
-<text text-anchor="start" x="1619.5" y="-203.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#453454">services/corpus_manager.py</text>
-<text text-anchor="start" x="1619.5" y="-192.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#453454">admission · prune · sync</text>
-<text text-anchor="start" x="1619.5" y="-181.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#453454">ga · qea · rate_distortion · bloom dedup</text>
-<text text-anchor="start" x="1619.5" y="-170.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#453454">state_store (resume) · parallel workers</text>
+<path fill="#e6dcee" stroke="transparent" stroke-width="0" d="M1811,-219.5C1811,-219.5 1621,-219.5 1621,-219.5 1615,-219.5 1609,-213.5 1609,-207.5 1609,-207.5 1609,-171.5 1609,-171.5 1609,-165.5 1615,-159.5 1621,-159.5 1621,-159.5 1811,-159.5 1811,-159.5 1817,-159.5 1823,-165.5 1823,-171.5 1823,-171.5 1823,-207.5 1823,-207.5 1823,-213.5 1817,-219.5 1811,-219.5"/>
+<text text-anchor="start" x="1621" y="-203.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#453454">services/corpus_manager.py</text>
+<text text-anchor="start" x="1621" y="-192.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#453454">admission · prune · sync</text>
+<text text-anchor="start" x="1621" y="-181.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#453454">ga · qea · rate_distortion · hash dedup</text>
+<text text-anchor="start" x="1621" y="-170.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#453454">state_store (resume) · parallel workers</text>
 </g>
 <!-- cov&#45;&gt;corpus -->
 <g id="edge26" class="edge">
@@ -460,7 +460,7 @@
 <!-- frontier&#45;&gt;picker -->
 <g id="edge24" class="edge">
 <title>frontier&#45;&gt;picker</title>
-<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M2012.98,-65.17C1986.72,-110.33 1922.73,-208.22 1839,-252.5 1804.94,-270.51 1692.46,-245.58 1667,-274.5 1664.36,-277.5 1665.37,-279.85 1667,-283.5 1719.32,-400.77 1762.55,-429.39 1882,-476.5 1955.3,-505.41 2517.53,-462.04 2591,-490.5 2726.87,-543.13 2809.64,-695.09 2706,-797.5 2665.12,-837.9 694.27,-823.61 637,-828.5 613.6,-830.5 589.14,-833.39 564.96,-836.73"/>
+<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M2012.76,-65.16C1986.1,-110.31 1921.21,-208.18 1837,-252.5 1803.29,-270.24 1692.15,-245.89 1667,-274.5 1664.36,-277.5 1665.37,-279.85 1667,-283.5 1719.32,-400.77 1762.55,-429.39 1882,-476.5 1955.3,-505.41 2517.53,-462.04 2591,-490.5 2726.87,-543.13 2809.64,-695.09 2706,-797.5 2665.12,-837.9 694.27,-823.61 637,-828.5 613.6,-830.5 589.14,-833.39 564.96,-836.73"/>
 <polygon fill="#2f7d5a" stroke="#2f7d5a" stroke-width="1.1" points="564.55,-834.38 558.15,-837.68 565.21,-839.1 564.55,-834.38"/>
 <text text-anchor="middle" x="2684.5" y="-514.2" font-family="Helvetica,sans-Serif" font-size="8.50">frontier &#160;</text>
 </g>
@@ -474,15 +474,15 @@
 <!-- corpus&#45;&gt;frontier -->
 <g id="edge23" class="edge">
 <title>corpus&#45;&gt;frontier</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M1743,-159.38C1763.62,-138.76 1793.74,-111.95 1825,-95.5 1847.38,-83.72 1872.55,-74.35 1897.31,-66.94"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="1898.08,-69.2 1903.93,-65.01 1896.74,-64.63 1898.08,-69.2"/>
-<text text-anchor="middle" x="1851" y="-97.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;new seeds</text>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M1742.69,-159.36C1763.1,-138.73 1792.93,-111.91 1824,-95.5 1846.32,-83.71 1871.42,-74.34 1896.14,-66.94"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="1896.89,-69.2 1902.75,-65.01 1895.56,-64.63 1896.89,-69.2"/>
+<text text-anchor="middle" x="1850" y="-97.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;new seeds</text>
 </g>
 <!-- crash&#45;&gt;corpus -->
 <g id="edge28" class="edge">
 <title>crash&#45;&gt;corpus</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M1431.37,-305.25C1433.98,-294.02 1438.5,-283.15 1446,-274.5 1484.41,-230.23 1545.72,-208.98 1600.21,-198.91"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="1600.89,-201.21 1607.17,-197.68 1600.06,-196.52 1600.89,-201.21"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M1431.37,-305.25C1433.98,-294.02 1438.5,-283.15 1446,-274.5 1484.79,-229.78 1546.95,-208.55 1601.85,-198.61"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="1602.56,-200.9 1608.86,-197.39 1601.75,-196.21 1602.56,-200.9"/>
 <text text-anchor="middle" x="1499" y="-276.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;minimized · &#45;C variants</text>
 </g>
 </g>

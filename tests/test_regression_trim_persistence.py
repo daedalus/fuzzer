@@ -57,7 +57,6 @@ class _FakeFuzzer:
         self.seed_meta: dict[bytes, dict] = {}
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = None
         self.shm_cov = _FakeShm({1, 2, 3})
         self.ptrace_cov = None
         self._runner = _FakeRunner()
@@ -94,7 +93,7 @@ TRIMMED = ORIGINAL[:4]
 
 
 def _seed_the_corpus(f: _FakeFuzzer) -> None:
-    save_to_corpus(ORIGINAL, f.corpus_dir, f.seen_hashes, f.bloom)
+    save_to_corpus(ORIGINAL, f.corpus_dir, f.seen_hashes)
     f.corpus.append(ORIGINAL)
     f.seed_meta[ORIGINAL] = {
         "fuzz_count": 3,
@@ -189,7 +188,7 @@ class TestTrimDeclineIsUnchanged:
 
     def test_short_seed_rejects_trim(self, fuzzer):
         tiny = b"AB"
-        save_to_corpus(tiny, fuzzer.corpus_dir, fuzzer.seen_hashes, fuzzer.bloom)
+        save_to_corpus(tiny, fuzzer.corpus_dir, fuzzer.seen_hashes)
         fuzzer.corpus.append(tiny)
         CorpusManager(fuzzer).trim_new_coverage(tiny, tiny)
         assert fuzzer.corpus == [tiny]
@@ -197,7 +196,7 @@ class TestTrimDeclineIsUnchanged:
 
 class TestRetireHelper:
     def test_moves_full_seed(self, fuzzer):
-        save_to_corpus(ORIGINAL, fuzzer.corpus_dir, fuzzer.seen_hashes, fuzzer.bloom)
+        save_to_corpus(ORIGINAL, fuzzer.corpus_dir, fuzzer.seen_hashes)
         h = hash_data(ORIGINAL)
         assert _retire_seed_file(fuzzer.corpus_dir, h) is True
         assert not (fuzzer.corpus_dir / "seeds" / h[:2] / f"id_{h}").is_file()

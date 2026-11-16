@@ -69,7 +69,6 @@ class _Fuzzer:
         self.seed_meta: dict[bytes, dict] = {}
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = None
         self.shm_cov = _Shm(trimmed_edges, new_ids)
         self.ptrace_cov = None
         self._runner = _Runner(rc)
@@ -109,7 +108,7 @@ def _make(tmp_path, rc=0, trimmed_edges=BASE_EDGES, new_ids=()):
     corpus_dir = tmp_path / "corpus"
     (corpus_dir / "seeds").mkdir(parents=True)
     f = _Fuzzer(corpus_dir, rc, trimmed_edges, new_ids)
-    save_to_corpus(ORIGINAL, f.corpus_dir, f.seen_hashes, f.bloom)
+    save_to_corpus(ORIGINAL, f.corpus_dir, f.seen_hashes)
     f.corpus.append(ORIGINAL)
     f.seed_meta[ORIGINAL] = {"fuzz_count": 0, "lineage_depth": 0}
     return f

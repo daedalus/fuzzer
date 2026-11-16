@@ -2915,8 +2915,6 @@ class Fuzzer:
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = BloomFilter(capacity=100_000)
-        self.bloom.init_fuzzy(max_recent=200)
         # Executed-input filter.  The mutation space is not uniform: stall
         # recovery, dictionary ops and the deterministic stages collapse onto
         # very short buffers, so the same mutant is handed to the target
@@ -6480,7 +6478,14 @@ class Fuzzer:
         is not a pruned seed any more) and so is every mutant the
         filter does not hold: there the give-up is just a wasted exec,
         which is the bound the re-roll budget documents.
+
+        A negative-bloom member is moved off the same way: the filter
+        is the user's list of inputs never to execute.
         """
+        neg_bloom = getattr(self, "_neg_bloom", None)
+        if neg_bloom is not None and neg_bloom.query_bytes(bytes(mutated)):
+            return self._operators.force_change(mutated, data)
+
         if self.cuckoo_seed_filter is None:
             return mutated
         h = self._seed_key(mutated)
