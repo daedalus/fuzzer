@@ -38,6 +38,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | DPP seed arm (`--seed-dpp-scheduler`) | DPP over hashed edge sets | N | 5W/15L p=0.041 (Holm 0.083); `--reps 3`; as Elo arm vs `elo` |
 | Gram eigenvector seed arm (`--seed-gram-scheduler`, `--seed-gram-mode {peripheral,central}`) | Tickets from the top eigenvector of B = A Aᵀ (core-stripped incidence), matrix-free | N | `--set ffmpeg` (9.0.2 noasan, audio-only component set, 1 core), 10 seeds x 3 reps x 5k execs, sole arm vs `baseline`. peripheral W2 L8 (McNemar p=0.109), central W1 L9 (p=0.0215, Holm 0.043); med Δ edges -1043 / -983, noise 1216 / 1451. No A/A control, 10 cells; read as "no gain", not as a measured loss |
 | FESS seed arm (`--seed-fess-scheduler`) | Least-explored cell of a log2 (edges, rare, depth, size) grid, then its least-fuzzed seed | U | `seed-fess` vs `baseline`, `elo-seed-fess` vs `elo`; fuzzgoat (clang) 20 seeds x 10k + A/A; FFmpeg if not NULL |
+| Advisors (`--advisors`) | Per seed stage, i2s / token / cond advisors each run one free deduped move from recorded cmplog state | U | `advisors` vs `baseline`; fuzzgoat (clang) 20 seeds x 10k + A/A; FFmpeg if not NULL |
 | Doppler energy (`--schedule doppler`) | Power-Doppler seed energy | U | vs `fast` |
 | Consolidated seed arm | Merged seed-arm features | U | vs `p2c`/`drr` |
 | OS/net ports (`mlfq`, `stride`, `eevdf`, `bfq`, `sfq`, `codel`, `aimd`, `p2c`, `op_stride`, `op_p2c`) | Kernel/network schedulers as seed/op arms | U | each vs `seed_round_robin`/`drr` |

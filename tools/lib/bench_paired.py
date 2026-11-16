@@ -233,6 +233,8 @@ ARMS: dict[str, list[str]] = {
     # `baseline`, and as an Elo arm vs `elo`.
     "seed-fess": ["--seed-fess-scheduler"],
     "elo-seed-fess": ["--elo", "--mc-bandit", "--seed-fess-scheduler"],
+    # Advisors (services/advisors.py): free advised moves per stage vs `baseline`.
+    "advisors": ["--advisors"],
     **{
         f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
         for pct in SEED_NEWEST_PCTS
@@ -434,6 +436,7 @@ ARM_BASELINES: dict[str, str] = {
     "seed-gram-central": "baseline",
     "seed-fess": "baseline",
     "elo-seed-fess": "elo",
+    "advisors": "baseline",
     "novel-crash-reward-abort": "abort-crash",
     "abort-crash-ctl": "abort-crash",
     "seed-branch": "elo",

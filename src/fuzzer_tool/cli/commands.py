@@ -1032,6 +1032,7 @@ def cmd_fuzz(args):
         pos_learn=getattr(args, "pos_learn", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
+        advisors=getattr(args, "advisors", False),
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2958,6 +2959,9 @@ def cmd_sweep(args):
 # seed_fess_scheduler (--seed-fess-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
 #
+# advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md).
+#
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md). The first is also inert without the stride arm.
@@ -4239,6 +4243,14 @@ def main() -> int:
         "probability --seed-newest-p, else a uniform seed (DFS-like corridors vs bushy). Elo arm; "
         "also the no-elo pick when enabled (core/schedulers/seed_newest.py). Not in --hail-mary "
         "until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--advisors",
+        action="store_true",
+        help="Advisors (soksolv): on each seed stage, i2s / token / cond advisors each "
+        "propose one move built from the seed's recorded cmplog data, run free of the "
+        "stage's energy and deduped (services/advisors.py). Not in --hail-mary until it "
+        "wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--seed-fess-scheduler",
