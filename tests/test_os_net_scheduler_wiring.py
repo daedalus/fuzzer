@@ -16,8 +16,9 @@ from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
-from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
+from fuzzer_tool.core.schedulers.seed_fess import SeedFessScheduler
+from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
 from fuzzer_tool.core.schedulers.seed_newest import SeedNewestScheduler
@@ -46,6 +47,7 @@ SEED_ARMS = {
     "dpp": ("seed_dpp_scheduler", "_seed_dpp", SeedDPPScheduler),
     "gram": ("seed_gram_scheduler", "_seed_gram", SeedGramScheduler),
     "lottery": ("seed_lottery_scheduler", "_seed_lottery", SeedLotteryScheduler),
+    "fess": ("seed_fess_scheduler", "_seed_fess", SeedFessScheduler),
     "consolidated": (
         "seed_consolidated_scheduler",
         "_seed_consolidated",
@@ -59,6 +61,7 @@ UNMEASURED_ARMS = frozenset(
         "seed_dpp_scheduler",
         "seed_gram_scheduler",
         "seed_lottery_scheduler",
+        "seed_fess_scheduler",
     }
 )
 OP_ARMS = {
@@ -100,6 +103,7 @@ def _fuzzer(name=None, corpus=(SEED_A, SEED_B, SEED_C), meta=None, favored=()):
         _kruskal_count=None,
         _favored=set(favored),
         mean_exec_time=lambda: 0.001,
+        exec_count=0,
     )
     for arm, (_kw, attr, cls) in SEED_ARMS.items():
         setattr(f, attr, _build(cls) if arm == name else None)
