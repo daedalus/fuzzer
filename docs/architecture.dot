@@ -127,6 +127,13 @@ digraph fuzzer_tool {
              fillcolor="#e3e7ec", fontcolor="#242a31"];
     }
 
+    subgraph cluster_eval {
+        label="Evaluation (offline)";
+        color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
+        mkill [label="core/ir_mutants → adapters/mutant_build · mutant_replay.c\lservices/mutant_kill (mutants-build · mutants-score)\ltools/lib/bench_paired --kill-set (metric: kills)\l",
+               fillcolor="#e3e7ec", fontcolor="#242a31"];
+    }
+
     // ------------------------------------------------------------ spine
     cli -> fuzzer [penwidth=1.8, color="#3f4a58"];
     fuzzer -> picker [penwidth=1.8, color="#3f4a58", label="  pick seed"];
@@ -165,6 +172,7 @@ digraph fuzzer_tool {
     cmplog -> corpus [label="  cmp progress"];
     crash -> corpus [style=dashed, label="  minimized · -C variants"];
 
+    corpus -> mkill [style=dashed, label="  final corpus"];
     cov -> obs [style=dashed];
     cmplog -> obs [style=dashed];
     infoth -> obs [style=dashed];
