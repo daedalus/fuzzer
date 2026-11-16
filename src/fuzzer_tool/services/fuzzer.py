@@ -61,7 +61,7 @@ from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due, phase_of
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
-from fuzzer_tool.core.cmplog import CmplogRecords, DedupScope
+from fuzzer_tool.core.cmplog import CmplogRecords, DedupScope, RecordChannel
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.coverage_noise import (
     NOISE_PROBE_VARIANTS,
@@ -591,6 +591,9 @@ def _current_rss_kb() -> int | None:
 
 # Symbols that mean the target can populate an edge bitmap: the shim's own
 # (linked or preloaded) and clang's sancov callbacks.
+# afl_custom_queue_get refusals in a row before a seed is fuzzed regardless.
+_QUEUE_GET_MAX_SKIPS = 64
+
 _AFL_SYMS = ("__afl_area", "__afl_map_shm", "__sanitizer_cov")
 
 
@@ -1575,6 +1578,8 @@ class Fuzzer:
         # Shim record knobs (afl_shim.c): per-site cap per drain, dedup lifetime.
         cmplog_site_cap=0,
         cmplog_dedup_scope=DedupScope.DRAIN,
+        # CMP records as text lines or in a shared binary table.
+        cmplog_records=RecordChannel.TEXT,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -1602,6 +1607,7 @@ class Fuzzer:
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
+        repro_gate=0,
         crash_tmin_execs=0,
         crash_blocklist=None,
         crash_allowlist=None,
@@ -1890,6 +1896,7 @@ class Fuzzer:
         custom_mutator=None,
         custom_mutator_isolation="guard",
         custom_mutator_timeout_ms=1000,
+        afl_custom_mutator=None,
         # Successive-elimination / racing bandit for operator scheduling.
         successive_elim=False,
         successive_elim_delta=0.1,
@@ -2464,6 +2471,19 @@ class Fuzzer:
                 isolate=custom_mutator_isolation != "none",
                 timeout_ms=custom_mutator_timeout_ms,
             )
+        # --afl-custom-mutator: operators register here, before the engine is
+        # built; post_process / queue_get bind after the runner (_bind_afl_hooks).
+        self._afl_custom = None
+        self._queue_skips = 0
+        if afl_custom_mutator:
+            from fuzzer_tool.core.mutations.custom_mutator import register_afl_custom_mutator
+
+            self._afl_custom, _ = register_afl_custom_mutator(
+                afl_custom_mutator,
+                seed=seed,
+                isolate=custom_mutator_isolation != "none",
+                timeout_ms=custom_mutator_timeout_ms,
+            )
         # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
@@ -2661,6 +2681,7 @@ class Fuzzer:
                     "shim compilation will be attempted"
                 )
             from fuzzer_tool.core.cmplog import CmplogCollector, Preload
+            from fuzzer_tool.core.elf import trace_cmp_call_sites
 
             self._cmplog = CmplogCollector(
                 max_tokens=cmplog_max_tokens,
@@ -2677,6 +2698,13 @@ class Fuzzer:
                 prune_const=cmp_prune_const,
                 site_cap=cmplog_site_cap,
                 dedup_scope=cmplog_dedup_scope,
+                record_channel=cmplog_records,
+                # Sizes the record table's site index; scanned only when used.
+                record_call_sites=(
+                    trace_cmp_call_sites(self.target)
+                    if cmplog_records is RecordChannel.SHM
+                    else None
+                ),
                 # A target with the shim compiled in already intercepts
                 # libc; a preloaded copy would count every call twice.
                 preload=Preload.NONE if has_cmplog else Preload.SHIM,
@@ -3016,6 +3044,11 @@ class Fuzzer:
         # None when that crash was not written. Set by CorpusManager.save_crash.
         self._last_crash_signature: str | None = None
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
+        # --repro-gate N: novel crashes replayed <= N times before saving;
+        # failures land in crashes/no_repro/ under their own dedup maps.
+        self.repro_gate: int = repro_gate
+        self.no_repro_hashes: set[str] = set()
+        self.no_repro_sigs: dict[str, int] = {}
         # --crash-tmin-execs: shrink novel crashes at maintenance ticks (None = off).
         # Lambdas: the runner and corpus manager are built later in __init__.
         self._crash_shrinker: CrashShrinker | None = None
@@ -3134,6 +3167,8 @@ class Fuzzer:
         self._runner = TargetRunner(self)
         self._stats = StatsReporter(self, rng=self._rng)
         self._corpus_manager = CorpusManager(self)
+        if self._afl_custom is not None:
+            self._bind_afl_hooks()
         self._poisson_admission = None  # lazy-init; created on first save_to_corpus()
         # PoissonDiskAdmission holds a reference to _edge_tracker._minhash,
         # which is only fully initialized after corpus init; lazily create it
@@ -6790,6 +6825,14 @@ class Fuzzer:
         """
         if len(self.crash_hashes) > MAX_CRASH_HASHES:
             self.crash_hashes.clear()
+
+        # --repro-gate maps: clearing only lets a flaky crash re-enter no_repro/.
+        # getattr: partial fuzzer stand-ins in tests predate these maps.
+        for nr, cap in (("no_repro_hashes", MAX_CRASH_HASHES), ("no_repro_sigs", MAX_CRASH_SIGS)):
+            m = getattr(self, nr, None)
+            if m is not None and len(m) > cap:
+                m.clear()
+
         if len(self.crash_sigs) <= MAX_CRASH_SIGS:
             return
         # Keep top 75%: count descending, then newest first; insertion order kept.
@@ -7681,6 +7724,31 @@ class Fuzzer:
         if changed and engine.wants_det_edges(seed_key):
             edge_ids = self.shm_cov.get_edge_arrays()[0]
         engine.note_deterministic_result(changed, current, magnitude, edge_ids)
+
+    def _bind_afl_hooks(self) -> None:
+        """Bind the plugin's per-exec hooks once (ifs up): no check per exec."""
+        from fuzzer_tool.core.mutations.custom_mutator import AflHook
+
+        plugin = self._afl_custom
+        if plugin.has(AflHook.POST_PROCESS):
+            self._runner.bind_post_process(plugin.post_process)
+        if plugin.has(AflHook.QUEUE_GET):
+            self._fuzz_ungated = self.fuzz_one
+            self.fuzz_one = self._queue_gated
+
+    def _queue_gated(self, data: bytes) -> bool:
+        """fuzz_one behind ``afl_custom_queue_get``.
+
+        A refusal skips the seed. After _QUEUE_GET_MAX_SKIPS refusals in a row
+        the next seed runs anyway, so a plugin refusing everything cannot stall
+        the loop (a skip executes nothing, so exec-count stop rules never fire).
+        """
+        if self._queue_skips < _QUEUE_GET_MAX_SKIPS and not self._afl_custom.queue_get(data):
+            self._queue_skips += 1
+            return False
+
+        self._queue_skips = 0
+        return self._fuzz_ungated(data)
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.

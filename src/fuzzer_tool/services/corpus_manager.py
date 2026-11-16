@@ -27,6 +27,7 @@ import numpy as np
 
 from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.filesystem import (
+    NO_REPRO_DIR,
     load_corpus,
     safe_subdir,
     save_crash,
@@ -40,6 +41,7 @@ from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.inverse_lottery import inverse_lottery_victims
+from fuzzer_tool.core.mutations.custom_mutator import AflHook
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.pool_drift import PoolDrift
@@ -62,12 +64,25 @@ _TIMEOUTS = "timeouts"
 # Never in the in-memory corpus, so no kept set names them.
 _PROTECTED = frozenset((_IRREPLACEABLE, _CRASHING, _TIMEOUTS))
 
+# Weizz tag-map keys carried across --resume (see weizz_tags.attach_tags_to_meta).
+_WEIZZ_TAG_KEYS = (
+    "weizz_tags_rle",
+    "weizz_tags_len",
+    "weizz_tags_ntypes",
+    "weizz_tags_dirty",
+    "weizz_tags_inherited",
+)
+
 # AFL trim_case: chunks len/2 .. len/1024, never under 4 bytes (TRIM_MIN_BYTES).
 # Budget caps a 64 KiB walk (~2k execs uncapped) per new-coverage seed.
 _TRIM_START_DIV = 2
 _TRIM_END_DIV = 1024
 _TRIM_MIN_BYTES = 4
 _TRIM_MAX_EXECS = 512
+# Trim execs may total at most this share of fuzz execs (cumulative). Uncapped,
+# FFmpeg 9.0.2 (~99% of cuts change the trace, 2.7 KB seeds) spent 512 execs
+# per admission: 9,920 -> 65 fuzz execs in 90 s.
+_TRIM_EXEC_SHARE = 0.25
 
 
 class _Cut(Enum):
@@ -480,6 +495,8 @@ class CorpusManager:
         # Corpus seed -> content key. Corpus seeds are long-lived bytes with
         # a cached hash, so a hit skips the xxh64 pass over the seed.
         self._key_memo: dict[bytes, str] = {}
+        # Trim execs spent so far; bounded by _TRIM_EXEC_SHARE of fuzz execs.
+        self._trim_execs = 0
 
     def _entropy_add(self, data: bytes) -> None:
         """Fold an admitted seed into the byte-entropy readout.
@@ -685,6 +702,8 @@ class CorpusManager:
                 "record_stride": meta.get("record_stride", None),
                 "c11": meta.get("c11", 0),
             }
+            # Weizz tags: only when collected, so untagged seeds stay unarmed.
+            state["seed_meta"][key].update({k: meta[k] for k in _WEIZZ_TAG_KEYS if k in meta})
         # Seeds before state: state must never name seeds not yet on disk.
         seed_zip.flush_all()
         store = f._state_store
@@ -748,6 +767,7 @@ class CorpusManager:
         f.timeout_count = state.get("timeout_count", 0)
         f.crash_sigs = state.get("crash_sigs", {})
         self.resync_crash_sigs()
+        self.resync_no_repro()
         f.crash_frames = state.get("crash_frames", {})
         # Keyed by signature; states before that keyed it by stack hash.
         min_sizes = state.get("crash_min_sizes", {})
@@ -850,6 +870,7 @@ class CorpusManager:
                         "c11": sm.get("c11", 0),
                     }
                 )
+                f.seed_meta[seed].update({k: sm[k] for k in _WEIZZ_TAG_KEYS if k in sm})
                 rm_ser = sm.get("redqueen_matches", [])
                 if rm_ser:
                     f.seed_meta[seed]["redqueen_matches"] = [
@@ -931,6 +952,12 @@ class CorpusManager:
 
         self._record_frames(verdict)
 
+        # --repro-gate: a novel crash must reproduce before it is saved.
+        if verdict.novel and getattr(f, "repro_gate", 0) and not self._reproduces(data, verdict):
+            self._save_no_repro(data, returncode, stderr, fault_addr)
+            f._last_crash_signature = None
+            return False
+
         meta: CrashMetadata | None = None
         if verdict.novel:
             meta = self._novel_crash_meta(data, returncode, fault_addr, shim_sym)
@@ -984,6 +1011,52 @@ class CorpusManager:
         if alert and getattr(f, "_push", None) is not None:
             self._push_crash(result, returncode, stderr)
         return result
+
+    def _reproduces(self, data: bytes, verdict) -> bool:
+        """True when one of ``repro_gate`` replays crashes as the same bug class.
+
+        OneFuzz ``check_retry_count`` semantics: first match passes. Replays
+        reset per-run crash state (regs, fault address) and append shim
+        records; both are restored / drained so the novel crash keeps its own.
+        """
+        from fuzzer_tool.services.stats_reporter import ReplayOutcome, _replay_verdict
+
+        f = self.f
+        saved = (getattr(f, "_last_regs", None), getattr(f, "_last_fault_addr", None))
+        sink = getattr(f, "_crash_sym_sink", None)
+        try:
+            for _ in range(f.repro_gate):
+                rc, stderr = f._runner.run_target(data)
+                if sink is not None:
+                    sink.drain()
+                if _replay_verdict(verdict.signature, rc, stderr) == ReplayOutcome.CRASHED:
+                    return True
+            return False
+        finally:
+            f._last_regs, f._last_fault_addr = saved
+
+    def _save_no_repro(self, data: bytes, returncode: int, stderr: str, fault_addr) -> None:
+        """Write a gate-failed crash to ``crashes/no_repro/``; own dedup maps, no alert."""
+        f = self.f
+        out = Path(f.crashes_dir) / NO_REPRO_DIR
+        out.mkdir(parents=True, exist_ok=True)
+        save_crash(
+            data,
+            returncode,
+            stderr,
+            out,
+            f.no_repro_hashes,
+            f.no_repro_sigs,
+            fault_addr=fault_addr,
+        )
+
+    def resync_no_repro(self) -> None:
+        """Restore no_repro signatures from their sidecars (``--resume``)."""
+        crashes_dir = getattr(self.f, "crashes_dir", None)
+        if crashes_dir is None:
+            return
+        for sig in saved_crash_sigs(Path(crashes_dir) / NO_REPRO_DIR):
+            self.f.no_repro_sigs.setdefault(sig, 1)
 
     def _drain_sym(self):
         """This crash's shim record: the one crash_is_novel() took, else the sink's."""
@@ -1305,6 +1378,10 @@ class CorpusManager:
             # Purely observational bookkeeping for CorpusFlux (P4-T6); must
             # never be able to break a save.
             f._corpus_flux.record_addition()
+            # afl_custom_queue_new_entry: new seed, its parent (None for a root).
+            plugin = getattr(f, "_afl_custom", None)
+            if plugin is not None and plugin.has(AflHook.QUEUE_NEW_ENTRY):
+                plugin.queue_new_entry(data, parent)
             # Mix the newly-admitted seed's bytes into the campaign's shared
             # RandPool. This is deliberately gated on save_to_corpus()'s own
             # novelty check (seen_hashes/bloom) above, not on the Poisson-disk
@@ -1558,7 +1635,7 @@ class CorpusManager:
         if current_edges is None:
             return
 
-        trimmed, trimmed_dist = self._trim_walk(data, current_edges)
+        trimmed, trimmed_dist = self._trim_strategy()(data, current_edges)
         if trimmed is data:
             return
 
@@ -1622,6 +1699,41 @@ class CorpusManager:
                 )
             log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
 
+    def _trim_strategy(self):
+        """The plugin's trim trio when it serves one (AFL++ precedence), else trim_case."""
+        plugin = getattr(self.f, "_afl_custom", None)
+        if plugin is not None and plugin.has(AflHook.TRIM):
+            return self._custom_trim
+        return self._trim_walk
+
+    def _custom_trim(self, seed: bytes, base_edges: set[int]) -> tuple[bytes, float | None]:
+        """AFL++ custom trim: init_trim -> (trim, run, post_trim)* until done.
+
+        A cut is kept when the trace is unchanged and it is no longer than the
+        current input; post_trim returns the next step (< 0 aborts).
+        """
+        plugin = self.f._afl_custom
+        steps = plugin.init_trim(seed)
+        data, dist = seed, None
+        step = execs = 0
+
+        while 0 <= step < steps and execs < _TRIM_MAX_EXECS:
+            cut = plugin.trim()
+            if cut is None or len(cut) > len(data) or cut in self.f.seed_meta:
+                step = plugin.post_trim(False)
+                continue
+
+            execs += 1
+            outcome, cut_dist = self._try_cut(cut, seed, base_edges)
+            if outcome is _Cut.CRASH:
+                break
+            kept = outcome is _Cut.KEPT
+            if kept:
+                data, dist = cut, cut_dist
+            step = plugin.post_trim(kept)
+
+        return data, dist
+
     def _trim_walk(self, seed: bytes, base_edges: set[int]) -> tuple[bytes, float | None]:
         """AFL ``trim_case``: cut chunks len/2 .. len/1024, keep trace-preserving cuts.
 
@@ -1635,10 +1747,11 @@ class CorpusManager:
         chunk = n // _TRIM_START_DIV
         data, dist = seed, None
         execs = 0
+        budget = self._trim_budget()
 
         while chunk >= floor:
             pos = chunk
-            while pos < len(data) and execs < _TRIM_MAX_EXECS:
+            while pos < len(data) and execs < budget:
                 cut = data[:pos] + data[pos + chunk :]
 
                 # Already a seed (e.g. the parent): swapping would clobber its
@@ -1648,6 +1761,7 @@ class CorpusManager:
                     continue
 
                 execs += 1
+                self._trim_execs += 1
                 outcome, cut_dist = self._try_cut(cut, seed, base_edges)
                 if outcome is _Cut.CRASH:
                     return data, dist
@@ -1658,6 +1772,14 @@ class CorpusManager:
             chunk //= 2
 
         return data, dist
+
+    def _trim_budget(self) -> int:
+        """Execs this walk may spend: per-walk cap, then the cumulative share.
+
+        Example: 40 fuzz execs, share 0.25, 6 already spent -> 4.
+        """
+        share = int(self.f.exec_count * _TRIM_EXEC_SHARE) - self._trim_execs
+        return min(_TRIM_MAX_EXECS, share)
 
     def _try_cut(self, cut: bytes, seed: bytes, base_edges: set[int]) -> tuple[_Cut, float | None]:
         """Run one trim candidate; returns its outcome and, when kept, its distance."""

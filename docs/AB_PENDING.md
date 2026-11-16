@@ -117,6 +117,7 @@ Off arm needs a tree without the op.
 | `gradient_descent` NUMERIC | Trace-cmp objective | N | +1056 edges p=0.29; ~45 seeds |
 | `coupled_pair` (`--byte-interaction`) | Interacting byte pairs | S | fuzzgoat; tune top-K |
 | `hmm_segment` + span positions (`--field-hmm`) | Viterbi field spans | N | fuzzgoat noasan 20 seeds x 10k: edges W9 L11 McNemar p=0.82, med -21.5; A/A `field-hmm-ctl` W9 L11 p=0.82, med -8 (clean). eps med 753 vs 845 (ctl 817). PNG kill criterion (field_map truth, 104 PNGs) failed: ~700 spans/seed vs ~17 true cuts; F1 0.028 vs random 0.026 exact, worse than random at ±1. Null; over-segments. Drop or retry with sticky transitions / min span length |
+| Weizz tags (`--weizz-tags`, arm `weizz-tags`) | Passive cmplog tags + field/chunk/repair ops | N | FFmpeg 9.0.2 ledger #147: NULL on real edges (11/9, Wilcoxon p=0.81, med +280 of 23,184), CPU +43% (p=1.9e-6), A/A clean. Owed: profile the CPU cost first, then fuzzgoat (Rule 52) and a nested-chunk target |
 | Grimoire (`--grimoire`) | Generalised input splicing | U | text target (grep/sqlite) |
 | `op_append` (`--op-append`) | Append one record | U | needs linear-instruction target |
 | `taint_boost` / `--priming-check` | Revizor input boosting; primed-id filter | U | `--colorize` with / without |

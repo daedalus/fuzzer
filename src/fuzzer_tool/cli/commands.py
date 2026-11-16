@@ -7,6 +7,7 @@ import datetime
 import glob
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -20,7 +21,7 @@ from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
-from fuzzer_tool.core.cmplog import DedupScope
+from fuzzer_tool.core.cmplog import DedupScope, RecordChannel
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.count_items import CountItems
 from fuzzer_tool.core.crash_graph import Linkage
@@ -32,7 +33,7 @@ from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD
 from fuzzer_tool.core.run_mode import InputChannel, InputPlacement, RunMode, Switch
-from fuzzer_tool.core.sanitizer import STACK_HASH_TAG, STACK_HASH_VERSION
+from fuzzer_tool.core.sanitizer import FUNC_HASH_TAG, STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
@@ -184,7 +185,7 @@ def _load_hash_list(path: str | None) -> set[str] | None:
 
     hashes = {line for line in lines if line and not line.startswith("#")}
     tags = [line for line in lines if line.startswith(_STACK_HASH_PREFIX)]
-    if hashes and tags != [STACK_HASH_TAG]:
+    if hashes and tags != [STACK_HASH_TAG] and FUNC_HASH_TAG not in lines:
         found = ", ".join(t.removeprefix(_STACK_HASH_PREFIX) for t in tags) or "untagged"
         print(
             f"[!] Warning: {path}: stack-hash format {found}, current "
@@ -195,6 +196,32 @@ def _load_hash_list(path: str | None) -> set[str] | None:
 
 
 _STACK_HASH_PREFIX = "# stack-hash "
+
+
+def _stack_ignore_file(path: str) -> list[str]:
+    """Regexes for ``--stack-ignore``: one per line, ``#`` comments.
+
+    Each is compiled here so a bad line fails at parse time as
+    ``FILE:LINE: error``, not mid-run.
+    """
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(f"{path}: {exc.strerror}") from exc
+
+    patterns: list[str] = []
+    for no, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            re.compile(line)
+        except re.error as exc:
+            raise argparse.ArgumentTypeError(f"{path}:{no}: {exc}") from exc
+        patterns.append(line)
+    return patterns
+
+
 # Loaded, never exec'd: verify/replay route these through the loader child.
 SHARED_OBJECT_SUFFIXES = (".so", ".dylib", ".dll")
 
@@ -504,6 +531,14 @@ def cmd_fuzz(args):
 
         configure_crash_cluster(threshold=_cc_threshold)
         print(f"[*] crash clustering threshold: {_cc_threshold}")
+
+    # Stack filter: bound before any crash is classified.
+    _stack_ignore = getattr(args, "stack_ignore", None)
+    if _stack_ignore:
+        from fuzzer_tool.core.sanitizer import configure_stack_ignore
+
+        configure_stack_ignore(_stack_ignore)
+        print(f"[*] stack ignore: {len(_stack_ignore)} pattern(s)")
 
     # Phase 1 / B1 — Floyd sampling.
     if getattr(args, "rand_floyd_sample", False):
@@ -882,6 +917,7 @@ def cmd_fuzz(args):
         cmp_prune_const=getattr(args, "cmp_prune_const", False),
         cmplog_site_cap=getattr(args, "cmplog_site_cap", 0),
         cmplog_dedup_scope=getattr(args, "cmplog_dedup_scope", DedupScope.DRAIN),
+        cmplog_records=getattr(args, "cmplog_records", RecordChannel.TEXT),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -913,6 +949,7 @@ def cmd_fuzz(args):
         alloc_sizes=getattr(args, "alloc_sizes", False),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
+        repro_gate=getattr(args, "repro_gate", 0),
         crash_tmin_execs=getattr(args, "crash_tmin_execs", 0),
         asan_target=getattr(args, "asan_target", None),
         ubsan_target=getattr(args, "ubsan_target", None),
@@ -1249,6 +1286,7 @@ def cmd_fuzz(args):
         custom_mutator=getattr(args, "custom_mutator", None),
         custom_mutator_isolation=getattr(args, "custom_mutator_isolation", "guard"),
         custom_mutator_timeout_ms=getattr(args, "custom_mutator_timeout", 1000),
+        afl_custom_mutator=getattr(args, "afl_custom_mutator", None),
         email_on_crash=_mail_config_from_args(args),
         push_on_crash=_push_targets_from_args(args),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
@@ -3167,6 +3205,17 @@ def _positive_ms_arg(value: str) -> int:
     if ms < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1 ms, got {ms}")
     return ms
+
+
+def _non_negative_int_arg(value: str) -> int:
+    """argparse type: a whole number, at least 0."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
 
 
 def _positive_int_arg(value: str) -> int:
@@ -6297,6 +6346,19 @@ def main() -> int:
         ),
     )
     fuzz_parser.add_argument(
+        "--cmplog-records",
+        type=RecordChannel,
+        choices=list(RecordChannel),
+        default=RecordChannel.TEXT,
+        metavar="{text,shm}",
+        help=(
+            "Where the shim writes CMP records. text (default): hex lines on the cmplog "
+            "FIFO/file. shm: binary operands in a shared table sized from the target's "
+            "compare call sites (~7-31 MiB, fixed per run): no formatting, parsing or FIFO "
+            "drops. DIV/GEP records stay on text. Targets built before this fall back to text."
+        ),
+    )
+    fuzz_parser.add_argument(
         "--max-corpus",
         type=int,
         default=0,
@@ -6600,6 +6662,14 @@ def main() -> int:
         help="Replay each crash N times for reproducibility scoring (default: 0 = off)",
     )
     fuzz_parser.add_argument(
+        "--repro-gate",
+        type=_non_negative_int_arg,
+        default=0,
+        metavar="N",
+        help="Replay each novel crash up to N times before saving; none reproducing "
+        "the bug class -> crashes/no_repro/, no alert (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
         "--asan-target",
         default=None,
         metavar="PATH",
@@ -6616,8 +6686,19 @@ def main() -> int:
         default=None,
         metavar="FILE",
         help=(
-            "File with stack hashes (one per line, sidecar 'stack_hash') to skip when "
-            "saving crashes; header '# stack-hash v2' (other versions warn)"
+            "File with stack hashes (one per line, sidecar 'stack_hash' or 'func_hash') "
+            "to skip when saving crashes; header '# stack-hash v2' or '# func-hash v1' "
+            "(other versions warn)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--stack-ignore",
+        type=_stack_ignore_file,
+        default=None,
+        metavar="FILE",
+        help=(
+            "Regexes (one per line) of extra frames to strip from crash signatures "
+            "and func_hash, e.g. '^av_(free|malloc)' for project allocator wrappers"
         ),
     )
     fuzz_parser.add_argument(
@@ -7179,6 +7260,18 @@ def main() -> int:
             "LLVMFuzzerMutate, served by the fuzzer's own byte havoc. Runs "
             "in-process, so a crash in the plugin ends the fuzzer. Needs a "
             "C compiler on first use. See core/mutations/custom_mutator.py"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--afl-custom-mutator",
+        metavar="PATH",
+        default=None,
+        help=(
+            "AFL++ custom mutator: .so exporting afl_custom_* or .py module "
+            "(AFL_PYTHON_MODULE hook names). fuzz/havoc_mutation become "
+            "operators (afl_custom_fuzz, afl_custom_havoc); post_process, "
+            "the trim trio, queue_get and queue_new_entry are wired in. "
+            "Shares --custom-mutator-isolation/--custom-mutator-timeout"
         ),
     )
     fuzz_parser.add_argument(

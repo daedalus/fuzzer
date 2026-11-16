@@ -11,10 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import save_to_corpus
-from fuzzer_tool.services.corpus_manager import _TRIM_MAX_EXECS, CorpusManager
+from fuzzer_tool.services.corpus_manager import _TRIM_EXEC_SHARE, _TRIM_MAX_EXECS, CorpusManager
 
 CRASH_RC = -11
 TIMEOUT_RC = -1
+# Enough fuzz execs that the trim share never binds (single-walk tests).
+FUZZ_EXECS = 10**9
 KEPT = frozenset({1})
 CHANGED = frozenset({2})
 
@@ -63,6 +65,7 @@ class _Fuzzer:
         self._use_lineage = False
         self.crash_count = 0
         self.crashes: list[bytes] = []
+        self.exec_count = FUZZ_EXECS
 
     def get_seed_edge_count(self, key):
         return len(KEPT)
@@ -83,13 +86,18 @@ class _Fuzzer:
         return None
 
 
-def _trim(tmp_path, original: bytes, target) -> _Fuzzer:
-    corpus_dir = tmp_path / "corpus"
-    (corpus_dir / "seeds").mkdir(parents=True)
-    f = _Fuzzer(corpus_dir, target)
+def _admit(f: _Fuzzer, original: bytes) -> None:
     save_to_corpus(original, f.corpus_dir, f.seen_hashes, f.bloom)
     f.corpus.append(original)
     f.seed_meta[original] = {"fuzz_count": 0, "lineage_depth": 0}
+
+
+def _trim(tmp_path, original: bytes, target, execs: int = FUZZ_EXECS) -> _Fuzzer:
+    corpus_dir = tmp_path / "corpus"
+    (corpus_dir / "seeds").mkdir(parents=True)
+    f = _Fuzzer(corpus_dir, target)
+    f.exec_count = execs
+    _admit(f, original)
     CorpusManager(f).trim_new_coverage(original, original)
     return f
 
@@ -167,3 +175,46 @@ class TestAdversarial:
 
         assert f.corpus == [b"HEADTAIL"]
         assert f.crashes == []
+
+
+class TestExecShare:
+    """Trim execs are capped at a share of fuzz execs, across walks.
+
+    On FFmpeg 9.0.2 ~99% of cuts change the trace, so every admitted 2.7 KB
+    seed spent the full 512-exec budget: 9,920 -> 65 fuzz execs in 90 s.
+    """
+
+    def test_regression_trim_exec_share(self, tmp_path):
+        """40 fuzz execs allow int(40 * share) trim execs, no more."""
+        execs = 40
+        original = bytes(range(256)) * 16
+        f = _trim(tmp_path, original, lambda d: (0, CHANGED), execs=execs)
+
+        assert len(f._runner.calls) == int(execs * _TRIM_EXEC_SHARE)
+        assert f.corpus == [original]
+
+    def test_share_is_cumulative(self, tmp_path):
+        """Falsification: a second walk with no new fuzz execs runs nothing."""
+        corpus_dir = tmp_path / "corpus"
+        (corpus_dir / "seeds").mkdir(parents=True)
+        f = _Fuzzer(corpus_dir, lambda d: (0, CHANGED))
+        f.exec_count = 40
+        cm = CorpusManager(f)
+        first, second = bytes(range(256)) * 16, bytes(range(255, -1, -1)) * 16
+
+        _admit(f, first)
+        cm.trim_new_coverage(first, first)
+        spent = len(f._runner.calls)
+        _admit(f, second)
+        cm.trim_new_coverage(second, second)
+
+        assert spent == int(f.exec_count * _TRIM_EXEC_SHARE)
+        assert len(f._runner.calls) == spent
+
+    def test_no_fuzz_execs_no_trim(self, tmp_path):
+        """Adversarial: zero fuzz execs -> zero trim execs, seed untouched."""
+        original = b"HEAD" + b"x" * 56 + b"TAIL"
+        f = _trim(tmp_path, original, _head_tail, execs=0)
+
+        assert f._runner.calls == []
+        assert f.corpus == [original]

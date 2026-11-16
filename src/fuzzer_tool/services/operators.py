@@ -4103,8 +4103,13 @@ class OperatorEngine:
 
     # ── Weizz P2: field / chunk operators ─────────────────────────────────
 
-    def _weizz_structure_map(self, data: bytes):
-        """Load StructureMap for *data* from seed_meta, or None."""
+    def _weizz_structure_map(self, data: bytes, buf=None):
+        """Load StructureMap for *data* from seed_meta, or None.
+
+        With *buf*: None once an earlier op in the stack changed its length,
+        since the offsets no longer line up. The seed's own map stays clean
+        (its bytes are unchanged); children inherit a dirty one (P5).
+        """
         from fuzzer_tool.core.weizz_tags import load_tags_from_meta
 
         meta = self.ctx.seed_meta.get(data)
@@ -4112,13 +4117,9 @@ class OperatorEngine:
             return None
         if meta.get("weizz_tags_dirty"):
             return None
+        if buf is not None and len(buf) != meta.get("weizz_tags_len"):
+            return None
         return load_tags_from_meta(meta)
-
-    def _weizz_mark_dirty(self, data: bytes) -> None:
-        """Mark tags on parent seed dirty after a length-changing mutation."""
-        meta = self.ctx.seed_meta.get(data)
-        if meta is not None and "weizz_tags_rle" in meta:
-            meta["weizz_tags_dirty"] = True
 
     def _op_weizz_field_havoc(self, buf, _byte_idx, data):
         """Havoc only inside one Weizz-tagged field (same-cmp_id run).
@@ -4126,7 +4127,7 @@ class OperatorEngine:
         Length-preserving: flips / arithmetic / interesting values within a
         randomly chosen field span. Falls back to None when no tags.
         """
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf:
             return None
         spans = smap.field_spans()
@@ -4168,7 +4169,7 @@ class OperatorEngine:
 
     def _op_weizz_chunk_dup(self, buf, _byte_idx, data):
         """Duplicate a Weizz top-level chunk span (insert a second copy)."""
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf:
             return None
         spans = smap.chunk_spans(parent=None)
@@ -4183,12 +4184,11 @@ class OperatorEngine:
             return None
         # Insert duplicate after the original chunk.
         out = bytearray(buf[:end]) + bytearray(chunk) + bytearray(buf[end:])
-        self._weizz_mark_dirty(data)
         return out[: self.ctx.max_len]
 
     def _op_weizz_chunk_delete(self, buf, _byte_idx, data):
         """Delete a Weizz field or top-level chunk span (never the whole buffer)."""
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf or len(buf) < 4:
             return None
         # Prefer field spans: chunk_spans(parent=None) may collapse the entire
@@ -4206,12 +4206,11 @@ class OperatorEngine:
         out = bytearray(buf[:start]) + bytearray(buf[end:])
         if not out:
             return None
-        self._weizz_mark_dirty(data)
         return out[: self.ctx.max_len]
 
     def _op_weizz_chunk_swap(self, buf, _byte_idx, data):
         """Swap two Weizz top-level chunk spans."""
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf:
             return None
         spans = smap.chunk_spans(parent=None)
@@ -4235,10 +4234,6 @@ class OperatorEngine:
             + bytearray(buf[a0:a1])
             + bytearray(buf[b1:])
         )
-        # Length-preserving swap: tags remain valid position-wise only if
-        # spans had equal length; mark dirty when lengths differ.
-        if (a1 - a0) != (b1 - b0):
-            self._weizz_mark_dirty(data)
         return out[: self.ctx.max_len]
 
     def _op_weizz_tag_repair(self, buf, _byte_idx, data):
@@ -4257,7 +4252,7 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.weizz_tags import TagFlags
 
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf:
             return None
         rng = self.ctx._rng
