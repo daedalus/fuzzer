@@ -2172,6 +2172,9 @@ class Fuzzer:
         # --seed-fess-scheduler: FESS feature-grid seed arm
         # (core/schedulers/seed_fess.py). Off, out of --hail-mary. Appended.
         seed_fess_scheduler=False,
+        # --fess-inherit: FESS parent-cell inheritance + new-cell jump. Needs
+        # the FESS arm. Off, out of --hail-mary. Appended.
+        fess_inherit=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3727,7 +3730,14 @@ class Fuzzer:
             if seed_lottery_scheduler
             else None
         )
-        self._seed_fess = SeedFessScheduler(rng=self._rng) if seed_fess_scheduler else None
+        if fess_inherit is Switch.ON and not seed_fess_scheduler:
+            log.warning("--fess-inherit has no effect without --seed-fess-scheduler")
+            fess_inherit = Switch.OFF
+        # Read by SeedPicker._fess_cells (parent-cell projection).
+        self._fess_inherit = fess_inherit
+        self._seed_fess = (
+            SeedFessScheduler(rng=self._rng, jump=fess_inherit) if seed_fess_scheduler else None
+        )
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:

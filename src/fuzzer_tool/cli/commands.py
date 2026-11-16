@@ -1032,6 +1032,7 @@ def cmd_fuzz(args):
         pos_learn=getattr(args, "pos_learn", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
+        fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2955,8 +2956,9 @@ def cmd_sweep(args):
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
 #
-# seed_fess_scheduler (--seed-fess-scheduler) is excluded as unmeasured: unit
-# tests only, no paired run (docs/AB_PENDING.md).
+# seed_fess_scheduler (--seed-fess-scheduler) and fess_inherit (--fess-inherit)
+# are excluded as unmeasured: unit tests only, no paired run
+# (docs/AB_PENDING.md). The second is also inert without the FESS arm.
 #
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
@@ -4247,6 +4249,14 @@ def main() -> int:
         "(edges, rare edges, lineage depth, size); the least-explored cell is fuzzed next, then "
         "its least-fuzzed seed. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_fess.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--fess-inherit",
+        action="store_true",
+        help="With --seed-fess-scheduler: a child seed no better than its parent's cell (more "
+        "edges, then rare edges, smaller size, shallower) competes in the parent's cell, and a "
+        "cell occupied for the first time is picked next, once (soksolv project / "
+        "NewCellJump). No effect without the FESS arm. Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--frontier-bin",
