@@ -21,6 +21,7 @@ import tempfile
 from collections.abc import Callable
 
 from fuzzer_tool.adapters import libc_mem, libc_shm
+from fuzzer_tool.adapters.global_snapshot import GlobalSnapshot
 from fuzzer_tool.adapters.guard_arena import GUARD_OVERREAD, GuardArena
 from fuzzer_tool.adapters.heap_input import HeapInput
 from fuzzer_tool.adapters.process import run_target_stdin
@@ -32,7 +33,7 @@ from fuzzer_tool.adapters.shim_factory import (
 )
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY
 from fuzzer_tool.adapters.stderr_capture import StderrCapture
-from fuzzer_tool.core.run_mode import InputPlacement
+from fuzzer_tool.core.run_mode import InputPlacement, StateRestore
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +218,10 @@ def _fill_guard(r: "InProcessRunner", data) -> ctypes.Array:
     return r._arena.place(data)
 
 
+def _no_restore() -> None:
+    """``--snapshot-restore off``: nothing to write back."""
+
+
 # Crash hooks: only guard placement reads the fault address.
 def _crash_plain(r: "InProcessRunner", sig: int) -> None:
     return None
@@ -255,6 +260,7 @@ class InProcessRunner:
         use_ptrace: bool = False,
         placement: InputPlacement = InputPlacement.EXACT,
         perf_counters=None,
+        restore: StateRestore = StateRestore.OFF,
     ):
         self.target = target
         # Handed to the loaders, which attach at spawn (see perf_pid()).
@@ -287,6 +293,9 @@ class InProcessRunner:
         self._heap = HeapInput()
         self._fill = _fill_guard if self._arena else _fill_heap
         self._on_crash = _crash_guard if self._arena else _crash_plain
+        # Globals copy-back before each direct exec, bound once per load.
+        self._restore_mode = restore
+        self._restore = _no_restore
         # fd 2 -> reused pipe around direct-mode calls (ASAN reports).
         self._stderr = StderrCapture()
         self._is_c = False
@@ -334,6 +343,7 @@ class InProcessRunner:
             use_ptrace=self.use_ptrace,
             placement=self._placement,
             perf_counters=self._perf_counters,
+            restore=self._restore_mode,
         )
 
     def _start(self):
@@ -412,6 +422,7 @@ class InProcessRunner:
             ]
             self._func_ptr = fn_ptr  # cache the resolved symbol
             self._bind_guard()
+            self._bind_snapshot()
         except OSError as e:
             if shim_loaded:
                 log.warning("Direct mode failed (%s), falling back to subprocess", e)
@@ -459,6 +470,20 @@ class InProcessRunner:
         guarded.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
         self._guard_fn, self._guard_call = guarded, _call_plain
 
+    def _bind_snapshot(self) -> None:
+        """Capture globals after load and constructors; bind ``_restore``.
+
+        Captured before the first exec, so every input starts from the
+        post-load state (wtf-style snapshot, globals only).
+        """
+        if self._restore_mode is StateRestore.OFF:
+            return
+        snap = GlobalSnapshot.capture(self._lib, self.target, self._func_ptr)
+        if snap is None:
+            return
+        self._restore = snap.restore
+        log.info("snapshot-restore: %d bytes of globals per exec", snap.size)
+
     def _bind_fault(self) -> None:
         """Bind ``__afl_last_fault_addr`` for guard placement; warn if absent."""
         if self._arena is None:
@@ -472,6 +497,7 @@ class InProcessRunner:
         self._fault_fn = fn
 
     def _unbind_guard(self) -> None:
+        self._restore = _no_restore
         self._guard_call = _call_unguarded
         self._guard_fn = None
         self._guard_ptr = None
@@ -791,6 +817,7 @@ class InProcessRunner:
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
+        self._restore()
         # No reset_bitmap() here: run_target's reset_edge_map() generation bump
         # already aged out the previous exec. A memset re-claimed every slot
         # cold and bumped edge_count, defeating the _scan_new fast path.
@@ -856,6 +883,7 @@ class InProcessRunner:
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
+        self._restore()
 
         n = len(data)
         self._c_buf = self._fill(self, data)

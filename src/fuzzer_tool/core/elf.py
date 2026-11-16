@@ -1255,6 +1255,104 @@ def _find_text_section(elf: bytes) -> tuple[bytes, int, int] | None:
     return None
 
 
+# ── Snapshot spans (--snapshot-restore) ──────────────────────────────
+#
+#   RW PT_LOAD:  [.got][.got.plt][.data][afl_shim_data][.bss][afl_shim_bss]
+#                 └─ loader ──────┘└ span ┘└── shim ───┘└span┘└── shim ──┘
+#
+# Only target state is restored: loader tables (RELRO, GOT, init arrays),
+# shim globals (afl_shim.c section pragma) and sancov metadata are not.
+_SHF_WRITE = 0x1
+_SHF_ALLOC = 0x2
+_SHF_TLS = 0x400
+_SNAP_FLAGS = _SHF_WRITE | _SHF_ALLOC
+_PT_GNU_RELRO = 0x6474E552
+_SHIM_SECTIONS = frozenset((b"afl_shim_data", b"afl_shim_bss"))
+_SNAP_SKIP = _SHIM_SECTIONS | frozenset(
+    (
+        b".got", b".got.plt", b".dynamic", b".init_array", b".fini_array",
+        b".preinit_array", b".data.rel.ro", b".tm_clone_table",
+        b"__sancov_guards", b"__sancov_cntrs", b"__sancov_bools",
+    )
+)  # fmt: skip
+
+
+class DataRanges(NamedTuple):
+    """Link-time ``(vaddr, size)`` spans of target-owned writable data."""
+
+    spans: tuple[tuple[int, int], ...]
+    shim_isolated: bool  # shim globals are in afl_shim_{data,bss}
+
+
+def _relro(elf: bytes) -> tuple[int, int]:
+    """``[lo, hi)`` of PT_GNU_RELRO; ``(0, 0)`` when absent or out of bounds."""
+    n = len(elf)
+    e_phoff = struct.unpack_from("<Q", elf, _E_PHOFF)[0]
+    e_phentsize, e_phnum = struct.unpack_from("<HH", elf, _E_PHENTSIZE)
+    if e_phentsize < 56 or e_phoff > n or e_phnum * e_phentsize > n - e_phoff:
+        return 0, 0
+
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        if struct.unpack_from("<I", elf, off)[0] != _PT_GNU_RELRO:
+            continue
+        vaddr = struct.unpack_from("<Q", elf, off + 16)[0]
+        return vaddr, vaddr + struct.unpack_from("<Q", elf, off + 40)[0]
+    return 0, 0
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """Sort and join touching spans: fewer memmoves per restore."""
+    out: list[tuple[int, int]] = []
+    for addr, size in sorted(spans):
+        if out and out[-1][0] + out[-1][1] >= addr:
+            last, last_size = out[-1]
+            out[-1] = (last, max(last_size, addr + size - last))
+            continue
+        out.append((addr, size))
+    return tuple(out)
+
+
+def data_ranges(elf: bytes) -> DataRanges | None:
+    """Writable spans ``--snapshot-restore globals`` copies; None if malformed.
+
+    Example: probe.so -> spans ((0x4010, 0xc), (0x4024, 0xc)), shim_isolated.
+    """
+    if not _elf64_le(elf):
+        return None
+    n = len(elf)
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", elf, 58)
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return None
+    if not _shdrs_in_bounds(n, e_shoff, e_shnum, e_shentsize):
+        return None
+
+    shstr = struct.unpack_from("<Q", elf, e_shoff + e_shstrndx * e_shentsize + 24)[0]
+    relro_lo, relro_hi = _relro(elf)
+    spans: list[tuple[int, int]] = []
+    isolated = False
+
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        flags = struct.unpack_from("<Q", elf, sh + 8)[0]
+        if flags & (_SNAP_FLAGS | _SHF_TLS) != _SNAP_FLAGS:
+            continue
+
+        name_at = min(shstr + struct.unpack_from("<I", elf, sh)[0], n)
+        name = elf[name_at : name_at + 64].split(b"\x00")[0]
+        isolated |= name in _SHIM_SECTIONS
+        addr = struct.unpack_from("<Q", elf, sh + 16)[0]
+        size = struct.unpack_from("<Q", elf, sh + 32)[0]
+
+        # Skip loader/shim state and anything inside RELRO (read-only after load).
+        if name in _SNAP_SKIP or not size or relro_lo <= addr < relro_hi:
+            continue
+        spans.append((addr, size))
+
+    return DataRanges(_merge_spans(spans), isolated)
+
+
 def _word_is_noise(value: int, width: int) -> bool:
     """True when a data word is not worth a dictionary token.
 

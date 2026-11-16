@@ -1466,6 +1466,18 @@ Opt-in, default `exact`, not set by `--hail-mary`. Direct in-process modes (`--i
 
 A build without ASAN reads past an exact-size heap copy silently; here the first byte past the input faults. The shim records `si_addr` on every recovered crash (`__afl_last_fault_addr()`); `InProcessRunner._crash_guard` reads it for SIGSEGV/SIGBUS and sets `_last_fault_label = "guard-overread"` when it lies in the guard page, and `corpus_manager._label_fault` writes it to `error_type` (access `READ`) unless a sanitizer already named the crash. The mapping grows to the largest input and never shrinks; one array per length is cached (cap 1024, cleared on remap). Cost (bytes inputs, random lengths): 264 vs 366 ns at <=64 B, 294 vs 972 ns at <=2 KiB, 1.5 vs 2.1 us at <=64 KiB against `_input_buf`. Limits: underreads are not caught (bytes before the input are stale); the arena is not ASAN heap, so ASAN's redzone for the input buffer is replaced by the guard page; a shim without `__afl_last_fault_addr` recovers the crash but leaves it unlabelled (startup warning); loader modes ignore the flag. Tests: `tests/test_guard_arena.py`.
 
+### Global snapshot restore (`--snapshot-restore globals`)
+On by default; `--no-snapshot-restore` (or `--snapshot-restore off`) disables it. Port of wtf's per-testcase snapshot restore, scoped to the target `.so`'s writable globals. Direct in-process modes have no process boundary: a counter, "header seen" flag or cache written by one input is read by the next, so crashes and coverage depend on history.
+
+```
+RW PT_LOAD: [.got][.got.plt][.data][afl_shim_data][.bss][afl_shim_bss]
+             └─ skipped ───┘  span   skipped (shim)  span  skipped (shim)
+```
+
+`core/elf.py:data_ranges` picks SHF_WRITE|SHF_ALLOC, non-TLS sections outside PT_GNU_RELRO, minus loader tables, sancov metadata and the shim's own sections (afl_shim.c `#pragma clang section`). `adapters/global_snapshot.py` copies those spans after load (constructors done) and `InProcessRunner._run_c_direct{,_lite}` writes them back before every exec. A shim-linked target without `afl_shim_{data,bss}` (gcc build, old shim) is refused with a warning: restoring would clobber the shim.
+
+Cost: memoryview slice copy, ~55 ns per span (ctypes.memmove: 640 ns); fuzzgoat (44 B, 2 spans) +0.1-0.25 us/exec microbenchmark, in-run inside A/A spread, identical edges in both arms (ledger #153: fuzzgoat keeps no state across calls, so this measures cost only). Limits: heap and TLS are not restored; a global pointing to heap freed by a later exec gets the freed pointer back (false UAF under ASAN; disable with `--no-snapshot-restore`); loader modes ignore the flag (they fork). Tests: `tests/test_global_snapshot.py`.
+
 ### SHM resize in inprocess mode
 When collision risk exceeds the threshold, the coverage SHM (edge table) is resized. In inprocess mode, `InProcessRunner.update_shm_after_resize` re-runs the target's `__afl_map_shm()` (re-reads `__AFL_SHM_ID`/`AFL_MAP_SIZE`, so `__afl_area` and `__afl_map_size` follow the new segment; falls back to patching `__afl_area`) and invalidates the cached SHM attachment, so coverage writes don't go to freed memory. The persistent loader is restarted instead. The shim validates the new segment first, then publishes size, header pointers and table together and detaches the old segment. A refused re-attach detaches and turns coverage off; refusal is sticky only for that segment id.
 
