@@ -60,7 +60,24 @@ Why null: fuzzgoat runs persistent (`__AFL_PERSISTENT=1`), so a child forks once
 
 Why null: target time is 0.04 ms of a 0.5 ms cycle. Cost: +38 MB RSS.
 
+### 4.3 FFmpeg 9.0.2, clang + ASAN
+
+`ffmpeg_read_9.0.2_asan` (exe), forkserver, auto-sized map 524,288 entries (4 MiB, 1,024 pages), ~10-14K live edges per exec. Seeds: 11 FATE samples, 14 crafted 8.0.3 seeds, 3 generated (`build_targets.sh`).
+
+| Test | B vs A | A/A |
+|---|---|---|
+| Forkserver only, persistent, 11 rounds × 28 seeds, min | +6.4% | −3.4% |
+| Forkserver only, non-persistent, 31 rounds, paired | B faster 13/31 and 11/31; med +1.5%, +7.9% | 24/31 (p=0.003) and 14/31; med −4.6%, +2.8% |
+| Child faults, non-persistent, 5 × 28 execs per arm | 12,001 minflt/exec, sys 13.1 ms | A: 11,906 minflt/exec, sys 13.9 ms |
+| End-to-end, 10 pairs × 1k, wall | B faster 6/10, med −3.0%, p=0.60 | 9/10, med −4.3%, p=0.004 |
+
+Why null: a non-persistent ASAN child takes ~12K minor faults per exec; the coverage map is ~1K of them. The rest are copy-on-write faults on the forkserver's heap and ASAN shadow. Populate batches the 1K, saving at most ~0.7 ms of ~13 ms system time per exec. In the default persistent mode it runs once per child.
+
+Both A/A controls fail (p=0.003 forkserver-only, p=0.004 end-to-end): the two-runner harness is biased, and FFmpeg runs diverge within a pair (live-edge counts differ at the same seed). No WIN/LOSS can be read from these designs.
+
+Private-heap `MADV_HUGEPAGE`: not applicable under ASAN. The shim refuses `__AFL_PRIVATE_HEAP` in sanitizer builds, so ASAN's allocator owns the heap.
+
 ## 5. Not done
 
-- Populate on a large non-persistent target with dense per-exec coverage (ffmpeg, 2^19-entry map). Synthetic data predicts up to ~160 us/fork saved there, and a loss on early-rejected inputs; it would need a gate (e.g. populate only when the previous exec's touched pages exceed ~1/4 of the table).
-- Private-heap THP on a heap-heavy target (ffmpeg noasan direct_lite).
+- Private-heap THP on FFmpeg noasan direct_lite (needs `tools/vendor_ffmpeg.sh` nosan tree).
+- The ~11K non-coverage COW faults per non-persistent FFmpeg ASAN exec are the real fork cost; persistent mode (the default) already avoids them.
