@@ -1483,6 +1483,7 @@ def cmd_import(args):
         import_from_afl,
         import_from_honggfuzz,
         import_from_libfuzzer,
+        import_from_pcap,
         write_dictionary,
     )
 
@@ -1498,6 +1499,9 @@ def cmd_import(args):
     elif args.format == "honggfuzz":
         imported, _ = import_from_honggfuzz(args.source_dir, args.corpus, args.crashes)
         print(f"[+] Imported {imported} seeds from honggfuzz")
+    elif args.format == "pcap":
+        imported = import_from_pcap(args.source_dir, args.corpus, args.window, args.framing)
+        print(f"[+] Imported {imported} seeds from packet captures")
 
     if getattr(args, "autotokens", None):
         tokens = build_autotoken_dictionary(args.corpus)
@@ -8009,8 +8013,10 @@ def main() -> int:
     sarif_parser.set_defaults(func=cmd_sarif)
 
     # --- import ---
+    from fuzzer_tool.services.import_corpus import PCAP_FRAMINGS, PCAP_WINDOW
+
     import_parser = subparsers.add_parser(
-        "import", help="Import corpus from AFL/libFuzzer/honggfuzz"
+        "import", help="Import corpus from AFL/libFuzzer/honggfuzz/packet captures"
     )
     import_parser.add_argument("source_dir", help="Source directory")
     import_parser.add_argument("-d", "--corpus", required=True, help="Destination corpus directory")
@@ -8019,9 +8025,21 @@ def main() -> int:
     )
     import_parser.add_argument(
         "--format",
-        choices=["afl", "libfuzzer", "honggfuzz"],
+        choices=["afl", "libfuzzer", "honggfuzz", "pcap"],
         default="afl",
         help="Source format (default: afl)",
+    )
+    import_parser.add_argument(
+        "--window",
+        type=int,
+        default=PCAP_WINDOW,
+        help=f"pcap: consecutive packets per seed (default: {PCAP_WINDOW})",
+    )
+    import_parser.add_argument(
+        "--framing",
+        choices=PCAP_FRAMINGS,
+        default=PCAP_FRAMINGS[0],
+        help=f"pcap: per-packet length prefix (default: {PCAP_FRAMINGS[0]})",
     )
     import_parser.add_argument(
         "--autotokens",

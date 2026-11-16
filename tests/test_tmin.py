@@ -263,3 +263,27 @@ class TestTminGrammarPass:
 
     def test_adversarial_growing_shrink_rejected(self, tmp_path):
         assert self._run(tmp_path, _GrowTree, b"ab" * 8 + b"X") == b"X"
+
+
+def _framed(*payloads: bytes) -> bytes:
+    return b"".join(len(p).to_bytes(4, "big") + p for p in payloads)
+
+
+def _framed_run(_target, data, _timeout, env=None):
+    """run_target_stdin stand-in: SIGSEGV only on a well-framed BUG message."""
+    pos, n, msgs = 0, len(data), []
+    while pos < n:
+        size = int.from_bytes(data[pos : pos + 4], "big")
+        if pos + 4 > n or pos + 4 + size > n:
+            return 0, "", 1
+        msgs.append(data[pos + 4 : pos + 4 + size])
+        pos += 4 + size
+    return (-11, "", 1) if b"BUG" in msgs else (0, "", 1)
+
+
+def test_tmin_shrinks_whole_messages(tmp_path):
+    crash = tmp_path / "crash.bin"
+    crash.write_bytes(_framed(b"hello", b"BUG", b"world!", b"tail"))
+    with patch("fuzzer_tool.adapters.process.run_target_stdin", side_effect=_framed_run):
+        result = tmin("/bin/false", str(crash), also_dir=str(tmp_path / "also"))
+    assert result == _framed(b"BUG")

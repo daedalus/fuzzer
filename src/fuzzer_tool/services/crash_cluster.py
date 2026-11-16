@@ -37,7 +37,7 @@ from fuzzer_tool.core.crash_graph import (
 )
 from fuzzer_tool.core.elf import estimate_map_size
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
+from fuzzer_tool.core.reducer import Oracle, Reducer, Verdict, shrink_passes
 from fuzzer_tool.core.run_mode import InputChannel
 from fuzzer_tool.services.tmin import crash_sig
 
@@ -118,7 +118,7 @@ class CoverageReducer:
     signature and touches fewer edges (equal edges: shorter input). Two
     phases share one exec budget:
 
-        shrink  ChunkPass deletions to a fixpoint (core/reducer.py)
+        shrink  message, then ChunkPass deletions to a fixpoint (core/reducer.py)
         mutate  random cut / byte / truncate on what is left
     """
 
@@ -158,7 +158,7 @@ class CoverageReducer:
             best[:] = [cand, got]  # Reducer keeps every PASS: it is the new current
             return Verdict.PASS
 
-        Reducer(Oracle(judge), [(Phase.MAIN, ChunkPass())]).run(data)
+        Reducer(Oracle(judge), shrink_passes()).run(data)
         return best[0], best[1]
 
     def _mutate(self, data: bytes, trace: Trace) -> tuple[bytes, Trace]:
