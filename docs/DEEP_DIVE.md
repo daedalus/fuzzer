@@ -1035,6 +1035,8 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `verify` | Re-run crashes with ASAN target to confirm memory bugs |
 | `estimate` | Estimate execs to first crash via static analysis + calibration |
 | `import` | Import corpus from AFL/libFuzzer/honggfuzz/packet captures |
+| `mutants-build` | Build a cached mutant set (ASAN binaries per IR mutation site) for the mutant-kill metric |
+| `mutants-score` | Score a corpus by the mutants it kills; prints `kills= mutants= hangs= flaky= inputs= clean_inputs=` |
 
 ### Rank Seeds
 
@@ -1721,6 +1723,16 @@ evidence; a HANG is reported, never a kill. `Confirm.RERUN` (default) re-runs
 the killing input alone; a kill that does not reproduce counts as `flaky`.
 fuzzgoatNoVulns, 5 stock seeds: 63 kills, 5 hangs, 0 flaky, identical on
 rerun; 23.1 s at 1 job, 7.4 s at 4; confirmation adds no measurable time.
+
+CLI (P4):
+
+```
+fuzzer-tool mutants-build SRC.c --wrapper targets/X_read.c -I DIR -o SET [--cap N] [--seed S] [-j N]
+fuzzer-tool mutants-score SET -d CORPUS [-j N] [--timeout-ms MS] [--confirm rerun|none]
+```
+
+fuzzgoatNoVulns: build 47.9 s (4 jobs), score 5 stock seeds 7.6 s:
+`kills=63 mutants=467 hangs=5 flaky=0 inputs=5 clean_inputs=5`.
 
 ### SMT Solver Evaluation (`--enable-smt-z3`)
 

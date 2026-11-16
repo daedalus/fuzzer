@@ -2223,6 +2223,56 @@ def cmd_sarif(args):
     return 0
 
 
+def cmd_mutants_build(args):
+    """Build (or reuse) a mutant set for the mutant-kill metric."""
+    from fuzzer_tool.adapters.mutant_build import TargetSpec
+    from fuzzer_tool.services.mutant_kill import ALL_SITES, KillSetError, build_kill_set
+
+    spec = TargetSpec(Path(args.src), Path(args.wrapper), tuple(Path(d) for d in args.include))
+    cap = ALL_SITES if args.cap is None else args.cap
+    try:
+        got = build_kill_set(spec, Path(args.out), cap, args.seed, args.jobs)
+    except KillSetError as exc:
+        print(f"[-] {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"[+] {got.mutants} mutants ({got.equivalent} equivalent, {got.failed} failed) in {args.out}"
+    )
+    return 0
+
+
+def cmd_mutants_score(args):
+    """Score a corpus by the mutants it kills (prints a key=value line)."""
+    from fuzzer_tool.services.mutant_kill import (
+        DEFAULT_TIMEOUT_MS,
+        Confirm,
+        KillScorer,
+        KillSetError,
+    )
+
+    corpus = Path(args.corpus)
+    if not corpus.is_dir():
+        print(f"[-] Corpus directory not found: {corpus}", file=sys.stderr)
+        return 1
+
+    try:
+        timeout_ms = DEFAULT_TIMEOUT_MS if args.timeout_ms is None else args.timeout_ms
+        scorer = KillScorer.open(
+            Path(args.kill_set), args.jobs, timeout_ms, Confirm[args.confirm.upper()]
+        )
+    except KillSetError as exc:
+        print(f"[-] {exc}", file=sys.stderr)
+        return 1
+
+    r = scorer.score(corpus)
+    print(
+        f"kills={r.kills} mutants={scorer.mutant_count} hangs={r.hangs} flaky={r.flaky} "
+        f"inputs={r.inputs} clean_inputs={r.clean_inputs}"
+    )
+    return 0
+
+
 def cmd_replay(args):
     """Replay a crash input against the target."""
     _validate_target(args.target)
@@ -7995,6 +8045,51 @@ def main() -> int:
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
     verify_parser.set_defaults(func=cmd_verify)
+
+    # --- mutants-build / mutants-score (docs/action_plan_mutant_kill_metric.md) ---
+    mb_parser = subparsers.add_parser(
+        "mutants-build", help="Build a mutant set for the mutant-kill metric"
+    )
+    mb_parser.add_argument("src", help="C source to mutate (e.g. fuzzgoatNoVulns.c)")
+    mb_parser.add_argument(
+        "--wrapper", required=True, help="Wrapper exposing fuzz_shm_run (targets/*_read.c)"
+    )
+    mb_parser.add_argument(
+        "-o", "--out", required=True, help="Output directory (cached by build key)"
+    )
+    mb_parser.add_argument(
+        "-I", "--include", action="append", default=[], help="Include directory (repeatable)"
+    )
+    mb_parser.add_argument(
+        "--cap", type=_positive_int_arg, default=None, help="Max sites kept (default: all)"
+    )
+    mb_parser.add_argument("--seed", type=int, default=1, help="Site sampling seed (default: 1)")
+    mb_parser.add_argument(
+        "-j", "--jobs", type=_positive_int_arg, default=os.cpu_count() or 1, help="Parallel builds"
+    )
+    mb_parser.set_defaults(func=cmd_mutants_build)
+
+    ms_parser = subparsers.add_parser(
+        "mutants-score", help="Score a corpus by the mutants it kills"
+    )
+    ms_parser.add_argument("kill_set", help="Directory built by mutants-build")
+    ms_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
+    ms_parser.add_argument(
+        "-j", "--jobs", type=_positive_int_arg, default=os.cpu_count() or 1, help="Parallel mutants"
+    )
+    ms_parser.add_argument(
+        "--timeout-ms",
+        type=_positive_int_arg,
+        default=None,
+        help="Per-input timeout in ms (default: 1000)",
+    )
+    ms_parser.add_argument(
+        "--confirm",
+        choices=("rerun", "none"),
+        default="rerun",
+        help="Re-run each killing input alone before counting the kill (default: rerun)",
+    )
+    ms_parser.set_defaults(func=cmd_mutants_score)
 
     # --- sarif ---
     sarif_parser = subparsers.add_parser(

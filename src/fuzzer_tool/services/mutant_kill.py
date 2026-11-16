@@ -27,15 +27,31 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import iter_seed_batches
-from fuzzer_tool.adapters.mutant_build import MutantSet, Status, pack_record, replay, write_pack
+from fuzzer_tool.adapters.mutant_build import (
+    BuildError,
+    MutantSet,
+    Status,
+    TargetSpec,
+    asan_available,
+    pack_record,
+    replay,
+    write_pack,
+)
 
 # Oracle binaries are small parsers; one second separates a hang from work.
 DEFAULT_TIMEOUT_MS = 1000
+
+# Cap meaning "keep every site": sample_sites keeps all when cap >= len(sites).
+ALL_SITES = 1 << 31
 
 # Corpus read granularity: bounds memory while streaming into the pack.
 _CORPUS_BATCH = 256
 
 _PACK = "corpus.pack"
+
+
+class KillSetError(RuntimeError):
+    """A kill set cannot be built or opened (toolchain, sources, manifest)."""
 
 
 class Confirm(enum.Enum):
@@ -86,9 +102,25 @@ class KillScorer:
         self._confirm = confirm
 
     @classmethod
-    def open(cls, kill_set: Path, jobs: int, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> KillScorer:
-        """Scorer for the mutant set built in *kill_set*."""
-        return cls(MutantSet.load(kill_set), jobs, timeout_ms)
+    def open(
+        cls,
+        kill_set: Path,
+        jobs: int,
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
+        confirm: Confirm = Confirm.RERUN,
+    ) -> KillScorer:
+        """Scorer for the mutant set built in *kill_set*.
+
+        Raises:
+            KillSetError: *kill_set* holds no manifest (never built, or interrupted).
+        """
+        if not MutantSet.is_built(kill_set):
+            raise KillSetError(f"no mutant set manifest in {kill_set}: run mutants-build first")
+        return cls(MutantSet.load(kill_set), jobs, timeout_ms, confirm)
+
+    @property
+    def mutant_count(self) -> int:
+        return len(self._set.sites)
 
     def score(self, corpus: Path) -> KillScore:
         """Score every live seed of *corpus* (seeds/, seeds.zip, deltas)."""
@@ -141,6 +173,36 @@ class KillScorer:
         finally:
             one.unlink()
         return _Outcome.KILLED if again[:1] == bytes([Status.CRASH]) else _Outcome.FLAKY
+
+
+@dataclass(frozen=True, slots=True)
+class KillSetSummary:
+    """What ``build_kill_set`` produced."""
+
+    mutants: int
+    equivalent: int
+    failed: int
+
+
+def build_kill_set(
+    spec: TargetSpec, out_dir: Path, cap: int, seed: int, jobs: int
+) -> KillSetSummary:
+    """Build (or reuse, by key) the mutant set for *spec* in *out_dir*.
+
+    Raises:
+        KillSetError: no ASAN runtime, a missing source, or the original fails to build.
+    """
+    if not asan_available():
+        raise KillSetError("clang cannot link ASAN: install libclang-rt-<clang major>-dev")
+    missing = [p for p in (spec.src, spec.wrapper) if not p.is_file()]
+    if missing:
+        raise KillSetError(f"missing source: {', '.join(map(str, missing))}")
+
+    try:
+        built = MutantSet.build(spec, out_dir, cap, seed, jobs)
+    except BuildError as exc:
+        raise KillSetError(f"original does not build: {exc}") from exc
+    return KillSetSummary(len(built.sites), len(built.equivalent), len(built.failed))
 
 
 def _iter_corpus(corpus: Path) -> Iterator[bytes]:

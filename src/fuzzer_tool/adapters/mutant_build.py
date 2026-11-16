@@ -264,6 +264,11 @@ class MutantSet:
         return (self.out_dir / _BASE_IR).read_text()
 
     @classmethod
+    def is_built(cls, out_dir: Path) -> bool:
+        """*out_dir* holds a finished build (its manifest is written last)."""
+        return (out_dir / _MANIFEST).is_file()
+
+    @classmethod
     def load(cls, out_dir: Path) -> MutantSet:
         """Read *out_dir*'s manifest (pickle, state allowlist only)."""
         with open(out_dir / _MANIFEST, "rb") as fh:
