@@ -7,6 +7,7 @@ import datetime
 import glob
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -32,7 +33,7 @@ from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD
 from fuzzer_tool.core.run_mode import InputChannel, InputPlacement, RunMode, Switch
-from fuzzer_tool.core.sanitizer import STACK_HASH_TAG, STACK_HASH_VERSION
+from fuzzer_tool.core.sanitizer import FUNC_HASH_TAG, STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
@@ -184,7 +185,7 @@ def _load_hash_list(path: str | None) -> set[str] | None:
 
     hashes = {line for line in lines if line and not line.startswith("#")}
     tags = [line for line in lines if line.startswith(_STACK_HASH_PREFIX)]
-    if hashes and tags != [STACK_HASH_TAG]:
+    if hashes and tags != [STACK_HASH_TAG] and FUNC_HASH_TAG not in lines:
         found = ", ".join(t.removeprefix(_STACK_HASH_PREFIX) for t in tags) or "untagged"
         print(
             f"[!] Warning: {path}: stack-hash format {found}, current "
@@ -195,6 +196,32 @@ def _load_hash_list(path: str | None) -> set[str] | None:
 
 
 _STACK_HASH_PREFIX = "# stack-hash "
+
+
+def _stack_ignore_file(path: str) -> list[str]:
+    """Regexes for ``--stack-ignore``: one per line, ``#`` comments.
+
+    Each is compiled here so a bad line fails at parse time as
+    ``FILE:LINE: error``, not mid-run.
+    """
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(f"{path}: {exc.strerror}") from exc
+
+    patterns: list[str] = []
+    for no, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            re.compile(line)
+        except re.error as exc:
+            raise argparse.ArgumentTypeError(f"{path}:{no}: {exc}") from exc
+        patterns.append(line)
+    return patterns
+
+
 # Loaded, never exec'd: verify/replay route these through the loader child.
 SHARED_OBJECT_SUFFIXES = (".so", ".dylib", ".dll")
 
@@ -504,6 +531,14 @@ def cmd_fuzz(args):
 
         configure_crash_cluster(threshold=_cc_threshold)
         print(f"[*] crash clustering threshold: {_cc_threshold}")
+
+    # Stack filter: bound before any crash is classified.
+    _stack_ignore = getattr(args, "stack_ignore", None)
+    if _stack_ignore:
+        from fuzzer_tool.core.sanitizer import configure_stack_ignore
+
+        configure_stack_ignore(_stack_ignore)
+        print(f"[*] stack ignore: {len(_stack_ignore)} pattern(s)")
 
     # Phase 1 / B1 — Floyd sampling.
     if getattr(args, "rand_floyd_sample", False):
@@ -887,6 +922,7 @@ def cmd_fuzz(args):
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
         auto_minimize=Switch.OFF if getattr(args, "no_auto_minimize", False) else Switch.ON,
+        trim_new_coverage=Switch.ON if getattr(args, "trim_new_coverage", False) else Switch.OFF,
         prune_corpus_max_memory=getattr(args, "prune_corpus_on_max_memory", 80),
         bootstrap=getattr(args, "bootstrap", False),
         bootstrap_k=getattr(args, "bootstrap_k", 1),
@@ -914,6 +950,7 @@ def cmd_fuzz(args):
         alloc_sizes=getattr(args, "alloc_sizes", False),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
+        repro_gate=getattr(args, "repro_gate", 0),
         crash_tmin_execs=getattr(args, "crash_tmin_execs", 0),
         asan_target=getattr(args, "asan_target", None),
         ubsan_target=getattr(args, "ubsan_target", None),
@@ -923,6 +960,7 @@ def cmd_fuzz(args):
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
         ijon=getattr(args, "ijon", False),
+        stack_depth_max=getattr(args, "stack_depth_max", False),
         ijon_schedule_maxmap=getattr(args, "ijon_schedule_maxmap", DEFAULT_SCHEDULE_MAXMAP),
         c11=getattr(args, "c11", False),
         value_profile=ValueProfile(getattr(args, "value_profile", ValueProfile.OFF.value)),
@@ -2836,6 +2874,9 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the PCA group arm
 # has only a synthetic planted-group check, no paired run on a real target.
 #
+# trim_new_coverage (--trim-new-coverage) is excluded: an exec cost (up to 512
+# execs per admission, ~98% of an FFmpeg run), not a search strategy.
+#
 # pos_learn (--pos-learn) is excluded as unmeasured (see
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): LearnAFL's path
 # mask has unit tests only. Bench arm: pos-arena-learn.
@@ -3107,6 +3148,7 @@ _HAIL_MARY_FLAGS = (
     "honggfuzz",
     "hw_perf",
     "ijon",
+    "stack_depth_max",
     "c11",
     "intel_pt",
     "lbr",
@@ -3167,6 +3209,17 @@ def _positive_ms_arg(value: str) -> int:
     if ms < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1 ms, got {ms}")
     return ms
+
+
+def _non_negative_int_arg(value: str) -> int:
+    """argparse type: a whole number, at least 0."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
 
 
 def _positive_int_arg(value: str) -> int:
@@ -6395,6 +6448,13 @@ def main() -> int:
         "(the memory-pressure prune stays). Set by --lightweight.",
     )
     fuzz_parser.add_argument(
+        "--trim-new-coverage",
+        action="store_true",
+        help="Trim each new-coverage seed on admission (AFL trim_case walk, up to "
+        "512 execs each). Off by default: on FFmpeg it took ~98%% of campaign time. "
+        "--no-auto-minimize overrides it.",
+    )
+    fuzz_parser.add_argument(
         "--prune-corpus-on-max-memory",
         type=int,
         default=80,
@@ -6613,6 +6673,14 @@ def main() -> int:
         help="Replay each crash N times for reproducibility scoring (default: 0 = off)",
     )
     fuzz_parser.add_argument(
+        "--repro-gate",
+        type=_non_negative_int_arg,
+        default=0,
+        metavar="N",
+        help="Replay each novel crash up to N times before saving; none reproducing "
+        "the bug class -> crashes/no_repro/, no alert (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
         "--asan-target",
         default=None,
         metavar="PATH",
@@ -6629,8 +6697,19 @@ def main() -> int:
         default=None,
         metavar="FILE",
         help=(
-            "File with stack hashes (one per line, sidecar 'stack_hash') to skip when "
-            "saving crashes; header '# stack-hash v2' (other versions warn)"
+            "File with stack hashes (one per line, sidecar 'stack_hash' or 'func_hash') "
+            "to skip when saving crashes; header '# stack-hash v2' or '# func-hash v1' "
+            "(other versions warn)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--stack-ignore",
+        type=_stack_ignore_file,
+        default=None,
+        metavar="FILE",
+        help=(
+            "Regexes (one per line) of extra frames to strip from crash signatures "
+            "and func_hash, e.g. '^av_(free|malloc)' for project allocator wrappers"
         ),
     )
     fuzz_parser.add_argument(
@@ -6738,6 +6817,12 @@ def main() -> int:
         help="Enable performance counters via perf_event_open (instructions, cycles, "
         "branches, branch misses, L1D, CPU time, page faults, context switches). "
         "Software events only without a PMU. Requires CAP_PERFMON or root.",
+    )
+    fuzz_parser.add_argument(
+        "--stack-depth-max",
+        action="store_true",
+        help="Keep inputs that recurse deeper than any before (honggfuzz stack-depth "
+        "feedback). Needs AFL SHM coverage and a per-edge callback build.",
     )
     fuzz_parser.add_argument(
         "--ijon",

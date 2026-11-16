@@ -299,6 +299,7 @@ def _trim(f, trimmed_tail: tuple[int, int]) -> None:
     shm = _Shm()
     f.shm_cov = shm
     f._distance = _Dist(DIST)
+    f.exec_count = 10**9  # fuzz execs: the trim exec share never binds
     f.save_to_corpus(LONG, parent=PARENT)
     f.seed_meta[LONG]["avg_distance"] = OLD_DIST
 

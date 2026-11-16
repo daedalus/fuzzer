@@ -64,7 +64,7 @@ class _FakeFuzzer:
         self._agg_cache_valid = True
         self._use_lineage = False
         self._edge_tracker = self
-        self.exec_count = 0
+        self.exec_count = 10**9  # fuzz execs: the trim exec share never binds
 
     # stand-in for EdgeTracker.get_seed_edge_count
     def get_seed_edge_count(self, key):

@@ -27,6 +27,7 @@ import numpy as np
 
 from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.filesystem import (
+    NO_REPRO_DIR,
     load_corpus,
     safe_subdir,
     save_crash,
@@ -78,6 +79,10 @@ _TRIM_START_DIV = 2
 _TRIM_END_DIV = 1024
 _TRIM_MIN_BYTES = 4
 _TRIM_MAX_EXECS = 512
+# Trim execs may total at most this share of fuzz execs (cumulative). Uncapped,
+# FFmpeg 9.0.2 (~99% of cuts change the trace, 2.7 KB seeds) spent 512 execs
+# per admission: 9,920 -> 65 fuzz execs in 90 s.
+_TRIM_EXEC_SHARE = 0.25
 
 
 class _Cut(Enum):
@@ -490,6 +495,8 @@ class CorpusManager:
         # Corpus seed -> content key. Corpus seeds are long-lived bytes with
         # a cached hash, so a hit skips the xxh64 pass over the seed.
         self._key_memo: dict[bytes, str] = {}
+        # Trim execs spent so far; bounded by _TRIM_EXEC_SHARE of fuzz execs.
+        self._trim_execs = 0
 
     def _entropy_add(self, data: bytes) -> None:
         """Fold an admitted seed into the byte-entropy readout.
@@ -760,6 +767,7 @@ class CorpusManager:
         f.timeout_count = state.get("timeout_count", 0)
         f.crash_sigs = state.get("crash_sigs", {})
         self.resync_crash_sigs()
+        self.resync_no_repro()
         f.crash_frames = state.get("crash_frames", {})
         # Keyed by signature; states before that keyed it by stack hash.
         min_sizes = state.get("crash_min_sizes", {})
@@ -944,6 +952,12 @@ class CorpusManager:
 
         self._record_frames(verdict)
 
+        # --repro-gate: a novel crash must reproduce before it is saved.
+        if verdict.novel and getattr(f, "repro_gate", 0) and not self._reproduces(data, verdict):
+            self._save_no_repro(data, returncode, stderr, fault_addr)
+            f._last_crash_signature = None
+            return False
+
         meta: CrashMetadata | None = None
         if verdict.novel:
             meta = self._novel_crash_meta(data, returncode, fault_addr, shim_sym)
@@ -997,6 +1011,52 @@ class CorpusManager:
         if alert and getattr(f, "_push", None) is not None:
             self._push_crash(result, returncode, stderr)
         return result
+
+    def _reproduces(self, data: bytes, verdict) -> bool:
+        """True when one of ``repro_gate`` replays crashes as the same bug class.
+
+        OneFuzz ``check_retry_count`` semantics: first match passes. Replays
+        reset per-run crash state (regs, fault address) and append shim
+        records; both are restored / drained so the novel crash keeps its own.
+        """
+        from fuzzer_tool.services.stats_reporter import ReplayOutcome, _replay_verdict
+
+        f = self.f
+        saved = (getattr(f, "_last_regs", None), getattr(f, "_last_fault_addr", None))
+        sink = getattr(f, "_crash_sym_sink", None)
+        try:
+            for _ in range(f.repro_gate):
+                rc, stderr = f._runner.run_target(data)
+                if sink is not None:
+                    sink.drain()
+                if _replay_verdict(verdict.signature, rc, stderr) == ReplayOutcome.CRASHED:
+                    return True
+            return False
+        finally:
+            f._last_regs, f._last_fault_addr = saved
+
+    def _save_no_repro(self, data: bytes, returncode: int, stderr: str, fault_addr) -> None:
+        """Write a gate-failed crash to ``crashes/no_repro/``; own dedup maps, no alert."""
+        f = self.f
+        out = Path(f.crashes_dir) / NO_REPRO_DIR
+        out.mkdir(parents=True, exist_ok=True)
+        save_crash(
+            data,
+            returncode,
+            stderr,
+            out,
+            f.no_repro_hashes,
+            f.no_repro_sigs,
+            fault_addr=fault_addr,
+        )
+
+    def resync_no_repro(self) -> None:
+        """Restore no_repro signatures from their sidecars (``--resume``)."""
+        crashes_dir = getattr(self.f, "crashes_dir", None)
+        if crashes_dir is None:
+            return
+        for sig in saved_crash_sigs(Path(crashes_dir) / NO_REPRO_DIR):
+            self.f.no_repro_sigs.setdefault(sig, 1)
 
     def _drain_sym(self):
         """This crash's shim record: the one crash_is_novel() took, else the sink's."""
@@ -1687,10 +1747,11 @@ class CorpusManager:
         chunk = n // _TRIM_START_DIV
         data, dist = seed, None
         execs = 0
+        budget = self._trim_budget()
 
         while chunk >= floor:
             pos = chunk
-            while pos < len(data) and execs < _TRIM_MAX_EXECS:
+            while pos < len(data) and execs < budget:
                 cut = data[:pos] + data[pos + chunk :]
 
                 # Already a seed (e.g. the parent): swapping would clobber its
@@ -1700,6 +1761,7 @@ class CorpusManager:
                     continue
 
                 execs += 1
+                self._trim_execs += 1
                 outcome, cut_dist = self._try_cut(cut, seed, base_edges)
                 if outcome is _Cut.CRASH:
                     return data, dist
@@ -1710,6 +1772,14 @@ class CorpusManager:
             chunk //= 2
 
         return data, dist
+
+    def _trim_budget(self) -> int:
+        """Execs this walk may spend: per-walk cap, then the cumulative share.
+
+        Example: 40 fuzz execs, share 0.25, 6 already spent -> 4.
+        """
+        share = int(self.f.exec_count * _TRIM_EXEC_SHARE) - self._trim_execs
+        return min(_TRIM_MAX_EXECS, share)
 
     def _try_cut(self, cut: bytes, seed: bytes, base_edges: set[int]) -> tuple[_Cut, float | None]:
         """Run one trim candidate; returns its outcome and, when kept, its distance."""

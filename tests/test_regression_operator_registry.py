@@ -220,8 +220,9 @@ class TestAvailabilityPredicates:
     def test_cmplog_ops_gated_on_pairs(self):
         assert "redqueen_xform" not in self._available()
         assert "gradient_cmp" not in self._available()
+        assert "cmp_solve" not in self._available()
         avail = self._available(_cmplog=_CmplogWithPairs())
-        assert {"redqueen_xform", "gradient_cmp"} <= avail
+        assert {"redqueen_xform", "gradient_cmp", "cmp_solve"} <= avail
 
     def test_regex_bomb_gated_on_flag(self):
         assert "regex_bomb" not in self._available()

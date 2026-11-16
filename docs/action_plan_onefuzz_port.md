@@ -14,7 +14,7 @@ Survey and ranking: `docs/TODO.md` §OneFuzz port candidates.
                            save_crash ──► crashes/
 ```
 
-## P1 — Repro gate (`--repro-gate N`)
+## P1 — Repro gate (`--repro-gate N`) (shipped; matches bug class via `_replay_verdict`, not full signature)
 
 **Gap.** `--replay-n` scores crashes after they are saved
 (`services/stats_reporter.py:159`). Crashes that never reproduce sit in
@@ -91,7 +91,7 @@ existing pickle state machinery (Hard Rule 15).
 - Speed: fuzzgoat run with the gate on vs off. Execs/s must match within
   noise (Hard Rule 41).
 
-## P2 — Configurable stack filter and function hash
+## P2 — Configurable stack filter and function hash (shipped; `--resume` warning deferred to TODO)
 
 **Gap.** Frame stripping uses hardcoded sets (`core/sanitizer.py:152-166`).
 Project wrappers such as `av_free`, `xmalloc` and `g_free` become the

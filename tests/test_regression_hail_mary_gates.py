@@ -73,6 +73,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "seed_branch_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "inverse_lottery_select",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "lightweight",  # the inverse preset; the two are mutually exclusive
+        "trim_new_coverage",  # exec cost (~98% of an FFmpeg run), not a strategy
         "no_cmplog",  # opt-OUT of comparison tracing; --hail-mary must not turn cmplog off
         "resume",
         "refresh_profile",  # profiling: hail-mary already slow, full re-analysis per run is overkill

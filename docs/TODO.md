@@ -226,6 +226,7 @@
 - [ ] **`FractalVoronoiMutator._boundary_cache` / `_root_hash_cache` are unbounded** (2026-09-25) — only `_plan_cache` is capped (now LRU, `core/lru.py`); the other two grow with every distinct cell/root across input lengths. Bound them with `LRUCache` (Hard Rule 54).
 
 ## Corpus
+- [ ] **Trim exec share** (2026-11-16) — trim is now opt-in (`--trim-new-coverage`, default off). `_TRIM_EXEC_SHARE` 0.25 caps the AFL `trim_case` walk (ledger #146; uncapped walk cost FFmpeg ~12-100x). Open: (a) trim execs are not counted in `execs`/`--max-execs`, so fixed-exec A/Bs hide trim cost — count them or report them; (b) share unswept: paired fuzzgoat + FFmpeg run 0.1 / 0.25 / 0.5 on real edges; (c) AFL trims at a seed's first fuzz, not on admission — consider deferring like `--colorize`.
 - [ ] **Orbit dedup unmeasured on a real target** (2026-10-26) — `--orbit-dedup` and `--orbit-probe` verified on a toy stream only (handover_algebra G1). Open: (a) paired A/B on an instrumented target with a true and a deliberately wrong spec (needs clang); (b) cache the parent's `canonical()` per parent (recomputed every `_is_repeat`, 461 us at 1 MB); (c) tune the probe period (default 64, ~3% extra execs); (d) probe is blind without SHM coverage.
 - [ ] **`--edge-components` unmeasured on real corpora** (2026-10-27) — `minimize -c --edge-components` verified on synthetic books and fuzzgoat (handover_coverage_gram_matrix §13). Open: (a) png_read/ffmpeg corpora; (b) `STRIP_FRAC=0.1` chosen on fuzzgoat only (0.5 gave one 99% component there); components vs parser regions unchecked; (c) not wired into `fuzz` or `--report`.
 - [ ] **`--seed-cut` unmeasured on real corpora** (2026-11-09) — `minimize -c --seed-cut K` verified on synthetic books only (cut within 1 point of a random split; per-group edge coverage +0.5 to +2.2 points). Open: (a) fuzzgoat/png_read/ffmpeg corpora; (b) the objective weighs every shared edge equally, so popular edges dominate; weight rare edges (1/C(n_e,2)) or maximise per-group coverage directly; (c) no consumer yet: nothing shards or A/B-splits the corpus with it.
@@ -339,8 +340,10 @@ Ported: time-normalised Elo strategy credit (`--elo-time-credit`).
 
 ## OneFuzz port candidates (2026-11-15, microsoft/onefuzz agent)
 Plan for P1/P2: `docs/action_plan_onefuzz_port.md`. Already have: tmin/cmin, ptrace coverage, SARIF, push/email, crash-bisect, gdb replay.
-- [ ] **P2 `--stack-ignore` + `func_hash`** — user regexes extend runtime-frame stripping (prototype: `av_free` wrappers stop being the signature); function-name hash survives rebuilds; blocklist accepts `# func-hash v1`.
-- [ ] **P1 `--repro-gate N`** — replay novel crashes ≤N times before save; no signature match → `crashes/no_repro/`, no alert.
+- [x] **P2 `--stack-ignore` + `func_hash`** — shipped (`tests/test_stack_filter.py`).
+- [ ] **P2 follow-ups** — warn on `--resume` when the ignore file changed (signatures shift); apply `--stack-ignore` to `verify`/`replay`/`crash-cluster`.
+- [x] **P1 `--repro-gate N`** — shipped (`tests/test_repro_gate.py`). Matches bug class (existing `_replay_verdict`), not full signature.
+- [ ] **P1 follow-ups** — `no_repro: K` in the end-of-run summary; fuzzgoat in-run check with a flaky target.
 - [ ] **Regression mode for `verify`** — per bucket: fixed / still crashing / new signature against a new build.
 - [ ] **Pre-flight** — unresolved shared libs (`LD_DEBUG=libs`), seeds crashing/timing out at start.
 - [ ] **Placeholders** — `{input}`, `{target_exe}`, `{crashes}`, `{input_file_name}` in `adapters/process.py` (only `{file}` today).
@@ -352,7 +355,7 @@ Plan for P1/P2: `docs/action_plan_onefuzz_port.md`. Already have: tmin/cmin, ptr
 
 ## WEIZZ port gaps (2026-11-15, ISSTA 2020)
 Ported: passive tags (`core/weizz_tags.py`), field/chunk/repair ops, P4 restricted solve, P5 inheritance. Fixed 2026-11-15: collected tags were discarded (copy in `attach_tags_to_meta`, mutant meta replaced on admission), initial seeds never tagged, length-changing ops disabled the parent's map for good, tags lost on `--resume` (`tests/test_regression_weizz_tags_lifecycle.py`).
-- [ ] **A/B `--weizz-tags`** (E1) — `bench_paired.py` arm; fuzzgoat + a nested-chunk target. No ledger row exists; every claim below is unmeasured.
+- [ ] **A/B `--weizz-tags`** (E1) — FFmpeg 9.0.2 done (ledger #147): NULL on edges (med +1.2%, p=0.81), CPU +43% (20/20, p=1.9e-6). Open: (a) profile where the CPU goes (collection scan vs ops) and cut it; (b) fuzzgoat (Rule 52) + a nested-chunk target; (c) items below remain unmeasured.
 - [ ] **Wire differential `get_deps`** — tests-only today. Per-seed, probabilistic, exec-budgeted on fresh-coverage seeds; Weizz first/last-bit-per-byte sampling; per-run cmplog (`last_conds`) instead of the campaign pool.
 - [ ] **Comparison order in shim** — sequence id per CMP record (`__AFL_SHM_LAYOUT` +1, rebuild targets) for chunk nesting; `counter` is a shortest-operand rank today.
 - [ ] **Checksum cmp patching** — disable flagged checksum site, fuzz, repair, verify. Repair today: CRC-32 over the whole prefix, not the dependent bytes.
@@ -394,8 +397,8 @@ Already ported: power factors (`--honggfuzz`), Magic, ASCIINumChange, SpecialStr
 - [ ] **Seed dry-run size ramp** — `input_prepareStaticFile`: run each seed truncated to 4 bytes, doubling to full size; cheap early coverage of short-input paths.
 - [ ] **Persistent self-restart on slowdown** — `performance.c`: baseline µs/exec after 5000 iters or 20 s; restart child at 5x slowdown (leaks, fragmentation). Partly ported (`8a69d3f2`): `PersistentLoader._track_throughput` restarts below 10% of baseline eps (10x); forkserver/direct paths have none. `--persistent` (signal runner) now restarts on a page-fault budget (`FaultBudget`, 2026-11-11); slowdown-based restart still open there.
 - [ ] **Multi-worker + live sync** — threads sharing one coverage map, `--dynamic_input` dir polled and unlinked after import. Largest item; we are single-process.
-- [ ] **Max stack depth as novelty** (2026-11-15) — `instrumentCheckStackDepth` + `fuzz_perfFeedback`: admit input when per-exec depth (`__sancov_lowest_stack`) beats campaign max. Ours reads `read_stack_depth()` in `FuzzRound._commit_edges` but only feeds `--honggfuzz` power factors. Admission gate beside `_is_hw_max`; no shim change.
-- [ ] **CmpSolve partial match** (2026-11-15) — `mangle_CmpSolve`: find first window where 0 < matching bytes < len of a cmp operand, overwrite it with the operand (25% +1, 25% -1 LE). Redqueen needs an exact operand hit; `_op_gradient_cmp` is `mangle_GradientCmp`. Register as an op (Hard Rule 12).
+- [ ] **Max stack depth as novelty** (2026-11-15) — shipped: `--stack-depth-max` (`core/stack_depth.StackMax`, `FuzzRound._observe_stack`). Open: A/B on clang fuzzgoat (Hard Rule 52, ledger row); in-run cost of the per-exec read.
+- [ ] **CmpSolve partial match** (2026-11-15) — shipped: `cmp_solve` op (`core/cmp_solve.py`). Open: A/B with `--cmplog` on clang fuzzgoat; overlaps `gradient_cmp` strategy 4 (full overwrite) — compare per-op success rates.
 - [ ] **Diverse splice partner** (2026-11-15) — `input_getDiverseInputAsBuf`: rotating 16-entry window, pick max `|cov - cur_cov|` + `cur_cov/4` bonus for a different parent. Ours: `_op_splice*` partners unrelated to coverage distance. Cheap A/B arm.
 - [ ] **CPU-time timeouts** (2026-11-15) — `--tmout_sigvtalrm`: `ITIMER_VIRTUAL`, so host load does not create false hangs. None in tree.
 - Skip: `mangle_pickWeighted` tiers (`uint8_t roll` wraps when sum > 255; our bandits supersede), rare-edge counter (counts bucket collisions, not frequency), BTS (superseded by PT/LBR), socket_fuzzer protocol (niche), `ArithConst` (`_rq_arith` covers), `Havoc` stagnation burst (stall escalation exists), cov-tuple corpus order (schedulers supersede), `only_printable`, `pprocess_cmd`/`ffmutate_cmd` (`--custom-mutator`), `linux_ns_*`.
@@ -413,6 +416,8 @@ Already covered: 64 KiB signal altstack (`afl_shim.c` `__AFL_ALTSTACK_SIZE`), si
 - Skip: tunnel search (length-change byte deepening; effector maps in `position_arena.py` supersede), instruction-length probing and opcode blacklists (CPU fuzzing, out of scope).
 
 ## Standing notes
+- [ ] **Master test debt (2026-11-16)**: `test_perf_group_read.py::test_real_software_counters_count_own_work` fails in this container; `test_regression_end_of_run_persistence.py` lets the probe's KeyboardInterrupt abort the pytest session (later files never run); 16 failures across `test_regression_cli_fuzzer_kwargs`/`elo_all`/`fuzzer`/`one_fifth`/… also red on master.
+- [ ] **`test_regression_novel_crash_reward.py`: 2 failures on master** — stub `SimpleNamespace` lacks `_is_hw_max` (2026-11-16).
 
 These are not work items. They are the lessons the closed work left behind, and
 they keep costing time when forgotten.

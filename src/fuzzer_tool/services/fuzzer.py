@@ -195,6 +195,7 @@ from fuzzer_tool.core.shim_health import (
 )
 from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
+from fuzzer_tool.core.stack_depth import StackMax
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
@@ -1069,6 +1070,7 @@ class Fuzzer:
     _run_mode = RunMode.FULL
     _markov_switch = Switch.ON
     _auto_minimize = Switch.ON
+    _trim_new_coverage_on = Switch.OFF
     # Multi-target .so: target -> its in-process runner; __init__ fills it.
     _target_runners: MappingProxyType = MappingProxyType({})
 
@@ -1606,6 +1608,7 @@ class Fuzzer:
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
+        repro_gate=0,
         crash_tmin_execs=0,
         crash_blocklist=None,
         crash_allowlist=None,
@@ -2157,6 +2160,10 @@ class Fuzzer:
         rq_add_key=False,
         # --stall-mode: op choice during stall recovery (services/operators.py). Appended.
         stall_mode=None,
+        # --stack-depth-max: admit deeper recursion (core/stack_depth.py). Appended.
+        stack_depth_max=False,
+        # --trim-new-coverage: trim each new-coverage seed on admission. Appended.
+        trim_new_coverage=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2174,8 +2181,8 @@ class Fuzzer:
         # Context term on/off (--ctx-sensitive); the shim reads it at attach and
         # the sizing / ASLR / contract code below reads it via effective_ctx_bits.
         export_ctx_sensitive(ctx_sensitive)
-        # Stack-depth sampling: --honggfuzz is its only reader; read at attach.
-        export_stack_depth(honggfuzz)
+        # Stack-depth sampling: --honggfuzz and --stack-depth-max read it; read at attach.
+        export_stack_depth(honggfuzz or stack_depth_max)
         # Allocation-size edges (--alloc-sizes); read at attach.
         export_alloc_sizes(alloc_sizes)
         # In-process modes dlopen the target; an executable cannot be.
@@ -2347,6 +2354,7 @@ class Fuzzer:
         # --no-auto-minimize: no trim on admission, no corpus-size prune.
         # The memory-pressure prune stays (bounded memory).
         self._auto_minimize = auto_minimize
+        self._trim_new_coverage_on = trim_new_coverage
         # --lightweight: FuzzRound.run picks the lean pipeline.
         self._run_mode = run_mode
         self.prune_corpus_max_memory = prune_corpus_max_memory
@@ -2858,6 +2866,13 @@ class Fuzzer:
         if ijon and self.shm_cov and not self.multi_targets:
             self._ijon = self._open_ijon(target, ijon_schedule_maxmap)
 
+        # --stack-depth-max: the depth comes from the SHM header; no SHM, no signal.
+        self._stack_max: StackMax | None = None
+        if stack_depth_max and self.shm_cov:
+            self._stack_max = StackMax()
+        elif stack_depth_max:
+            print("[!] --stack-depth-max: needs AFL SHM coverage; disabled")
+
         # --shared-virgin: one novelty store across the per-target tables.
         self._shared_virgin: SharedVirgin | None = None
         if shared_virgin:
@@ -3033,6 +3048,11 @@ class Fuzzer:
         # None when that crash was not written. Set by CorpusManager.save_crash.
         self._last_crash_signature: str | None = None
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
+        # --repro-gate N: novel crashes replayed <= N times before saving;
+        # failures land in crashes/no_repro/ under their own dedup maps.
+        self.repro_gate: int = repro_gate
+        self.no_repro_hashes: set[str] = set()
+        self.no_repro_sigs: dict[str, int] = {}
         # --crash-tmin-execs: shrink novel crashes at maintenance ticks (None = off).
         # Lambdas: the runner and corpus manager are built later in __init__.
         self._crash_shrinker: CrashShrinker | None = None
@@ -6809,6 +6829,14 @@ class Fuzzer:
         """
         if len(self.crash_hashes) > MAX_CRASH_HASHES:
             self.crash_hashes.clear()
+
+        # --repro-gate maps: clearing only lets a flaky crash re-enter no_repro/.
+        # getattr: partial fuzzer stand-ins in tests predate these maps.
+        for nr, cap in (("no_repro_hashes", MAX_CRASH_HASHES), ("no_repro_sigs", MAX_CRASH_SIGS)):
+            m = getattr(self, nr, None)
+            if m is not None and len(m) > cap:
+                m.clear()
+
         if len(self.crash_sigs) <= MAX_CRASH_SIGS:
             return
         # Keep top 75%: count descending, then newest first; insertion order kept.
@@ -10258,6 +10286,8 @@ class Fuzzer:
             groups["Execution"].append("honggfuzz")
         if self.hw_perf:
             groups["Execution"].append("hw-perf")
+        if getattr(self, "_stack_max", None) is not None:
+            groups["Execution"].append("stack-depth-max")
         if self.pt_cov:
             groups["Execution"].append("intel-pt")
         if self.branch_cov:

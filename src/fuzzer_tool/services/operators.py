@@ -3670,6 +3670,14 @@ class OperatorEngine:
                 ]
             )
 
+    def _op_cmp_solve(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.cmp_solve import cmp_solve
+
+        # Same length out as in: no max_len truncation needed.
+        if buf and self.ctx.cmplog_pairs:
+            out = cmp_solve(bytes(buf), self.ctx.cmplog_pairs, self.ctx._rng)
+            return None if out is None else bytearray(out)
+
     def _op_gradient_descent(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.gradient_descent import gradient_descent, pick_objective
 
