@@ -922,6 +922,7 @@ def cmd_fuzz(args):
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
         auto_minimize=Switch.OFF if getattr(args, "no_auto_minimize", False) else Switch.ON,
+        trim_new_coverage=Switch.ON if getattr(args, "trim_new_coverage", False) else Switch.OFF,
         prune_corpus_max_memory=getattr(args, "prune_corpus_on_max_memory", 80),
         bootstrap=getattr(args, "bootstrap", False),
         bootstrap_k=getattr(args, "bootstrap_k", 1),
@@ -959,6 +960,7 @@ def cmd_fuzz(args):
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
         ijon=getattr(args, "ijon", False),
+        stack_depth_max=getattr(args, "stack_depth_max", False),
         ijon_schedule_maxmap=getattr(args, "ijon_schedule_maxmap", DEFAULT_SCHEDULE_MAXMAP),
         c11=getattr(args, "c11", False),
         value_profile=ValueProfile(getattr(args, "value_profile", ValueProfile.OFF.value)),
@@ -2872,6 +2874,9 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the PCA group arm
 # has only a synthetic planted-group check, no paired run on a real target.
 #
+# trim_new_coverage (--trim-new-coverage) is excluded: an exec cost (up to 512
+# execs per admission, ~98% of an FFmpeg run), not a search strategy.
+#
 # pos_learn (--pos-learn) is excluded as unmeasured (see
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): LearnAFL's path
 # mask has unit tests only. Bench arm: pos-arena-learn.
@@ -3143,6 +3148,7 @@ _HAIL_MARY_FLAGS = (
     "honggfuzz",
     "hw_perf",
     "ijon",
+    "stack_depth_max",
     "c11",
     "intel_pt",
     "lbr",
@@ -6442,6 +6448,13 @@ def main() -> int:
         "(the memory-pressure prune stays). Set by --lightweight.",
     )
     fuzz_parser.add_argument(
+        "--trim-new-coverage",
+        action="store_true",
+        help="Trim each new-coverage seed on admission (AFL trim_case walk, up to "
+        "512 execs each). Off by default: on FFmpeg it took ~98%% of campaign time. "
+        "--no-auto-minimize overrides it.",
+    )
+    fuzz_parser.add_argument(
         "--prune-corpus-on-max-memory",
         type=int,
         default=80,
@@ -6804,6 +6817,12 @@ def main() -> int:
         help="Enable performance counters via perf_event_open (instructions, cycles, "
         "branches, branch misses, L1D, CPU time, page faults, context switches). "
         "Software events only without a PMU. Requires CAP_PERFMON or root.",
+    )
+    fuzz_parser.add_argument(
+        "--stack-depth-max",
+        action="store_true",
+        help="Keep inputs that recurse deeper than any before (honggfuzz stack-depth "
+        "feedback). Needs AFL SHM coverage and a per-edge callback build.",
     )
     fuzz_parser.add_argument(
         "--ijon",

@@ -99,6 +99,7 @@ Off arm needs a tree without the op.
 
 | Feature | What | St | A/B owed |
 |---|---|---|---|
+| `cmp_solve` (arms `baseline` on vs `cmp-solve-off`, ctl `cmp-solve-off-ctl`) | Write a cmplog operand (exact / +/-1 LE) over the lowest partial window (honggfuzz) | U | Frozen 2026-11-15: `--set ffmpeg` (9.0.2 noasan clang), 20 seeds x 10k, metric real_edges, Wilcoxon two-sided alpha 0.05; A/A off vs off-ctl first |
 | `overflow_pair` | Two-field overflow sums | S | fuzzgoat; merge with `div_trap` if both null |
 | FXT ops (`rational_pair`, `sum_shift`, `multiset_next`, `haar_coef`, `revbin_permute`, `hilbert_patch`, `hadamard_oa`, `fib_encode`) | Arndt FXT-book ops | S | fuzzgoat, then FFmpeg / png |
 | `pairing_fn` | Szudzik/Cantor pairing op | S | fuzzgoat |
@@ -146,6 +147,7 @@ Off arm needs a tree without the op.
 |---|---|---|---|
 | Value profile (`--value-profile on/stall`) | `popcount(a^b)`, `bitlen|a-b|` per cmp site as synthetic edges | U | fuzzgoat `--cmplog` build, `on` and `stall` vs off, 20 seeds + A/A; metric real edges on a non-marking replay (marks inflate campaign edges) |
 | Cmplog record cap + campaign dedup (`--cmplog-site-cap 32 --cmplog-dedup-scope campaign`, arm `cmp-cap-dedup`) | Per-site record cap per drain; dedup table kept across drains | N | NULL on both: fuzzgoat_tcg ledger #138, FFmpeg 9.0.2 #139 (9/11, p=0.93; CPU −9% median, p=0.14). Owed only if CPU matters: a cpu_user rerun at ≥ 40 seeds on FFmpeg. |
+| Stack-depth novelty (`--stack-depth-max`, arm `stack-depth-max`) | Admit a clean run deeper than the campaign max (honggfuzz) | U | Frozen 2026-11-15: `--set ffmpeg` (9.0.2 noasan clang), 20 seeds x 10k, metric real_edges, Wilcoxon two-sided alpha 0.05; A/A `stack-depth-max-ctl` vs `baseline` first; also report corpus size |
 | Edge clusters (`--edge-clusters`) | Class rarity + near-miss bonus | N | fuzzgoat null; FFmpeg/png |
 | Inline sancov modes | `inline-8bit-counters`, `inline-bool-flag` | N | −23/−38 edges; fold buckets, 20×20k rerun |
 | Shim bit tricks | SWAR fold, masked probe, `bit_compress` | S | rebuild + fuzzgoat calibration |

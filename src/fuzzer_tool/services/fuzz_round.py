@@ -134,6 +134,7 @@ class FuzzRound:
         "_is_new_max",
         "_is_hw_max",
         "_is_ijon_max",
+        "_is_stack_max",
         "_is_cmp_progress",
         "_is_new_valid_coverage",
         "_ltl_new",
@@ -165,6 +166,7 @@ class FuzzRound:
         self._is_new_max = False
         self._is_hw_max = False
         self._is_ijon_max = False
+        self._is_stack_max = False
         self._is_cmp_progress = False
         self._is_new_valid_coverage = False
         self._ltl_new = False
@@ -925,13 +927,14 @@ class FuzzRound:
             return
         self._is_crash = self._is_crash and explorer.observe(self._edges_now())
         self._is_interesting = self._has_new_coverage = self._is_new_max = False
-        self._is_hw_max = self._is_ijon_max = False
+        self._is_hw_max = self._is_ijon_max = self._is_stack_max = False
         self._is_cmp_progress = self._is_new_valid_coverage = self._is_slow = False
 
     # ── Side signals ─────────────────────────────────────────────────
 
     def _observe(self) -> None:
         self._observe_counts()
+        self._observe_stack()
         self._cmp_progress()
         self._valid_coverage()
         self._region_liveness()
@@ -988,6 +991,16 @@ class FuzzRound:
         clean = not self._is_crash and not self._is_timeout
         run = Exec.CLEAN if clean else Exec.TRUNCATED
         self._is_ijon_max = bool(ijon.observe(run, self._mutated))
+
+    def _observe_stack(self) -> None:
+        # --stack-depth-max: recursed deeper than any input before it
+        # (honggfuzz). A truncated run stopped mid-path; its depth is not
+        # a maximum.
+        stack_max = self._f._stack_max
+        shm = self._scanned_shm
+        if stack_max is None or shm is None or self._is_crash or self._is_timeout:
+            return
+        self._is_stack_max = stack_max.observe(shm.read_stack_depth())
 
     def _cmp_progress(self) -> None:
         # Comparison progress: a callback family this input satisfied more
@@ -1567,6 +1580,7 @@ class FuzzRound:
             or self._is_new_max
             or self._is_hw_max
             or self._is_ijon_max
+            or self._is_stack_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
         )
@@ -2143,6 +2157,7 @@ class FuzzRound:
             or self._is_new_max
             or self._is_hw_max
             or self._is_ijon_max
+            or self._is_stack_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
             or self._ltl_new
@@ -2172,8 +2187,7 @@ class FuzzRound:
         self._feed_population()
         self._probe_uninit()
         # Coverage-guided trimming: try to minimize inputs that hit new edges
-        trim = f._auto_minimize is Switch.ON
-        if trim and self._has_new_coverage and len(mutated) > 10:
+        if self._trims():
             f._trim_new_coverage(mutated, data)
         if f.mc and f.mc_cem:
             f.mc.add_elite(mutated, 2, temperature=f._temperature)
@@ -2182,6 +2196,14 @@ class FuzzRound:
         f._maybe_periodic_minimize(dedup=True)
         f._record_fluctuation_observation("success")
         return True
+
+    def _trims(self) -> bool:
+        # --trim-new-coverage: up to 512 execs per admission (~98% of an
+        # FFmpeg campaign), so opt-in; --no-auto-minimize still turns it off.
+        f = self._f
+        if f._trim_new_coverage_on is not Switch.ON or f._auto_minimize is not Switch.ON:
+            return False
+        return self._has_new_coverage and len(self._mutated) > 10
 
     def _note_novelty(self) -> None:
         # --grimoire: the edges this input was admitted for are what
