@@ -84,6 +84,7 @@ All pair against `pos-arena-uniform`.
 |---|---|---|---|
 | Saliency (`--pos-saliency`) | NEUZZ gradient over a fitted MLP | U | `pos-arena-saliency`; read `stats()` |
 | PCA (`--pos-pca`) | Byte groups by edges their flip moved | U | `pos-arena-pca`; must beat `finch`/`effector` |
+| Hotspot (`--pos-hotspot`) | Offsets by unsolved-CondStmt count (soksolv) | U | `pos-arena-hotspot` on a cmplog target; must beat `cmplog` |
 | Kadane (`--pos-kadane`) | Max-excess window over bin rates | S | `pos-arena-kadane`; window hook rides with it |
 | effector / token / chunk / changed / rare_mask | Det-stage map, dict tokens, chunk kinds, path-hash credit, FairFuzz mask | U | `pos-arena-{…}` on png_read |
 | Consolidated (`--pos-consolidated`) | Merged learning arms | U | `pos-arena-consolidated` |

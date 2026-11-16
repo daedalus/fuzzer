@@ -962,6 +962,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
+    if getattr(f, "_pos_hotspot", None) is not None and getattr(f, "_cmplog", None) is not None:
+        names.append("hotspot")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
         names.append("lineage")
     if _pos_canary_live(f):
@@ -2128,6 +2130,10 @@ class Fuzzer:
         # Window influence tracker (core/analyzers/analyzer_influence.py):
         # replaces the per-byte tracker; implies sensitivity. Appended.
         influence=False,
+        # Position-arena hotspot arm (core/schedulers/pos_hotspot.py): offsets
+        # by unsolved-CondStmt count. Opt-in, not implied by position_arena or
+        # --hail-mary. Appended.
+        pos_hotspot=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3730,6 +3736,17 @@ class Fuzzer:
                 log.warning(
                     "--pos-cmplog needs cmplog, which is off: the arm stays out of the pool"
                 )
+        # Position-arena hotspot: offsets ranked by how many unsolved CondStmts
+        # they block (soksolv hotspot table). Opt-in only (unmeasured); gated
+        # on cmplog like the cmplog arm, reads condstmt_solve's CondStmt cache.
+        self._pos_hotspot = None
+        if pos_hotspot:
+            from fuzzer_tool.core.schedulers.pos_hotspot import PositionHotspotScheduler
+
+            self._pos_hotspot = PositionHotspotScheduler(
+                self._rng, conds_of=self._operators._get_cond_stmts
+            )
+            log.info("Position hotspot scheduling enabled")
         # Position-arena lineage: the mutation sites that produced a seed, as
         # its own landing prior (see core/schedulers/pos_lineage.py).
         # Tracker-style: the arena gates it on --lineage, the only mode that
@@ -3925,6 +3942,7 @@ class Fuzzer:
                 finch=self._pos_finch,
                 pca=self._pos_pca,
                 cmplog=self._pos_cmplog,
+                hotspot=self._pos_hotspot,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,
             )

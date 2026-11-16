@@ -969,6 +969,7 @@ def cmd_fuzz(args):
         pos_emeans_tau=getattr(args, "pos_emeans_tau", 0.0),
         pos_pca=getattr(args, "pos_pca", False),
         pos_learn=getattr(args, "pos_learn", False),
+        pos_hotspot=getattr(args, "pos_hotspot", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
@@ -2825,6 +2826,10 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): LearnAFL's path
 # mask has unit tests only. Bench arm: pos-arena-learn.
 #
+# pos_hotspot (--pos-hotspot) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the soksolv
+# hotspot arm has unit tests only.
+#
 # joint_liveness (--joint-liveness) is excluded: it only has an effect together
 # with --region-profile (the dead-region down-weight is the thing it revokes)
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
@@ -4351,6 +4356,14 @@ def main() -> int:
         "changes, mutable ones (frozen restored) once stable; frozen runs feed the "
         "auto-dictionary (core/schedulers/pos_learn.py). Opt-in: NOT implied by "
         "--position-arena or --hail-mary (unmeasured).",
+    )
+    fuzz_parser.add_argument(
+        "--pos-hotspot",
+        action="store_true",
+        help="Enable the position-arena hotspot scheduler: offsets ranked by how many "
+        "unsolved cmplog comparisons their bytes block, hottest first; solved ones "
+        "drop out (soksolv hotspot table; core/schedulers/pos_hotspot.py). Needs "
+        "cmplog. Opt-in: NOT implied by --position-arena or --hail-mary (unmeasured).",
     )
     fuzz_parser.add_argument(
         "--saliency-targets",

@@ -278,6 +278,8 @@ ARMS: dict[str, list[str]] = {
     "pos-arena-pca": _ARENA + ["--pos-pca", "--pos-arena-arms", "uniform,pca"],
     # LearnAFL path mask is opt-in like kadane.
     "pos-arena-learn": _ARENA + ["--pos-learn", "--pos-arena-arms", "uniform,learn"],
+    # soksolv hotspot table is opt-in like kadane; needs cmplog (on by default).
+    "pos-arena-hotspot": _ARENA + ["--pos-hotspot", "--pos-arena-arms", "uniform,hotspot"],
     # Gravity splice donor (core/gravity.py). Only the seven corpus-crossing
     # operators change; read "Gravity splice: ... hits, refits" in a cell's
     # log before trusting a null -- a closed fit gate means prior exponents.
@@ -412,6 +414,7 @@ ARM_BASELINES: dict[str, str] = {
     "pos-arena-emeans-revive": "pos-arena-uniform",
     "pos-arena-pca": "pos-arena-uniform",
     "pos-arena-learn": "pos-arena-uniform",
+    "pos-arena-hotspot": "pos-arena-uniform",
     "splice-gravity": "baseline",
     "elo-op-minimax": "elo",
     "wall-order": "baseline",
