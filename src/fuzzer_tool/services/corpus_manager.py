@@ -79,6 +79,10 @@ _TRIM_START_DIV = 2
 _TRIM_END_DIV = 1024
 _TRIM_MIN_BYTES = 4
 _TRIM_MAX_EXECS = 512
+# Trim execs may total at most this share of fuzz execs (cumulative). Uncapped,
+# FFmpeg 9.0.2 (~99% of cuts change the trace, 2.7 KB seeds) spent 512 execs
+# per admission: 9,920 -> 65 fuzz execs in 90 s.
+_TRIM_EXEC_SHARE = 0.25
 
 
 class _Cut(Enum):
@@ -491,6 +495,8 @@ class CorpusManager:
         # Corpus seed -> content key. Corpus seeds are long-lived bytes with
         # a cached hash, so a hit skips the xxh64 pass over the seed.
         self._key_memo: dict[bytes, str] = {}
+        # Trim execs spent so far; bounded by _TRIM_EXEC_SHARE of fuzz execs.
+        self._trim_execs = 0
 
     def _entropy_add(self, data: bytes) -> None:
         """Fold an admitted seed into the byte-entropy readout.
@@ -1741,10 +1747,11 @@ class CorpusManager:
         chunk = n // _TRIM_START_DIV
         data, dist = seed, None
         execs = 0
+        budget = self._trim_budget()
 
         while chunk >= floor:
             pos = chunk
-            while pos < len(data) and execs < _TRIM_MAX_EXECS:
+            while pos < len(data) and execs < budget:
                 cut = data[:pos] + data[pos + chunk :]
 
                 # Already a seed (e.g. the parent): swapping would clobber its
@@ -1754,6 +1761,7 @@ class CorpusManager:
                     continue
 
                 execs += 1
+                self._trim_execs += 1
                 outcome, cut_dist = self._try_cut(cut, seed, base_edges)
                 if outcome is _Cut.CRASH:
                     return data, dist
@@ -1764,6 +1772,14 @@ class CorpusManager:
             chunk //= 2
 
         return data, dist
+
+    def _trim_budget(self) -> int:
+        """Execs this walk may spend: per-walk cap, then the cumulative share.
+
+        Example: 40 fuzz execs, share 0.25, 6 already spent -> 4.
+        """
+        share = int(self.f.exec_count * _TRIM_EXEC_SHARE) - self._trim_execs
+        return min(_TRIM_MAX_EXECS, share)
 
     def _try_cut(self, cut: bytes, seed: bytes, base_edges: set[int]) -> tuple[_Cut, float | None]:
         """Run one trim candidate; returns its outcome and, when kept, its distance."""

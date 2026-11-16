@@ -352,6 +352,11 @@ ARMS: dict[str, list[str]] = {
     # frames decoded per codec); inert elsewhere. ctl is baseline again (Rule 46).
     "ijon": ["--ijon"],
     "ijon-ctl": [],
+    # Weizz structure tags (passive, cmplog-fed) + field/chunk/repair ops.
+    # Needs cmplog live; seeds > --weizz-tags-max-len stay untagged. ctl is
+    # baseline again (Rule 46).
+    "weizz-tags": ["--weizz-tags"],
+    "weizz-tags-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -467,6 +472,8 @@ ARM_BASELINES: dict[str, str] = {
     "cmp-rec-shm-campaign": "baseline",
     "ijon": "baseline",
     "ijon-ctl": "baseline",
+    "weizz-tags": "baseline",
+    "weizz-tags-ctl": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

@@ -459,6 +459,7 @@ class TestLineageRecording:
         f = _mk_fuzzer(lineage=True)
         f.shm_cov = _FakeShm({1, 2, 3, 4})
         f._runner = _FakeRunner()
+        f.exec_count = 10**9  # fuzz execs: the trim exec share never binds
         seed = b"A" * 40
         f.corpus = [seed]
         key = f._seed_key(seed)

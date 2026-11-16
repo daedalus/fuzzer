@@ -78,6 +78,7 @@ class _Fuzzer:
         self._use_lineage = False
         self.crash_count = 0
         self.crashes: list[tuple[bytes, int]] = []
+        self.exec_count = 10**9  # fuzz execs: the trim exec share never binds
         self.admitted: list[tuple[bytes, bytes | None]] = []
         self.pruned = 0
 
