@@ -1713,6 +1713,15 @@ the input file name into `.rodata`, so per-file names made every object
 unique. fuzzgoatNoVulns, 4 cores: 467 kept, 145 equivalent (139 branch
 negations duplicating an eq/ne swap), 43.5 s, 34 MB; 5 stock seeds kill 63.
 
+`services/mutant_kill.py` (P3): `KillScorer(mutant_set, jobs, timeout_ms,
+confirm).score(corpus_dir)` (or `score_inputs`) -> `KillScore(kills, hangs,
+flaky, inputs, clean_inputs, killed, hung)`. Killed = CLEAN on the original,
+CRASH on the mutant; inputs crashing or hanging the original are no
+evidence; a HANG is reported, never a kill. `Confirm.RERUN` (default) re-runs
+the killing input alone; a kill that does not reproduce counts as `flaky`.
+fuzzgoatNoVulns, 5 stock seeds: 63 kills, 5 hangs, 0 flaky, identical on
+rerun; 23.1 s at 1 job, 7.4 s at 4; confirmation adds no measurable time.
+
 ### SMT Solver Evaluation (`--enable-smt-z3`)
 
 The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations. **Concolic mode is now the default** (`--mod-solving concolic`), providing full constraint modeling with z3 across whole execution traces. Override with `--mod-solving heuristic` or `--mod-solving trace` if needed. The concolic whole-input solve is capped at `_CONCOLIC_MAX_BYTES` (32 KiB) in `core/smt_solver.py`: it models one z3 `BitVec` per input byte, and over multi-MB seeds that model alone transiently exceeds a GB of memory (measured ~1.3 GB spikes), enough to OOM the fuzzer. Oversized inputs skip the whole-input solve (the per-pair cmplog solving is unaffected).

@@ -14,46 +14,13 @@ from fuzzer_tool.adapters.mutant_build import (
     Status,
     TargetSpec,
     asan_available,
+    pack_record,
     replay,
     write_pack,
 )
 from fuzzer_tool.core.ir_mutants import MutOp
 from fuzzer_tool.core.state_store import safe_load
-
-# Toy library: the mutated source. 'C' crashes, 'H' hangs, 'P' prints to
-# stdout; the malloc(4) boundary is the kill target; `dead` is a dead store
-# (equivalent once -O2 runs).
-_LIB = """\
-#include <stdio.h>
-#include <stdlib.h>
-int toy_run(const unsigned char *b, size_t n)
-{
-    int dead = (int)n + 7;
-    char *p = malloc(4);
-    if (!p) return 0;
-    if (n < 4) p[n] = 1; else p[0] = 2;
-    int r = p[0];  /* p observable: -O2 must not drop the allocation */
-    free(p);
-    if (n && b[0] == 'C') { volatile int *z = 0; *z = 1; }
-    if (n && b[0] == 'H') { volatile int spin = 1; while (spin) {} }
-    if (n && b[0] == 'P') puts("noise noise noise");
-    return r == 9;
-}
-"""
-
-# Wrapper in the targets/*_read.c shape: fuzz_shm_run + its own main + a
-# shim call that the driver's no-op stub must satisfy.
-_WRAP = """\
-#include <stddef.h>
-extern void __afl_map_edge(unsigned int cur_loc);
-int toy_run(const unsigned char *b, size_t n);
-int fuzz_shm_run(const unsigned char *buf, size_t size)
-{
-    __afl_map_edge(1);
-    return toy_run(buf, size);
-}
-int main(void) { return 0; }
-"""
+from tests.support.mutant_toy import TOY_LIB, TOY_WRAP
 
 _TIMEOUT_MS = 300
 
@@ -63,8 +30,8 @@ needs_asan = pytest.mark.skipif(not asan_available(), reason="needs clang + ASAN
 @pytest.fixture(scope="module")
 def built(tmp_path_factory) -> MutantSet:
     root = tmp_path_factory.mktemp("mutants")
-    (root / "toy.c").write_text(_LIB)
-    (root / "toy_wrap.c").write_text(_WRAP)
+    (root / "toy.c").write_text(TOY_LIB)
+    (root / "toy_wrap.c").write_text(TOY_WRAP)
     spec = TargetSpec(src=root / "toy.c", wrapper=root / "toy_wrap.c")
     return MutantSet.build(spec, root / "set", cap=10_000, seed=1, jobs=4)
 
@@ -89,6 +56,22 @@ class TestPack:
 
     def test_returns_record_count(self, tmp_path) -> None:
         assert write_pack(iter([b"a", b"b"]), tmp_path / "p") == 2
+
+    def test_pack_record_reads_each(self, tmp_path) -> None:
+        inputs = [b"abc", b"", b"\x00\xff", b"z" * 300]
+        path = _pack(tmp_path, inputs)
+        assert [pack_record(path, i) for i in range(len(inputs))] == inputs
+
+    def test_pack_record_past_end_raises(self, tmp_path) -> None:
+        path = _pack(tmp_path, [b"a", b"b"])
+        with pytest.raises(IndexError):
+            pack_record(path, 2)
+
+    def test_pack_record_truncated_raises(self, tmp_path) -> None:
+        path = tmp_path / "bad.pack"
+        path.write_bytes(struct.pack("<I", 10) + b"abc")
+        with pytest.raises(ReplayError):
+            pack_record(path, 0)
 
 
 @needs_asan

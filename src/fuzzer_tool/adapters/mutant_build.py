@@ -146,6 +146,33 @@ def count_records(pack: Path) -> int:
     return n
 
 
+def pack_record(pack: Path, index: int) -> bytes:
+    """Record *index* of *pack* (0-based), walking headers only.
+
+    Raises:
+        IndexError: the pack has no such record.
+        ReplayError: the pack is truncated before it.
+    """
+    with open(pack, "rb") as fh:
+        for i in range(index + 1):
+            hdr = fh.read(_PACK_HDR.size)
+            if not hdr:
+                raise IndexError(f"{pack}: no record {index} (has {i})")
+            if len(hdr) != _PACK_HDR.size:
+                raise ReplayError(f"{pack}: truncated header at record {i}")
+
+            (length,) = _PACK_HDR.unpack(hdr)
+            if i < index:
+                fh.seek(length, os.SEEK_CUR)
+                continue
+
+            data = fh.read(length)
+            if len(data) != length:
+                raise ReplayError(f"{pack}: record {i} runs past end of file")
+            return data
+    raise AssertionError("unreachable")
+
+
 def replay(binary: Path, pack: Path, mask: bytes | None, timeout_ms: int) -> bytes:
     """Status bytes (``Status``) for each record of *pack* run on *binary*.
 
