@@ -82,3 +82,33 @@ def test_seed_contribution_shows_edges_per_bit():
     long_ = next(ln for ln in lines if "32 edges" in ln)
     assert f"{16 / (2 * BITS_PER_BYTE):.3f} e/bit" in short
     assert f"{32 / (8 * BITS_PER_BYTE):.3f} e/bit" in long_
+
+
+def _hit_fuzzer(hit: dict[bytes, set[int]]) -> MagicMock:
+    """Seeds whose discovered count differs from the edges they hit."""
+    f = MagicMock()
+    f.corpus = list(hit)
+    f.shm_cov.cumulative_edges = 100
+    f.seed_meta = {s: {"coverage_edges": 1, "fuzz_count": 1} for s in hit}
+    f._seed_key.side_effect = bytes.hex
+    f._edge_tracker.seed_edges = {s.hex(): e for s, e in hit.items()}
+    return f
+
+
+def test_seed_contribution_shows_hit_edges_per_bit():
+    """Falsification: hit density comes from seed_edges, not coverage_edges."""
+    seed = b"abcd"
+    hit = set(range(8))
+    line = next(
+        ln for ln in _seed_contribution(_hit_fuzzer({seed: hit})).splitlines() if "e/bit" in ln
+    )
+    assert f"hit {edges_per_bit(len(hit), len(seed)):.3f}" in line
+    assert f"found {edges_per_bit(1, len(seed)):.3f}" in line
+
+
+def test_seed_contribution_untracked_seed_hits_zero():
+    """Adversarial: a seed the tracker no longer holds reads hit 0, no raise."""
+    f = _hit_fuzzer({b"abcd": {1}})
+    f._edge_tracker.seed_edges = {}
+    line = next(ln for ln in _seed_contribution(f).splitlines() if "e/bit" in ln)
+    assert f"hit {0.0:.3f}" in line
