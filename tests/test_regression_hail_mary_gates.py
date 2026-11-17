@@ -71,6 +71,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "seed_stride_cost",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the stride arm
         "seed_lottery_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_branch_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "waypoints",  # unmeasured: A/B pending (docs/AB_PENDING.md); directed mode only
         "cut_damage",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the branch arm
         "inverse_lottery_select",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "lightweight",  # the inverse preset; the two are mutually exclusive

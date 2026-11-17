@@ -194,6 +194,7 @@ from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
+from fuzzer_tool.core.waypoints import NO_STRATUM
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
 from fuzzer_tool.services.corpus_manager import CorpusManager
@@ -2132,6 +2133,9 @@ class Fuzzer:
         # 'branch' arm ranks frontier branches by cut damage (core/articulation.py,
         # --cut-damage); needs seed_branch_scheduler. Appended.
         cut_damage=False,
+        # Waypoint race over the target's dominator chain (core/waypoints.py,
+        # --waypoints); directed mode only. Appended.
+        waypoints=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -4681,6 +4685,12 @@ class Fuzzer:
         self._use_cfg_cache = use_cfg_cache
         self._gate_bonus = gate_bonus
         self._distance_metric = distance_metric
+        # --waypoints: the distance spec builds the race (analyzer_registry).
+        self._waypoints_requested = bool(waypoints and targets)
+        self._waypoints = None
+        self._waypoint_bmp = None
+        if waypoints and not targets:
+            log.warning("--waypoints needs --target-functions; ignored")
         self._trace_crashes_requested = trace_crashes
 
         # Crash MI tracker, length-edge tracker, transfer entropy, occupation,
@@ -5773,6 +5783,8 @@ class Fuzzer:
             self._state_store.set("dict_picker", self._dict_picker.to_dict())
         if self._gravity is not None:
             self._state_store.set("gravity", self._gravity.state_dict())
+        if self._waypoints is not None:
+            self._state_store.set("waypoints", self._waypoints.state_dict())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -5807,6 +5819,8 @@ class Fuzzer:
             self._dict_picker.from_dict(self._state_store.get("dict_picker", {}))
         if self._gravity is not None:
             self._gravity.load_state_dict(self._state_store.get("gravity", {}))
+        if self._waypoints is not None:
+            self._waypoints.load_state_dict(self._state_store.get("waypoints", {}))
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""
@@ -8318,6 +8332,10 @@ class Fuzzer:
         dist = self._exec_distance()
         if dist is not None:
             meta["avg_distance"] = dist
+        if self._waypoints is not None:
+            stratum = self._waypoints.stratum_of(self._waypoint_bmp.read_and_clear())
+            meta["waypoint"] = stratum
+            self._waypoints.admit(stratum)
 
     def _warn_no_dist_source(self) -> None:
         """Warn once: directed mode on, but nothing measures real blocks.
@@ -10536,6 +10554,12 @@ class Fuzzer:
                         # The picked seed's own counts, not the last execution's.
                         **self._edge_tracker.seed_hw(seed_key),
                     )
+                    if self._waypoints is not None:
+                        self._last_perf_score = min(
+                            self._last_perf_score
+                            * self._waypoints.multiplier(meta.get("waypoint", NO_STRATUM)),
+                            self._seed_scorer.max_mult * 100.0,
+                        )
                 elif staged is None:
                     # Markov-generated or synthetic seed: reset to neutral multiplier
                     self._last_perf_score = 100.0

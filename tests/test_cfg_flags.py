@@ -1,11 +1,11 @@
-"""CLI plumbing for the static-CFG flags: --cut-damage."""
+"""CLI plumbing for the static-CFG flags: --cut-damage, --waypoints."""
 
 import sys
 from unittest.mock import MagicMock
 
 from fuzzer_tool.cli import commands
 
-FLAGS = (("--cut-damage", "cut_damage"),)
+FLAGS = (("--cut-damage", "cut_damage"), ("--waypoints", "waypoints"))
 
 
 def _fuzz_kwargs(monkeypatch, tmp_path, extra: list[str]) -> dict:

@@ -1062,10 +1062,25 @@ class TargetDistance:
         symbol. Empty dict for non-instrumented builds or when no site maps
         to a valued block.
         """
-        targets = self._trace_targets()
-        if not self._bb_value or not targets:
+        if not self._bb_value:
             return {}
         table: dict[int, float] = {}
+        for key, call in self._trace_sites():
+            dist = self._bb_value_of(call)
+            if dist is not None:
+                table[key] = dist
+        return table
+
+    def _trace_sites(self):
+        """Yield (probe key, call address) per sancov callback call site.
+
+        Key: return address after the call, relative to the object base.
+        Score the block holding the call: the CFG ends blocks at calls, so
+        the return address already opens the next block.
+        """
+        targets = self._trace_targets()
+        if not targets:
+            return
         base = self._base_addr or 0
         for start, end in self.functions.values():
             if end <= start or start < self._text_start or end > self._text_end:
@@ -1078,16 +1093,31 @@ class TargetDistance:
                 if offset + 5 > len(code):
                     continue
                 disp = struct.unpack_from("<i", code, offset + 1)[0]
-                call_target = start + offset + 5 + disp
-                if call_target not in targets:
+                if start + offset + 5 + disp not in targets:
                     continue
-                site = start + offset + 5  # return address after the call
-                # Score the block holding the call: the CFG ends blocks at
-                # calls, so *site* already opens the next block.
-                dist = self._bb_value_of(start + offset)
-                if dist is not None:
-                    table[site - base] = dist
+                yield start + offset + 5 - base, start + offset
+
+    def target_blocks(self) -> set[int]:
+        """Start addresses of every block containing a target."""
+        return set().union(*self._target_bbs().values())
+
+    def waypoint_node_table(self, stages: list[frozenset[int]]) -> dict[int, int]:
+        """Probe key -> stage index for call sites inside a waypoint block."""
+        stage_of = {b: i for i, blocks in enumerate(stages) for b in blocks}
+        table: dict[int, int] = {}
+        for key, call in self._trace_sites():
+            func = self._addr_to_function(call)
+            cfg = self._cfgs.get(func) if func else None
+            blk = cfg.block_containing(call) if cfg else None
+            if blk is not None and blk.start in stage_of:
+                table[key] = stage_of[blk.start]
         return table
+
+    def waypoint_sites(self, node_of: dict[int, int]):
+        """Yield (probe key, call address) for the keys in *node_of*."""
+        for key, call in self._trace_sites():
+            if key in node_of:
+                yield key, call
 
     def _build_np_index(self):
         """Build pre-sorted numpy arrays for vectorized distance lookup."""

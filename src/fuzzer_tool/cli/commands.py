@@ -959,6 +959,7 @@ def cmd_fuzz(args):
         byte_interaction=getattr(args, "byte_interaction", False),
         influence=getattr(args, "influence", False),
         cut_damage=getattr(args, "cut_damage", False),
+        waypoints=getattr(args, "waypoints", False),
         field_hmm=getattr(args, "field_hmm", False),
         field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
@@ -2833,6 +2834,9 @@ def cmd_sweep(args):
 #
 # seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
+#
+# waypoints (--waypoints) is excluded as unmeasured: unit tests only, no paired run
+# (docs/AB_PENDING.md); inert without --target-functions.
 #
 # cut_damage (--cut-damage) is excluded as unmeasured: unit tests only, no paired
 # run (docs/AB_PENDING.md); inert without --seed-branch-scheduler.
@@ -5568,6 +5572,14 @@ def main() -> int:
         help="Target functions for directed fuzzing — names, hex addresses, "
         "or file.c:line (via DWARF). Note: use --target-functions (not the "
         "positional 'targets' binary list).",
+    )
+    fuzz_parser.add_argument(
+        "--waypoints",
+        action="store_true",
+        help="With --target-functions: race the target's ICFG dominator chain from main; "
+        "seeds are stratified by the deepest waypoint reached, the active stratum's energy "
+        "doubles while the window's min distance sets records (core/waypoints.py). Not in "
+        "--hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--gate-bonus",
