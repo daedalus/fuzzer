@@ -41,6 +41,7 @@ from fuzzer_tool.core.run_mode import (
 )
 from fuzzer_tool.core.sanitizer import FUNC_HASH_TAG, STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
+from fuzzer_tool.core.schedulers.seed_fess import FESS_RANDOM_EVERY, FessMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
@@ -1035,6 +1036,8 @@ def cmd_fuzz(args):
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
         fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
+        seed_fess_mode=FessMode(getattr(args, "seed_fess_mode", FessMode.LEAST_EFFORT.value)),
+        fess_cell_novelty=Switch.ON if getattr(args, "fess_cell_novelty", False) else Switch.OFF,
         respawn_backoff=Switch.ON if getattr(args, "respawn_backoff", False) else Switch.OFF,
         advisors=getattr(args, "advisors", False),
         plateau_groups=getattr(args, "plateau_groups", False),
@@ -2969,9 +2972,10 @@ def cmd_sweep(args):
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
 #
-# seed_fess_scheduler (--seed-fess-scheduler) and fess_inherit (--fess-inherit)
-# are excluded as unmeasured: unit tests only, no paired run
-# (docs/AB_PENDING.md). The second is also inert without the FESS arm.
+# seed_fess_scheduler (--seed-fess-scheduler), fess_inherit (--fess-inherit)
+# and fess_cell_novelty (--fess-cell-novelty) are excluded as unmeasured: unit
+# tests only, no paired run (docs/AB_PENDING.md). The last two are also inert
+# without the FESS arm.
 #
 # respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
 # only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
@@ -4307,6 +4311,24 @@ def main() -> int:
         "(edges, rare edges, lineage depth, size); the least-explored cell is fuzzed next, then "
         "its least-fuzzed seed. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_fess.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-fess-mode",
+        choices=tuple(m.value for m in FessMode),
+        default=FessMode.LEAST_EFFORT.value,
+        help="With --seed-fess-scheduler: cell schedule. least-effort: least-explored cell. "
+        f"triple: every {FESS_RANDOM_EVERY}th pick a random occupied cell, else even picks the "
+        "best cell (success rate over its seeds), odd picks round robin in creation order "
+        "(soksolv selectMove / pickCell).",
+    )
+    fuzz_parser.add_argument(
+        "--fess-cell-novelty",
+        action="store_true",
+        help="With --seed-fess-scheduler: per-cell scoped novelty. Each cell remembers the "
+        "edges its execs reached (bounded); an exec bringing edges new to its cell, even if "
+        "globally known, is credited, and picks prefer cells with recent in-cell novelty "
+        "(soksolv scoped novelty). No effect without the FESS arm. Not in --hail-mary until "
+        "it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--fess-inherit",

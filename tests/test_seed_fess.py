@@ -18,6 +18,11 @@ import pytest
 from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.schedulers.seed_fess import (
     FESS_BUCKET_CAP,
+    FESS_CELL_EDGE_CAP,
+    FESS_HOT_WINDOW,
+    FESS_NOVELTY_HALF,
+    FESS_RANDOM_EVERY,
+    FessMode,
     SeedFessScheduler,
     cell_better,
     fess_cell,
@@ -496,3 +501,461 @@ class TestInheritWiring:
 
         assert f._fess_inherit is Switch.OFF
         assert "--fess-inherit" in caplog.text
+
+
+# --- Three-way cell schedule (--seed-fess-mode triple) ------------------------
+
+Z = (3, 0, 0, 0)
+TRIO = {"a": X, "b": Y, "c": Z}
+
+
+def _triple(**rng_kw) -> SeedFessScheduler:
+    return SeedFessScheduler(rng=ScriptedRng(**rng_kw), mode=FessMode.TRIPLE)
+
+
+def _turn_kinds(turns: int) -> list[str]:
+    """Schedule from its definition: every Nth random, else even best, odd round robin."""
+    kinds = []
+    for t in range(1, turns + 1):
+        if t % FESS_RANDOM_EVERY == 0:
+            kinds.append("random")
+        elif t % 2 == 0:
+            kinds.append("best")
+        else:
+            kinds.append("rr")
+    return kinds
+
+
+def _picks(s: SeedFessScheduler, n: int, cells=TRIO) -> list[str]:
+    return [s.select_seed(list(cells), cells.__getitem__) for _ in range(n)]
+
+
+class TestTriple:
+    def test_schedule_interleaves_rr_best_random(self):
+        turns = FESS_RANDOM_EVERY + 1
+        random_idx = 2
+        s = _triple(choice_idxs=[random_idx])
+        s.record("b", success=True)  # Y: rate 1.0; X, Z untried: 0.0
+
+        order = list(TRIO)  # creation order = first-select member order
+        expected, rr = [], 0
+        for kind in _turn_kinds(turns):
+            if kind == "rr":
+                expected.append(order[rr % len(order)])
+                rr += 1
+            elif kind == "best":
+                expected.append("b")
+            else:
+                expected.append(order[random_idx])
+
+        assert _picks(s, turns) == expected
+
+    def test_best_rate_aggregates_over_cell_seeds(self):
+        # X: a 1/1 but a2 0/3 -> 1/4. Y: b 1/2. Per-seed max would say X.
+        s = _triple()
+        cells = {"a": X, "a2": X, "b": Y}
+        s.record("a", success=True)
+        for _ in range(3):
+            s.record("a2", success=False)
+        s.record("b", success=True)
+        s.record("b", success=False)
+
+        picks = _picks(s, 2, cells)
+
+        assert picks[1] == "b"
+
+    def test_best_ties_drawn_from_pool(self):
+        s = _triple(choice_idxs=[1])
+        s.record("a", success=True)
+        s.record("b", success=True)
+
+        # Turn 2: X and Y tie at 1.0 -> idx 1 -> Y.
+        assert _picks(s, 2)[1] == "b"
+
+    def test_round_robin_skips_empty_cells(self):
+        s = _triple(choice_idxs=[0])
+        _picks(s, 2)  # rr X, best: all 0.0 tie -> idx 0 -> X
+
+        # Y left: turn 3 round robin moves past it to Z.
+        cells = {"a": X, "c": Z}
+        assert s.select_seed(list(cells), cells.__getitem__) == "c"
+
+    def test_least_fuzzed_seed_inside_chosen_cell(self):
+        s = _triple()
+        cells = {"a": X, "a2": X, "b": Y}
+        s.record("a", success=False)
+
+        # Turn 1 round robin -> X; a2 has fewer execs.
+        assert _picks(s, 1, cells) == ["a2"]
+
+    def test_one_cell_never_draws(self):
+        """Falsification: one occupied cell reduces every turn to least-fuzzed."""
+        s = _triple()
+        cells = {"a": X, "a2": X}
+        s.record("a", success=False)
+
+        assert _picks(s, FESS_RANDOM_EVERY, cells) == ["a2"] * FESS_RANDOM_EVERY
+
+    def test_rejects_non_enum_mode(self):
+        with pytest.raises(ValueError):
+            SeedFessScheduler(rng=ScriptedRng(), mode="triple")
+
+    def test_jump_preempts_without_spending_a_turn(self):
+        s = SeedFessScheduler(rng=ScriptedRng(), mode=FessMode.TRIPLE, jump=Switch.ON)
+        two = {"a": X, "b": Y}
+        _picks(s, 1, two)  # turn 1: rr -> X (priming select, no jump)
+
+        jumped = _picks(s, 1)[0]  # Z is new: jump, turn stays 1
+        s.record("c", success=True)
+
+        assert jumped == "c"
+        assert _picks(s, 2) == ["c", "b"]  # turn 2 best (Z 1.0), turn 3 rr -> Y
+
+
+class TestTriplePersistence:
+    def _driven(self) -> SeedFessScheduler:
+        s = _triple()
+        s.record("b", success=True)
+        _picks(s, 3)  # rr X, best Y, rr Y
+        return s
+
+    def test_round_trip_continues_schedule(self):
+        s = self._driven()
+        blob = pickle.dumps(s.to_dict())
+        t = _triple()
+        t.from_dict(safe_load(io.BytesIO(blob)))
+        t.record("b", success=True)  # seed ledgers are not persisted
+
+        # Turn 4 best (Y), turn 5 round robin resumes after Y -> Z.
+        assert _picks(t, 2) == _picks(s, 2) == ["b", "c"]
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"turn": -1},
+            {"turn": True},
+            {"turn": "3"},
+            {"cursor": 9},
+            {"cursor": -1},
+            {"order": [X, X]},
+            {"order": [(1, 2)]},
+            {"order": "junk"},
+        ],
+    )
+    def test_malformed_schedule_starts_fresh(self, bad):
+        data = {**self._driven().to_dict(), **bad}
+        t = _triple()
+        t.from_dict(data)
+
+        assert t.to_dict()["turn"] == 0
+        assert t.to_dict()["cursor"] == 0
+        assert t.to_dict()["order"] == []
+
+    def test_malformed_schedule_keeps_effort(self):
+        s = _sched(choice_idxs=[0])
+        s.select_seed(["a"], lambda _k: X)
+        s.record("a", success=False)
+        t = _triple()
+        t.from_dict({**s.to_dict(), "turn": -5})
+
+        assert _effort(t) == {X: 1}
+
+
+class TestModeWiring:
+    def test_mode_reaches_scheduler_and_resumes(self, tmp_path):
+        f = _real_fuzzer(tmp_path, seed_fess_scheduler=True, seed_fess_mode=FessMode.TRIPLE)
+        _picks(f._seed_fess, 3)
+        f._save_learned()
+
+        g = _real_fuzzer(tmp_path, seed_fess_scheduler=True, seed_fess_mode=FessMode.TRIPLE)
+        g.resume = True
+        g._state_store = f._state_store
+        g._load_learned()
+
+        assert g._seed_fess._mode is FessMode.TRIPLE
+        assert g._seed_fess.to_dict()["turn"] == 3
+
+    def test_default_is_least_effort(self, tmp_path):
+        f = _real_fuzzer(tmp_path, seed_fess_scheduler=True)
+
+        assert f._seed_fess._mode is FessMode.LEAST_EFFORT
+
+    @pytest.mark.parametrize("mode", list(FessMode))
+    def test_cli_values_map_to_enum(self, monkeypatch, mode):
+        args = _cli_args(monkeypatch, "--seed-fess-mode", mode.value)
+
+        assert FessMode(args.seed_fess_mode) is mode
+
+
+def _cli_args(monkeypatch, *extra: str):
+    """Parse ``fuzz /bin/true *extra`` through the real CLI, cmd_fuzz stubbed."""
+    import sys
+
+    from fuzzer_tool.cli import commands
+
+    captured: dict = {}
+
+    def _spy(args):
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(commands, "cmd_fuzz", _spy)
+    monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", *extra])
+    assert commands.main() == 0
+    return captured["args"]
+
+
+# --- Per-cell scoped novelty (--fess-cell-novelty) -----------------------------
+
+OWN = {"a": frozenset({1, 2}), "b": frozenset({1, 2}), "c": frozenset({7})}
+
+
+def _novel(rng=None, own=OWN, mode=FessMode.LEAST_EFFORT) -> SeedFessScheduler:
+    return SeedFessScheduler(
+        rng=rng or ScriptedRng(),
+        mode=mode,
+        novelty=Switch.ON,
+        seed_edges=lambda k: own.get(k, frozenset()),
+    )
+
+
+def _credit(n: int) -> float:
+    """Novelty credit from its definition: n / (n + half)."""
+    return n / (n + FESS_NOVELTY_HALF)
+
+
+def _exec(s: SeedFessScheduler, key: str, edges, success=False, weight=1.0) -> None:
+    s.observe_edges(key, frozenset(edges))
+    s.record(key, success=success, weight=weight)
+
+
+class TestCellNovelty:
+    def test_globally_known_edge_new_in_cell_is_credited(self):
+        s = _novel()
+        s.select_seed(["a"], lambda _k: X)
+
+        _exec(s, "a", {1, 2, 3})  # 3 is new to X, not to the parent's own run
+
+        assert s.bandit_stats()["a"] == (_credit(1), 1.0 - _credit(1))
+
+    def test_parent_own_edges_earn_nothing(self):
+        s = _novel()
+        s.select_seed(["a"], lambda _k: X)
+
+        _exec(s, "a", OWN["a"])
+
+        assert s.bandit_stats()["a"] == (0.0, 1.0)
+
+    def test_edge_credited_once_per_cell(self):
+        s = _novel(rng=ScriptedRng(choice_idxs=[0]))  # a/b tie inside X
+        same = {"a": X, "b": X}
+        s.select_seed(["a", "b"], same.__getitem__)
+        _exec(s, "a", {1, 2, 3})
+
+        _exec(s, "b", {1, 2, 3})  # X already holds 3
+
+        assert s.bandit_stats()["b"] == (0.0, 1.0)
+
+    def test_novelty_is_scoped_to_the_cell(self):
+        s = _novel(rng=ScriptedRng(choice_idxs=[0]))
+        cells = {"a": X, "c": Y}
+        s.select_seed(["a", "c"], cells.__getitem__)
+        _exec(s, "a", {1, 2, 3})
+
+        _exec(s, "c", {7, 3})  # 3 known in X, new in Y
+
+        assert s.bandit_stats()["c"] == (_credit(1), 1.0 - _credit(1))
+
+    def test_global_find_keeps_larger_weight(self):
+        s = _novel()
+        s.select_seed(["a"], lambda _k: X)
+
+        _exec(s, "a", {1, 2, 3}, success=True, weight=0.9)
+
+        assert s.bandit_stats()["a"] == pytest.approx((0.9, 0.1))
+
+    def test_off_ignores_edges(self):
+        """Falsification: without the flag the same exec earns nothing."""
+        s = SeedFessScheduler(rng=ScriptedRng())
+        s.select_seed(["a"], lambda _k: X)
+
+        _exec(s, "a", {1, 2, 3})
+
+        assert s.bandit_stats()["a"] == (0.0, 1.0)
+
+
+class TestHotCells:
+    """Hot = never charged, or fewer than FESS_HOT_WINDOW charges since in-cell novelty."""
+
+    def _setup(self, novelty=Switch.ON):
+        # X: 3 charges, the last novel. Y: 1 charge, never novel.
+        s = SeedFessScheduler(
+            rng=ScriptedRng(choice_idxs=[0]),
+            novelty=novelty,
+            seed_edges=lambda k: OWN.get(k, frozenset()),
+        )
+        cells = {"a": X, "c": Y}
+        s.select_seed(["a", "c"], cells.__getitem__)
+        _exec(s, "c", OWN["c"])
+        for edges in ({1, 2}, {1, 2}, {1, 2, 3}):
+            _exec(s, "a", edges)
+        return s, cells
+
+    def test_recent_novelty_beats_least_effort(self):
+        s, cells = self._setup()
+
+        assert s.select_seed(list(cells), cells.__getitem__) == "a"
+
+    def test_off_is_least_effort(self):
+        """Falsification: same charges, flag off -> Y (least effort)."""
+        s, cells = self._setup(novelty=Switch.OFF)
+
+        assert s.select_seed(list(cells), cells.__getitem__) == "c"
+
+    def test_cell_cools_after_window(self):
+        s, cells = self._setup()
+        for _ in range(FESS_HOT_WINDOW):
+            _exec(s, "a", {1, 2})
+
+        assert s.select_seed(list(cells), cells.__getitem__) == "c"
+
+    def test_one_charge_before_window_still_hot(self):
+        s, cells = self._setup()
+        for _ in range(FESS_HOT_WINDOW - 1):
+            _exec(s, "a", {1, 2})
+
+        assert s.select_seed(list(cells), cells.__getitem__) == "a"
+
+    def test_no_novelty_matches_off_sequence(self):
+        """Falsification: with no in-cell novelty ever, on and off pick alike."""
+        cells = {"a": X, "b": X, "c": Y}
+        runs = []
+        for flag in (Switch.OFF, Switch.ON):
+            s = SeedFessScheduler(
+                rng=ScriptedRng(choice_idxs=[0] * 8),
+                novelty=flag,
+                seed_edges=lambda k: OWN.get(k, frozenset()),
+            )
+            picks = []
+            for _ in range(6):
+                k = s.select_seed(list(cells), cells.__getitem__)
+                _exec(s, k, OWN[k])
+                picks.append(k)
+            runs.append(picks)
+
+        assert runs[0] == runs[1]
+
+    def test_triple_random_turn_ignores_hot_filter(self):
+        # X gets novelty on every exec and Y is charged but cold, so best /
+        # round robin stay on X; turn 8 (random) still draws over both
+        # cells: idx 1 -> Y. Single-seed selects spend no turn.
+        s = _novel(rng=ScriptedRng(choice_idxs=[1]), mode=FessMode.TRIPLE)
+        cells = {"a": X, "c": Y}
+        s.select_seed(["a"], lambda _k: X)
+        _exec(s, "a", {1, 2, 100})
+        s.select_seed(["c"], lambda _k: Y)
+        _exec(s, "c", OWN["c"])
+        for t in range(1, FESS_RANDOM_EVERY):
+            assert s.select_seed(list(cells), cells.__getitem__) == "a"
+            _exec(s, "a", {1, 2, 100 + t})
+
+        assert s.select_seed(list(cells), cells.__getitem__) == "c"
+
+
+class TestNoveltyAdversarial:
+    def test_unknown_key_earns_nothing(self):
+        s = _novel()
+        _exec(s, "ghost", {1, 2, 3})
+
+        assert s.bandit_stats()["ghost"] == (0.0, 1.0)
+
+    def test_stash_not_applied_to_another_key(self):
+        s = _novel(rng=ScriptedRng(choice_idxs=[0]))  # a/b tie inside X
+        same = {"a": X, "b": X}
+        s.select_seed(["a", "b"], same.__getitem__)
+        s.observe_edges("a", frozenset({1, 2, 3}))
+
+        s.record("b", success=False)
+
+        assert s.bandit_stats()["b"] == (0.0, 1.0)
+
+    def test_empty_edges(self):
+        s = _novel()
+        s.select_seed(["a"], lambda _k: X)
+
+        _exec(s, "a", set())
+
+        assert s.bandit_stats()["a"] == (0.0, 1.0)
+
+    def test_cell_cap_bounds_memory_and_credit(self):
+        s = _novel(own={})
+        s.select_seed(["a"], lambda _k: X)
+        _exec(s, "a", range(FESS_CELL_EDGE_CAP + 10))
+
+        _exec(s, "a", {FESS_CELL_EDGE_CAP + 100})  # full cell: no room, no credit
+
+        assert s._stored == FESS_CELL_EDGE_CAP
+        assert s.bandit_stats()["a"][0] == pytest.approx(_credit(FESS_CELL_EDGE_CAP))
+
+    def test_global_budget_bounds_all_cells(self, monkeypatch):
+        import fuzzer_tool.core.schedulers.seed_fess as mod
+
+        budget = 5
+        monkeypatch.setattr(mod, "FESS_NOVELTY_BUDGET", budget)
+        s = _novel(rng=ScriptedRng(choice_idxs=[0]), own={})
+        cells = {"a": X, "c": Y}
+        s.select_seed(["a", "c"], cells.__getitem__)
+        _exec(s, "a", range(4))
+        _exec(s, "c", range(10, 20))
+
+        assert s._stored == budget
+        assert s.bandit_stats()["c"][0] == pytest.approx(_credit(budget - 4))
+
+
+class TestNoveltyWiring:
+    def test_flag_binds_observer(self, tmp_path):
+        f = _real_fuzzer(tmp_path, seed_fess_scheduler=True, fess_cell_novelty=Switch.ON)
+
+        assert f._fess_observe is not None
+        assert f._seed_fess._novelty is Switch.ON
+
+    def test_without_arm_is_inert(self, tmp_path, caplog):
+        f = _real_fuzzer(tmp_path, fess_cell_novelty=Switch.ON)
+
+        assert f._fess_observe is None
+        assert "--fess-cell-novelty" in caplog.text
+
+    def test_off_binds_nothing(self, tmp_path):
+        f = _real_fuzzer(tmp_path, seed_fess_scheduler=True)
+
+        assert f._fess_observe is None
+
+    def _round(self, edges, timeout=False):
+        from fuzzer_tool.services.fuzz_round import FuzzRound
+
+        seen = []
+        f = SimpleNamespace(
+            _seed_quality=None,
+            _seed_canary=None,
+            _seed_round_robin=None,
+            _seed_drr=None,
+            _seed_os_arms=(object(),),
+            _seed_key=lambda d: d.decode(),
+            _edge_tracker=SimpleNamespace(estimate_distinct_edges_f0=lambda: None),
+            _record_seed_floor_arms=lambda *a: None,
+            _record_seed_os_arms=lambda *a: seen.append(("record", a[0])),
+            _fess_observe=lambda d, e: seen.append(("observe", d, e)),
+            _current_edges_cache=edges,
+        )
+        r = FuzzRound(f, b"a")
+        r._is_timeout = timeout
+        r._credit_seed()
+        return seen
+
+    def test_round_feeds_exec_edges_before_record(self):
+        edges = {5, 6}
+
+        assert self._round(edges) == [("observe", b"a", edges), ("record", b"a")]
+
+    def test_timeout_feeds_no_edges(self):
+        assert self._round({5, 6}, timeout=True)[0] == ("observe", b"a", ())

@@ -72,6 +72,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "seed_lottery_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_fess_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "fess_inherit",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
+        "fess_cell_novelty",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
         "respawn_backoff",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "advisors",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "plateau_groups",  # unmeasured: A/B pending (docs/AB_PENDING.md)

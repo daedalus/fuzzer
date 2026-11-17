@@ -166,7 +166,7 @@ from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
-from fuzzer_tool.core.schedulers.seed_fess import SeedFessScheduler
+from fuzzer_tool.core.schedulers.seed_fess import FessMode, SeedFessScheduler
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
@@ -2182,6 +2182,11 @@ class Fuzzer:
         # --fess-inherit: FESS parent-cell inheritance + new-cell jump. Needs
         # the FESS arm. Off, out of --hail-mary. Appended.
         fess_inherit=Switch.OFF,
+        # --seed-fess-mode: FESS cell schedule (least-effort / triple). Appended.
+        seed_fess_mode=FessMode.LEAST_EFFORT,
+        # --fess-cell-novelty: FESS per-cell scoped novelty. Needs the FESS
+        # arm. Off, out of --hail-mary. Appended.
+        fess_cell_novelty=Switch.OFF,
         # --respawn-backoff: pace restarts of a target that dies at once
         # (adapters/respawn_backoff.py). Off, out of --hail-mary. Appended.
         respawn_backoff=Switch.OFF,
@@ -3765,9 +3770,22 @@ class Fuzzer:
             fess_inherit = Switch.OFF
         # Read by SeedPicker._fess_cells (parent-cell projection).
         self._fess_inherit = fess_inherit
+        if fess_cell_novelty is Switch.ON and not seed_fess_scheduler:
+            log.warning("--fess-cell-novelty has no effect without --seed-fess-scheduler")
+            fess_cell_novelty = Switch.OFF
         self._seed_fess = (
-            SeedFessScheduler(rng=self._rng, jump=fess_inherit) if seed_fess_scheduler else None
+            SeedFessScheduler(
+                rng=self._rng,
+                jump=fess_inherit,
+                mode=seed_fess_mode,
+                novelty=fess_cell_novelty,
+                seed_edges=self._fess_seed_edges,
+            )
+            if seed_fess_scheduler
+            else None
         )
+        # Bound once (ifs up): FuzzRound._credit_seed feeds exec edges here.
+        self._fess_observe = self._fess_note_edges if fess_cell_novelty is Switch.ON else None
         self._plateau = PlateauGroups() if plateau_groups else None
         self._frontier_oracle = None
         self._seed_frontier = None
@@ -6130,6 +6148,17 @@ class Fuzzer:
         key = self._seed_key(parent)
         for arm in arms:
             arm.record(key, success=success, weight=weight)
+
+    def _fess_note_edges(self, parent: bytes, edges) -> None:
+        """--fess-cell-novelty: this exec's edges to the FESS arm, before its record()."""
+        if not self._in_corpus(parent):
+            return
+        self._seed_fess.observe_edges(self._seed_key(parent), edges)
+
+    def _fess_seed_edges(self, key: str):
+        """A seed's own edges (absorbed uncredited into its FESS cell)."""
+        tracker = getattr(self, "_edge_tracker", None)
+        return tracker.attributed_edges(key) if tracker is not None else ()
 
     def _in_corpus(self, parent: bytes) -> bool:
         """Live-corpus membership of *parent*, memoized across its executions.
