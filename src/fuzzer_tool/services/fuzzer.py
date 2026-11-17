@@ -230,7 +230,7 @@ from fuzzer_tool.services.seed_picker import SeedPicker
 from fuzzer_tool.services.seed_stage import SeedStage
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.target_arena import TargetArena
-from fuzzer_tool.services.tcp_ingest import TcpIngest, TcpMode
+from fuzzer_tool.services.tcp_ingest import Admission, TcpIngest, TcpMode
 from fuzzer_tool.services.uninit_probe import UninitProbe
 from fuzzer_tool.services.value_profile import ValueProfile, ValueProfileChannel
 
@@ -2247,6 +2247,8 @@ class Fuzzer:
         # --tcp-mode: round (one per fuzz round via mutate) or direct
         # (services/tcp_ingest.py: all queued, unmutated, admit on new coverage).
         tcp_mode=TcpMode.ROUND,
+        # --admit-all: direct-mode seeds join the corpus without new coverage.
+        tcp_admission=Admission.NEW_COVERAGE,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2621,7 +2623,7 @@ class Fuzzer:
         # direct -> TcpIngest.drain() before each loop iteration.
         direct = self._tcp_inbox is not None and tcp_mode is TcpMode.DIRECT
         self._tcp_round_inbox = None if direct else self._tcp_inbox
-        self._tcp_direct = TcpIngest(self, self._tcp_inbox) if direct else None
+        self._tcp_direct = TcpIngest(self, self._tcp_inbox, tcp_admission) if direct else None
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed

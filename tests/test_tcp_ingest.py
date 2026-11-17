@@ -208,3 +208,112 @@ class TestWiring:
         monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake)
         assert cmd_fuzz(args) == 0
         assert seen["tcp_mode"] is mode
+
+
+@pytest.fixture
+def admit_all(tmp_path):
+    from fuzzer_tool.services.tcp_ingest import Admission
+    from tests.test_regression_end_of_run_persistence import _make_fuzzer
+
+    f = _make_fuzzer(
+        tmp_path, tcp_listen_port=0, tcp_mode=TcpMode.DIRECT, tcp_admission=Admission.ALL
+    )
+    yield f
+    f._tcp_inbox.close()
+
+
+class TestAdmitAll:
+    def test_seed_without_new_coverage_admitted(self, admit_all, capsys):
+        _feed(admit_all, b"NOGAIN")
+        with (
+            patch.object(admit_all, "_run_target", return_value=(0, "")),
+            patch.object(admit_all, "_unmutated_coverage", return_value=(False, [5, 6])),
+            patch.object(admit_all, "_record_direct_edges", return_value=0) as rec,
+        ):
+            admit_all._tcp_direct.drain()
+
+        assert b"NOGAIN" in admit_all.corpus
+        rec.assert_called_once_with(b"NOGAIN", [5, 6])  # its edges still recorded
+        assert (
+            f"Ran seed id_{hash_data(b'NOGAIN')} (direct): rc=0, +0 edges, admitted"
+            in capsys.readouterr().out
+        )
+
+    def test_no_coverage_target_admits_without_recording(self, admit_all):
+        # /bin/true: no edges at all; the seed is kept, nothing to record.
+        _feed(admit_all, b"BLIND")
+        with (
+            patch.object(admit_all, "_run_target", return_value=(0, "")),
+            patch.object(admit_all, "_record_direct_edges") as rec,
+        ):
+            admit_all._tcp_direct.drain()
+        assert b"BLIND" in admit_all.corpus
+        rec.assert_not_called()
+
+    def test_crash_still_not_admitted(self, admit_all):
+        # Adversarial: a crashing seed in the corpus would crash every pick.
+        _feed(admit_all, b"BOOM")
+        with (
+            patch.object(admit_all, "_run_target", return_value=(-11, "")),
+            patch.object(admit_all, "_is_crash", return_value=True),
+            patch.object(admit_all, "save_crash") as save_crash,
+        ):
+            admit_all._tcp_direct.drain()
+        save_crash.assert_called_once()
+        assert b"BOOM" not in admit_all.corpus
+
+    def test_timeout_still_not_admitted(self, admit_all):
+        _feed(admit_all, b"HANG")
+        with (
+            patch.object(admit_all, "_run_target", return_value=(-1, "")),
+            patch.object(admit_all, "_is_crash", return_value=False),
+            patch.object(admit_all._corpus_manager, "save_timeout"),
+        ):
+            admit_all._tcp_direct.drain()
+        assert b"HANG" not in admit_all.corpus
+
+    def test_default_still_needs_new_coverage(self, direct):
+        # Falsification: without --admit-all a no-gain seed stays out.
+        _feed(direct, b"NOGAIN")
+        with (
+            patch.object(direct, "_run_target", return_value=(0, "")),
+            patch.object(direct, "_unmutated_coverage", return_value=(False, [5, 6])),
+        ):
+            direct._tcp_direct.drain()
+        assert b"NOGAIN" not in direct.corpus
+
+
+class TestAdmitAllCli:
+    @pytest.mark.parametrize(("argv", "expected"), [([], "new-coverage"), (["--admit-all"], "all")])
+    def test_flag_reaches_fuzzer(self, monkeypatch, tmp_path, argv, expected):
+        from fuzzer_tool.cli.commands import cmd_fuzz
+        from fuzzer_tool.services.tcp_ingest import Admission
+        from tests import test_commands_extended
+
+        args = test_commands_extended.TestCmdFuzzConstruction()._make_default_args(tmp_path)
+        args.tcp_listen_port = 4444
+        args.tcp_mode = "direct"
+        args.admit_all = bool(argv)
+        seen = {}
+
+        def fake(**kwargs):
+            seen.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake)
+        assert cmd_fuzz(args) == 0
+        assert seen["tcp_admission"] is Admission(expected)
+
+    def test_admit_all_needs_direct_mode(self, monkeypatch, tmp_path, capsys):
+        # Adversarial: in round mode the flag would silently do nothing.
+        from fuzzer_tool.cli.commands import cmd_fuzz
+        from tests import test_commands_extended
+
+        args = test_commands_extended.TestCmdFuzzConstruction()._make_default_args(tmp_path)
+        args.tcp_listen_port = 4444
+        args.tcp_mode = "round"
+        args.admit_all = True
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", MagicMock())
+        with pytest.raises(SystemExit):
+            cmd_fuzz(args)
+        assert "--admit-all needs --tcp-mode direct" in capsys.readouterr().out
