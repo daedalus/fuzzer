@@ -214,7 +214,7 @@ class TestMain:
             return send
 
         monkeypatch.setattr(ccs, "tcp_sink", sink)
-        assert ccs.main(["--root", str(root)]) == 1
+        assert ccs.main(["--root", str(root), "--retries", "0"]) == 1
         assert "sent 1 seeds before failure" in capsys.readouterr().err
 
     def test_progress_line_every_n(self, tmp_path, capsys, monkeypatch):
@@ -234,4 +234,79 @@ class TestMain:
         inbox = TcpSeedInbox(0)
         port = inbox.port
         inbox.close()  # nothing listens on this port any more
-        assert ccs.main(["--root", str(root), "--port", str(port), "--delay", "0"]) == 1
+        argv = ["--root", str(root), "--port", str(port), "--delay", "0", "--retries", "0"]
+        assert ccs.main(argv) == 1
+
+
+class TestRetry:
+    @staticmethod
+    def _flaky(fail_times: int):
+        """A sender that refuses *fail_times* calls, then accepts; logs every call."""
+        calls = []
+
+        def send(data):
+            calls.append(data)
+            if len(calls) <= fail_times:
+                raise ConnectionRefusedError(111, "Connection refused")
+
+        return send, calls
+
+    def test_recovers_after_failures_with_backoff(self, capsys):
+        send, calls = self._flaky(2)
+        naps = []
+        retrying = ccs.with_retry(send, retries=3, backoff=0.5, sleep=naps.append)
+
+        retrying(b"seed")
+        assert calls == [b"seed"] * 3  # same bytes resent, not skipped
+        assert naps == [0.5, 1.0]  # backoff doubles per attempt
+        assert capsys.readouterr().err.count("retry") == 2
+
+    def test_gives_up_after_retries(self):
+        # Falsification: a dead fuzzer still ends the run, after retries+1 attempts.
+        send, calls = self._flaky(99)
+        retrying = ccs.with_retry(send, retries=2, backoff=0.1, sleep=lambda _s: None)
+
+        with pytest.raises(ConnectionRefusedError):
+            retrying(b"seed")
+        assert len(calls) == 3
+
+    def test_backoff_capped(self):
+        # Adversarial: many retries never wait longer than MAX_BACKOFF_S per attempt.
+        send, _ = self._flaky(99)
+        naps = []
+        retrying = ccs.with_retry(send, retries=12, backoff=1.0, sleep=naps.append)
+
+        with pytest.raises(ConnectionRefusedError):
+            retrying(b"seed")
+        assert max(naps) == ccs.MAX_BACKOFF_S
+        assert naps[:3] == [1.0, 2.0, 4.0]
+
+    def test_non_network_error_not_retried(self):
+        # Adversarial: a bug (TypeError) surfaces at once instead of looping.
+        calls = []
+
+        def send(data):
+            calls.append(data)
+            raise TypeError("bug")
+
+        retrying = ccs.with_retry(send, retries=5, backoff=0.1, sleep=lambda _s: None)
+        with pytest.raises(TypeError):
+            retrying(b"seed")
+        assert len(calls) == 1
+
+    def test_main_survives_fuzzer_restart(self, tmp_path, capsys, monkeypatch):
+        # The fuzzer is down for one attempt; every seed still goes out once.
+        root = tmp_path / "chromium"
+        _profile(root, "Default", {"1_0": _entry(PNG), "2_0": _entry(JPG)})
+        send, calls = self._flaky(1)
+        monkeypatch.setattr(ccs, "tcp_sink", lambda *_a: send)
+
+        argv = ["--root", str(root), "--retries", "2", "--retry-backoff", "0"]
+        assert ccs.main(argv) == 0
+        assert calls == [PNG, PNG, JPG]
+        assert "[*] sent 2 seeds (" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("flag", ["--retries", "--retry-backoff"])
+    def test_negative_values_rejected(self, tmp_path, flag):
+        with pytest.raises(SystemExit):
+            ccs.main(["--root", str(tmp_path), flag, "-1"])

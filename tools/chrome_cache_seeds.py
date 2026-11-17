@@ -79,6 +79,11 @@ DEFAULT_DELAY_S = 0.05
 CONNECT_TIMEOUT_S = 5.0
 # Seeds between "sent N so far" lines.
 PROGRESS_EVERY = 100
+# Resends of one seed on a network error; waits 1+2+4+8+16 s by default,
+# enough to ride out a fuzzer restart.
+DEFAULT_RETRIES = 5
+DEFAULT_BACKOFF_S = 1.0
+MAX_BACKOFF_S = 30.0
 
 PLATFORM_MAC = "darwin"
 PLATFORM_WIN = "win"  # sys.platform prefix (win32)
@@ -228,6 +233,49 @@ def tcp_sink(host: str, port: int, delay: float) -> Callable[[bytes], None]:
     return send
 
 
+def with_retry(
+    send: Callable[[bytes], None],
+    retries: int,
+    backoff: float,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Callable[[bytes], None]:
+    """Wrap *send*: resend the same seed on network errors, waiting backoff * 2**k.
+
+    E.g. retries=3, backoff=1: waits 1, 2, 4 s, then re-raises. Waits are capped
+    at MAX_BACKOFF_S. Only OSError (refused, reset, timeout) is retried; a bug
+    surfaces at once. A seed cut mid-send may arrive twice (partial + full).
+    """
+
+    def send_retrying(data: bytes) -> None:
+        for attempt in range(retries + 1):
+            try:
+                send(data)
+                return
+            except OSError as e:
+                if attempt == retries:
+                    raise
+                wait = min(backoff * 2**attempt, MAX_BACKOFF_S)
+                print(
+                    f"[!] send failed: {e}; retry {attempt + 1}/{retries} in {wait:g}s",
+                    file=sys.stderr,
+                )
+                sleep(wait)
+
+    return send_retrying
+
+
+def _non_negative(kind: type) -> Callable[[str], int | float]:
+    """argparse type: *kind* parsed from text, at least 0."""
+
+    def parse(text: str) -> int | float:
+        value = kind(text)
+        if value < 0:
+            raise argparse.ArgumentTypeError(f"must be >= 0, got {text}")
+        return value
+
+    return parse
+
+
 def _media_set(spec: str) -> set[Media]:
     """argparse type: comma list of media names (jpg,png,...)."""
     try:
@@ -249,6 +297,18 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY_S, help="seconds between seeds")
     ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help="per-seed cap")
+    ap.add_argument(
+        "--retries",
+        type=_non_negative(int),
+        default=DEFAULT_RETRIES,
+        help=f"resends per seed on a network error (default {DEFAULT_RETRIES})",
+    )
+    ap.add_argument(
+        "--retry-backoff",
+        type=_non_negative(float),
+        default=DEFAULT_BACKOFF_S,
+        help=f"first wait in s, doubled per retry, capped at {MAX_BACKOFF_S:g} (default {DEFAULT_BACKOFF_S:g})",
+    )
     ap.add_argument("--dry-run", action="store_true", help="count, send nothing")
     return ap.parse_args(argv)
 
@@ -265,7 +325,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[*] cache: {cache}")
 
     # Ifs up: pick the sink once.
-    send = (lambda _data: None) if args.dry_run else tcp_sink(args.host, args.port, args.delay)
+    send = (
+        (lambda _data: None)
+        if args.dry_run
+        else with_retry(
+            tcp_sink(args.host, args.port, args.delay), args.retries, args.retry_backoff
+        )
+    )
     verb = "would send" if args.dry_run else "sent"
     stats = ScanStats()
 
