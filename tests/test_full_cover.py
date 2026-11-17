@@ -392,3 +392,56 @@ def test_duplicate_id_written_once(tmp_path):
 
     assert rep.kept == 1
     assert len(list((tmp_path / "out").rglob("id_*"))) == 1
+
+
+BIG_TWIN = b"B" * 100
+SMALL_TWIN = b"s"
+TWIN_EDGES = [1, 2, 3]
+
+
+def _kept_twin(tmp_path: Path, batches: list[dict[bytes, list[int]]]) -> set[str]:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, BIG_TWIN)
+    _seed(corpus, SMALL_TWIN)
+    full_cover.full_cover(_dump(tmp_path / "e.pkl", batches), corpus, output_dir=tmp_path / "out")
+    return _written_hashes(tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    "batches",
+    [
+        [{BIG_TWIN: TWIN_EDGES, SMALL_TWIN: TWIN_EDGES}],  # same batch, big first
+        [{SMALL_TWIN: TWIN_EDGES, BIG_TWIN: TWIN_EDGES}],  # control: small first
+        [{BIG_TWIN: TWIN_EDGES}, {SMALL_TWIN: TWIN_EDGES}],  # small in a later batch
+    ],
+    ids=["same-batch", "small-first", "later-batch"],
+)
+def test_regression_full_cover_keeps_smallest_twin(tmp_path, batches):
+    """Identical edge sets: the smallest seed is kept, whatever the dump order."""
+    assert _kept_twin(tmp_path, batches) == {hash_data(SMALL_TWIN)}
+
+
+def test_equal_size_twins_keep_one(tmp_path):
+    """Adversarial: same size, same edges -> exactly one kept, every edge covered."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, b"xx")
+    _seed(corpus, b"yy")
+    dump = _dump(tmp_path / "e.pkl", [{b"xx": TWIN_EDGES}, {b"yy": TWIN_EDGES}])
+
+    rep = full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+    assert rep.kept == 1
+    assert rep.reachable_edges == len(TWIN_EDGES)
+
+
+def test_subset_is_not_a_twin(tmp_path):
+    """Falsification: a smaller seed with a strict subset of edges never replaces."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, BIG_TWIN)
+    _seed(corpus, SMALL_TWIN)
+    dump = _dump(tmp_path / "e.pkl", [{BIG_TWIN: TWIN_EDGES}, {SMALL_TWIN: TWIN_EDGES[:2]}])
+
+    full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+    assert _written_hashes(tmp_path / "out") == {hash_data(BIG_TWIN)}
