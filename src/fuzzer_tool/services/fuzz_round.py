@@ -25,9 +25,11 @@ round. Long-lived state stays on the Fuzzer (``self._f``).
      └─ _on_crash | _admit | _on_boring
 """
 
+import enum
 import logging
 import os
 import resource
+import sys
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -101,6 +103,15 @@ def _in_taint(taints, offset: int, length: int) -> bool:
         return False
     end = offset + length - 1
     return any(region.start <= offset and end <= region.end for region in taints)
+
+
+class RoundOutcome(enum.Enum):
+    """How a round ended, as reported for --tcp-listen-port seeds."""
+
+    CRASH = "crash"
+    ADMITTED = "admitted"
+    BORING = "boring"
+    TIMEOUT = "timeout"  # --tcp-mode direct only; rounds count timeouts as boring
 
 
 class FuzzRound:
@@ -221,10 +232,31 @@ class FuzzRound:
 
         if self._is_crash:
             self._queue_variant()
+            self._report_tcp(RoundOutcome.CRASH)
             return self._on_crash()
         if self._admits():
+            self._report_tcp(RoundOutcome.ADMITTED)
             return self._admit()
+        self._report_tcp(RoundOutcome.BORING)
         return self._on_boring()
+
+    def _report_tcp(self, outcome: RoundOutcome) -> None:
+        """--tcp-listen-port: say the seed popped for this round ran, and how.
+
+        [*] Ran seed id_3f2a9c0d1e4b5a67: rc=0, +12 edges, admitted
+        """
+        f = self._f
+        pending = getattr(f, "_tcp_pending", None)
+        if pending is None or self._mutated is not pending.data:
+            return
+        f._tcp_pending = None
+        f._tcp_ran += 1
+        # One write: the listener thread prints "Received" lines concurrently.
+        sys.stdout.write(
+            f"[*] Ran seed id_{pending.seed_id}: rc={self._returncode}, "
+            f"+{f._last_new_edge_count} edges, {outcome.value}\n"
+        )
+        sys.stdout.flush()
 
     # ── Setup and execution ──────────────────────────────────────────
 
