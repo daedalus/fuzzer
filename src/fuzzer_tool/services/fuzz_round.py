@@ -29,6 +29,7 @@ import enum
 import logging
 import os
 import resource
+import sys
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -110,6 +111,7 @@ class RoundOutcome(enum.Enum):
     CRASH = "crash"
     ADMITTED = "admitted"
     BORING = "boring"
+    TIMEOUT = "timeout"  # --tcp-mode direct only; rounds count timeouts as boring
 
 
 class FuzzRound:
@@ -249,11 +251,12 @@ class FuzzRound:
             return
         f._tcp_pending = None
         f._tcp_ran += 1
-        print(
+        # One write: the listener thread prints "Received" lines concurrently.
+        sys.stdout.write(
             f"[*] Ran seed id_{pending.seed_id}: rc={self._returncode}, "
-            f"+{f._last_new_edge_count} edges, {outcome.value}",
-            flush=True,
+            f"+{f._last_new_edge_count} edges, {outcome.value}\n"
         )
+        sys.stdout.flush()
 
     # ── Setup and execution ──────────────────────────────────────────
 

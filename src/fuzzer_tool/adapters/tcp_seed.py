@@ -24,6 +24,7 @@ import collections
 import contextlib
 import logging
 import socket
+import sys
 import threading
 import time
 from typing import NamedTuple
@@ -229,12 +230,22 @@ class TcpSeedInbox:
 
         with self._lock:
             if len(self._queue) >= self._capacity:
-                print(f"[!] Dropped {seed}: inbox full", flush=True)
+                _say(f"[!] Dropped {seed}: inbox full")
                 self._dropped += 1
                 return
-            print(f"[*] Received {seed}", flush=True)
+            _say(f"[*] Received {seed}")
             self._queue.append(TcpSeed(data, seed_id))
             self._received += 1
+
+
+def _say(line: str) -> None:
+    """Print *line* from a reader thread in one write.
+
+    print() writes the text and the newline separately, so another thread's
+    line could land between them ("...:54218[*] Ran seed ...").
+    """
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
 
 
 def _peer(addr: tuple) -> str:

@@ -55,6 +55,7 @@ from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.operators import StallMode
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
+from fuzzer_tool.services.tcp_ingest import TcpMode
 from fuzzer_tool.services.value_profile import ValueProfile
 
 _original_print = builtins.print
@@ -1315,6 +1316,7 @@ def cmd_fuzz(args):
         push_on_crash=_push_targets_from_args(args),
         tcp_listen_port=getattr(args, "tcp_listen_port", None),
         tcp_listen_host=getattr(args, "tcp_listen_host", TCP_DEFAULT_HOST),
+        tcp_mode=TcpMode(getattr(args, "tcp_mode", TcpMode.ROUND.value)),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
         enable_arm_mutator=getattr(args, "arm_mutate", False),
         refresh_profile=getattr(args, "refresh_profile", False),
@@ -7068,6 +7070,15 @@ def main() -> int:
         help=(
             "Accept seeds over TCP: one connection = one seed (send, then close). "
             "Each runs verbatim through the exec/coverage/crash path; truncated to --max-len"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--tcp-mode",
+        choices=[m.value for m in TcpMode],
+        default=TcpMode.ROUND.value,
+        help=(
+            "round (default): one TCP seed per fuzz round, unmutated, with round bookkeeping; "
+            "direct: every queued seed before each round, run as is, kept only on new coverage"
         ),
     )
     fuzz_parser.add_argument(

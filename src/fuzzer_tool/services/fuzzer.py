@@ -230,6 +230,7 @@ from fuzzer_tool.services.seed_picker import SeedPicker
 from fuzzer_tool.services.seed_stage import SeedStage
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.target_arena import TargetArena
+from fuzzer_tool.services.tcp_ingest import TcpIngest, TcpMode
 from fuzzer_tool.services.uninit_probe import UninitProbe
 from fuzzer_tool.services.value_profile import ValueProfile, ValueProfileChannel
 
@@ -2243,6 +2244,9 @@ class Fuzzer:
         # None disables. Appended.
         tcp_listen_port=None,
         tcp_listen_host=TCP_DEFAULT_HOST,
+        # --tcp-mode: round (one per fuzz round via mutate) or direct
+        # (services/tcp_ingest.py: all queued, unmutated, admit on new coverage).
+        tcp_mode=TcpMode.ROUND,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2613,6 +2617,11 @@ class Fuzzer:
         # Seed popped this round (TcpSeed) until FuzzRound reports it; seeds run.
         self._tcp_pending = None
         self._tcp_ran = 0
+        # Ifs up: exactly one consumer per mode. round -> mutate() pops;
+        # direct -> TcpIngest.drain() before each loop iteration.
+        direct = self._tcp_inbox is not None and tcp_mode is TcpMode.DIRECT
+        self._tcp_round_inbox = None if direct else self._tcp_inbox
+        self._tcp_direct = TcpIngest(self, self._tcp_inbox) if direct else None
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
@@ -6698,6 +6707,32 @@ class Fuzzer:
         if _is_tcp_seed(self, mutated):
             return mutated
         return self._avoid_pruned(mutated, data)
+
+    def _unmutated_coverage(self, data: bytes) -> tuple[bool, list]:
+        """(has new coverage, edge ids) of the run that just executed *data*.
+
+        Confirmation rerun as in seed calibration. No SHM coverage: (False, []),
+        so a target without the shim admits nothing in --tcp-mode direct.
+        """
+        if not self.use_coverage or not self.shm_cov:
+            return False, []
+        has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
+        return self._confirm_new_coverage(data, self.shm_cov, has_new, edge_ids)
+
+    def _record_direct_edges(self, data: bytes, edge_ids) -> int:
+        """Record an admitted --tcp-mode direct seed's edges; returns how many were new."""
+        shm = self.shm_cov
+        path_hash = shm.read_path_hash() or shm.compute_path_hash_from_edges(edge_ids)
+        new = self._edge_tracker.record_edges(
+            self._seed_key(data),
+            edge_ids,
+            target_name="",
+            hit_counts=self._only_confirmed(shm.get_edge_counts()),
+            stack_depth=shm.read_stack_depth(),
+            path_hash=path_hash,
+        )
+        self._last_new_edge_count = len(new)
+        return len(new)
 
     def _report_tcp_seeds(self) -> None:
         """Exit line: every received seed is ran, or still queued (unrun); drops counted."""
@@ -10879,7 +10914,12 @@ class Fuzzer:
             print("[*] Starting fuzzing...\n")
             print("=" * 60)
 
+            # Ifs up: bound once; getattr for __new__-built test fuzzers.
+            tcp_direct = getattr(self, "_tcp_direct", None)
             while not _shutdown:
+                # --tcp-mode direct: every queued TCP seed, unmutated, first.
+                if tcp_direct is not None:
+                    tcp_direct.drain()
                 if iterations and i >= iterations:
                     break
                 # Budget counts this process's execs, not ones restored by --resume.

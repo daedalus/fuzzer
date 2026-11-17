@@ -412,3 +412,26 @@ class TestProcessingVisible:
         f._tcp_inbox.close()
         f._report_tcp_seeds()
         assert "TCP seeds: received 3, ran 0, dropped 0, unrun 3" in capsys.readouterr().out
+
+
+class TestOutputAtomic:
+    def test_regression_received_line_is_one_write(self, inbox, monkeypatch):
+        # print() writes text and newline separately: the main thread's
+        # "Ran seed" line landed between them ("...:54218[*] Ran seed ...").
+        writes = []
+
+        class Recorder:
+            def write(self, s):
+                writes.append(s)
+                return len(s)
+
+            def flush(self):
+                pass
+
+        monkeypatch.setattr(sys, "stdout", Recorder())
+        _send(inbox.port, b"hello")
+        _wait_received(inbox, 1)
+
+        line = [w for w in writes if "Received seed" in w]
+        assert len(line) == 1 and line[0].endswith("\n")
+        assert "\n" not in [w for w in writes]  # no lone newline write
