@@ -37,12 +37,22 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import chrome_cache_seeds as ccs
+import unpack
 from chrome_cache_seeds import Media
 
 from fuzzer_tool.core.rand_pool import RandPool
 
+# Size given to members past unpack.MAX_UNPACKED: larger than any --max-size.
+TOO_BIG = sys.maxsize + 1
 # Drawn seeds stay printable and pasteable.
 MAX_SEED = (1 << 32) - 1
+
+
+class Unpack(enum.Enum):
+    """--decompress: send an archive's members instead of the archive."""
+
+    OFF = "off"
+    ON = "on"
 
 
 class WalkOrder(enum.Enum):
@@ -112,30 +122,66 @@ def iter_dir_seeds(
     skip: frozenset[Path] = frozenset(),
     max_size: int = ccs.NO_LIMIT,
     arrange: Callable[[list], None] = list.sort,
+    unpack_mode: Unpack = Unpack.OFF,
 ) -> Iterator[tuple[Media, bytes]]:
     """(media, bytes) of every non-empty file of the *wanted* types, in walk order.
 
     A wanted file over *max_size* bytes (file size, before *max_bytes*) is
-    skipped and counted in stats.too_big.
+    skipped and counted in stats.too_big. With Unpack.ON an archive or
+    compressed file yields its members instead (tools/unpack.py).
     """
+    # Ifs up: the file -> payloads step is chosen once, not per file.
+    payloads = _unpacked if unpack_mode is Unpack.ON else _as_is
     for path in walk(paths, arrange):
         if path.resolve() in skip:
             continue
         try:
-            data, size = _read(path, max_bytes)
+            head, file_size = _read(path, max_bytes)
+            for data, size in payloads(path, head, file_size, max_bytes, max_size):
+                if (offer := _offer(data, size, wanted, max_size, stats)) is not None:
+                    yield offer
         except OSError:
             # Dangling link, permission, FIFO/device: counted, not fatal.
             stats.unreadable += 1
-            continue
-        if not data:
-            continue
-        media = classify(data)
-        if media not in wanted:
-            continue
-        if size > max_size:
-            stats.too_big += 1
-            continue
-        yield media, data
+        except unpack.UNPACK_ERRORS as e:
+            # Corrupt archive: members before the damage were already sent.
+            print(f"[!] cannot unpack {path}: {e}", file=sys.stderr)
+            stats.unreadable += 1
+
+
+def _offer(
+    data: bytes, size: int, wanted: set[Media], max_size: int, stats: ccs.ScanStats
+) -> tuple[Media, bytes] | None:
+    """(media, data) if wanted and within *max_size*; None otherwise (too big counted)."""
+    media = classify(data)
+    if media not in wanted:
+        return None
+    if size > max_size:
+        stats.too_big += 1
+        return None
+    if not data:
+        return None
+    return media, data
+
+
+def _as_is(
+    path: Path, data: bytes, size: int, _max_bytes: int, _max_size: int
+) -> Iterator[tuple[bytes, int]]:
+    """Unpack.OFF: the file itself."""
+    yield data, size
+
+
+def _unpacked(
+    path: Path, data: bytes, size: int, max_bytes: int, max_size: int
+) -> Iterator[tuple[bytes, int]]:
+    """Unpack.ON: an archive's / compressed file's members; any other file as is."""
+    if not unpack.is_packed(path):
+        yield data, size
+        return
+    for member in unpack.members(path, max_bytes, max_size):
+        # Past the hard cap (a bomb, or a lying header): always too big.
+        over_cap = member.size > unpack.MAX_UNPACKED
+        yield member.data, (TOO_BIG if over_cap else member.size)
 
 
 def _parse(argv: list[str] | None) -> argparse.Namespace:
@@ -148,6 +194,11 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
         help="sorted (default) or random: shuffle the paths, and each directory's files and subdirs",
     )
     ap.add_argument("--seed", type=int, help="seed for --order random (default: drawn and printed)")
+    ap.add_argument(
+        "--decompress",
+        action="store_true",
+        help="send the members of zip / tar(.gz/.bz2/.xz) / gzip / bzip2 / xz files, one level deep",
+    )
     ccs.add_send_args(ap)
     args = ap.parse_args(argv)
     args.order = WalkOrder(args.order)
@@ -175,7 +226,10 @@ def main(argv: list[str] | None = None) -> int:
 
     stats = ccs.ScanStats()
     skip = frozenset({args.sent_bloom.resolve()}) if args.sent_bloom else frozenset()
-    found = iter_dir_seeds(paths, args.types, args.max_bytes, stats, skip, args.max_size, arrange)
+    unpack_mode = Unpack.ON if args.decompress else Unpack.OFF
+    found = iter_dir_seeds(
+        paths, args.types, args.max_bytes, stats, skip, args.max_size, arrange, unpack_mode
+    )
     return ccs.send_seeds(ccs.unique(found, stats), args, stats)
 
 

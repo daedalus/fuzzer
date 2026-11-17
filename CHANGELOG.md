@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tools/dir_seeds.py --decompress`** (`tools/unpack.py`): zip, tar(.gz/.bz2/.xz) and gzip/bzip2/xz files are sent as their members while walking, one level deep, bounded per member and per file. `tests/test_dir_seeds.py`.
 - **`tools/tcp_corpus.py`**: TCP listener that only builds a corpus: every message (any feeder) written to `CORPUS/seeds/<h[:2]>/id_<h>`, deduplicated by a persistent `--bloom` file and by the disk. `tests/test_tcp_corpus.py`.
 
 ### Fixed
