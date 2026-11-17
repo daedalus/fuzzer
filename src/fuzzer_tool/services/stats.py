@@ -38,6 +38,7 @@ from fuzzer_tool.core.circular_stats import PhaseConcentration
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.edge_clusters import fit_tracker
+from fuzzer_tool.core.edge_density import BITS_PER_BYTE, edges_per_bit
 from fuzzer_tool.core.edge_stats import CurveShape
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.kalman import RobustKF
@@ -652,6 +653,13 @@ class StatsReporter:
             print(f"  ET positions:      {et_edges} (includes stale positions after resize)")
         else:
             print(f"  Edges discovered:  {edges}")
+
+        # Coverage per bit of corpus input: size-normalized corpus yield.
+        nbytes = sum(map(len, f.corpus))
+        print(
+            f"  Edges per bit:     {edges_per_bit(edges, nbytes):.4f} "
+            f"({nbytes * BITS_PER_BYTE:,} corpus bits)"
+        )
         print(f"  Load factor:       {density:.2f}%")
         print(f"  Collision risk:    {collision_risk:.2f}% (zero for sparse entries)")
         rec = f._edge_tracker.recommended_map_size()
