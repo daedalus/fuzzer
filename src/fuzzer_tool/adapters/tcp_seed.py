@@ -23,6 +23,8 @@ import socket
 import threading
 import time
 
+from fuzzer_tool.adapters.filesystem import hash_data
+
 log = logging.getLogger(__name__)
 
 # Loopback only unless --tcp-listen-host says otherwise: seeds run the target.
@@ -102,7 +104,7 @@ class TcpSeedInbox:
         """Accept connections until close(); one bad client never ends the loop."""
         while not self._stop.is_set():
             try:
-                conn, _ = self._sock.accept()
+                conn, addr = self._sock.accept()
             except TimeoutError:
                 continue
             except OSError as e:
@@ -113,7 +115,7 @@ class TcpSeedInbox:
 
             with conn:
                 data = self._read(conn)
-            self._enqueue(data)
+            self._enqueue(data, _peer(addr))
 
     def _read(self, conn: socket.socket) -> bytes:
         """Bytes until EOF, max_bytes or the connection deadline."""
@@ -140,12 +142,26 @@ class TcpSeedInbox:
 
         return bytes(buf)
 
-    def _enqueue(self, data: bytes) -> None:
-        """Queue *data*; empty messages (port probes) are not seeds."""
+    def _enqueue(self, data: bytes, peer: str) -> None:
+        """Queue *data* and announce it; empty messages (port probes) are not seeds.
+
+        Announced before the counters move, so a reader polling them sees the line.
+        The id is the corpus file name the seed gets if admitted (``id_<h>``).
+        """
         if not data:
             return
+        seed = f"seed id_{hash_data(data)} with {len(data)} bytes from {peer}"
+
         if len(self._queue) >= self._capacity:
+            print(f"[!] Dropped {seed}: inbox full", flush=True)
             self._dropped += 1
             return
+        print(f"[*] Received {seed}", flush=True)
         self._queue.append(data)
         self._received += 1
+
+
+def _peer(addr: tuple) -> str:
+    """``ip:port``, bracketing IPv6 (``[::1]:5000``)."""
+    host, port = addr[0], addr[1]
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"

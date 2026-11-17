@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.adapters.tcp_seed import DEFAULT_HOST, TcpSeedInbox
 
 WAIT_S = 5.0
@@ -86,6 +87,37 @@ class TestInbox:
                 _wait_received(box, 2)
 
             assert [box.pop(), box.pop()] == [b"partial", b"next"]
+        finally:
+            box.close()
+
+    def test_receive_logged_with_corpus_id_size_and_peer(self, inbox, capsys):
+        # The id matches the corpus file name the seed gets if admitted.
+        _send(inbox.port, b"hello")
+        _wait_received(inbox, 1)
+
+        out = capsys.readouterr().out
+        assert f"Received seed id_{hash_data(b'hello')} with 5 bytes from {DEFAULT_HOST}:" in out
+
+    def test_empty_connection_not_logged(self, inbox, capsys):
+        # Falsification: a probe that sends nothing is not announced as a seed.
+        socket.create_connection((DEFAULT_HOST, inbox.port), timeout=WAIT_S).close()
+        _send(inbox.port, b"x")
+        _wait_received(inbox, 1)
+
+        assert capsys.readouterr().out.count("Received seed") == 1
+
+    def test_drop_logged_with_peer(self, capsys):
+        # Adversarial: a full inbox says which peer lost a seed, not "Received".
+        box = TcpSeedInbox(0, capacity=1)
+        try:
+            _send(box.port, b"a")
+            _wait_received(box, 1)
+            _send(box.port, b"b")
+            _wait_received(box, 2)
+
+            out = capsys.readouterr().out
+            assert out.count("Received seed") == 1
+            assert f"Dropped seed id_{hash_data(b'b')} with 1 bytes from {DEFAULT_HOST}:" in out
         finally:
             box.close()
 
