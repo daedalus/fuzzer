@@ -77,6 +77,8 @@ DEFAULT_HOST = "127.0.0.1"
 # Pause between seeds: the fuzzer pops one per round and drops past 1024 queued.
 DEFAULT_DELAY_S = 0.05
 CONNECT_TIMEOUT_S = 5.0
+# Seeds between "sent N so far" lines.
+PROGRESS_EVERY = 100
 
 PLATFORM_MAC = "darwin"
 PLATFORM_WIN = "win"  # sys.platform prefix (win32)
@@ -264,21 +266,27 @@ def main(argv: list[str] | None = None) -> int:
 
     # Ifs up: pick the sink once.
     send = (lambda _data: None) if args.dry_run else tcp_sink(args.host, args.port, args.delay)
+    verb = "would send" if args.dry_run else "sent"
     stats = ScanStats()
+
+    # Count only completed sends: a failed one is reported, not counted.
+    sent = 0
     try:
         for _media, body in iter_seeds(caches, args.types, args.max_bytes, stats):
             send(body)
+            sent += 1
+            if sent % PROGRESS_EVERY == 0:
+                print(f"[*] {verb} {sent} seeds so far", flush=True)
     except OSError as e:
         print(f"[-] send to {args.host}:{args.port} failed: {e}", file=sys.stderr)
+        print(f"[-] sent {sent} seeds before failure", file=sys.stderr)
         return 1
 
-    verb = "would send" if args.dry_run else "sent"
     counts = ", ".join(
         f"{m.value}: {n}" for m, n in sorted(stats.by_media.items(), key=lambda kv: kv[0].value)
     )
-    total = sum(stats.by_media.values())
     print(
-        f"[*] {verb} {total} seeds ({counts or 'none'}); dup {stats.duplicates}, unreadable {stats.unreadable}"
+        f"[*] {verb} {sent} seeds ({counts or 'none'}); dup {stats.duplicates}, unreadable {stats.unreadable}"
     )
     return 0
 
