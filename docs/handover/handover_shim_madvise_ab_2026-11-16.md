@@ -77,7 +77,49 @@ Both A/A controls fail (p=0.003 forkserver-only, p=0.004 end-to-end): the two-ru
 
 Private-heap `MADV_HUGEPAGE`: not applicable under ASAN. The shim refuses `__AFL_PRIVATE_HEAP` in sanitizer builds, so ASAN's allocator owns the heap.
 
+### 4.4 Per-region flags and their combination, FFmpeg noasan
+
+`ffmpeg_read_9.0.2_noasan.so` clang 18, direct_lite, 524,288-entry map. One process holds harness, target and coverage table, so regions share the TLB. Flags (env-gated, same binary both arms):
+
+| Region | Flag | Mechanism |
+|---|---|---|
+| Python harness heap | `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` | glibc madvises THP on its heap |
+| Shim coverage table | `SHM_HUGETLB` via `libc_shm.shmget` hook (segments >= 2 MiB) | 4 MiB table on 2 MiB pages; 128 pages reserved |
+| Target private heap | `MADV_HUGEPAGE` on the reservation (`XP_MADV_HUGE`) | THP for the target's class regions |
+
+Two designs. Fuzz loop: 10 pairs × 3k execs, ABBA, `taskset -c 2`, rusage of the run. Replay: `edge-dump --inprocess-direct` over a fixed 1,706-input corpus, 20 pairs, ABBA; edge sets identical in all runs (deterministic workload). Exact sign-flip test on per-pair B/A − 1.
+
+Fuzz loop:
+
+| Arm | CPU (user+sys) | sys |
+|---|---|---|
+| A/A | +0.9%, p=0.72 | −2.3%, p=0.17 |
+| harness THP | +0.6%, p=0.38 | −13.1%, 10/10, p=0.002 |
+| coverage hugetlb | +3.0%, p=0.74 | +5.9%, p=0.25 |
+| private-heap THP | +2.7%, p=0.14 | +5.1%, p=0.13 |
+| all three | −8.6%, p=0.53 | −21.4%, 10/10, p=0.002 |
+
+Per-pair CPU spreads ±20% in the A/A: FFmpeg runs diverge (live edges differ within a pair), and cheaper paths cost less. CPU cannot resolve a few percent here. A first `all three` run was cut at 5/10 pairs by a container restart and rerun from scratch.
+
+Replay:
+
+| Arm | CPU | user | sys | wall |
+|---|---|---|---|---|
+| A/A | +0.3%, p=0.30 | +0.3%, p=0.30 | −1.6%, p=0.79 | +0.5%, p=0.30 |
+| harness THP | −0.7%, p=0.75 | +0.1%, p=0.48 | −7.9%, p=0.043 | −0.7%, p=0.78 |
+| coverage hugetlb | −1.4%, p=0.95 | −1.1%, p=0.80 | −3.7%, p=0.16 | −1.5%, p=0.96 |
+| private-heap THP | **−2.2%, 16/20, p=0.020** | **−2.5%, 17/20, p=0.009** | +0.3%, p=0.47 | −2.1%, p=0.013 |
+| all three | −1.1%, p=0.47 | +0.1%, p=0.95 | −8.1%, 19/20, p<0.0001 | −0.5%, p=0.49 |
+
+Holm over the 4 arms: private-heap THP p=0.08 (CPU), 0.037 (user). Peak RSS 120 → 122 MB.
+
+Reading:
+- Harness THP cuts page-fault time (sys −8% to −13%) but sys is ~8% of CPU; no CPU or wall change on FFmpeg or fuzzgoat (fuzzgoat: CPU +0.15%, p=0.87; sys −7.6%, p=0.16; A/A CPU +0.3%, p=0.65).
+- Coverage table on hugepages: null at 4 MiB too; together with the 256 KiB result, closes it.
+- Private-heap THP is the only arm with a user-time gain (fewer dTLB misses in target code). No threshold was frozen and it does not survive Holm on CPU: lean, not a win.
+- Combining does not add: `all three` keeps the sys saving and loses the user gain. Regions compete for the same STLB; harness THP may displace the target's huge mappings. Unexplained; one run.
+
 ## 5. Not done
 
-- Private-heap THP on FFmpeg noasan direct_lite (needs `tools/vendor_ffmpeg.sh` nosan tree).
+- Confirmation run for private-heap THP on FFmpeg noasan replay, threshold frozen beforehand (`docs/AB_PENDING.md`), then an in-run check (Hard Rule 58).
 - The ~11K non-coverage COW faults per non-persistent FFmpeg ASAN exec are the real fork cost; persistent mode (the default) already avoids them.
