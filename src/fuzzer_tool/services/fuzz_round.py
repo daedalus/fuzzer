@@ -1392,6 +1392,7 @@ class FuzzRound:
             stack_depth=stack_depth,
             path_hash=path_hash,
             exec_s=self._t_elapsed,
+            nbytes=len(self._data),
         )
 
     def _on_new_edges(self, new, hit_edges) -> None:

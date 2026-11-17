@@ -2249,6 +2249,12 @@ class Fuzzer:
         tcp_mode=TcpMode.ROUND,
         # --admit-all: direct-mode seeds join the corpus without new coverage.
         tcp_admission=Admission.NEW_COVERAGE,
+        # --density-weight: seed weight x 0.5..2 by edges-per-bit rank
+        # (core/edge_density.py). Off, out of --hail-mary. Appended.
+        density_weight=Switch.OFF,
+        # --prune-density: tracker eviction tie by edges per bit (EvictTie).
+        # Off, out of --hail-mary. Appended.
+        prune_density=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3525,6 +3531,9 @@ class Fuzzer:
             self._corpus_manager.rebuild_entropy()
         self._init_seed_metadata()
         self._edge_tracker.evict_tie = EvictTie.COST if prune_cost else EvictTie.AGE
+        if prune_density is Switch.ON:
+            self._edge_tracker.evict_tie = EvictTie.DENSITY
+        self._density_weight = density_weight
         self._edge_tracker.set_edge_store(EdgeStore.PACKED if packed_edges else EdgeStore.BUILTIN)
 
         # Rebuild the lineage tree from persisted seed_meta (single source
@@ -9973,6 +9982,7 @@ class Fuzzer:
             new = self._edge_tracker.record_edges(
                 self._seed_key(seed),
                 edge_ids,
+                nbytes=len(seed),
                 # "" skips seed_target_edges: a full per-seed duplicate that only
                 # multi-target mode reads, and this pass never runs there.
                 target_name="",

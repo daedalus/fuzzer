@@ -28,6 +28,7 @@ from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
 from fuzzer_tool.core.coverage_noise import fake_novelty_factor
 from fuzzer_tool.core.edge_clusters import count_distinct
 from fuzzer_tool.core.edge_components import components as edge_components
+from fuzzer_tool.core.edge_density import density_factors
 from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
@@ -2186,6 +2187,23 @@ class SeedPicker:
             return w
         return w * c11_weight(meta.get("c11", 0), *c11_range)
 
+    def _density_table(self, corpus: list[bytes], seed_keys: list) -> dict[str, float]:
+        """--density-weight factor per seed key, once per pass; empty when off.
+
+        Edges hit (``seed_edges``) per bit, ranked over the corpus
+        (core/edge_density.py): 0.5x least dense .. 2x densest.
+        """
+        f = self.f
+        if getattr(f, "_density_weight", Switch.OFF) is not Switch.ON:
+            return {}
+
+        n = len(corpus)
+        keys = [sk or f._seed_key(s) for sk, s in zip(seed_keys, corpus, strict=True)]
+        seed_edges = f._edge_tracker.seed_edges
+        edges = np.fromiter((len(seed_edges.get(k) or ()) for k in keys), np.int64, n)
+        nbytes = np.fromiter(map(len, corpus), np.int64, n)
+        return dict(zip(keys, density_factors(edges, nbytes).tolist(), strict=True))
+
     def _weight_fake_novelty(self, meta: dict, w: float) -> float:
         """Demote seeds whose mutants flood the corpus (BranchTrap fake paths)."""
         return w * fake_novelty_factor(meta["fuzz_count"], meta.get("child_count", 0))
@@ -2434,6 +2452,7 @@ class SeedPicker:
             and getattr(f, "_overlap_mode", "") == "pareto4d"
         )
         c11_range = self._c11_range(f)
+        density = self._density_table(corpus, seed_keys)
         try:
             for i, seed in enumerate(corpus):
                 if not has_meta[i]:
@@ -2455,6 +2474,7 @@ class SeedPicker:
                 w = self._weight_validity(meta, w, f)
                 w = self._weight_fake_novelty(meta, w)
                 w = self._weight_c11(meta, w, c11_range)
+                w *= density.get(sk, 1.0)
                 w *= lineage_div.get(sk, 1.0)
                 w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
 

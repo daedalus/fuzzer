@@ -74,6 +74,8 @@ _EXCLUDED_OPT_IN = frozenset(
         "fess_inherit",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
         "fess_cell_novelty",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
         "respawn_backoff",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "density_weight",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "prune_density",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "advisors",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "plateau_groups",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "elo_stale_bench",  # unmeasured: A/B pending (docs/AB_PENDING.md)

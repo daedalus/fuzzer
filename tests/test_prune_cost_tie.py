@@ -15,6 +15,7 @@ import sys
 import pytest
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker, EvictTie
+from fuzzer_tool.core.run_mode import Switch
 
 CEILING = 10
 N_NARROW = 30
@@ -107,5 +108,6 @@ def test_fuzzer_wires_tie(tie, tmp_path):
         crashes_dir=str(tmp_path / "k"),
         use_coverage=False,
         prune_cost=tie is EvictTie.COST,
+        prune_density=Switch.ON if tie is EvictTie.DENSITY else Switch.OFF,
     )
     assert f._edge_tracker.evict_tie is tie
