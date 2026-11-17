@@ -1,9 +1,12 @@
 """Tests for tools/dir_seeds.py: walk directories, send every file as a TCP seed."""
 
 import os
+import re
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(TOOLS))
@@ -203,3 +206,68 @@ class TestMaxSize:
         sent = _recorder(monkeypatch)
         assert ds.main([str(root), "--max-bytes", "4", "--max-size", "100"]) == 0
         assert sent == []
+
+
+class TestWalkOrder:
+    TREE = {"y": b"y", "z": b"z", "a/1": b"a1", "a/q/0": b"aq0", "b/2": b"b2"}
+
+    def test_arranger_applied_to_files_and_dirs_at_every_level(self, tmp_path):
+        # Deterministic stand-in for the shuffle (Rule 39): reverse each list.
+        root = _tree(tmp_path / "c", self.TREE)
+
+        def backwards(items):
+            items.sort(reverse=True)
+
+        got = [p.relative_to(root).as_posix() for p in ds.walk([root], arrange=backwards)]
+        assert got == ["z", "y", "b/2", "a/1", "a/q/0"]
+
+    def test_default_order_unchanged(self, tmp_path):
+        # Falsification: without --order random the walk stays sorted.
+        root = _tree(tmp_path / "c", self.TREE)
+        got = [p.relative_to(root).as_posix() for p in ds.walk([root])]
+        assert got == ["y", "z", "a/1", "a/q/0", "b/2"]
+
+    def test_same_seed_same_order(self, tmp_path, monkeypatch):
+        # Control (Rule 46): one seed, two runs, identical order.
+        root = _tree(tmp_path / "c", {f"d{i % 4}/f{i:02d}": b"%d" % i for i in range(40)})
+        runs = []
+        for _ in range(2):
+            sent = _recorder(monkeypatch)
+            assert ds.main([str(root), "--order", "random", "--seed", "7"]) == 0
+            runs.append(sent)
+        assert runs[0] == runs[1]
+        assert sorted(runs[0]) == sorted(b"%d" % i for i in range(40))
+
+    def test_seed_changes_order(self, tmp_path, monkeypatch):
+        # 40 files: two seeds agreeing by chance is ~1/40!.
+        root = _tree(tmp_path / "c", {f"f{i:02d}": b"%d" % i for i in range(40)})
+        runs = []
+        for seed in ("1", "2"):
+            sent = _recorder(monkeypatch)
+            assert ds.main([str(root), "--order", "random", "--seed", seed]) == 0
+            runs.append(sent)
+        assert runs[0] != runs[1]
+        assert runs[0] != [b"%d" % i for i in range(40)]  # not the sorted order
+
+    def test_top_level_paths_shuffled_too(self, tmp_path, monkeypatch):
+        dirs = [_tree(tmp_path / f"p{i:02d}", {"f": b"%d" % i}) for i in range(30)]
+        sent = _recorder(monkeypatch)
+        assert ds.main([*map(str, dirs), "--order", "random", "--seed", "3"]) == 0
+        assert sorted(sent) == sorted(b"%d" % i for i in range(30))
+        assert sent != [b"%d" % i for i in range(30)]
+
+    def test_unseeded_run_prints_reproducible_seed(self, tmp_path, monkeypatch, capsys):
+        # Adversarial: a random run must be repeatable from its printed seed.
+        root = _tree(tmp_path / "c", {f"f{i:02d}": b"%d" % i for i in range(20)})
+        first = _recorder(monkeypatch)
+        assert ds.main([str(root), "--order", "random"]) == 0
+        seed = re.search(r"walk order: random \(seed (\d+)\)", capsys.readouterr().out).group(1)
+
+        again = _recorder(monkeypatch)
+        assert ds.main([str(root), "--order", "random", "--seed", seed]) == 0
+        assert again == first
+
+    def test_seed_without_random_order_rejected(self, tmp_path):
+        root = _tree(tmp_path / "c", {"f": b"x"})
+        with pytest.raises(SystemExit):
+            ds.main([str(root), "--seed", "5"])
