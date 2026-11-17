@@ -46,7 +46,6 @@ class MockFuzzer:
         self._seed_quality = None
         self.irreplaceable_hashes: set[str] = set()
         self.seen_hashes: set[str] = set()
-        self.bloom = None
         self._total_corpus_attempts = 0
         self._last_hamming_distance = -1
         self._corpus_size_history: list[int] = []

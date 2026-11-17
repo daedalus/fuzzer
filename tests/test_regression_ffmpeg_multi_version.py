@@ -335,3 +335,25 @@ def test_regression_versions_matrix_wired_in_main():
     )
     assert re.search(r"build_ngram_so_targets\n\s+build_ffmpeg_version_ngram", main)
     assert "--ffmpeg-opts=*) FFMPEG_OPTS=" in text
+
+
+def test_ijon_variant_links_coverage_tree_with_define(tmp_path):
+    """_ijon: coverage-only archives, -DFUZZ_IJON on exe and .so (annotations compile in)."""
+    ijon = "\n".join(_versions(tmp_path / "i", '"_ijon" "-DFUZZ_IJON"'))
+
+    assert "build_vendored_ffmpeg_sancov  ffmpeg-9.0.2" in ijon
+    assert re.search(r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_ijon .*-DFUZZ_IJON", ijon)
+    assert re.search(r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_ijon\.so .*-DFUZZ_IJON", ijon)
+    assert "_asan" not in ijon
+
+
+def test_falsify_noasan_has_no_ijon_define(tmp_path):
+    """The default build must stay annotation-free: no FUZZ_IJON outside _ijon."""
+    noasan = "\n".join(_versions(tmp_path / "n", '"_noasan" ""'))
+    assert "FUZZ_IJON" not in noasan
+
+
+def test_ijon_variant_wired_after_noasan():
+    """_ijon rides the no-ASAN pass, after the tree it links is built."""
+    main = BUILD_SCRIPT.read_text().split("# ── Main ──", 1)[1]
+    assert re.search(r'build_ffmpeg_versions "_noasan" ""\n\s+build_ffmpeg_version_ijon', main)

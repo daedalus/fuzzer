@@ -35,6 +35,18 @@ class InputPlacement(Enum):
     GUARD = "guard"
 
 
+class StateRestore(Enum):
+    """What direct in-process modes reset before each exec (``--snapshot-restore``).
+
+    OFF      nothing: target globals carry over (``--no-snapshot-restore``).
+    GLOBALS  default: the target .so's .data/.bss as captured after load
+             (``adapters/global_snapshot.py``). Heap is not restored.
+    """
+
+    OFF = "off"
+    GLOBALS = "globals"
+
+
 class CrashReward(Enum):
     """Which crashes pay the operators that produced them (``--novel-crash-reward``).
 

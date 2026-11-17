@@ -1,7 +1,5 @@
 """Tests for genetic algorithm lifecycle."""
 
-import hashlib
-
 import pytest
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker
@@ -13,6 +11,7 @@ from fuzzer_tool.core.ga import (
     Speciation,
 )
 from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.services.corpus_manager import seed_key
 
 
 class TestIndividual:
@@ -39,7 +38,7 @@ class TestIndividual:
         ind = Individual(data=b"test", seed_key="abc123")
         d = ind.to_dict()
         restored = Individual.from_dict(d)
-        assert restored.seed_key == "abc123"
+        assert restored.seed_key == seed_key(b"test")
 
 
 class TestFitnessFunction:
@@ -86,7 +85,7 @@ class TestGALifecycle:
         et = EdgeTracker()
         corpus = [b"seed_%d" % i for i in range(5)]
         for i, data in enumerate(corpus):
-            et.seed_edges[hashlib.sha256(data).hexdigest()[:16]] = {i * 10 + j for j in range(5)}
+            et.seed_edges[seed_key(data)] = {i * 10 + j for j in range(5)}
         et.cumulative_edges = set(range(50))
         ga.initialize(corpus, et)
         assert ga.best_fitness > 0

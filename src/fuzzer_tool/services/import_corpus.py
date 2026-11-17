@@ -4,8 +4,10 @@ Supports importing seeds from:
 - AFL output: queue/id:* files and crashes/crash-* files
 - libFuzzer output: corpus/ directory files
 - Honggfuzz output: findings/ directory files
+- Packet captures (pcap/pcapng): windows of packets as length-prefixed messages
 """
 
+import mmap
 import shutil
 import string
 import sys
@@ -13,6 +15,11 @@ from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import free_slot, hash_data, is_regular
 from fuzzer_tool.core.misra_gries import MisraGries
+from fuzzer_tool.core.pcap import Framing, frame, read_packets
+
+# Consecutive packets per pcap seed: bounds seed size and memory (Hard Rule 54).
+PCAP_WINDOW = 64
+PCAP_FRAMINGS = tuple(f.name.lower() for f in Framing)
 
 # Misra–Gries counters per returned token: 64x kept 198-200 of the exact
 # top 200 on a 5k-seed corpus at 1/39 of the exact Counter's entries.
@@ -184,6 +191,62 @@ def import_from_honggfuzz(
             imported += 1
 
     return imported, 0
+
+
+def _capture_seeds(path: Path, window: int, framing: Framing):
+    """Framed seeds of *window* consecutive packets from one capture file."""
+    with path.open("rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as buf:
+        batch: list[bytes] = []
+        for pkt in read_packets(buf):
+            batch.append(pkt)
+            if len(batch) < window:
+                continue
+            yield frame(batch, framing)
+            batch = []
+
+        if batch:
+            yield frame(batch, framing)
+
+
+def import_from_pcap(
+    capture_dir: str, target_corpus: str, window: int = PCAP_WINDOW, framing: str = "u32be"
+) -> int:
+    """Import packet captures as multi-message seeds (VirtFuzz init PCAPs).
+
+    Each seed holds *window* consecutive packets, length-prefixed per
+    *framing*, so ``seq_mutate`` and ``MsgPass`` work per packet. Files that
+    are not captures are skipped.
+
+    Args:
+        capture_dir: Directory of pcap/pcapng files (not recursive).
+        target_corpus: Destination corpus directory.
+        window: Packets per seed (>= 1).
+        framing: One of ``PCAP_FRAMINGS``.
+
+    Returns:
+        Seeds imported.
+    """
+    src = Path(capture_dir)
+    if not src.is_dir():
+        print(f"[-] Capture directory not found: {capture_dir}", file=sys.stderr)
+        return 0
+
+    dest = Path(target_corpus)
+    dest.mkdir(parents=True, exist_ok=True)
+    seen_hashes = _existing_hashes(dest)
+    fmt = Framing[framing.upper()]
+    window = max(1, window)
+
+    imported = 0
+    for f in sorted(src.iterdir()):
+        # mmap rejects empty files.
+        if not is_regular(f) or not f.stat().st_size:
+            continue
+        for seed in _capture_seeds(f, window, fmt):
+            if seed and _admit(dest, seed, seen_hashes):
+                imported += 1
+
+    return imported
 
 
 def extract_tokens(data: bytes, min_len: int = 3, max_len: int = 32) -> set[bytes]:

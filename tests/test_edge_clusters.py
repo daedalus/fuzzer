@@ -211,3 +211,43 @@ def _fit_j(seeds, jaccard) -> EdgeClusters:
     c = EdgeClusters(jaccard=jaccard)
     c.refit(seeds)
     return c
+
+
+def _random_seeds(rng: np.random.Generator) -> dict[str, set[int]]:
+    """Seeds sharing edges from a small pool: multi-edge classes and clusters."""
+    pool = rng.integers(1, 1 << 32, 300)
+    return {f"s{i}": {int(e) for e in rng.choice(pool, rng.integers(5, 40))} for i in range(30)}
+
+
+def _leader_oracle(c: EdgeClusters, edge: int, table: np.ndarray) -> int:
+    """Batch path, independent of the scalar one: class_index, then the table."""
+    idx = c.class_index(np.array([edge], dtype=np.int64))[0]
+    return int(c._heads[table[idx]]) if idx >= 0 else -1
+
+
+def test_single_edge_lookups_match_batch_path():
+    rng = np.random.default_rng(11)
+    c = _fit(_random_seeds(rng))
+    seen = sorted({e for s in _random_seeds(np.random.default_rng(11)).values() for e in s})
+    unseen = [0, 7, 1 << 40, -3, int(c._heads.max()) + 1]  # adversarial: absent, past max
+    for e in seen + unseen:
+        assert c.cluster_of(e) == _leader_oracle(c, e, c._leader)
+        assert c.medoid_of(e) == _leader_oracle(c, e, c._medoid)
+
+
+def test_single_edge_lookups_skip_batch_path(monkeypatch):
+    """One key must not pay the array round trip (two searchsorted, wrapping)."""
+    c = _fit()
+
+    def boom(*_args):
+        raise AssertionError("batch path used for one edge")
+
+    monkeypatch.setattr(c, "class_index", boom)
+    assert c.cluster_of(5) == c.cluster_of(1) and c.cluster_of(9) != c.cluster_of(1)
+    assert c.medoid_of(10) == c.medoid_of(9)
+    assert c.cluster_of(4) == -1 and c.medoid_of(4) == -1
+
+
+def test_single_edge_lookups_before_refit():
+    c = EdgeClusters()
+    assert c.cluster_of(1) == -1 and c.medoid_of(1) == -1

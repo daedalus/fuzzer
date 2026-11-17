@@ -156,8 +156,8 @@ class OnlineGarch11:
 
         self._buf: collections.deque[float] = collections.deque(maxlen=self._buffer_size)
         self._count = 0
-        self._sum = 0.0
-        self._sum_sq = 0.0
+        self._mean = 0.0
+        self._m2 = 0.0
         self._sigma2 = 0.0
         self._eps = 0.0
         self._last_fit_at = (
@@ -169,9 +169,12 @@ class OnlineGarch11:
     def update(self, value: float) -> None:
         """Record one observation and advance the variance recursion."""
         v = float(value)
+
+        # Welford: M2 += (v - old_mean)(v - new_mean); no E[x^2]-E[x]^2 cancellation.
+        delta = v - self._mean
         self._count += 1
-        self._sum += v
-        self._sum_sq += v * v
+        self._mean += delta / self._count
+        self._m2 += delta * (v - self._mean)
         self._buf.append(v)
 
         # Advance sigma2 with the PREVIOUS residual before computing the
@@ -186,8 +189,8 @@ class OnlineGarch11:
         """Clear all state, keeping the configured parameters."""
         self._buf.clear()
         self._count = 0
-        self._sum = 0.0
-        self._sum_sq = 0.0
+        self._mean = 0.0
+        self._m2 = 0.0
         self._sigma2 = 0.0
         self._eps = 0.0
         self._last_fit_at = (
@@ -202,7 +205,7 @@ class OnlineGarch11:
 
     @property
     def mean(self) -> float:
-        return self._sum / self._count if self._count else 0.0
+        return self._mean
 
     @property
     def residual(self) -> float:
@@ -304,9 +307,7 @@ class OnlineGarch11:
     def _sample_variance(self) -> float:
         if self._count < 2:
             return 1.0
-        mean = self.mean
-        var = self._sum_sq / self._count - mean * mean
-        return max(var, _VARIANCE_FLOOR)
+        return max(self._m2 / self._count, _VARIANCE_FLOOR)
 
     def _maybe_refit(self) -> None:
         if not self._refit_interval or self._count < self._min_obs:
@@ -358,12 +359,31 @@ class OnlineGarch11:
             "buffer_size": self._buffer_size,
             "buf": list(self._buf),
             "count": self._count,
-            "sum": self._sum,
-            "sum_sq": self._sum_sq,
+            "mean": self._mean,
+            "m2": self._m2,
+            # Derived legacy keys: older loaders read sum/sum_sq.
+            "sum": self._mean * self._count,
+            "sum_sq": self._m2 + self._count * self._mean * self._mean,
             "sigma2": self._sigma2,
             "eps": self._eps,
             "last_fit_at": self._last_fit_at,
         }
+
+    @staticmethod
+    def _legacy_m2(data: dict) -> float:
+        """Rebuild M2 from pre-Welford ``sum``/``sum_sq`` state."""
+        count = data.get("count", 0)
+        if not count:
+            return 0.0
+
+        # buf holds every observation: exact two-pass, no cancellation.
+        buf = data.get("buf", [])
+        if len(buf) == count:
+            mean = math.fsum(buf) / count
+            return math.fsum((v - mean) ** 2 for v in buf)
+
+        total = data.get("sum", 0.0)
+        return max(data.get("sum_sq", 0.0) - total * total / count, 0.0)
 
     def load(self, data: dict) -> None:
         if not data:
@@ -377,8 +397,8 @@ class OnlineGarch11:
         self._buffer_size = data.get("buffer_size", self._buffer_size)
         self._buf = collections.deque(data.get("buf", []), maxlen=self._buffer_size)
         self._count = data.get("count", 0)
-        self._sum = data.get("sum", 0.0)
-        self._sum_sq = data.get("sum_sq", 0.0)
+        self._mean = data.get("mean", data.get("sum", 0.0) / max(self._count, 1))
+        self._m2 = data.get("m2", self._legacy_m2(data))
         self._sigma2 = data.get("sigma2", 0.0)
         self._eps = data.get("eps", 0.0)
         self._last_fit_at = data.get("last_fit_at", 0)

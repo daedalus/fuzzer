@@ -7,7 +7,6 @@ from fuzzer_tool.adapters.filesystem import (
     save_crash,
     save_to_corpus,
 )
-from fuzzer_tool.core.bloom import BloomFilter
 
 
 def _h(data: bytes) -> str:
@@ -54,14 +53,6 @@ class TestLoadCorpus:
         assert len(corpus) == 1
         assert len(seen) == 1
 
-    def test_populates_bloom(self, tmp_path):
-        seeds = tmp_path / "seeds"
-        seeds.mkdir()
-        (seeds / "f1").write_bytes(b"data")
-        bloom = BloomFilter(capacity=100)
-        load_corpus(tmp_path, bloom=bloom)
-        assert bloom.query(_h(b"data"))
-
     def test_nonexistent_dir(self, tmp_path):
         corpus, seen, _ = load_corpus(tmp_path / "nope")
         assert corpus == [b"AAAAAAAA"]
@@ -98,32 +89,6 @@ class TestSaveToCorpus:
         save_to_corpus(b"aaa", tmp_path, seen)
         save_to_corpus(b"bbb", tmp_path, seen)
         assert len(list((tmp_path / "seeds").iterdir())) == 2
-
-    def test_with_bloom_new(self, tmp_path):
-        seen = set()
-        bloom = BloomFilter(capacity=100)
-        result = save_to_corpus(b"fresh", tmp_path, seen, bloom=bloom)
-        assert result is True
-        assert _h(b"fresh") in seen
-        assert bloom.query(_h(b"fresh"))
-
-    def test_with_bloom_duplicate(self, tmp_path):
-        seen = set()
-        bloom = BloomFilter(capacity=100)
-        save_to_corpus(b"dup", tmp_path, seen, bloom=bloom)
-        result = save_to_corpus(b"dup", tmp_path, seen, bloom=bloom)
-        assert result is False
-
-    def test_with_bloom_false_positive_path(self, tmp_path):
-        seen = set()
-        bloom = BloomFilter(capacity=10)
-        for i in range(200):
-            bloom.add(f"filler_{i}")
-        h = _h(b"new_input")
-        if bloom.query(h):
-            result = save_to_corpus(b"new_input", tmp_path, seen, bloom=bloom)
-            assert result is True
-            assert h in seen
 
     def test_file_written_to_disk(self, tmp_path):
         seen = set()

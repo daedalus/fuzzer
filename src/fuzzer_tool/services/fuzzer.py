@@ -37,11 +37,13 @@ except ImportError:
 
 from fuzzer_tool.adapters import process, seed_zip
 from fuzzer_tool.adapters.filesystem import DeltaStore, without_timeout_seeds
+from fuzzer_tool.adapters.memfd_input import ALIAS_ENV, INPUT_PATH_ENV, MemfdInput
 from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
     reset_env_cache,
 )
+from fuzzer_tool.adapters.respawn_backoff import RespawnBackoff
 from fuzzer_tool.adapters.sancov_tables import SANCOV_ENV, SancovTables
 from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import (
@@ -62,7 +64,7 @@ from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due, phase_of
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
-from fuzzer_tool.core.cmplog import CmplogRecords
+from fuzzer_tool.core.cmplog import CmplogRecords, DedupScope, RecordChannel
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.coverage_noise import (
     NOISE_PROBE_VARIANTS,
@@ -71,6 +73,7 @@ from fuzzer_tool.core.coverage_noise import (
     classify_noise,
     tail_variants,
 )
+from fuzzer_tool.core.crash_cov import CrashCoverage
 from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK, EdgeStore, EvictTie
@@ -81,23 +84,28 @@ from fuzzer_tool.core.elf import (
     is_elf_executable,
     parse_sancov_guard_count,
 )
+from fuzzer_tool.core.elo_stale_bench import StaleBench
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
+from fuzzer_tool.core.fox_newton import SecantLog
 from fuzzer_tool.core.gravity import GravityModel, SpliceDonor
+from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.metropolis import accept_prob, path_energy
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
 from fuzzer_tool.core.novelty_confirm import confirm
+from fuzzer_tool.core.novelty_hist import NoveltyHist
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD, OrbitProbe, canonical
 from fuzzer_tool.core.percolation import CoverageRegime
+from fuzzer_tool.core.plateau import PlateauGroups
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check, structure_check
-from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, Switch
+from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, StateRestore, Switch
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
@@ -154,10 +162,12 @@ from fuzzer_tool.core.schedulers.op_swucb import SWUCB_PER_ARM
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
 from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
+from fuzzer_tool.core.schedulers.seed_branch import FrontierRank
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
+from fuzzer_tool.core.schedulers.seed_fess import FessMode, SeedFessScheduler
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
@@ -192,16 +202,20 @@ from fuzzer_tool.core.shim_health import (
 )
 from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
+from fuzzer_tool.core.stack_depth import StackMax
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
+from fuzzer_tool.services.advisors import AdvisorCtx, AdvisorStage, default_advisors
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
+from fuzzer_tool.services.c11_channel import C11Channel
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.crash_gdb import CrashGdbQueue
 from fuzzer_tool.services.crash_shrink import CrashShrinker
 from fuzzer_tool.services.favored_cover import favored_cover
 from fuzzer_tool.services.fuzz_round import FuzzRound
 from fuzzer_tool.services.i2s_fixpoint import I2SFixpoint
+from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP, IjonChannel
 from fuzzer_tool.services.maintenance import MaintenanceJob, MaintenanceQueue
 from fuzzer_tool.services.operators import _DELOCALISED_OPS, OperatorEngine, operator_strategy_pool
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
@@ -214,6 +228,7 @@ from fuzzer_tool.services.seed_stage import SeedStage
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.target_arena import TargetArena
 from fuzzer_tool.services.uninit_probe import UninitProbe
+from fuzzer_tool.services.value_profile import ValueProfile, ValueProfileChannel
 
 log = logging.getLogger(__name__)
 
@@ -309,6 +324,7 @@ _SEED_STRATEGY_NAMES = (
     "dpp",
     "gram",
     "lottery",
+    "fess",
 )
 
 
@@ -584,6 +600,9 @@ def _current_rss_kb() -> int | None:
 
 # Symbols that mean the target can populate an edge bitmap: the shim's own
 # (linked or preloaded) and clang's sancov callbacks.
+# afl_custom_queue_get refusals in a row before a seed is fuzzed regardless.
+_QUEUE_GET_MAX_SKIPS = 64
+
 _AFL_SYMS = ("__afl_area", "__afl_map_shm", "__sanitizer_cov")
 
 
@@ -963,6 +982,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
+    if getattr(f, "_pos_hotspot", None) is not None and getattr(f, "_cmplog", None) is not None:
+        names.append("hotspot")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
         names.append("lineage")
     if _pos_canary_live(f):
@@ -1060,6 +1081,7 @@ class Fuzzer:
     _run_mode = RunMode.FULL
     _markov_switch = Switch.ON
     _auto_minimize = Switch.ON
+    _trim_new_coverage_on = Switch.OFF
     # Multi-target .so: target -> its in-process runner; __init__ fills it.
     _target_runners: MappingProxyType = MappingProxyType({})
 
@@ -1489,6 +1511,7 @@ class Fuzzer:
         dictionary=None,
         file_mode=False,
         target_args=None,
+        input_alias=None,
         markov_order=1,
         markov_generate=False,
         markov_blend=False,
@@ -1523,6 +1546,7 @@ class Fuzzer:
         affine_mod=False,
         affine_mod_execs=AFFINE_MOD_EXECS,
         derived_cmp=False,
+        fox_newton=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
@@ -1564,6 +1588,11 @@ class Fuzzer:
         # WingFuzz: drop cmplog records of compares against constants with
         # < 2 bits set or clear. Record filter only; needs cmplog.
         cmp_prune_const=False,
+        # Shim record knobs (afl_shim.c): per-site cap per drain, dedup lifetime.
+        cmplog_site_cap=0,
+        cmplog_dedup_scope=DedupScope.DRAIN,
+        # CMP records as text lines or in a shared binary table.
+        cmplog_records=RecordChannel.TEXT,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -1591,6 +1620,7 @@ class Fuzzer:
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
+        repro_gate=0,
         crash_tmin_execs=0,
         crash_blocklist=None,
         crash_allowlist=None,
@@ -1880,6 +1910,7 @@ class Fuzzer:
         custom_mutator=None,
         custom_mutator_isolation="guard",
         custom_mutator_timeout_ms=1000,
+        afl_custom_mutator=None,
         # Successive-elimination / racing bandit for operator scheduling.
         successive_elim=False,
         successive_elim_delta=0.1,
@@ -2106,6 +2137,7 @@ class Fuzzer:
         push_on_crash=None,
         # Direct in-process input placement (--input-placement). Appended.
         input_placement=InputPlacement.EXACT,
+        state_restore=StateRestore.GLOBALS,
         # 'branch' seed arm over the Katz channel's ICFG (--seed-branch-scheduler). Appended.
         seed_branch_scheduler=False,
         # Viterbi field segmentation (core/field_hmm.py, --field-hmm). Appended.
@@ -2131,6 +2163,52 @@ class Fuzzer:
         # Window influence tracker (core/analyzers/analyzer_influence.py):
         # replaces the per-byte tracker; implies sensitivity. Appended.
         influence=False,
+        # --ijon: IJON max-map channel (services/ijon_channel.py). Appended.
+        ijon=False,
+        # --ijon-schedule-maxmap: percent of picks left to the normal queue.
+        ijon_schedule_maxmap=DEFAULT_SCHEDULE_MAXMAP,
+        # --c11: local-variable seed weight (services/c11_channel.py). Appended.
+        c11=False,
+        # --value-profile: comparison distance ids (services/value_profile.py). Appended.
+        value_profile=ValueProfile.OFF,
+        # --rq-add-key: redqueen through an additive key (core/rq_encodings.py). Appended.
+        rq_add_key=False,
+        # --stall-mode: op choice during stall recovery (services/operators.py). Appended.
+        stall_mode=None,
+        # --stack-depth-max: admit deeper recursion (core/stack_depth.py). Appended.
+        stack_depth_max=False,
+        # --trim-new-coverage: trim each new-coverage seed on admission. Appended.
+        trim_new_coverage=Switch.OFF,
+        # --seed-fess-scheduler: FESS feature-grid seed arm
+        # (core/schedulers/seed_fess.py). Off, out of --hail-mary. Appended.
+        seed_fess_scheduler=False,
+        # --fess-inherit: FESS parent-cell inheritance + new-cell jump. Needs
+        # the FESS arm. Off, out of --hail-mary. Appended.
+        fess_inherit=Switch.OFF,
+        # --seed-fess-mode: FESS cell schedule (least-effort / triple). Appended.
+        seed_fess_mode=FessMode.LEAST_EFFORT,
+        # --fess-cell-novelty: FESS per-cell scoped novelty. Needs the FESS
+        # arm. Off, out of --hail-mary. Appended.
+        fess_cell_novelty=Switch.OFF,
+        # --respawn-backoff: pace restarts of a target that dies at once
+        # (adapters/respawn_backoff.py). Off, out of --hail-mary. Appended.
+        respawn_backoff=Switch.OFF,
+        # Position-arena hotspot arm (core/schedulers/pos_hotspot.py): offsets
+        # by unsolved-CondStmt count. Opt-in, not implied by position_arena or
+        # --hail-mary. Appended.
+        pos_hotspot=False,
+        # 'branch' arm ranks frontier branches by cut damage (core/articulation.py,
+        # --cut-damage); needs seed_branch_scheduler. Appended.
+        cut_damage=False,
+        # --advisors: one free advised move per advisor per seed stage
+        # (services/advisors.py). Off, out of --hail-mary. Appended.
+        advisors=False,
+        # --plateau-groups: union seeds whose boring mutants take each other's
+        # path (core/plateau.py); lottery "group" signal. Off. Appended.
+        plateau_groups=False,
+        # --elo-stale-bench: bench stalest Elo strategies, revive fresh
+        # (core/elo_stale_bench.py). Off, out of --hail-mary. Appended.
+        elo_stale_bench=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2148,8 +2226,8 @@ class Fuzzer:
         # Context term on/off (--ctx-sensitive); the shim reads it at attach and
         # the sizing / ASLR / contract code below reads it via effective_ctx_bits.
         export_ctx_sensitive(ctx_sensitive)
-        # Stack-depth sampling: --honggfuzz is its only reader; read at attach.
-        export_stack_depth(honggfuzz)
+        # Stack-depth sampling: --honggfuzz and --stack-depth-max read it; read at attach.
+        export_stack_depth(honggfuzz or stack_depth_max)
         # Allocation-size edges (--alloc-sizes); read at attach.
         export_alloc_sizes(alloc_sizes)
         # In-process modes dlopen the target; an executable cannot be.
@@ -2177,6 +2255,7 @@ class Fuzzer:
         # always-on per-iteration trace in the persistent loader.
         self.use_ptrace = use_ptrace
         self.input_placement = input_placement
+        self.state_restore = state_restore
         # Weight havoc's 11 inline sub-mutations by their measured hit rate
         # instead of drawing them uniformly. On by default: the priors start
         # uniform, the per-draw cost is a bisect over 11 floats, and the
@@ -2291,6 +2370,8 @@ class Fuzzer:
         self.use_coverage = use_coverage
         self.dictionary = dictionary or []
         self.file_mode = file_mode
+        # --input-alias: hardcoded path the shim swaps for the memfd input.
+        self.input_alias = input_alias
         self.isolate_crash_fields = isolate_crash_fields
         # --rop-gadgets: on each novel crash, statically scan the target's
         # .text for ROP gadgets and record the inventory + syscall-chain
@@ -2321,6 +2402,7 @@ class Fuzzer:
         # --no-auto-minimize: no trim on admission, no corpus-size prune.
         # The memory-pressure prune stays (bounded memory).
         self._auto_minimize = auto_minimize
+        self._trim_new_coverage_on = trim_new_coverage
         # --lightweight: FuzzRound.run picks the lean pipeline.
         self._run_mode = run_mode
         self.prune_corpus_max_memory = prune_corpus_max_memory
@@ -2441,6 +2523,19 @@ class Fuzzer:
                 isolate=custom_mutator_isolation != "none",
                 timeout_ms=custom_mutator_timeout_ms,
             )
+        # --afl-custom-mutator: operators register here, before the engine is
+        # built; post_process / queue_get bind after the runner (_bind_afl_hooks).
+        self._afl_custom = None
+        self._queue_skips = 0
+        if afl_custom_mutator:
+            from fuzzer_tool.core.mutations.custom_mutator import register_afl_custom_mutator
+
+            self._afl_custom, _ = register_afl_custom_mutator(
+                afl_custom_mutator,
+                seed=seed,
+                isolate=custom_mutator_isolation != "none",
+                timeout_ms=custom_mutator_timeout_ms,
+            )
         # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
@@ -2461,6 +2556,9 @@ class Fuzzer:
         from fuzzer_tool.core.rq_encodings import XorKeyStage, set_xor_key_stage  # noqa: PLC0415
 
         set_xor_key_stage(XorKeyStage.ON if rq_xor_key else XorKeyStage.OFF)
+        from fuzzer_tool.core.rq_encodings import AddKeyStage, set_add_key_stage  # noqa: PLC0415
+
+        set_add_key_stage(AddKeyStage.ON if rq_add_key else AddKeyStage.OFF)
         self.checksum_sites = checksum_sites
         self.merkle_sites = merkle_sites
         self.grimoire = grimoire
@@ -2536,6 +2634,14 @@ class Fuzzer:
         # Gravity-model splice donor (core/gravity.py): staged in
         # OperatorEngine._donor, credited in fuzz_one with the round's yield
         self._gravity = GravityModel() if splice_donor is SpliceDonor.GRAVITY else None
+
+        # New edges per admitted seed (core/novelty_hist.py): fed in
+        # CorpusManager._after_admit, printed in the run summary
+        self._novelty_hist = NoveltyHist()
+
+        # Crash-only virgin map (core/crash_cov.py): fed in FuzzRound's
+        # crash exits, printed in the run summary
+        self._crash_cov = CrashCoverage()
 
         # Corpus size boost: normal-distribution seed resizing
         self._corpus_boost = corpus_boost
@@ -2627,6 +2733,7 @@ class Fuzzer:
                     "shim compilation will be attempted"
                 )
             from fuzzer_tool.core.cmplog import CmplogCollector, Preload
+            from fuzzer_tool.core.elf import trace_cmp_call_sites
 
             self._cmplog = CmplogCollector(
                 max_tokens=cmplog_max_tokens,
@@ -2641,6 +2748,15 @@ class Fuzzer:
                 site_counts=True,
                 compcov_level=self._compcov_level,
                 prune_const=cmp_prune_const,
+                site_cap=cmplog_site_cap,
+                dedup_scope=cmplog_dedup_scope,
+                record_channel=cmplog_records,
+                # Sizes the record table's site index; scanned only when used.
+                record_call_sites=(
+                    trace_cmp_call_sites(self.target)
+                    if cmplog_records is RecordChannel.SHM
+                    else None
+                ),
                 # A target with the shim compiled in already intercepts
                 # libc; a preloaded copy would count every call twice.
                 preload=Preload.NONE if has_cmplog else Preload.SHIM,
@@ -2746,6 +2862,8 @@ class Fuzzer:
             atexit.register(_cleanup_tmp_dir, self._tmp_dir)
         else:
             self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
+        self._input_file = None
+        self._export_input_env()
 
         self.ptrace_cov: PtraceCoverage | None = None
         self.shm_cov: ShmCoverage | None = None
@@ -2785,6 +2903,25 @@ class Fuzzer:
         if self.shm_cov and not self.multi_targets:
             self._block_bitmap = self._open_block_bitmap(target)
             self._sancov_tables = self._open_sancov_tables()
+
+        # --c11: rides the block bitmap's guard marks and the pc-table dump.
+        self._c11: C11Channel | None = self._open_c11(target) if c11 else None
+
+        # --value-profile: exported before any target spawns.
+        self._vp: ValueProfileChannel | None = self._open_vp(target, value_profile)
+
+        # --ijon: max-map segment for IJON_MAX/MIN. Single target only, like
+        # the block bitmap: targets sharing os.environ share one segment.
+        self._ijon: IjonChannel | None = None
+        if ijon and self.shm_cov and not self.multi_targets:
+            self._ijon = self._open_ijon(target, ijon_schedule_maxmap)
+
+        # --stack-depth-max: the depth comes from the SHM header; no SHM, no signal.
+        self._stack_max: StackMax | None = None
+        if stack_depth_max and self.shm_cov:
+            self._stack_max = StackMax()
+        elif stack_depth_max:
+            print("[!] --stack-depth-max: needs AFL SHM coverage; disabled")
 
         # --shared-virgin: one novelty store across the per-target tables.
         self._shared_virgin: SharedVirgin | None = None
@@ -2830,8 +2967,6 @@ class Fuzzer:
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = BloomFilter(capacity=100_000)
-        self.bloom.init_fuzzy(max_recent=200)
         # Executed-input filter.  The mutation space is not uniform: stall
         # recovery, dictionary ops and the deterministic stages collapse onto
         # very short buffers, so the same mutant is handed to the target
@@ -2919,6 +3054,8 @@ class Fuzzer:
         self.crash_count = 0
         self.timeout_count = 0
         self.start_time = self._clock.time()
+        # Host-clock start for the status line; start_time may be virtual.
+        self._wall_start = time.time()
         self.last_report: SanitizerReport | None = None
         self.op_counts: dict[str, int] = {}
         self.op_success: dict[str, int] = {}
@@ -2961,6 +3098,11 @@ class Fuzzer:
         # None when that crash was not written. Set by CorpusManager.save_crash.
         self._last_crash_signature: str | None = None
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
+        # --repro-gate N: novel crashes replayed <= N times before saving;
+        # failures land in crashes/no_repro/ under their own dedup maps.
+        self.repro_gate: int = repro_gate
+        self.no_repro_hashes: set[str] = set()
+        self.no_repro_sigs: dict[str, int] = {}
         # --crash-tmin-execs: shrink novel crashes at maintenance ticks (None = off).
         # Lambdas: the runner and corpus manager are built later in __init__.
         self._crash_shrinker: CrashShrinker | None = None
@@ -3073,10 +3215,14 @@ class Fuzzer:
 
         # ── Extracted modules ──────────────────────────────────────────
         self._operators = OperatorEngine(self)
+        if stall_mode is not None:
+            self._operators.bind_stall_mode(stall_mode)
         self._seed_picker = SeedPicker(self)
         self._runner = TargetRunner(self)
         self._stats = StatsReporter(self, rng=self._rng)
         self._corpus_manager = CorpusManager(self)
+        if self._afl_custom is not None:
+            self._bind_afl_hooks()
         self._poisson_admission = None  # lazy-init; created on first save_to_corpus()
         # PoissonDiskAdmission holds a reference to _edge_tracker._minhash,
         # which is only fully initialized after corpus init; lazily create it
@@ -3277,11 +3423,15 @@ class Fuzzer:
 
         # The branch arm reads the Katz channel's ICFG and node masks.
         if seed_branch_scheduler and self._katz_channel is not None:
-            self._katz_channel.enable_branch()
+            self._katz_channel.enable_branch(
+                FrontierRank.CUT_DAMAGE if cut_damage else FrontierRank.HITS
+            )
         elif seed_branch_scheduler:
             log.warning(
                 "--seed-branch-scheduler needs the Katz node channel (trace-pc, undirected)"
             )
+        if cut_damage and not seed_branch_scheduler:
+            log.warning("--cut-damage needs --seed-branch-scheduler; ignored")
         self._bind_katz(schedule or "base", elo, seed_branch_scheduler)
 
         self._load_corpus()
@@ -3623,6 +3773,28 @@ class Fuzzer:
             if seed_lottery_scheduler
             else None
         )
+        if fess_inherit is Switch.ON and not seed_fess_scheduler:
+            log.warning("--fess-inherit has no effect without --seed-fess-scheduler")
+            fess_inherit = Switch.OFF
+        # Read by SeedPicker._fess_cells (parent-cell projection).
+        self._fess_inherit = fess_inherit
+        if fess_cell_novelty is Switch.ON and not seed_fess_scheduler:
+            log.warning("--fess-cell-novelty has no effect without --seed-fess-scheduler")
+            fess_cell_novelty = Switch.OFF
+        self._seed_fess = (
+            SeedFessScheduler(
+                rng=self._rng,
+                jump=fess_inherit,
+                mode=seed_fess_mode,
+                novelty=fess_cell_novelty,
+                seed_edges=self._fess_seed_edges,
+            )
+            if seed_fess_scheduler
+            else None
+        )
+        # Bound once (ifs up): FuzzRound._credit_seed feeds exec edges here.
+        self._fess_observe = self._fess_note_edges if fess_cell_novelty is Switch.ON else None
+        self._plateau = PlateauGroups() if plateau_groups else None
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:
@@ -3644,6 +3816,7 @@ class Fuzzer:
                 self._seed_dpp,
                 self._seed_gram,
                 self._seed_lottery,
+                self._seed_fess,
             )
             if arm is not None
         )
@@ -3738,6 +3911,17 @@ class Fuzzer:
                 log.warning(
                     "--pos-cmplog needs cmplog, which is off: the arm stays out of the pool"
                 )
+        # Position-arena hotspot: offsets ranked by how many unsolved CondStmts
+        # they block (soksolv hotspot table). Opt-in only (unmeasured); gated
+        # on cmplog like the cmplog arm, reads condstmt_solve's CondStmt cache.
+        self._pos_hotspot = None
+        if pos_hotspot:
+            from fuzzer_tool.core.schedulers.pos_hotspot import PositionHotspotScheduler
+
+            self._pos_hotspot = PositionHotspotScheduler(
+                self._rng, conds_of=self._operators._get_cond_stmts
+            )
+            log.info("Position hotspot scheduling enabled")
         # Position-arena lineage: the mutation sites that produced a seed, as
         # its own landing prior (see core/schedulers/pos_lineage.py).
         # Tracker-style: the arena gates it on --lineage, the only mode that
@@ -3933,6 +4117,7 @@ class Fuzzer:
                 finch=self._pos_finch,
                 pca=self._pos_pca,
                 cmplog=self._pos_cmplog,
+                hotspot=self._pos_hotspot,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,
             )
@@ -3963,6 +4148,8 @@ class Fuzzer:
         self._i2s_fixpoint = (
             I2SFixpoint(self._i2s_probe, i2s_fixpoint_iters) if i2s_fixpoint else None
         )
+        # --advisors: zero-cost proposals per stage, drained by mutate().
+        self._advisors = AdvisorStage(default_advisors()) if advisors else None
         # --affine-mod: solve (a*x + b) % m == t compares on admitted inputs;
         # --derived-cmp adds GF(2), additive and byte-map operand maps.
         families = Families.DERIVED if derived_cmp else Families.MODULAR
@@ -3971,6 +4158,8 @@ class Fuzzer:
             if affine_mod or derived_cmp
             else None
         )
+        # --fox-newton: per-site operand records for the zero-exec secant op.
+        self._secant_log = SecantLog() if fox_newton else None
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
@@ -4694,6 +4883,8 @@ class Fuzzer:
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
         _ANALYZER_REGISTRY.wire_all(self)
+        if elo_stale_bench is Switch.ON and self._elo:
+            self._elo.enable_stale_bench(StaleBench())
 
         # self._frameshift: constructed by analyzer_registry.wire_all() above.
         self._last_ops_used: list[str] = []
@@ -5297,6 +5488,8 @@ class Fuzzer:
                 use_ptrace=self.use_ptrace,
                 placement=self.input_placement,
                 perf_counters=self._perf_counters,
+                restore=self.state_restore,
+                input_file=self._input_file,
             )
             if use_direct_lite and self._rss_limit_mb > 0:
                 # The target shares this process: no per-target cap exists.
@@ -5395,6 +5588,8 @@ class Fuzzer:
                 use_ptrace=self.use_ptrace,
                 placement=self.input_placement,
                 perf_counters=self._perf_counters,
+                restore=self.state_restore,
+                input_file=self._input_file,
             )
             mode = "direct ctypes" if direct_ok else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
@@ -5410,6 +5605,9 @@ class Fuzzer:
         if forkserver:
             self._setup_forkserver()
 
+        self._respawn_backoff_on = respawn_backoff
+        self._attach_backoff()
+
     def _cov_env_id(self) -> str | None:
         """SHM id the in-process runner of ``self.target`` attaches to.
 
@@ -5419,6 +5617,16 @@ class Fuzzer:
         if self.multi_targets:
             shm = self._target_shm_covs.get(self.target, shm)
         return shm.env_id if shm else None
+
+    def _attach_backoff(self) -> None:
+        """--respawn-backoff: one pacer per respawning runner, decided once."""
+        if self._respawn_backoff_on is not Switch.ON:
+            return
+
+        inproc = tuple(self._target_runners.values()) or (self._inprocess_runner,)
+        for runner in (self._persistent_runner, self._forkserver, *inproc):
+            if runner is not None:
+                runner.attach_backoff(RespawnBackoff())
 
     def _init_target_runners(self) -> None:
         """Multi-target .so: one in-process runner per target.
@@ -5481,6 +5689,19 @@ class Fuzzer:
         reset_env_cache()
         print("[*] AntiFuzz evasion: self-ptrace faked, input delays dropped (LD_PRELOAD)")
 
+    def _export_input_env(self) -> None:
+        """-F input in memory (wtf fshooks port); publish its path and alias.
+
+        Every backend inherits os.environ: spawn copies it, the loader and
+        in-process loads read it. Rolled back by ``_restore_environ()``.
+        """
+        if not self.file_mode:
+            return
+        self._input_file = MemfdInput()
+        os.environ[INPUT_PATH_ENV] = self._input_file.path
+        if self.input_alias:
+            os.environ[ALIAS_ENV] = self.input_alias
+
     def _setup_forkserver(self) -> None:
         """Start the C fuzz_loader for the default (spawn-per-exec) path.
 
@@ -5495,23 +5716,24 @@ class Fuzzer:
         persistent, ptrace) or needs per-execution setup the
         loader's environment is fixed against (cmplog's file sink truncates
         its log per run; the FIFO sink is run-invariant, and the shim zeroes
-        its counters before forking; file_mode/target_args build their own argv; multi-target needs more
-        than one binary).
+        its counters before forking; target_args without -F are ignored by
+        the spawn path too; multi-target needs more than one binary).
+        -F runs here too: the input is a memfd with one path for every exec,
+        so the argv template (``{file}``) is fixed at exec.
         """
         if (
             self._inprocess_runner
             or self._persistent_runner
             or self.ptrace_cov
             or self.multi_targets
-            or self.file_mode
-            or self.target_args
+            or (self.target_args and not self.file_mode)
             or (self._cmplog and not self._cmplog.fifo_sink)
             or self._pt_session
             or self._lbr_session
         ):
             return
 
-        from fuzzer_tool.adapters.forkserver import ForkserverRunner, mode_env
+        from fuzzer_tool.adapters.forkserver import FILE_PLACEHOLDER, ForkserverRunner, mode_env
 
         # Persistent loop / deferred init, when the harness has the macros.
         env: dict[str, str] = mode_env(self.target)
@@ -5526,8 +5748,15 @@ class Fuzzer:
         if self._cmplog:
             env = self._cmplog.setup_env({**os.environ, **env})
 
+        # -F: argv template, {file} -> the loader's memfd input path.
+        argv = (self.target_args or [FILE_PLACEHOLDER]) if self.file_mode else None
         runner = ForkserverRunner(
-            self.target, timeout=self.timeout, env=env, perf_counters=self._perf_counters
+            self.target,
+            timeout=self.timeout,
+            env=env,
+            perf_counters=self._perf_counters,
+            argv=argv,
+            input_file=self._input_file,
         )
         if runner.start():
             self._forkserver = runner
@@ -5605,6 +5834,45 @@ class Fuzzer:
 
         os.environ["__AFL_BLOCK_BITMAP_ID"] = bb.env_id
         return bb
+
+    def _open_ijon(self, target: str, schedule_maxmap: int) -> IjonChannel | None:
+        """Open the IJON channel; warn when the target's shim predates it."""
+        from fuzzer_tool.core.elf import detect_ijon_capable
+
+        if detect_ijon_capable(target) is False:
+            print("[!] --ijon: target shim has no IJON runtime (ijon_max); rebuild it")
+        return IjonChannel.open(schedule_maxmap)
+
+    def _open_c11(self, target: str) -> C11Channel | None:
+        """Open the C11 channel; it needs the single-target block bitmap."""
+        if self._block_bitmap is None or self._sancov_tables is None:
+            print("[!] --c11: needs SHM coverage on a single target; disabled")
+            return None
+        return C11Channel.open(target, self._sancov_tables, self._block_bitmap.size_bytes * 8)
+
+    def _open_vp(self, target: str, mode: ValueProfile) -> ValueProfileChannel | None:
+        """Open the value-profile switch; warn when the shim cannot mark."""
+        if mode is ValueProfile.OFF:
+            return None
+        from fuzzer_tool.core.elf import detect_vp_capable
+
+        if detect_vp_capable(target) is False:
+            print("[!] --value-profile: target shim has no value profile; rebuild with --cmplog")
+        return ValueProfileChannel.open(mode)
+
+    def _vp_on_stall(self) -> None:
+        """Stall engaged: --value-profile stall switches distance ids on."""
+        if self._vp is not None:
+            self._vp.on_stall()
+
+    def _note_c11(self, seed: bytes) -> None:
+        """Record the last exec's max locals on *seed* (--c11; 0 = unmeasured)."""
+        c11 = getattr(self, "_c11", None)  # partial Fuzzers (tests) skip __init__
+        if c11 is None:
+            return
+        meta = self.seed_meta.get(seed)
+        if meta is not None:
+            meta["c11"] = c11.measure(self.shm_cov.read_generation())
 
     def _open_sancov_tables(self) -> SancovTables:
         """Reserve the pc-table / control-flow dump path; the shim writes it."""
@@ -5747,7 +6015,7 @@ class Fuzzer:
         self._state_store.set("strata", state)
 
     def _save_learned(self) -> None:
-        """Persist op_credit, burn-front, PLL, WFC, dict-thompson and gravity for ``--resume``."""
+        """Persist op_credit, burn-front, PLL, WFC, dict-thompson, gravity, novelty and crash coverage for ``--resume``."""
         from fuzzer_tool.core.wfc_chunks import WFC_MUTATOR
 
         if self._op_credit is not None:
@@ -5773,6 +6041,14 @@ class Fuzzer:
             self._state_store.set("dict_picker", self._dict_picker.to_dict())
         if self._gravity is not None:
             self._state_store.set("gravity", self._gravity.state_dict())
+        self._state_store.set("novelty_hist", self._novelty_hist.to_dict())
+        self._state_store.set("crash_cov", self._crash_cov.to_dict())
+        if self._ijon is not None:
+            self._state_store.set("ijon", self._ijon.tracker.to_dict())
+        if self._seed_fess is not None:
+            self._state_store.set("seed_fess", self._seed_fess.to_dict())
+        if self._plateau is not None:
+            self._state_store.set("plateau", self._plateau.to_dict())
         if self._lineage_exhaust:
             self._state_store.set("lineage_exhaust", self._lineage.exhaust_state())
 
@@ -5809,6 +6085,15 @@ class Fuzzer:
             self._dict_picker.from_dict(self._state_store.get("dict_picker", {}))
         if self._gravity is not None:
             self._gravity.load_state_dict(self._state_store.get("gravity", {}))
+        self._novelty_hist.from_dict(self._state_store.get("novelty_hist", {}))
+        self._crash_cov.from_dict(self._state_store.get("crash_cov", {}))
+        if self._ijon is not None:
+            by_key = {key16(s): s for s in self.corpus}
+            self._ijon.tracker.from_dict(self._state_store.get("ijon", {}), by_key.get)
+        if self._seed_fess is not None:
+            self._seed_fess.from_dict(self._state_store.get("seed_fess", {}))
+        if self._plateau is not None:
+            self._plateau = PlateauGroups.from_dict(self._state_store.get("plateau", {}))
         if self._lineage_exhaust:
             self._lineage.load_exhaust(
                 self._state_store.get("lineage_exhaust", {}), self._lineage_backtrack_min_fuzz
@@ -5881,6 +6166,17 @@ class Fuzzer:
         key = self._seed_key(parent)
         for arm in arms:
             arm.record(key, success=success, weight=weight)
+
+    def _fess_note_edges(self, parent: bytes, edges) -> None:
+        """--fess-cell-novelty: this exec's edges to the FESS arm, before its record()."""
+        if not self._in_corpus(parent):
+            return
+        self._seed_fess.observe_edges(self._seed_key(parent), edges)
+
+    def _fess_seed_edges(self, key: str):
+        """A seed's own edges (absorbed uncredited into its FESS cell)."""
+        tracker = getattr(self, "_edge_tracker", None)
+        return tracker.attributed_edges(key) if tracker is not None else ()
 
     def _in_corpus(self, parent: bytes) -> bool:
         """Live-corpus membership of *parent*, memoized across its executions.
@@ -6347,7 +6643,14 @@ class Fuzzer:
         is not a pruned seed any more) and so is every mutant the
         filter does not hold: there the give-up is just a wasted exec,
         which is the bound the re-roll budget documents.
+
+        A negative-bloom member is moved off the same way: the filter
+        is the user's list of inputs never to execute.
         """
+        neg_bloom = getattr(self, "_neg_bloom", None)
+        if neg_bloom is not None and neg_bloom.query_bytes(bytes(mutated)):
+            return self._operators.force_change(mutated, data)
+
         if self.cuckoo_seed_filter is None:
             return mutated
         h = self._seed_key(mutated)
@@ -6696,6 +6999,14 @@ class Fuzzer:
         """
         if len(self.crash_hashes) > MAX_CRASH_HASHES:
             self.crash_hashes.clear()
+
+        # --repro-gate maps: clearing only lets a flaky crash re-enter no_repro/.
+        # getattr: partial fuzzer stand-ins in tests predate these maps.
+        for nr, cap in (("no_repro_hashes", MAX_CRASH_HASHES), ("no_repro_sigs", MAX_CRASH_SIGS)):
+            m = getattr(self, nr, None)
+            if m is not None and len(m) > cap:
+                m.clear()
+
         if len(self.crash_sigs) <= MAX_CRASH_SIGS:
             return
         # Keep top 75%: count descending, then newest first; insertion order kept.
@@ -7588,6 +7899,48 @@ class Fuzzer:
             edge_ids = self.shm_cov.get_edge_arrays()[0]
         engine.note_deterministic_result(changed, current, magnitude, edge_ids)
 
+    def _bind_afl_hooks(self) -> None:
+        """Bind the plugin's per-exec hooks once (ifs up): no check per exec."""
+        from fuzzer_tool.core.mutations.custom_mutator import AflHook
+
+        plugin = self._afl_custom
+        if plugin.has(AflHook.POST_PROCESS):
+            self._runner.bind_post_process(plugin.post_process)
+        if plugin.has(AflHook.QUEUE_GET):
+            self._fuzz_ungated = self.fuzz_one
+            self.fuzz_one = self._queue_gated
+
+    def _queue_gated(self, data: bytes) -> bool:
+        """fuzz_one behind ``afl_custom_queue_get``.
+
+        A refusal skips the seed. After _QUEUE_GET_MAX_SKIPS refusals in a row
+        the next seed runs anyway, so a plugin refusing everything cannot stall
+        the loop (a skip executes nothing, so exec-count stop rules never fire).
+        """
+        if self._queue_skips < _QUEUE_GET_MAX_SKIPS and not self._afl_custom.queue_get(data):
+            self._queue_skips += 1
+            return False
+
+        self._queue_skips = 0
+        return self._fuzz_ungated(data)
+
+    def _advise(self, seed: bytes) -> None:
+        """--advisors: run each advisor's move for *seed*, off the stage's energy."""
+        stage = self._advisors
+        cmplog = self._cmplog
+        ops = self._operators
+        ctx = AdvisorCtx(
+            seed_meta=self.seed_meta,
+            dictionary=self.dictionary,
+            conds=lambda: ops._get_cond_stmts().unsolved_view() if cmplog else (),
+            fresh=stage.fresh,
+            max_len=self.max_len,
+        )
+
+        # One round per move; mutate() pops it, so the round is a normal one.
+        for name in stage.plan(seed, ctx):
+            stage.credit(name, self.fuzz_one(seed))
+
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
         mark = self._exec_timer.cycle_mark()
@@ -8118,6 +8471,18 @@ class Fuzzer:
         except OSError as e:
             log.debug("__cmplog_reset failed: %s", e)
 
+    def _rescope_cmplog_shim(self) -> None:
+        """Fresh shim dedup scope: campaign scope would hide this exec's repeats."""
+        runner = self._inprocess_runner
+        if not (runner and runner.direct_lite and runner._lib):
+            return
+        # getattr: name mangling, see _rewind_cmplog_shim.
+        rescope = getattr(runner._lib, "__cmplog_rescope", None)
+        if rescope is None:
+            return
+
+        rescope()
+
     def _cmplog_records(self, mode: CmplogRecords) -> None:
         """Switch the direct_lite shim's record emission; no-op on old builds."""
         if mode is self._cmplog_records_mode:
@@ -8158,6 +8523,7 @@ class Fuzzer:
         # Drained tokens are marked known by cmplog; the dictionary must get them.
         self._add_dict_tokens(cmplog.collect_tokens())
         self._rewind_cmplog_shim()
+        self._rescope_cmplog_shim()
         self._cmplog_records(CmplogRecords.ON)
         self._runner.run_target(data)
         self.exec_count += 1
@@ -8239,6 +8605,10 @@ class Fuzzer:
         byte-bitmap ptrace coverage (non-zero byte positions).
         """
         return self._stats.get_current_edge_set()
+
+    def _get_current_edge_array(self) -> "np.ndarray":
+        """Currently-active edge ids as an array (see ``_get_current_edge_set``)."""
+        return self._stats.get_current_edge_array()
 
     def _current_scheduling_badness(self) -> float:
         """Badness score in [0, 1] for badness-indexed scheduler floors.
@@ -8547,6 +8917,7 @@ class Fuzzer:
         prev = self._stall_last_engage_exec
         self._stall_recovery_count += 1
         self._stall_recovery_active = True
+        self._vp_on_stall()
         self._stall_engaged_at = self.exec_count
         self._stall_last_engage_exec = self.exec_count
         self._stall_edges_in_recovery = 0
@@ -9489,6 +9860,7 @@ class Fuzzer:
                 hw_branch_misses=self._last_perf_deltas.get("branch_misses", 0),
             )
             baseline_edges += len(new)
+            self._note_c11(seed)
             entries += len(edge_ids)
             if entries > entries_limit:
                 # Bound RAM by edge entries, not seed count: wide seeds blow
@@ -10103,6 +10475,8 @@ class Fuzzer:
             groups["Execution"].append("honggfuzz")
         if self.hw_perf:
             groups["Execution"].append("hw-perf")
+        if getattr(self, "_stack_max", None) is not None:
+            groups["Execution"].append("stack-depth-max")
         if self.pt_cov:
             groups["Execution"].append("intel-pt")
         if self.branch_cov:
@@ -10553,6 +10927,8 @@ class Fuzzer:
                     self._last_perf_score = 100.0
                 if staged is None:
                     self._stage.begin(seed, self._last_perf_score)
+                    if self._advisors is not None:
+                        self._advise(seed)
                 if self._diff_tracker:
                     self._check_differential(seed)
                 # Deterministic-stage mutations are now drawn inline by

@@ -9,7 +9,6 @@ from fuzzer_tool.adapters.filesystem import (
     load_corpus,
     save_to_corpus,
 )
-from fuzzer_tool.core.bloom import BloomFilter
 
 
 class TestComputeDelta:
@@ -99,12 +98,11 @@ class TestLoadCorpusDelta:
         assert len(corpus) == 2
         assert child in corpus
 
-    def test_delta_with_bloom(self, tmp_path):
+    def test_delta_resolves(self, tmp_path):
         seeds = tmp_path / "seeds"
         seeds.mkdir()
         deltas_dir = tmp_path / "deltas"
         deltas_dir.mkdir()
-        bloom = BloomFilter(capacity=100)
         parent_data = b"AAAA"
         parent_hash = hash_data(parent_data)
         (seeds / f"{parent_hash}.bin").write_bytes(parent_data)
@@ -115,7 +113,7 @@ class TestLoadCorpusDelta:
         delta_file = deltas_dir / f"delta_{child_hash}.json"
         delta_file.write_text(json.dumps({"parent": parent_hash, "diff": d}))
 
-        corpus, seen, _ = load_corpus(tmp_path, bloom=bloom)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 2
 
     def test_corrupt_delta_skipped(self, tmp_path):
@@ -180,9 +178,3 @@ class TestSaveToCorpus:
         assert not list((tmp_path / "deltas").glob("delta_*.json"))
         full_files = list((tmp_path / "seeds").rglob("id_*"))
         assert len(full_files) == 2
-
-    def test_with_bloom(self, tmp_path):
-        bloom = BloomFilter(capacity=100)
-        seen = set()
-        save_to_corpus(b"test", tmp_path, seen, bloom=bloom)
-        assert bloom.query(hash_data(b"test"))

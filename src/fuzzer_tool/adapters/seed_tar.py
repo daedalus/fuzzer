@@ -22,6 +22,7 @@ import zlib
 from collections.abc import Collection, Iterator
 from pathlib import Path
 
+from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.hashing import key16
 
@@ -71,6 +72,15 @@ def _members(corpus_dir: Path) -> Iterator[tuple[tarfile.TarFile, tarfile.TarInf
         with gzip.open(path, "rb") as gz, tarfile.open(fileobj=gz, mode="r|") as tf:
             for info in tf:
                 if not info.isreg():
+                    continue
+                # Same cap as seeds.zip: each member is read whole.
+                if info.size > seed_zip.MAX_MEMBER_BYTES:
+                    log.warning(
+                        "%s: member %r over %d bytes not read",
+                        TAR_NAME,
+                        info.name,
+                        seed_zip.MAX_MEMBER_BYTES,
+                    )
                     continue
                 tree = _tree(info.name)
                 if tree is None:

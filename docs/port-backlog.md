@@ -42,7 +42,7 @@ colorization executor loop almost verbatim — same "mutate, compare path
 checksum" shape. **Effort M, and cheapest of this group because the plumbing
 exists.** Start here.
 
-**A2. Gramatron — grammar automatons instead of parse trees** (`I.3`,
+**A2. Gramatron — grammar automatons instead of parse trees (implemented 2026-11-15, `gramatron_*` ops, unmeasured)** (`I.3`,
 HexHive/Gramatron ISSTA'21, also vendored in AFL++). Restructures the CFG into
 an FSA so an input is a *walk*; splice becomes a state-matched cut of two walks.
 Claims unbiased sampling and more aggressive mutation than parse-tree operators.

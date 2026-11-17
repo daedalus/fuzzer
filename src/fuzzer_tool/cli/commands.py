@@ -7,6 +7,7 @@ import datetime
 import glob
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
+from fuzzer_tool.core.cmplog import DedupScope, RecordChannel
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.count_items import CountItems
 from fuzzer_tool.core.crash_graph import Linkage
@@ -30,9 +32,16 @@ from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD
-from fuzzer_tool.core.run_mode import InputChannel, InputPlacement, RunMode, Switch
-from fuzzer_tool.core.sanitizer import STACK_HASH_TAG, STACK_HASH_VERSION
+from fuzzer_tool.core.run_mode import (
+    InputChannel,
+    InputPlacement,
+    RunMode,
+    StateRestore,
+    Switch,
+)
+from fuzzer_tool.core.sanitizer import FUNC_HASH_TAG, STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
+from fuzzer_tool.core.schedulers.seed_fess import FESS_RANDOM_EVERY, FessMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
@@ -42,8 +51,11 @@ from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.crash_cluster import CLUSTER_THRESHOLD, REDUCE_EXECS, WL_ITERS
 from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, Fuzzer
+from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
+from fuzzer_tool.services.operators import StallMode
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
+from fuzzer_tool.services.value_profile import ValueProfile
 
 _original_print = builtins.print
 _patched_print = builtins.print
@@ -180,7 +192,7 @@ def _load_hash_list(path: str | None) -> set[str] | None:
 
     hashes = {line for line in lines if line and not line.startswith("#")}
     tags = [line for line in lines if line.startswith(_STACK_HASH_PREFIX)]
-    if hashes and tags != [STACK_HASH_TAG]:
+    if hashes and tags != [STACK_HASH_TAG] and FUNC_HASH_TAG not in lines:
         found = ", ".join(t.removeprefix(_STACK_HASH_PREFIX) for t in tags) or "untagged"
         print(
             f"[!] Warning: {path}: stack-hash format {found}, current "
@@ -191,6 +203,32 @@ def _load_hash_list(path: str | None) -> set[str] | None:
 
 
 _STACK_HASH_PREFIX = "# stack-hash "
+
+
+def _stack_ignore_file(path: str) -> list[str]:
+    """Regexes for ``--stack-ignore``: one per line, ``#`` comments.
+
+    Each is compiled here so a bad line fails at parse time as
+    ``FILE:LINE: error``, not mid-run.
+    """
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(f"{path}: {exc.strerror}") from exc
+
+    patterns: list[str] = []
+    for no, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            re.compile(line)
+        except re.error as exc:
+            raise argparse.ArgumentTypeError(f"{path}:{no}: {exc}") from exc
+        patterns.append(line)
+    return patterns
+
+
 # Loaded, never exec'd: verify/replay route these through the loader child.
 SHARED_OBJECT_SUFFIXES = (".so", ".dylib", ".dll")
 
@@ -501,6 +539,14 @@ def cmd_fuzz(args):
         configure_crash_cluster(threshold=_cc_threshold)
         print(f"[*] crash clustering threshold: {_cc_threshold}")
 
+    # Stack filter: bound before any crash is classified.
+    _stack_ignore = getattr(args, "stack_ignore", None)
+    if _stack_ignore:
+        from fuzzer_tool.core.sanitizer import configure_stack_ignore
+
+        configure_stack_ignore(_stack_ignore)
+        print(f"[*] stack ignore: {len(_stack_ignore)} pattern(s)")
+
     # Phase 1 / B1 — Floyd sampling.
     if getattr(args, "rand_floyd_sample", False):
         from fuzzer_tool.core.rand_pool import configure_rand_floyd
@@ -802,8 +848,10 @@ def cmd_fuzz(args):
         deep_coverage=args.deep_coverage,
         max_bps=args.max_bps,
         dictionary=dictionary,
-        file_mode=args.file_mode,
+        # --input-alias needs the memfd input, i.e. -F.
+        file_mode=args.file_mode or bool(getattr(args, "input_alias", None)),
         target_args=args.target_args,
+        input_alias=getattr(args, "input_alias", None),
         markov_order=args.markov_order if use_markov else 0,
         markov_generate=args.markov_gen,
         markov=Switch.OFF if getattr(args, "no_markov", False) else Switch.ON,
@@ -844,6 +892,7 @@ def cmd_fuzz(args):
         affine_mod=getattr(args, "affine_mod", False),
         affine_mod_execs=getattr(args, "affine_mod_execs", AFFINE_MOD_EXECS),
         derived_cmp=getattr(args, "derived_cmp", False),
+        fox_newton=getattr(args, "fox_newton", False),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
@@ -875,10 +924,14 @@ def cmd_fuzz(args):
         cmplog_fifo_sink_size=getattr(args, "cmplog_fifo_sink_size", None),
         compcov_level=getattr(args, "compcov_level", 0),
         cmp_prune_const=getattr(args, "cmp_prune_const", False),
+        cmplog_site_cap=getattr(args, "cmplog_site_cap", 0),
+        cmplog_dedup_scope=getattr(args, "cmplog_dedup_scope", DedupScope.DRAIN),
+        cmplog_records=getattr(args, "cmplog_records", RecordChannel.TEXT),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
         auto_minimize=Switch.OFF if getattr(args, "no_auto_minimize", False) else Switch.ON,
+        trim_new_coverage=Switch.ON if getattr(args, "trim_new_coverage", False) else Switch.OFF,
         prune_corpus_max_memory=getattr(args, "prune_corpus_on_max_memory", 80),
         bootstrap=getattr(args, "bootstrap", False),
         bootstrap_k=getattr(args, "bootstrap_k", 1),
@@ -901,11 +954,13 @@ def cmd_fuzz(args):
         input_placement=InputPlacement(
             getattr(args, "input_placement", InputPlacement.EXACT.value)
         ),
+        state_restore=StateRestore(getattr(args, "snapshot_restore", StateRestore.GLOBALS.value)),
         touched_atomic=getattr(args, "touched_atomic", None),
         ctx_sensitive=getattr(args, "ctx_sensitive", None),
         alloc_sizes=getattr(args, "alloc_sizes", False),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
+        repro_gate=getattr(args, "repro_gate", 0),
         crash_tmin_execs=getattr(args, "crash_tmin_execs", 0),
         asan_target=getattr(args, "asan_target", None),
         ubsan_target=getattr(args, "ubsan_target", None),
@@ -914,6 +969,13 @@ def cmd_fuzz(args):
         save_smaller=getattr(args, "save_smaller", False),
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
+        ijon=getattr(args, "ijon", False),
+        stack_depth_max=getattr(args, "stack_depth_max", False),
+        ijon_schedule_maxmap=getattr(args, "ijon_schedule_maxmap", DEFAULT_SCHEDULE_MAXMAP),
+        c11=getattr(args, "c11", False),
+        value_profile=ValueProfile(getattr(args, "value_profile", ValueProfile.OFF.value)),
+        rq_add_key=getattr(args, "rq_add_key", False),
+        stall_mode=StallMode(getattr(args, "stall_mode", StallMode.RANDOM.value)),
         hw_perf_counters=getattr(args, "hw_perf_counters", None),
         hw_instr_limit=getattr(args, "hw_instr_limit", 0),
         intel_pt=getattr(args, "intel_pt", False),
@@ -958,6 +1020,7 @@ def cmd_fuzz(args):
         joint_liveness=getattr(args, "joint_liveness", False),
         byte_interaction=getattr(args, "byte_interaction", False),
         influence=getattr(args, "influence", False),
+        cut_damage=getattr(args, "cut_damage", False),
         field_hmm=getattr(args, "field_hmm", False),
         field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
@@ -969,7 +1032,16 @@ def cmd_fuzz(args):
         pos_emeans_tau=getattr(args, "pos_emeans_tau", 0.0),
         pos_pca=getattr(args, "pos_pca", False),
         pos_learn=getattr(args, "pos_learn", False),
+        pos_hotspot=getattr(args, "pos_hotspot", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
+        seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
+        fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
+        seed_fess_mode=FessMode(getattr(args, "seed_fess_mode", FessMode.LEAST_EFFORT.value)),
+        fess_cell_novelty=Switch.ON if getattr(args, "fess_cell_novelty", False) else Switch.OFF,
+        respawn_backoff=Switch.ON if getattr(args, "respawn_backoff", False) else Switch.OFF,
+        advisors=getattr(args, "advisors", False),
+        plateau_groups=getattr(args, "plateau_groups", False),
+        elo_stale_bench=Switch.ON if getattr(args, "elo_stale_bench", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -1236,6 +1308,7 @@ def cmd_fuzz(args):
         custom_mutator=getattr(args, "custom_mutator", None),
         custom_mutator_isolation=getattr(args, "custom_mutator_isolation", "guard"),
         custom_mutator_timeout_ms=getattr(args, "custom_mutator_timeout", 1000),
+        afl_custom_mutator=getattr(args, "afl_custom_mutator", None),
         email_on_crash=_mail_config_from_args(args),
         push_on_crash=_push_targets_from_args(args),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
@@ -1432,6 +1505,7 @@ def cmd_import(args):
         import_from_afl,
         import_from_honggfuzz,
         import_from_libfuzzer,
+        import_from_pcap,
         write_dictionary,
     )
 
@@ -1447,6 +1521,9 @@ def cmd_import(args):
     elif args.format == "honggfuzz":
         imported, _ = import_from_honggfuzz(args.source_dir, args.corpus, args.crashes)
         print(f"[+] Imported {imported} seeds from honggfuzz")
+    elif args.format == "pcap":
+        imported = import_from_pcap(args.source_dir, args.corpus, args.window, args.framing)
+        print(f"[+] Imported {imported} seeds from packet captures")
 
     if getattr(args, "autotokens", None):
         tokens = build_autotoken_dictionary(args.corpus)
@@ -2168,6 +2245,56 @@ def cmd_sarif(args):
     return 0
 
 
+def cmd_mutants_build(args):
+    """Build (or reuse) a mutant set for the mutant-kill metric."""
+    from fuzzer_tool.adapters.mutant_build import TargetSpec
+    from fuzzer_tool.services.mutant_kill import ALL_SITES, KillSetError, build_kill_set
+
+    spec = TargetSpec(Path(args.src), Path(args.wrapper), tuple(Path(d) for d in args.include))
+    cap = ALL_SITES if args.cap is None else args.cap
+    try:
+        got = build_kill_set(spec, Path(args.out), cap, args.seed, args.jobs)
+    except KillSetError as exc:
+        print(f"[-] {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"[+] {got.mutants} mutants ({got.equivalent} equivalent, {got.failed} failed) in {args.out}"
+    )
+    return 0
+
+
+def cmd_mutants_score(args):
+    """Score a corpus by the mutants it kills (prints a key=value line)."""
+    from fuzzer_tool.services.mutant_kill import (
+        DEFAULT_TIMEOUT_MS,
+        Confirm,
+        KillScorer,
+        KillSetError,
+    )
+
+    corpus = Path(args.corpus)
+    if not corpus.is_dir():
+        print(f"[-] Corpus directory not found: {corpus}", file=sys.stderr)
+        return 1
+
+    try:
+        timeout_ms = DEFAULT_TIMEOUT_MS if args.timeout_ms is None else args.timeout_ms
+        scorer = KillScorer.open(
+            Path(args.kill_set), args.jobs, timeout_ms, Confirm[args.confirm.upper()]
+        )
+    except KillSetError as exc:
+        print(f"[-] {exc}", file=sys.stderr)
+        return 1
+
+    r = scorer.score(corpus)
+    print(
+        f"kills={r.kills} mutants={scorer.mutant_count} hangs={r.hangs} flaky={r.flaky} "
+        f"inputs={r.inputs} clean_inputs={r.clean_inputs}"
+    )
+    return 0
+
+
 def cmd_replay(args):
     """Replay a crash input against the target."""
     _validate_target(args.target)
@@ -2283,7 +2410,6 @@ def cmd_rank(args):
     import time
 
     from fuzzer_tool.adapters.filesystem import load_corpus
-    from fuzzer_tool.core.bloom import BloomFilter
     from fuzzer_tool.core.edge_tracker import EdgeTracker
     from fuzzer_tool.core.elf import estimate_map_size
     from fuzzer_tool.core.state_store import StateStore
@@ -2296,9 +2422,8 @@ def cmd_rank(args):
     store = StateStore(corpus_dir)
     store.load()
 
-    bloom = BloomFilter(capacity=100_000)
     # add_default=False: the synthetic AAAAAAAA seed is not part of the corpus.
-    corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, bloom, add_default=False)
+    corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, add_default=False)
     if not corpus:
         print("[-] Empty corpus", file=sys.stderr)
         return 1
@@ -2395,17 +2520,14 @@ def cmd_ppmd(args):
 
     from fuzzer_tool.adapters.filesystem import load_corpus
     from fuzzer_tool.core.analyzers.analyzer_corpus_compression import CorpusCompressor
-    from fuzzer_tool.core.bloom import BloomFilter
 
     corpus_dir = Path(args.corpus)
     if not corpus_dir.exists():
         print(f"Error: corpus directory {corpus_dir} not found")
         return 1
 
-    bloom = BloomFilter(capacity=100_000)
-    bloom.init_fuzzy(max_recent=200)
     # add_default=False: the synthetic AAAAAAAA seed is not part of the corpus.
-    corpus, _, _ = load_corpus(corpus_dir, bloom, add_default=False)
+    corpus, _, _ = load_corpus(corpus_dir, add_default=False)
 
     if not corpus:
         print(f"No seeds found in {corpus_dir}")
@@ -2711,7 +2833,7 @@ def cmd_sweep(args):
 
     from fuzzer_tool.adapters.filesystem import hash_data, load_corpus
 
-    seeds, _, _ = load_corpus(corpus_dir, bloom=None, add_default=False)
+    seeds, _, _ = load_corpus(corpus_dir, add_default=False)
     if not seeds:
         print("[-] No seeds found in corpus")
         return 0
@@ -2823,9 +2945,16 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the PCA group arm
 # has only a synthetic planted-group check, no paired run on a real target.
 #
+# trim_new_coverage (--trim-new-coverage) is excluded: an exec cost (up to 512
+# execs per admission, ~98% of an FFmpeg run), not a search strategy.
+#
 # pos_learn (--pos-learn) is excluded as unmeasured (see
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): LearnAFL's path
 # mask has unit tests only. Bench arm: pos-arena-learn.
+#
+# pos_hotspot (--pos-hotspot) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the soksolv
+# hotspot arm has unit tests only.
 #
 # joint_liveness (--joint-liveness) is excluded: it only has an effect together
 # with --region-profile (the dead-region down-weight is the thing it revokes)
@@ -2835,12 +2964,33 @@ def cmd_sweep(args):
 # seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
 #
+# cut_damage (--cut-damage) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md); inert without --seed-branch-scheduler.
+#
 # seed_gram_scheduler (--seed-gram-scheduler) is excluded as unmeasured: unit tests
 # only, no paired run (docs/AB_PENDING.md).
 #
 # seed_lottery_scheduler (--seed-lottery-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
+#
+# seed_fess_scheduler (--seed-fess-scheduler), fess_inherit (--fess-inherit)
+# and fess_cell_novelty (--fess-cell-novelty) are excluded as unmeasured: unit
+# tests only, no paired run (docs/AB_PENDING.md). The last two are also inert
+# without the FESS arm.
+#
+# respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
+#
+# advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md).
+#
+# plateau_groups (--plateau-groups) is excluded as unmeasured: unit tests only,
+# no paired run (docs/AB_PENDING.md). Inert without --seed-lottery-scheduler and
+# a --seed-lottery-currency other than off.
+#
+# elo_stale_bench (--elo-stale-bench) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md).
 #
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
@@ -3099,12 +3249,16 @@ _HAIL_MARY_FLAGS = (
     "save_smaller",
     "honggfuzz",
     "hw_perf",
+    "ijon",
+    "stack_depth_max",
+    "c11",
     "intel_pt",
     "lbr",
     "colorize",
     "i2s_fixpoint",
     "affine_mod",
     "derived_cmp",
+    "fox_newton",
     "weizz_tags",
     "formatfuzzer",
     "op_span_reverse",
@@ -3112,6 +3266,7 @@ _HAIL_MARY_FLAGS = (
     "op_append",
     "op_line_code",
     "rq_xor_key",
+    "rq_add_key",
     "checksum_sites",
     "merkle_sites",
     "grimoire",
@@ -3158,6 +3313,17 @@ def _positive_ms_arg(value: str) -> int:
     return ms
 
 
+def _non_negative_int_arg(value: str) -> int:
+    """argparse type: a whole number, at least 0."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
+
+
 def _positive_int_arg(value: str) -> int:
     """argparse type: a whole number, at least 1."""
     try:
@@ -3166,6 +3332,21 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
     if n < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
+# Upper bound of a percentage argument.
+PERCENT_MAX = 100
+
+
+def _percent_arg(value: str) -> int:
+    """argparse type: a whole percent in 0..100."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if not 0 <= n <= PERCENT_MAX:
+        raise argparse.ArgumentTypeError(f"must be 0..{PERCENT_MAX}, got {n}")
     return n
 
 
@@ -3537,6 +3718,20 @@ def main() -> int:
         "an overread faults (labelled guard-overread) without ASAN. Default: exact.",
     )
     fuzz_parser.add_argument(
+        "--snapshot-restore",
+        choices=[m.value for m in StateRestore],
+        default=StateRestore.GLOBALS.value,
+        help="Direct in-process modes: 'globals' restores the target .so's .data/.bss "
+        "before each exec (wtf-style snapshot; heap not restored). Default: globals.",
+    )
+    fuzz_parser.add_argument(
+        "--no-snapshot-restore",
+        dest="snapshot_restore",
+        action="store_const",
+        const=StateRestore.OFF.value,
+        help="Disable --snapshot-restore: target globals carry over between execs.",
+    )
+    fuzz_parser.add_argument(
         "--no-cfg-cache",
         action="store_true",
         help="Disable the on-disk CFG decode cache (~/.cache/fuzzer_cfgcache); "
@@ -3566,6 +3761,13 @@ def main() -> int:
     fuzz_parser.add_argument("-D", "--dict", nargs="+", help="Dictionary file(s)")
     fuzz_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    fuzz_parser.add_argument(
+        "--input-alias",
+        metavar="PATH",
+        default=None,
+        help="Path the target opens by name (hardcoded); afl_shim.c's open/fopen/stat "
+        "hooks serve the fuzz input there from memory. Implies -F.",
     )
     fuzz_parser.add_argument(
         "-A",
@@ -3775,6 +3977,14 @@ def main() -> int:
         action="store_true",
         help="Judge Elo operator/seed strategy matches per second, not per round "
         "(autofz): a slow strategy must out-yield a fast one to draw. Needs --elo.",
+    )
+    fuzz_parser.add_argument(
+        "--elo-stale-bench",
+        action="store_true",
+        help="Bench the Elo strategy with the most rounds since its last gain once it passes "
+        "max(2000, 4x the pool median); revive it after 10000 rounds with a prior rating. "
+        "Never benches the last armed strategy (soksolv; core/elo_stale_bench.py). Needs --elo. "
+        "Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--lineage",
@@ -4050,6 +4260,13 @@ def main() -> int:
         "(core/schedulers/seed_branch.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
+        "--cut-damage",
+        action="store_true",
+        help="With --seed-branch-scheduler: rank frontier branches by tail hits / (1 + "
+        "blocks the head alone guards from main), articulation points of the undirected "
+        "ICFG (core/articulation.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
         "--seed-p2c-scheduler",
         action="store_true",
         help="Seed-arena arm 'p2c': power of two choices: two uniform draws, higher posterior mean"
@@ -4085,6 +4302,65 @@ def main() -> int:
         "probability --seed-newest-p, else a uniform seed (DFS-like corridors vs bushy). Elo arm; "
         "also the no-elo pick when enabled (core/schedulers/seed_newest.py). Not in --hail-mary "
         "until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--plateau-groups",
+        action="store_true",
+        help="Plateau groups (soksolv): a boring mutant taking another seed's exact path "
+        "unions its parent with that seed (core/plateau.py). The groups replace connected "
+        "components as --seed-lottery-scheduler's currency, so each plateau is backed "
+        "once. Needs --seed-lottery-currency equal|sqrt. Not in --hail-mary until it wins "
+        "its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--advisors",
+        action="store_true",
+        help="Advisors (soksolv): on each seed stage, i2s / token / cond advisors each "
+        "propose one move built from the seed's recorded cmplog data, run free of the "
+        "stage's energy and deduped (services/advisors.py). Not in --hail-mary until it "
+        "wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-fess-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'fess': FESS feature-space search. Seeds map to a log2 grid of "
+        "(edges, rare edges, lineage depth, size); the least-explored cell is fuzzed next, then "
+        "its least-fuzzed seed. Elo arm; also the no-elo pick when enabled "
+        "(core/schedulers/seed_fess.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-fess-mode",
+        choices=tuple(m.value for m in FessMode),
+        default=FessMode.LEAST_EFFORT.value,
+        help="With --seed-fess-scheduler: cell schedule. least-effort: least-explored cell. "
+        f"triple: every {FESS_RANDOM_EVERY}th pick a random occupied cell, else even picks the "
+        "best cell (success rate over its seeds), odd picks round robin in creation order "
+        "(soksolv selectMove / pickCell).",
+    )
+    fuzz_parser.add_argument(
+        "--fess-cell-novelty",
+        action="store_true",
+        help="With --seed-fess-scheduler: per-cell scoped novelty. Each cell remembers the "
+        "edges its execs reached (bounded); an exec bringing edges new to its cell, even if "
+        "globally known, is credited, and picks prefer cells with recent in-cell novelty "
+        "(soksolv scoped novelty). No effect without the FESS arm. Not in --hail-mary until "
+        "it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--fess-inherit",
+        action="store_true",
+        help="With --seed-fess-scheduler: a child seed no better than its parent's cell (more "
+        "edges, then rare edges, smaller size, shallower) competes in the parent's cell, and a "
+        "cell occupied for the first time is picked next, once (soksolv project / "
+        "NewCellJump). No effect without the FESS arm. Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--respawn-backoff",
+        action="store_true",
+        help="Pace restarts of a persistent/forkserver target that dies within 250 ms of "
+        "starting: 20 ms doubling to 1 s per quick failure in a row; a longer run resets. "
+        "16 in a row abort the run with a clear error (adapters/respawn_backoff.py). "
+        "Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--frontier-bin",
@@ -4367,6 +4643,14 @@ def main() -> int:
         "changes, mutable ones (frozen restored) once stable; frozen runs feed the "
         "auto-dictionary (core/schedulers/pos_learn.py). Opt-in: NOT implied by "
         "--position-arena or --hail-mary (unmeasured).",
+    )
+    fuzz_parser.add_argument(
+        "--pos-hotspot",
+        action="store_true",
+        help="Enable the position-arena hotspot scheduler: offsets ranked by how many "
+        "unsolved cmplog comparisons their bytes block, hottest first; solved ones "
+        "drop out (soksolv hotspot table; core/schedulers/pos_hotspot.py). Needs "
+        "cmplog. Opt-in: NOT implied by --position-arena or --hail-mary (unmeasured).",
     )
     fuzz_parser.add_argument(
         "--saliency-targets",
@@ -5966,6 +6250,15 @@ def main() -> int:
         "--affine-mod-execs; needs cmplog.",
     )
     fuzz_parser.add_argument(
+        "--fox-newton",
+        action="store_true",
+        default=False,
+        help="FOX secant step (fox_newton op): fit each integer compare's operand "
+        "against the input field two logged runs changed, and write the field value "
+        "that lands it on an unreached side of the constant. No extra execs; "
+        "needs cmplog.",
+    )
+    fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"
     )
     fuzz_parser.add_argument(
@@ -6247,6 +6540,42 @@ def main() -> int:
         ),
     )
     fuzz_parser.add_argument(
+        "--cmplog-site-cap",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "A trace-cmp site writes at most N cmplog records per drain (AFL++ keeps 32), "
+            "so loop compares stop flooding the read window. 0 = off (default)."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cmplog-dedup-scope",
+        type=DedupScope,
+        choices=list(DedupScope),
+        default=DedupScope.DRAIN,
+        metavar="{drain,campaign}",
+        help=(
+            "Lifetime of the shim's cmplog record dedup. drain (default): each drain holds "
+            "one exec's full set. campaign: a record is written once per campaign, so "
+            "input-invariant compares stop filling the window; per-input consumers see "
+            "only new records (the I2S probe still gets a full set)."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cmplog-records",
+        type=RecordChannel,
+        choices=list(RecordChannel),
+        default=RecordChannel.TEXT,
+        metavar="{text,shm}",
+        help=(
+            "Where the shim writes CMP records. text (default): hex lines on the cmplog "
+            "FIFO/file. shm: binary operands in a shared table sized from the target's "
+            "compare call sites (~7-31 MiB, fixed per run): no formatting, parsing or FIFO "
+            "drops. DIV/GEP records stay on text. Targets built before this fall back to text."
+        ),
+    )
+    fuzz_parser.add_argument(
         "--max-corpus",
         type=int,
         default=0,
@@ -6330,6 +6659,13 @@ def main() -> int:
         action="store_true",
         help="No trim of new-coverage inputs and no corpus-size prune "
         "(the memory-pressure prune stays). Set by --lightweight.",
+    )
+    fuzz_parser.add_argument(
+        "--trim-new-coverage",
+        action="store_true",
+        help="Trim each new-coverage seed on admission (AFL trim_case walk, up to "
+        "512 execs each). Off by default: on FFmpeg it took ~98%% of campaign time. "
+        "--no-auto-minimize overrides it.",
     )
     fuzz_parser.add_argument(
         "--prune-corpus-on-max-memory",
@@ -6558,6 +6894,14 @@ def main() -> int:
         help="Replay each crash N times for reproducibility scoring (default: 0 = off)",
     )
     fuzz_parser.add_argument(
+        "--repro-gate",
+        type=_non_negative_int_arg,
+        default=0,
+        metavar="N",
+        help="Replay each novel crash up to N times before saving; none reproducing "
+        "the bug class -> crashes/no_repro/, no alert (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
         "--asan-target",
         default=None,
         metavar="PATH",
@@ -6574,8 +6918,19 @@ def main() -> int:
         default=None,
         metavar="FILE",
         help=(
-            "File with stack hashes (one per line, sidecar 'stack_hash') to skip when "
-            "saving crashes; header '# stack-hash v2' (other versions warn)"
+            "File with stack hashes (one per line, sidecar 'stack_hash' or 'func_hash') "
+            "to skip when saving crashes; header '# stack-hash v2' or '# func-hash v1' "
+            "(other versions warn)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--stack-ignore",
+        type=_stack_ignore_file,
+        default=None,
+        metavar="FILE",
+        help=(
+            "Regexes (one per line) of extra frames to strip from crash signatures "
+            "and func_hash, e.g. '^av_(free|malloc)' for project allocator wrappers"
         ),
     )
     fuzz_parser.add_argument(
@@ -6685,6 +7040,44 @@ def main() -> int:
         "Software events only without a PMU. Requires CAP_PERFMON or root.",
     )
     fuzz_parser.add_argument(
+        "--stack-depth-max",
+        action="store_true",
+        help="Keep inputs that recurse deeper than any before (honggfuzz stack-depth "
+        "feedback). Needs AFL SHM coverage and a per-edge callback build.",
+    )
+    fuzz_parser.add_argument(
+        "--ijon",
+        action="store_true",
+        help="IJON state feedback: keep inputs that raise an IJON_MAX/IJON_MIN "
+        "annotated value (adapters/ijon.h). IJON_SET/IJON_INC work without it.",
+    )
+    fuzz_parser.add_argument(
+        "--c11",
+        action="store_true",
+        help="AFL++ C11 seed weight (ICSE'26): favour seeds that enter functions with "
+        "more locals (params + variables, from DWARF). Needs a target built with -g and "
+        "--sancov=trace-pc-guard,pc-table; off during stall recovery.",
+    )
+    fuzz_parser.add_argument(
+        "--value-profile",
+        choices=[m.value for m in ValueProfile],
+        default=ValueProfile.OFF.value,
+        help="Comparison distance feedback (libFuzzer -use_value_profile, AFL++ -r): per "
+        "trace-cmp site, popcount(a^b) and bitlen(|a-b|) become coverage, so an input "
+        "getting closer is kept. off (default) | on | stall (switch on at the first stall, "
+        "then keep on). Needs a --cmplog build; complements --compcov-level.",
+    )
+    fuzz_parser.add_argument(
+        "--ijon-schedule-maxmap",
+        type=_percent_arg,
+        default=DEFAULT_SCHEDULE_MAXMAP,
+        metavar="PCT",
+        help="With --ijon: percent of seed picks left to the normal queue; the rest "
+        "fuzz the best input of a random IJON_MAX slot (the paper's "
+        f"IJON_SCHEDULE_MAXMAP; 0 = always max queue, 100 = never; default "
+        f"{DEFAULT_SCHEDULE_MAXMAP}).",
+    )
+    fuzz_parser.add_argument(
         "--hw-perf-counters",
         type=_hw_perf_counter_list,
         default=None,
@@ -6752,8 +7145,11 @@ def main() -> int:
             "aflgo",
             "entropic",
             "doppler",
+            "seek",
+            "exploit",
         ),
-        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic|doppler "
+        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic|doppler|"
+        "seek|exploit (seek = base ignoring exec time; exploit = AFL's x32 constant) "
         "(aflgo = exact AFLGo distance annealing, see --t-x; "
         "entropic = libFuzzer -entropic, log-scaled rare-feature energy; "
         "doppler = power Doppler flow energy, SHM coverage only)",
@@ -6880,6 +7276,13 @@ def main() -> int:
         metavar="N",
         help="Run N calibration execs (seed replay + cheap mutations) to bootstrap "
         "coverage stats before the main fuzz loop (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
+        "--stall-mode",
+        choices=[m.value for m in StallMode],
+        default=StallMode.RANDOM.value,
+        help="Op choice once --stall triggers: random (default, uniform over every op) or "
+        "exploit (AFL++ -P: only the precise bands -- redqueen, I2S, solvers, dictionary).",
     )
     fuzz_parser.add_argument(
         "--stall",
@@ -7092,6 +7495,18 @@ def main() -> int:
         ),
     )
     fuzz_parser.add_argument(
+        "--afl-custom-mutator",
+        metavar="PATH",
+        default=None,
+        help=(
+            "AFL++ custom mutator: .so exporting afl_custom_* or .py module "
+            "(AFL_PYTHON_MODULE hook names). fuzz/havoc_mutation become "
+            "operators (afl_custom_fuzz, afl_custom_havoc); post_process, "
+            "the trim trio, queue_get and queue_new_entry are wired in. "
+            "Shares --custom-mutator-isolation/--custom-mutator-timeout"
+        ),
+    )
+    fuzz_parser.add_argument(
         "--custom-mutator-isolation",
         choices=("guard", "none"),
         default="guard",
@@ -7280,6 +7695,14 @@ def main() -> int:
         help=(
             "Redqueen through an unknown repeating XOR key (1-8 bytes): input "
             "deobfuscated before a compare. Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--rq-add-key",
+        action="store_true",
+        help=(
+            "Redqueen through an unknown repeating additive key (1-8 bytes, mod 256): "
+            "ROT-n, `c - '0'` decodes (AFL++ cmplog arith). Off by default."
         ),
     )
     fuzz_parser.add_argument(
@@ -7795,6 +8218,51 @@ def main() -> int:
     )
     verify_parser.set_defaults(func=cmd_verify)
 
+    # --- mutants-build / mutants-score (docs/action_plan_mutant_kill_metric.md) ---
+    mb_parser = subparsers.add_parser(
+        "mutants-build", help="Build a mutant set for the mutant-kill metric"
+    )
+    mb_parser.add_argument("src", help="C source to mutate (e.g. fuzzgoatNoVulns.c)")
+    mb_parser.add_argument(
+        "--wrapper", required=True, help="Wrapper exposing fuzz_shm_run (targets/*_read.c)"
+    )
+    mb_parser.add_argument(
+        "-o", "--out", required=True, help="Output directory (cached by build key)"
+    )
+    mb_parser.add_argument(
+        "-I", "--include", action="append", default=[], help="Include directory (repeatable)"
+    )
+    mb_parser.add_argument(
+        "--cap", type=_positive_int_arg, default=None, help="Max sites kept (default: all)"
+    )
+    mb_parser.add_argument("--seed", type=int, default=1, help="Site sampling seed (default: 1)")
+    mb_parser.add_argument(
+        "-j", "--jobs", type=_positive_int_arg, default=os.cpu_count() or 1, help="Parallel builds"
+    )
+    mb_parser.set_defaults(func=cmd_mutants_build)
+
+    ms_parser = subparsers.add_parser(
+        "mutants-score", help="Score a corpus by the mutants it kills"
+    )
+    ms_parser.add_argument("kill_set", help="Directory built by mutants-build")
+    ms_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
+    ms_parser.add_argument(
+        "-j", "--jobs", type=_positive_int_arg, default=os.cpu_count() or 1, help="Parallel mutants"
+    )
+    ms_parser.add_argument(
+        "--timeout-ms",
+        type=_positive_int_arg,
+        default=None,
+        help="Per-input timeout in ms (default: 1000)",
+    )
+    ms_parser.add_argument(
+        "--confirm",
+        choices=("rerun", "none"),
+        default="rerun",
+        help="Re-run each killing input alone before counting the kill (default: rerun)",
+    )
+    ms_parser.set_defaults(func=cmd_mutants_score)
+
     # --- sarif ---
     sarif_parser = subparsers.add_parser(
         "sarif", help="Export crashes as a SARIF 2.1.0 log (GitHub code scanning)"
@@ -7812,8 +8280,10 @@ def main() -> int:
     sarif_parser.set_defaults(func=cmd_sarif)
 
     # --- import ---
+    from fuzzer_tool.services.import_corpus import PCAP_FRAMINGS, PCAP_WINDOW
+
     import_parser = subparsers.add_parser(
-        "import", help="Import corpus from AFL/libFuzzer/honggfuzz"
+        "import", help="Import corpus from AFL/libFuzzer/honggfuzz/packet captures"
     )
     import_parser.add_argument("source_dir", help="Source directory")
     import_parser.add_argument("-d", "--corpus", required=True, help="Destination corpus directory")
@@ -7822,9 +8292,21 @@ def main() -> int:
     )
     import_parser.add_argument(
         "--format",
-        choices=["afl", "libfuzzer", "honggfuzz"],
+        choices=["afl", "libfuzzer", "honggfuzz", "pcap"],
         default="afl",
         help="Source format (default: afl)",
+    )
+    import_parser.add_argument(
+        "--window",
+        type=int,
+        default=PCAP_WINDOW,
+        help=f"pcap: consecutive packets per seed (default: {PCAP_WINDOW})",
+    )
+    import_parser.add_argument(
+        "--framing",
+        choices=PCAP_FRAMINGS,
+        default=PCAP_FRAMINGS[0],
+        help=f"pcap: per-packet length prefix (default: {PCAP_FRAMINGS[0]})",
     )
     import_parser.add_argument(
         "--autotokens",

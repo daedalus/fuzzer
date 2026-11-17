@@ -15,6 +15,7 @@ Usage:
 import base64
 import functools
 import logging
+import math
 import struct
 import zlib
 from collections.abc import Callable
@@ -229,6 +230,74 @@ class AsciiEncoder(Encoder):
 
     def name(self):
         return f"ascii_{'s' if self.signed else 'u'}_{self.base}"
+
+
+# Float compares arrive as 4/8-byte CMP records of the raw IEEE bits. A
+# "nice" value (few significant digits, normal, finite) is what a parsed
+# numeral or a source literal looks like; an integer's bit pattern decodes
+# to a long ugly float and is rejected, so int compares stay off this path.
+#   0x40500000 -> 3.25 (nice)    0x41424344 -> 12.141422271728516 (not)
+_FLOAT_FMT = {4: ">f", 8: ">d"}
+_FLOAT_MAX_DIGITS = 7
+_FLOAT_MIN_EXP, _FLOAT_MAX_EXP = -12, 15  # decimal exponent window
+
+
+def _float_value(val: bytes) -> float | None:
+    """IEEE value of big-endian *val*; None for NaN, inf, denormal or odd width."""
+    fmt = _FLOAT_FMT.get(len(val))
+    if fmt is None:
+        return None
+    x = _struct_unpack(fmt, val)[0]
+    if not math.isfinite(x) or (x != 0.0 and abs(x) < 2.2250738585072014e-308):
+        return None
+    if len(val) == 4 and x != 0.0 and abs(x) < 1.1754943508222875e-38:
+        return None
+    return x
+
+
+def _float_text(x: float, width: int) -> str:
+    """Shortest round-trip rendering at the compare's own precision."""
+    return str(np.float32(x)) if width == 4 else repr(x)
+
+
+def _nice_float(val: bytes) -> bool:
+    x = _float_value(val)
+    if x is None:
+        return False
+    if x == 0.0:
+        return True
+    mant, _, exp = _float_text(x, len(val)).lstrip("-").partition("e")
+    digits = mant.replace(".", "").strip("0")
+    e10 = math.floor(math.log10(abs(x)))
+    return len(digits) <= _FLOAT_MAX_DIGITS and _FLOAT_MIN_EXP <= e10 <= _FLOAT_MAX_EXP
+
+
+class FloatAsciiEncoder(Encoder):
+    """Float/double compare reached through strtod: the operand is a numeral.
+
+    ``style`` "r" is the shortest round-trip form (``4.5``, ``0.1``), "g" is
+    printf %g (``250`` for 250.0). The +-1 CMP variants on the IEEE bits are
+    the ULP neighbours, so ``4.500000000000001`` is offered too.
+    """
+
+    def __init__(self, style: str = "r"):
+        self.style = style
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):
+        if cmp_type != "CMP" or cmp_size not in (32, 64):
+            return False
+        return _nice_float(lhs) and _nice_float(rhs)
+
+    def encode(self, val):
+        x = _float_value(val)
+        if x is None:
+            return []
+        if self.style == "g":
+            return [format(x, "g").encode()]
+        return [_float_text(x, len(val)).encode()]
+
+    def name(self):
+        return f"float_ascii_{self.style}"
 
 
 class CStringEncoder(Encoder):
@@ -871,32 +940,83 @@ class XorKeyEncoder(Encoder):
         return f"xor_key_{self.period}_{'r' if self.reverse else 'p'}"
 
 
+class KeyGroup(Enum):
+    """How an unknown periodic key is applied before the compare."""
+
+    XOR = "xor"  # x = v ^ K
+    ADD = "add"  # x = v + K (mod 256 per byte): AFL++ rtn "arith", ROT-n, `c - '0'`
+
+
+class AddKeyEncoder(XorKeyEncoder):
+    """Input shifted by an unknown repeating additive key before a compare."""
+
+    group = KeyGroup.ADD
+
+    def name(self):
+        return f"add_key_{self.period}_{'r' if self.reverse else 'p'}"
+
+
+XorKeyEncoder.group = KeyGroup.XOR
+
 _XOR_ENCODERS = tuple(
     XorKeyEncoder(p, rev) for p in range(1, _XOR_MAX_PERIOD + 1) for rev in (False, True)
 )
+_ADD_ENCODERS = tuple(
+    AddKeyEncoder(p, rev) for p in range(1, _XOR_MAX_PERIOD + 1) for rev in (False, True)
+)
+
+
+def _sub_bytes(a: bytes, b: bytes) -> bytes:
+    """(a - b) mod 256 per byte, equal lengths."""
+    return (np.frombuffer(a, np.uint8) - np.frombuffer(b, np.uint8)).tobytes()
+
+
+def _add_bytes(a: bytes, b: bytes) -> bytes:
+    """(a + b) mod 256 per byte, equal lengths."""
+    return (np.frombuffer(a, np.uint8) + np.frombuffer(b, np.uint8)).tobytes()
+
+
+def _key_lag(group: KeyGroup, a: bytes, p: int) -> bytes:
+    """Key-free lag-p stream: the key cancels (XOR: a[i]^a[i+p]; ADD: a[i+p]-a[i])."""
+    if group is KeyGroup.XOR:
+        return _xor_bytes(a[:-p], a[p:])
+    return _sub_bytes(a[p:], a[:-p])
+
+
+def _key_solve(group: KeyGroup, chunk: bytes, a: bytes) -> bytes:
+    """Key that maps operand *a* onto input *chunk*."""
+    return _xor_bytes(chunk, a) if group is KeyGroup.XOR else _sub_bytes(chunk, a)
+
+
+def _key_apply(group: KeyGroup, v: bytes, key: bytes) -> bytes:
+    """*v* as the target sees it after the key."""
+    return _xor_bytes(v, key) if group is KeyGroup.XOR else _add_bytes(v, key)
 
 
 class _InputLags:
     """Lag-p streams of the last input; one input serves many pairs.
 
     Keyed by identity: the held reference keeps the bytes alive, so the id
-    cannot be reused. Bounded: one input, <= _XOR_MAX_PERIOD streams.
+    cannot be reused. Bounded: one input, <= 2 * _XOR_MAX_PERIOD streams.
     """
 
     def __init__(self) -> None:
         self._data: bytes | None = None
         self._lags: dict[int, bytes] = {}
 
-    def get(self, data: bytes, p: int) -> bytes:
+    def get(self, data: bytes, p: int, group: KeyGroup = KeyGroup.XOR) -> bytes:
         if data is not self._data:
             self._data = data
             self._lags = {}
 
-        lag = self._lags.get(p)
+        lag = self._lags.get((p, group))
         if lag is None:
             arr = np.frombuffer(data, np.uint8)
-            lag = np.bitwise_xor(arr[:-p], arr[p:]).tobytes()
-            self._lags[p] = lag
+            if group is KeyGroup.XOR:
+                lag = np.bitwise_xor(arr[:-p], arr[p:]).tobytes()
+            else:
+                lag = (arr[p:] - arr[:-p]).tobytes()  # uint8 wraps mod 256
+            self._lags[(p, group)] = lag
         return lag
 
 
@@ -925,6 +1045,21 @@ def set_xor_key_stage(state: XorKeyStage) -> None:
     _xor_stage_fn = _xor_key_mutations if state is XorKeyStage.ON else _xor_stage_off
 
 
+class AddKeyStage(Enum):
+    OFF = 0
+    ON = 1
+
+
+# Same cost as the XOR stage, so armed only with --rq-add-key.
+_add_stage_fn: Callable[..., None] = _xor_stage_off
+
+
+def set_add_key_stage(state: AddKeyStage) -> None:
+    """Arm or disarm the additive-key stage of generate_mutations."""
+    global _add_stage_fn  # noqa: PLW0603
+    _add_stage_fn = _add_key_mutations if state is AddKeyStage.ON else _xor_stage_off
+
+
 # All built-in encoders.
 # Mirrors the Encoders list in Redqueen encoding.py lines 235-242.
 BUILTIN_ENCODERS: list[Encoder] = []
@@ -943,6 +1078,10 @@ for rev in (False, True):
     BUILTIN_ENCODERS.append(SplitEncoder(rev))
 
 BUILTIN_ENCODERS.append(CStringEncoder())
+
+# Float compares through strtod (AFL++ cmplog IS_FP).
+for style_ in ("r", "g"):
+    BUILTIN_ENCODERS.append(FloatAsciiEncoder(style_))
 
 for length in range(4, 16):
     BUILTIN_ENCODERS.append(MemEncoder(length))
@@ -1149,9 +1288,10 @@ def generate_mutations(
                             mutations.append((offset_combo, repl, enc))
                             count += 1
 
-    # XOR-key stage: substitution through a key, so hash-like pairs skip it.
+    # Keyed stages: substitution through a key, so hash-like pairs skip them.
     if not hash_only:
         _xor_stage_fn(operand_a, operand_b, cmp_size, cmp_type, input_data, hammer, seen, mutations)
+        _add_stage_fn(operand_a, operand_b, cmp_size, cmp_type, input_data, hammer, seen, mutations)
     return mutations
 
 
@@ -1159,21 +1299,23 @@ _XOR_PAT_CACHE_MAX = 4096
 _xor_pat_cache: LRUCache = LRUCache(_XOR_PAT_CACHE_MAX)
 
 
-def _xor_patterns(op_a: bytes, op_b: bytes, cmp_size: int, cmp_type: str) -> tuple:
+def _xor_patterns(
+    op_a: bytes, op_b: bytes, cmp_size: int, cmp_type: str, encoders: tuple = _XOR_ENCODERS
+) -> tuple:
     """Per-pair (encoder, operand, lag pattern) list; input-independent, cached."""
-    pair_key = (op_a, cmp_size, cmp_type)
+    pair_key = (op_a, cmp_size, cmp_type, encoders[0].group)
     pats = _xor_pat_cache.get(pair_key)
     if pats is not None:
         return pats
 
     out = []
-    for enc in _XOR_ENCODERS:
+    for enc in encoders:
         if not enc.is_applicable(cmp_size, cmp_type, op_a, op_b):
             continue
         # Key-free invariant; a p-periodic operand would match every p-periodic run.
         a = enc.encode(op_a)[0]
         p = enc.period
-        pat = _xor_bytes(a[:-p], a[p:])
+        pat = _key_lag(enc.group, a, p)
         if any(pat):
             out.append((enc, a, pat))
     pats = tuple(out)
@@ -1192,6 +1334,25 @@ def _xor_key_mutations(
     mutations: list,
 ) -> None:
     """Append I2S mutations through an unknown repeating XOR key (see XorKeyEncoder)."""
+    _keyed_mutations(_XOR_ENCODERS, op_a, op_b, cmp_size, cmp_type, data, hammer, seen, mutations)
+
+
+def _add_key_mutations(
+    op_a: bytes,
+    op_b: bytes,
+    cmp_size: int,
+    cmp_type: str,
+    data: bytes,
+    hammer: bool,
+    seen: set[tuple],
+    mutations: list,
+) -> None:
+    """Append I2S mutations through an unknown repeating additive key (AddKeyEncoder)."""
+    _keyed_mutations(_ADD_ENCODERS, op_a, op_b, cmp_size, cmp_type, data, hammer, seen, mutations)
+
+
+def _keyed_mutations(encoders, op_a, op_b, cmp_size, cmp_type, data, hammer, seen, mutations):
+    """Shared body of the keyed stages; *encoders* fixes the key group."""
     n = len(op_a)
     if n > len(data):
         return
@@ -1199,17 +1360,18 @@ def _xor_key_mutations(
     if type(data) is not bytes:
         data = bytes(data)
 
-    for enc, a, pat in _xor_patterns(op_a, op_b, cmp_size, cmp_type):
+    group = encoders[0].group
+    for enc, a, pat in _xor_patterns(op_a, op_b, cmp_size, cmp_type, encoders):
         p = enc.period
         variants = None
         count = 0
-        for off in find_offsets(_input_lags.get(data, p), pat):
+        for off in find_offsets(_input_lags.get(data, p, group), pat):
             if count >= MAX_MUTATIONS_PER_PAIR:
                 break
 
             # Key 0 is a plain match: PlainEncoder already wrote it.
             chunk = data[off : off + n]
-            key = _xor_bytes(chunk, a)[:p]
+            key = _key_solve(group, chunk, a)[:p]
             if not any(key):
                 continue
 
@@ -1217,7 +1379,7 @@ def _xor_key_mutations(
                 variants = _get_encoded_variants(enc, cmp_type, cmp_size, op_b, hammer)
             for (rv,) in variants:
                 m = len(rv)
-                repl = _xor_bytes(rv, (key * (m // p + 1))[:m])
+                repl = _key_apply(group, rv, (key * (m // p + 1))[:m])
                 k = ((off,), (repl,))
                 if repl == chunk or k in seen:
                     continue

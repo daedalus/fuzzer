@@ -192,6 +192,13 @@ FUZZGOAT_KATZ_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/fuzzgoat_read_dist.so", "-D dictionaries/json.dict"),
 ]
 
+# fuzzgoat_tcg: trace-cmp in the library object (build_tracecmp_targets);
+# the fuzzgoat set logs no compares, so cmplog A/Bs run here. noasan; not
+# comparable with the fuzzgoat set (different instrumentation).
+FUZZGOAT_TCG_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/fuzzgoat_read_tcg.so", "-D dictionaries/json.dict"),
+]
+
 # fuzzgoat_dir279 / fuzzgoat_dir258: ASAN trace-pc fuzzgoat (build_targets.sh
 # --distance), directed at one planted bug; read with analyse --metric tte_<kind>:
 # fuzzgoat.c:279 -> tte_bad-free (empty string), :258 -> tte_heap-buffer-overflow
@@ -217,6 +224,14 @@ FUZZGOAT_DIR258_TARGETS: list[tuple[str, str]] = [
 # Cells start from an empty corpus like every set. Not comparable with others.
 FFMPEG_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/ffmpeg_read_9.0.2_noasan.so", "-D dictionaries/wav.dict"),
+]
+
+# ffmpeg_ijon: the same build with -DFUZZ_IJON (tools/build_targets.sh
+# --ffmpeg-opts=ijon): IJON_SET stream log and output formats, IJON_STATE per
+# container. Edge ids differ from ffmpeg's by construction: compare the two
+# sets on --metric blocks.
+FFMPEG_IJON_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/ffmpeg_read_9.0.2_ijon.so", "-D dictionaries/wav.dict"),
 ]
 
 # ffmpeg_asan: FFmpeg 9.0.2 ASAN (tools/build_targets.sh --ffmpeg-opts=asan),
@@ -248,9 +263,11 @@ TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "fuzzgoat": FUZZGOAT_TARGETS,
     "fuzzgoat_asan": FUZZGOAT_ASAN_TARGETS,
     "fuzzgoat_katz": FUZZGOAT_KATZ_TARGETS,
+    "fuzzgoat_tcg": FUZZGOAT_TCG_TARGETS,
     "fuzzgoat_dir279": FUZZGOAT_DIR279_TARGETS,
     "fuzzgoat_dir258": FUZZGOAT_DIR258_TARGETS,
     "ffmpeg": FFMPEG_TARGETS,
+    "ffmpeg_ijon": FFMPEG_IJON_TARGETS,
     "ffmpeg_asan": FFMPEG_ASAN_TARGETS,
     "ffmpeg_803": FFMPEG_803_TARGETS,
 }

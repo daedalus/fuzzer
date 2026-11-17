@@ -46,6 +46,7 @@ widely-used return-value APIs, or test mocks.
 
 - **Clamp any input-derived range before calling `random.randint`/`randrange`.** If bounds come from input length (e.g. `len(raw) // stride - 1`), a small or degenerate input can make `hi < lo`, raising `ValueError` at fuzz time. Guard with `max(0, ...)` or an early return for the degenerate case.
 - **Clamp arithmetic-mutation results to their valid range before packing.** `val * 2` or `val ^ (1 << 31)` can overflow the target field width and crash `struct.pack_into` — clamp to `[lo, hi]` for the field width in use.
+- **Never compute variance as `sum_sq/n - mean**2`.** Catastrophic cancellation: at offset 1e9 it returns 0 for a true variance of 9. Use two-pass or Welford (`core/running_stats.py`); keep a running mean, not `sum/n`, or constant streams leak rounding noise. Fixed in `analyzer_garch.py`.
 
 ## State & double-counting
 

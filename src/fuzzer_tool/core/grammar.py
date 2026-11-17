@@ -262,6 +262,28 @@ class Grammar:
             self._fit_alts[key] = fit
         return fit
 
+    # ── Read API for walk-based mutators (core/gramatron.py) ──────────
+
+    def start_rule(self) -> str | None:
+        """The rule generate() starts from: the first one parsed."""
+        return next(iter(self.rules), None)
+
+    def alternatives(self, name: str, depth: int) -> list | None:
+        """Alternatives generate() may pick for *name* at *depth*; None = b"?" leaf."""
+        if depth <= 0 or name not in self._table:
+            return None
+        return self._alts_at(name, depth)
+
+    def shortest_alternative(self, name: str, depth: int) -> int:
+        """Index, within alternatives(name, depth), of the one that terminates soonest."""
+        alts = self._alts_at(name, depth)
+        need = dict(zip(map(id, self.rules[name]), self._needs[name], strict=True))
+        return min(range(len(alts)), key=lambda k: need.get(id(alts[k]), UNREACHABLE_DEPTH))
+
+    def repeat_upper(self, name: str, lo: int, hi: int, depth: int) -> int:
+        """Largest repeat count generate() allows here (only *lo* once too deep)."""
+        return hi if self._mu.get(name, 0) < depth else lo
+
     def _fits(self, name: str, depth: int) -> bool:
         """True when *name* can terminate within *depth* levels."""
         return self._mu.get(name, 0) <= depth

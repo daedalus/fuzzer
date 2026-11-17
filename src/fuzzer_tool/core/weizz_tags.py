@@ -1025,7 +1025,6 @@ def collect_structure_map(
 
 def attach_tags_to_meta(meta: dict, smap: StructureMap) -> dict:
     """Store a compact RLE tag map on seed metadata dict (mutates and returns)."""
-    meta = dict(meta)
     meta["weizz_tags_rle"] = smap.to_rle()
     meta["weizz_tags_len"] = smap.input_len
     meta["weizz_tags_ntypes"] = smap.ntypes

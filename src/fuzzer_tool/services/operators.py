@@ -75,6 +75,7 @@ from fuzzer_tool.core.mutations import (
     splice_diff_located,
 )
 from fuzzer_tool.core.mutations.afl_det import det_variant
+from fuzzer_tool.core.mutations.generic import InputMode, input_mode
 from fuzzer_tool.core.mutations.int_encodings import (
     bcd_pack,
     bit_compress,
@@ -348,9 +349,10 @@ _CONTEXT_FORMAT_CATEGORIES = (
     "other",
 )
 # 6 scalar features (log-size, entropy, edge-coverage frac, lineage depth,
-# cmplog-pairs-exist, corpus-size percentile) + format one-hot + 1 per-arm
+# cmplog-pairs-exist, corpus-size percentile) + format one-hot + input-mode
+# one-hot (text/mixed/binary, AFL++ input_mode) + 1 per-arm
 # operator-cost feature appended in _context_vector().
-CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
+CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + len(InputMode) + 1
 
 # ── deterministic stage ───────────────────────────────────────────────────
 # Effector-map codes. A position is skipped by the arithmetic and
@@ -1447,6 +1449,17 @@ class _SegAction(Enum):
 _POS_SLOT_COUNT = 11
 
 
+class StallMode(Enum):
+    """Op choice during stall recovery (--stall-mode)."""
+
+    RANDOM = "random"  # uniform over every available op
+    EXPLOIT = "exploit"  # AFL++ -P: only the precise bands (EXPLOIT_BANDS)
+
+
+# Bands an exploit-mode stall draws from: input-to-state, solvers, dictionary.
+EXPLOIT_BANDS = ("adaptive", "dict")
+
+
 def _round_mutations(f) -> int:
     """Mutations this round: -M scaled by seed energy and the 1/5 rule, floored at 16 in stall recovery."""
     n_mutations = f.mutations_per_input
@@ -1503,6 +1516,7 @@ class OperatorEngine:
 
     def __init__(self, fuzzer):
         self.f = fuzzer
+        self.bind_stall_mode(StallMode.RANDOM)  # Fuzzer rebinds from --stall-mode
         # Position plan for the current mutate() round (_pos_plan); None
         # falls back to select_position.
         self._round_pos_plan: tuple | None = None
@@ -3656,6 +3670,14 @@ class OperatorEngine:
                 ]
             )
 
+    def _op_cmp_solve(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.cmp_solve import cmp_solve
+
+        # Same length out as in: no max_len truncation needed.
+        if buf and self.ctx.cmplog_pairs:
+            out = cmp_solve(bytes(buf), self.ctx.cmplog_pairs, self.ctx._rng)
+            return None if out is None else bytearray(out)
+
     def _op_gradient_descent(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.gradient_descent import gradient_descent, pick_objective
 
@@ -3671,6 +3693,14 @@ class OperatorEngine:
         )
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
+
+    def _op_fox_newton(self, buf, _byte_idx, _data):
+        """FOX secant step: set a field to its fitted root (core/fox_newton.py, --fox-newton)."""
+        log = getattr(self.f, "_secant_log", None)
+        out = log.propose(bytes(buf), self.ctx._rng) if log is not None else None
+        if out is None:
+            return self._op_declined("fox_newton", buf)
+        return bytearray(out[: self.ctx.max_len])
 
     def _op_saliency_ladder(self, buf, _byte_idx, _data):
         """NEUZZ ladder: nudge the bytes the saliency net ranks highest along the gradient sign.
@@ -4073,8 +4103,13 @@ class OperatorEngine:
 
     # ── Weizz P2: field / chunk operators ─────────────────────────────────
 
-    def _weizz_structure_map(self, data: bytes):
-        """Load StructureMap for *data* from seed_meta, or None."""
+    def _weizz_structure_map(self, data: bytes, buf=None):
+        """Load StructureMap for *data* from seed_meta, or None.
+
+        With *buf*: None once an earlier op in the stack changed its length,
+        since the offsets no longer line up. The seed's own map stays clean
+        (its bytes are unchanged); children inherit a dirty one (P5).
+        """
         from fuzzer_tool.core.weizz_tags import load_tags_from_meta
 
         meta = self.ctx.seed_meta.get(data)
@@ -4082,13 +4117,9 @@ class OperatorEngine:
             return None
         if meta.get("weizz_tags_dirty"):
             return None
+        if buf is not None and len(buf) != meta.get("weizz_tags_len"):
+            return None
         return load_tags_from_meta(meta)
-
-    def _weizz_mark_dirty(self, data: bytes) -> None:
-        """Mark tags on parent seed dirty after a length-changing mutation."""
-        meta = self.ctx.seed_meta.get(data)
-        if meta is not None and "weizz_tags_rle" in meta:
-            meta["weizz_tags_dirty"] = True
 
     def _op_weizz_field_havoc(self, buf, _byte_idx, data):
         """Havoc only inside one Weizz-tagged field (same-cmp_id run).
@@ -4096,7 +4127,7 @@ class OperatorEngine:
         Length-preserving: flips / arithmetic / interesting values within a
         randomly chosen field span. Falls back to None when no tags.
         """
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf:
             return None
         spans = smap.field_spans()
@@ -4138,7 +4169,7 @@ class OperatorEngine:
 
     def _op_weizz_chunk_dup(self, buf, _byte_idx, data):
         """Duplicate a Weizz top-level chunk span (insert a second copy)."""
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf:
             return None
         spans = smap.chunk_spans(parent=None)
@@ -4153,12 +4184,11 @@ class OperatorEngine:
             return None
         # Insert duplicate after the original chunk.
         out = bytearray(buf[:end]) + bytearray(chunk) + bytearray(buf[end:])
-        self._weizz_mark_dirty(data)
         return out[: self.ctx.max_len]
 
     def _op_weizz_chunk_delete(self, buf, _byte_idx, data):
         """Delete a Weizz field or top-level chunk span (never the whole buffer)."""
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf or len(buf) < 4:
             return None
         # Prefer field spans: chunk_spans(parent=None) may collapse the entire
@@ -4176,12 +4206,11 @@ class OperatorEngine:
         out = bytearray(buf[:start]) + bytearray(buf[end:])
         if not out:
             return None
-        self._weizz_mark_dirty(data)
         return out[: self.ctx.max_len]
 
     def _op_weizz_chunk_swap(self, buf, _byte_idx, data):
         """Swap two Weizz top-level chunk spans."""
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf:
             return None
         spans = smap.chunk_spans(parent=None)
@@ -4205,10 +4234,6 @@ class OperatorEngine:
             + bytearray(buf[a0:a1])
             + bytearray(buf[b1:])
         )
-        # Length-preserving swap: tags remain valid position-wise only if
-        # spans had equal length; mark dirty when lengths differ.
-        if (a1 - a0) != (b1 - b0):
-            self._weizz_mark_dirty(data)
         return out[: self.ctx.max_len]
 
     def _op_weizz_tag_repair(self, buf, _byte_idx, data):
@@ -4227,7 +4252,7 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.weizz_tags import TagFlags
 
-        smap = self._weizz_structure_map(data)
+        smap = self._weizz_structure_map(data, buf)
         if smap is None or not buf:
             return None
         rng = self.ctx._rng
@@ -4320,6 +4345,65 @@ class OperatorEngine:
                     : self.ctx.max_len
                 ]
             )
+
+    def _op_c_source_mutate(self, buf, _byte_idx, _data):
+        """AFL++ compiler-fuzzer rule (core/mutations/source_rules.py); text inputs only."""
+        from fuzzer_tool.core.mutations.source_rules import source_mutate  # noqa: PLC0415
+
+        out = source_mutate(bytes(buf), self.ctx._rng, self.ctx.max_len or len(buf) * 2 + 64)
+        return bytearray(out) if out is not None else None
+
+    # ── Gramatron walks (core/gramatron.py) ──
+    # A seed this engine produced has a remembered walk and is mutated as one;
+    # any other input is replaced by a fresh walk (Gramatron fuzzes walks only).
+
+    def _gramatron(self):
+        engine = getattr(self, "_gramatron_engine", None)
+        if engine is None or engine.grammar is not self.ctx.grammar:
+            from fuzzer_tool.core.gramatron import Gramatron  # noqa: PLC0415
+
+            engine = self._gramatron_engine = Gramatron(self.ctx.grammar)
+        return engine
+
+    def _gramatron_emit(self, engine, walk: list[int], out: bytes) -> bytearray:
+        engine.remember(out, walk)
+        return bytearray(out[: self.ctx.max_len or None])
+
+    def _gramatron_seed(self, engine, buf):
+        """The input's walk, or a fresh (walk, out) when it has none."""
+        walk = engine.walk_for(bytes(buf))
+        if walk is None:
+            return None, engine.random_walk(self.ctx._rng)
+        return walk, None
+
+    def _op_gramatron_random(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine = self._gramatron()
+        walk, fresh = self._gramatron_seed(engine, buf)
+        return self._gramatron_emit(engine, *(fresh or engine.mutate_random(walk, self.ctx._rng)))
+
+    def _op_gramatron_splice(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine, rng = self._gramatron(), self.ctx._rng
+        walk, fresh = self._gramatron_seed(engine, buf)
+        if fresh is not None:
+            return self._gramatron_emit(engine, *fresh)
+
+        donor = engine.donor(rng)
+        res = engine.mutate_splice(walk, donor, rng) if donor is not None else None
+        return self._gramatron_emit(engine, *(res or engine.mutate_random(walk, rng)))
+
+    def _op_gramatron_recurse(self, buf, _byte_idx, _data):
+        if not self.ctx.grammar:
+            return None
+        engine, rng = self._gramatron(), self.ctx._rng
+        walk, fresh = self._gramatron_seed(engine, buf)
+        if fresh is not None:
+            return self._gramatron_emit(engine, *fresh)
+        res = engine.mutate_recurse(walk, rng)
+        return self._gramatron_emit(engine, *(res or engine.mutate_random(walk, rng)))
 
     def _op_fsm_regen(self, buf, _byte_idx, _data):
         """Keep a valid FSM prefix, regenerate a valid tail (core/format_fsm.py)."""
@@ -6221,6 +6305,8 @@ class OperatorEngine:
 
         fmt = self._classify_format(data)
         fmt_onehot = [1.0 if fmt == cat else 0.0 for cat in _CONTEXT_FORMAT_CATEGORIES]
+        mode = input_mode(data)
+        mode_onehot = [1.0 if mode is m else 0.0 for m in InputMode]
 
         return [
             log_size,
@@ -6230,6 +6316,7 @@ class OperatorEngine:
             cmplog_exists,
             pctile,
             *fmt_onehot,
+            *mode_onehot,
         ]
 
     def _op_cost_feature(self, op: str) -> float:
@@ -6280,14 +6367,33 @@ class OperatorEngine:
         f._meta_strategy_key = strategy
         return strategy
 
+    def bind_stall_mode(self, mode: StallMode) -> None:
+        """Fix the stall-recovery op picker once (ifs up: no per-call mode test)."""
+        if mode is StallMode.RANDOM:
+            self._stall_pick = self._stall_pick_random
+            return
+        self._exploit_ops = frozenset(n for b in EXPLOIT_BANDS for n in REGISTRY.categories()[b])
+        self._stall_pick = self._stall_pick_exploit
+
+    def _stall_pick_random(self, ops: list[str]) -> str:
+        self.f._meta_strategy = "random_stall"
+        return self.ctx._rng.choice(ops)
+
+    def _stall_pick_exploit(self, ops: list[str]) -> str:
+        # Sorted: the candidate order must not depend on set hashing.
+        precise = sorted(op for op in ops if op in self._exploit_ops)
+        if not precise:
+            return self._stall_pick_random(ops)
+        self.f._meta_strategy = "exploit_stall"
+        return self.ctx._rng.choice(precise)
+
     def select_op(self, ops: list[str]) -> str:
         """Select a mutation operator using the active scheduling strategy."""
         f = self.f
 
         if f._stall_recovery_active:
-            f._meta_strategy = "random_stall"
             f._op_selector = None
-            return self.ctx._rng.choice(ops)
+            return self._stall_pick(ops)
 
         # Ballot and strategy are fixed for the exec: resolve on the first
         # mutation, reuse on the rest. mutate() clears the cache per exec; a
@@ -7337,6 +7443,13 @@ class OperatorEngine:
         # Cleared every round: only a round that builds a joint probe below
         # may leave it set, or the exec loop would credit a stale pair.
         f._last_joint_probe = None
+        # --advisors move (Fuzzer._advise): first, so it runs on its own seed.
+        advisors = getattr(f, "_advisors", None)
+        advised = advisors.pop() if advisors is not None else None
+        if advised is not None:
+            self._reset_round_ops(data, advised)
+            return advised
+
         det_mutant = self.maybe_deterministic_mutation(data)
         if det_mutant is not None:
             self._reset_round_ops(data, det_mutant)

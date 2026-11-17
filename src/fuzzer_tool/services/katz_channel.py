@@ -32,7 +32,7 @@ from fuzzer_tool.core.icfg import (
     build_interprocedural_cfg,
     probe_key_node_table,
 )
-from fuzzer_tool.core.schedulers.seed_branch import BranchFrontier
+from fuzzer_tool.core.schedulers.seed_branch import BranchFrontier, FrontierRank
 from fuzzer_tool.core.schedulers.seed_katz import build_beta, katz_scores
 
 log = logging.getLogger(__name__)
@@ -54,6 +54,9 @@ _MAX_RECOMPUTE_OVERHEAD = 0.05
 # ratio to a sub-millisecond rebuild would delay a refresh the campaign can
 # trivially afford, and on a small ICFG every rebuild is that cheap.
 _COST_GATE_FLOOR = 0.005
+
+# Cut damage is measured from this function's entry block (--cut-damage).
+_ENTRY_FUNC = "main"
 
 # Mask key for the union of seeds that left the corpus (NUL: never a hash).
 EVICTED_KEY = "\0evicted"
@@ -307,10 +310,23 @@ class KatzChannel:
             self._last_recompute_exec = self.exec_count
         return self._scores
 
-    def enable_branch(self) -> None:
+    def enable_branch(self, rank: FrontierRank = FrontierRank.HITS) -> None:
         """Score seeds for the 'branch' arm on every recompute."""
-        self._branch = BranchFrontier(self.icfg)
+        guard = self._cut_guard() if rank is FrontierRank.CUT_DAMAGE else None
+        self._branch = BranchFrontier(self.icfg, guard=guard)
         self._dirty = True
+
+    def _cut_guard(self) -> np.ndarray | None:
+        """Cut damage from ``main``'s entry block; None (hits rank) without one."""
+        funcs = self.icfg.node_funcs
+        entry = next((i for i, f in enumerate(funcs) if f == _ENTRY_FUNC), None)
+        if entry is None:
+            log.warning("--cut-damage: no %s() block in the ICFG; ranking by hits", _ENTRY_FUNC)
+            return None
+        t0 = time.perf_counter()
+        _, damage = self.icfg.cut_damage(self.icfg.node_addrs[entry])
+        log.info("cut damage: %d blocks in %.2f s", self.n_nodes, time.perf_counter() - t0)
+        return damage
 
     @property
     def branch_ready(self) -> bool:

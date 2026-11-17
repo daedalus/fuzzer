@@ -1,6 +1,16 @@
 """Tests for core/reducer.py — C-Reduce-style pass manager."""
 
-from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
+import struct
+
+from fuzzer_tool.core.reducer import (
+    ChunkPass,
+    MsgPass,
+    Oracle,
+    Phase,
+    Reducer,
+    Verdict,
+    shrink_passes,
+)
 
 
 def _bool_test(fn):
@@ -191,3 +201,74 @@ class TestAdversarial:
         data = bytes(range(200))
         out = Reducer(Oracle(lambda d: Verdict.FAIL), [(Phase.MAIN, ChunkPass())]).run(data)
         assert out == data
+
+
+# --- MsgPass: whole-message deletion (VirtFuzz frame minimizer) ---
+
+
+def _frames(*payloads: bytes) -> bytes:
+    """u32 BE length-prefixed frames, built independently of seq_mutate."""
+    return b"".join(struct.pack(">I", len(p)) + p for p in payloads)
+
+
+def _parse_frames(data: bytes) -> list[bytes] | None:
+    """Strict u32 BE frame walk: None unless the frames tile *data* exactly."""
+    out, pos, n = [], 0, len(data)
+    while pos < n:
+        if pos + 4 > n:
+            return None
+        (size,) = struct.unpack_from(">I", data, pos)
+        end = pos + 4 + size
+        if end > n:
+            return None
+        out.append(data[pos + 4 : end])
+        pos = end
+    return out
+
+
+def _framed_bug(d: bytes) -> bool:
+    """A stateful parser: crashes only on a well-framed BUG message."""
+    msgs = _parse_frames(d)
+    return msgs is not None and b"BUG" in msgs
+
+
+class TestMsgPass:
+    def test_reduces_to_trigger_frame(self):
+        data = _frames(b"hello", b"BUG", b"world!", b"tail")
+        out = Reducer(Oracle(_bool_test(_framed_bug)), shrink_passes()).run(data)
+        assert out == _frames(b"BUG")
+
+    def test_control_bytes_only_stalls(self):
+        # Falsification: byte cuts alone break framing and cannot reach the
+        # trigger frame, so the test above is measuring MsgPass.
+        data = _frames(b"hello", b"BUG", b"world!", b"tail")
+        out = Reducer(Oracle(_bool_test(_framed_bug)), [(Phase.MAIN, ChunkPass())]).run(data)
+        assert out != _frames(b"BUG")
+
+    def test_keeps_needed_lines(self):
+        data = b"a\nNEED1\nb\nc\nNEED2\nd\n"
+        oracle = Oracle(_needs(b"NEED1\n", b"NEED2\n"))
+        out = Reducer(oracle, [(Phase.MAIN, MsgPass())]).run(data)
+        assert out == b"NEED1\nNEED2\n"
+
+    def test_no_boundaries_no_runs(self):
+        # Adversarial: unsplittable input proposes nothing, costs no exec.
+        data = bytes(range(7))
+        p = MsgPass()
+        assert p.transform(data, p.new(data)) is None
+
+    def test_never_proposes_empty(self):
+        # Adversarial: an always-PASS oracle accepts every cut; none is empty.
+        seen: list[bytes] = []
+
+        def accept(d: bytes) -> Verdict:
+            seen.append(d)
+            return Verdict.PASS
+
+        data = _frames(b"aa", b"bb", b"cc")
+        out = Reducer(Oracle(accept), [(Phase.MAIN, MsgPass())]).run(data)
+        assert seen and all(seen) and out
+
+    def test_shrink_passes_order(self):
+        kinds = [type(p) for phase, p in shrink_passes() if phase is Phase.MAIN]
+        assert kinds.index(MsgPass) < kinds.index(ChunkPass)

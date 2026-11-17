@@ -8,7 +8,6 @@ from fuzzer_tool.adapters.filesystem import (
     load_corpus,
     save_to_corpus,
 )
-from fuzzer_tool.core.bloom import BloomFilter
 
 
 class TestComputeDelta:
@@ -142,13 +141,12 @@ class TestDeltaSaveLoad:
         assert b in corpus
         assert c in corpus
 
-    def test_load_with_bloom(self, tmp_path):
+    def test_load_after_save(self, tmp_path):
         a = b"test_a"
         seen = set()
-        bloom = BloomFilter(capacity=100)
-        save_to_corpus(a, tmp_path, seen, bloom)
+        save_to_corpus(a, tmp_path, seen)
 
-        loaded_corpus, loaded_seen, _ = load_corpus(tmp_path, bloom=bloom)
+        loaded_corpus, loaded_seen, _ = load_corpus(tmp_path)
         assert len(loaded_corpus) == 1
         assert hash_data(a) in loaded_seen
 

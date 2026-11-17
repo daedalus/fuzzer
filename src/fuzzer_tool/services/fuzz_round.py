@@ -30,6 +30,8 @@ import os
 import resource
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import _NO_VALUE_DISTANCE
 from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
@@ -37,6 +39,7 @@ from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cmplog import CmplogRecords, CountsDrain
+from fuzzer_tool.core.crash_cov import SigNovelty
 from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
 from fuzzer_tool.core.orbit_dedup import run_probe
 from fuzzer_tool.core.ro_rd import classify_operator_name
@@ -44,6 +47,7 @@ from fuzzer_tool.core.run_mode import CrashReward, RunMode, Switch
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.secretary import SecretaryStopping
 from fuzzer_tool.core.validity import Validity
+from fuzzer_tool.services.ijon_channel import Exec
 from fuzzer_tool.services.runner import TargetRunner, ptrace_available
 
 if TYPE_CHECKING:
@@ -129,6 +133,8 @@ class FuzzRound:
         "_has_new_coverage",
         "_is_new_max",
         "_is_hw_max",
+        "_is_ijon_max",
+        "_is_stack_max",
         "_is_cmp_progress",
         "_is_new_valid_coverage",
         "_ltl_new",
@@ -159,6 +165,8 @@ class FuzzRound:
         self._has_new_coverage = False
         self._is_new_max = False
         self._is_hw_max = False
+        self._is_ijon_max = False
+        self._is_stack_max = False
         self._is_cmp_progress = False
         self._is_new_valid_coverage = False
         self._ltl_new = False
@@ -469,11 +477,26 @@ class FuzzRound:
             f._cmplog_skip_counter = 0
             # Counters were drained in _execute; a second drain empties them.
             new_tokens = f._cmplog.collect_tokens(CountsDrain.SKIP)
+            self._log_secant()
         else:
             new_tokens = []
         self._cmplog_found = bool(new_tokens)
         self._rewind_shim()
+        self._rescope_shim()
         f._add_dict_tokens(new_tokens)
+
+    def _rescope_shim(self) -> None:
+        # Campaign dedup scope: after a full pool turnover, let the shim
+        # re-send pairs the pool evicted. Only a collect can evict.
+        if self._collect_now and self._f._cmplog.take_stale_scope():
+            self._f._rescope_cmplog_shim()
+
+    def _log_secant(self) -> None:
+        # --fox-newton: records are gated to collect rounds, so this drain
+        # is this exec's (trim runs aside) and pairs with self._mutated.
+        log = getattr(self._f, "_secant_log", None)  # __new__-built test fuzzers
+        if log is not None:
+            log.observe(self._mutated, self._f._cmplog.last_conds)
 
     def _collect_due(self) -> bool:
         # Whether this round's _collect_tokens will drain the records.
@@ -911,13 +934,14 @@ class FuzzRound:
             return
         self._is_crash = self._is_crash and explorer.observe(self._edges_now())
         self._is_interesting = self._has_new_coverage = self._is_new_max = False
-        self._is_hw_max = False
+        self._is_hw_max = self._is_ijon_max = self._is_stack_max = False
         self._is_cmp_progress = self._is_new_valid_coverage = self._is_slow = False
 
     # ── Side signals ─────────────────────────────────────────────────
 
     def _observe(self) -> None:
         self._observe_counts()
+        self._observe_stack()
         self._cmp_progress()
         self._valid_coverage()
         self._region_liveness()
@@ -963,6 +987,27 @@ class FuzzRound:
         # (honggfuzz perfFeedback). Truncated runs skipped as above.
         hw_max = f._hw_max
         self._is_hw_max = bool(clean and hw_max is not None and hw_max.observe(f._last_perf_deltas))
+        self._observe_ijon()
+
+    def _observe_ijon(self) -> None:
+        # --ijon: an annotated value (IJON_MAX/MIN) beat its campaign max.
+        # Read on truncated runs too, so their partial values are discarded.
+        ijon = self._f._ijon
+        if ijon is None:
+            return
+        clean = not self._is_crash and not self._is_timeout
+        run = Exec.CLEAN if clean else Exec.TRUNCATED
+        self._is_ijon_max = bool(ijon.observe(run, self._mutated))
+
+    def _observe_stack(self) -> None:
+        # --stack-depth-max: recursed deeper than any input before it
+        # (honggfuzz). A truncated run stopped mid-path; its depth is not
+        # a maximum.
+        stack_max = self._f._stack_max
+        shm = self._scanned_shm
+        if stack_max is None or shm is None or self._is_crash or self._is_timeout:
+            return
+        self._is_stack_max = stack_max.observe(shm.read_stack_depth())
 
     def _cmp_progress(self) -> None:
         # Comparison progress: a callback family this input satisfied more
@@ -1104,6 +1149,12 @@ class FuzzRound:
         # For round-robin and DRR an Elo-compatibility signal only: their own
         # selection ignores it (deterministic cycling).
         f._record_seed_floor_arms(data, found, weight)
+        # --fess-cell-novelty: in-cell novelty needs this exec's edges, read
+        # before the record it credits. Timeouts earn no coverage.
+        fess_observe = getattr(f, "_fess_observe", None)
+        if fess_observe is not None:
+            edges = () if self._is_timeout else self._edges_now()
+            fess_observe(data, edges if isinstance(edges, set | frozenset) else ())
         f._record_seed_os_arms(data, found, weight)
 
     def _feed_models(self) -> None:
@@ -1163,18 +1214,24 @@ class FuzzRound:
         f._seed_dpp.maybe_refit(f._edge_tracker, f.exec_count)
 
     def _feed_weizz(self) -> None:
-        # Weizz structure tags: once-per-lineage passive collection after a
-        # coverage gain, gated by --weizz-tags and max_len. Uses existing
-        # cmplog pairs (+ optional colorize taints); no second tracer.
+        # Weizz structure tags for the round's seed (initial, admitted or
+        # resumed) while it lacks a clean map. Collecting on the mutant was
+        # lost: save_to_corpus replaces its meta. Retries on rounds 1, 2, 4,
+        # 8, ...: the cmplog pool may be empty early, and log2 attempts keep
+        # the scan cost bounded. Reads existing cmplog pairs; no extra execs.
         f = self._f
-        mutated = self._mutated
-        if (
-            self._has_new_coverage
-            and f.weizz_tags
-            and f._cmplog is not None
-            and len(mutated) <= f.weizz_tags_max_len
-        ):
-            f._maybe_collect_weizz_tags(mutated)
+        meta = self._meta
+        if meta is None or not f.weizz_tags or f._cmplog is None:
+            return
+        if meta.get("weizz_tags_rle") and not meta.get("weizz_tags_dirty"):
+            return
+
+        rounds = meta["fuzz_count"]
+        if rounds < 1 or rounds & (rounds - 1):
+            return
+        if len(self._data) > f.weizz_tags_max_len:
+            return
+        f._maybe_collect_weizz_tags(self._data)
 
     def _feed_katz(self) -> None:
         # K-Scheduler bitmap sampling runs EVERY exec (beta needs R_i over
@@ -1538,6 +1595,8 @@ class FuzzRound:
             or self._is_slow
             or self._is_new_max
             or self._is_hw_max
+            or self._is_ijon_max
+            or self._is_stack_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
         )
@@ -2008,12 +2067,23 @@ class FuzzRound:
 
     # ── Exits ────────────────────────────────────────────────────────
 
+    def _crash_edges(self) -> np.ndarray:
+        # Read before triage: its ptrace rerun may overwrite the map.
+        return self._f._get_current_edge_array()
+
+    def _note_crash_cov(self, edges: np.ndarray, crash_name) -> None:
+        # Crash-only virgin map (core/crash_cov.py); falsy name = signature dup.
+        sig = SigNovelty.NEW if crash_name else SigNovelty.DUP
+        self._f._crash_cov.record(edges, sig)
+
     def _on_crash(self) -> bool:
         f = self._f
         mutated = self._mutated
         f.crash_count += 1
+        edges = self._crash_edges()
         self._triage_crash()
         crash_name = f.save_crash(mutated, self._returncode, self._stderr)
+        self._note_crash_cov(edges, crash_name)
         f._prune_crash_data()
         # Generate GDB/strace trace report if enabled; with the background
         # queue it shares the sidecar's gdb run instead of blocking here.
@@ -2102,6 +2172,8 @@ class FuzzRound:
             or self._has_new_coverage
             or self._is_new_max
             or self._is_hw_max
+            or self._is_ijon_max
+            or self._is_stack_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
             or self._ltl_new
@@ -2113,6 +2185,7 @@ class FuzzRound:
         mutated = self._mutated
         _corpus_len_before = len(f.corpus)
         f.save_to_corpus(mutated, parent=data)
+        f._note_c11(mutated)
         self._tag_distance()
         # Validity is a property of this execution, so it is recorded
         # here rather than reconstructed later: the seed picker reads it
@@ -2130,8 +2203,7 @@ class FuzzRound:
         self._feed_population()
         self._probe_uninit()
         # Coverage-guided trimming: try to minimize inputs that hit new edges
-        trim = f._auto_minimize is Switch.ON
-        if trim and self._has_new_coverage and len(mutated) > 10:
+        if self._trims():
             f._trim_new_coverage(mutated, data)
         if f.mc and f.mc_cem:
             f.mc.add_elite(mutated, 2, temperature=f._temperature)
@@ -2140,6 +2212,14 @@ class FuzzRound:
         f._maybe_periodic_minimize(dedup=True)
         f._record_fluctuation_observation("success")
         return True
+
+    def _trims(self) -> bool:
+        # --trim-new-coverage: up to 512 execs per admission (~98% of an
+        # FFmpeg campaign), so opt-in; --no-auto-minimize still turns it off.
+        f = self._f
+        if f._trim_new_coverage_on is not Switch.ON or f._auto_minimize is not Switch.ON:
+            return False
+        return self._has_new_coverage and len(self._mutated) > 10
 
     def _note_novelty(self) -> None:
         # --grimoire: the edges this input was admitted for are what
@@ -2182,6 +2262,8 @@ class FuzzRound:
     def _on_boring(self) -> bool:
         f = self._f
         mutated = self._mutated
+        if f._plateau is not None:
+            self._join_plateau()
         # ── Metropolis acceptance for non-improving / non-crashing inputs ──
         if f._metropolis and f._anneal_budget > 0 and not self._is_timeout and self._metropolis():
             return True
@@ -2200,6 +2282,19 @@ class FuzzRound:
         f._record_fluctuation_observation("boring")
         return False
 
+    def _join_plateau(self) -> None:
+        # --plateau-groups: a boring mutant on another seed's exact path puts
+        # parent and that seed on one plateau. The shim's rolling path hash is
+        # this exec's (one word read); a timeout's path is truncated.
+        f = self._f
+        shm = f.shm_cov
+        if shm is None or self._is_timeout:
+            return
+        path_hash = shm.read_path_hash()
+        if path_hash == 0:
+            return
+        f._plateau.observe(f._seed_key(self._data), path_hash, f._edge_tracker.seed_path_hash)
+
     def _metropolis(self) -> bool:
         f = self._f
         data = self._data
@@ -2210,6 +2305,7 @@ class FuzzRound:
             return False
         _corpus_len_before = len(f.corpus)
         f.save_to_corpus(mutated, parent=data)
+        f._note_c11(mutated)
         self._tag_distance()
         f._record_lineage_insert(mutated, data, _corpus_len_before)
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
@@ -2232,11 +2328,12 @@ class FuzzRound:
         self._periodic()
         self._classify()
         self._lite_scan()
+        self._observe_ijon()
         self._record_edges()
 
         if self._is_crash:
             return self._lite_crash()
-        if not (self._has_new_coverage or self._is_interesting):
+        if not (self._has_new_coverage or self._is_interesting or self._is_ijon_max):
             return False
 
         self._f.save_to_corpus(self._mutated, parent=self._data)
@@ -2263,7 +2360,9 @@ class FuzzRound:
         # Count, triage (fault address for the signature), save, bound.
         f = self._f
         f.crash_count += 1
+        edges = self._crash_edges()
         self._triage_crash()
-        f.save_crash(self._mutated, self._returncode, self._stderr)
+        crash_name = f.save_crash(self._mutated, self._returncode, self._stderr)
+        self._note_crash_cov(edges, crash_name)
         f._prune_crash_data()
         return True

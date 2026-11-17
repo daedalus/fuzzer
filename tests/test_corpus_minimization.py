@@ -56,7 +56,6 @@ class MockFuzzer:
         self.irreplaceable_hashes: set[str] = set()
         # Attributes needed by save_to_corpus
         self.seen_hashes: set[str] = set()
-        self.bloom = None
         self._total_corpus_attempts = 0
         self._duplicate_reject_count = 0
         self._last_bloat_warn_exec = 0
@@ -76,6 +75,10 @@ class MockFuzzer:
     def _exec_distance(self):
         """Not directed: trim_new_coverage measures no distance."""
         return None
+
+    def _is_crash(self, rc, stderr):
+        """No crashes: trim_new_coverage asks after every trim exec."""
+        return False
 
     def mean_exec_time(self) -> float:
         """Corpus-wide mean target time per execution, in seconds.

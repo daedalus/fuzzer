@@ -26,7 +26,6 @@ from fuzzer_tool.adapters import seed_tar, seed_zip
 from fuzzer_tool.adapters.libc_symbols import libc_symbol
 from fuzzer_tool.adapters.process import signal_number
 from fuzzer_tool.adapters.seed_zip import SeedTree
-from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.crash_symbols import sidecar_pcs
@@ -94,15 +93,9 @@ def _bound_seen_hashes(seen_hashes: set[str]) -> None:
     """Keep ``seen_hashes`` from growing without bound, without forgetting
     everything at once.
 
-    ``bloom`` (see the four call sites below) never forgets a hash once
-    added, so it keeps answering "seen" for anything ever inserted here,
-    forever. That is the whole point of pairing an exact set with an
-    approximate filter: the set only exists to resolve the rare case where
-    ``bloom`` is wrong. Wiping the set entirely (the previous behaviour)
-    broke that pairing for every hash it held: on its next appearance each
-    one would query ``bloom`` as "seen" but the set as "no", fall into the
-    false-positive branch, and get silently re-admitted as if new — every
-    single previously-known hash, not a bounded fraction of them. See P1-3.
+    The set is the only dedup authority for the save paths below. Wiping
+    it entirely (the previous behaviour) re-admitted every previously-known
+    hash on its next appearance, not a bounded fraction of them. See P1-3.
 
     Evicting only half keeps the memory bound (the set never exceeds
     ``SEEN_HASHES_MAX``) while leaving the retained half correctly
@@ -510,7 +503,6 @@ def free_slot(dest: Path, data: bytes) -> Path:
 def _absorb(
     entries,
     seen: set[str],
-    bloom: BloomFilter | None,
     entropy_tracker: CumulativeByteEntropy | None,
     corpus: list[bytes],
 ) -> None:
@@ -519,8 +511,6 @@ def _absorb(
         if h in seen:
             continue
         seen.add(h)
-        if bloom is not None:
-            bloom.add(h)
         if entropy_tracker is not None:
             entropy_tracker.add(data)
         corpus.append(data)
@@ -580,7 +570,6 @@ def _resolve_deltas(
 
 def load_corpus(
     corpus_dir: Path,
-    bloom: BloomFilter | None = None,
     add_default: bool = True,
     load_irreplaceable: bool = True,
     entropy_tracker: CumulativeByteEntropy | None = None,
@@ -601,7 +590,6 @@ def load_corpus(
     Args:
         corpus_dir: Path to corpus directory. seeds/ is scanned recursively
             for full files, and both deltas/ and seeds/ for delta records.
-        bloom: Optional bloom filter to populate for fast dedup.
         add_default: If True and corpus is empty, add b"AAAAAAAA" as a
             synthetic default seed. Set False for commands that need to
             reflect the actual on-disk corpus state (e.g. sweep).
@@ -709,14 +697,14 @@ def load_corpus(
             _collect_deltas_from_dir(base)
 
     # Load full files
-    _absorb(full_files.items(), seen, bloom, entropy_tracker, corpus)
+    _absorb(full_files.items(), seen, entropy_tracker, corpus)
 
     # Reconstruct delta chains via topological resolution.
     # Each delta depends on its parent; resolve in order from full snapshots.
     if delta_files:
         resolved = _resolve_deltas(full_files, delta_files, corpus_dir)
         chained = ((h, resolved[h]) for h, _ in delta_files if h in resolved)
-        _absorb(chained, seen, bloom, entropy_tracker, corpus)
+        _absorb(chained, seen, entropy_tracker, corpus)
 
     if not corpus and add_default:
         corpus.append(b"AAAAAAAA")
@@ -1025,16 +1013,12 @@ def save_to_corpus(
     data: bytes,
     corpus_dir: Path,
     seen_hashes: set[str],
-    bloom: BloomFilter | None = None,
     parent: bytes | None = None,
     lineage_depth: int = 0,
     delta_store: DeltaStore | None = None,
     parent_key: str | None = None,
 ) -> bool:
     """Save input to corpus if not already seen.
-
-    Uses bloom filter as fast pre-check when available. False positives
-    (bloom says "seen" but set says "new") fall through to the authoritative set.
 
     With a *delta_store* (``--delta-corpus``), a parent and a compact diff
     (< 25% of child size), stores a delta record instead of the full input;
@@ -1044,7 +1028,6 @@ def save_to_corpus(
         data: Input bytes to save.
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes.
-        bloom: Optional bloom filter for fast pre-check.
         parent: Parent input bytes (for delta encoding).
         lineage_depth: Parent's lineage depth; the child sits at +1.
         delta_store: ``--delta-corpus`` writer state; None stores full seeds.
@@ -1054,16 +1037,8 @@ def save_to_corpus(
         True if saved (new), False if duplicate.
     """
     h = hash_data(data)
-    if bloom is not None:
-        if not bloom.query(h):
-            bloom.add(h)
-        elif h in seen_hashes:
-            return False
-        else:
-            bloom.add(h)
-    else:
-        if h in seen_hashes:
-            return False
+    if h in seen_hashes:
+        return False
     seen_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
     seeds_dir = corpus_dir / "seeds"
@@ -1095,7 +1070,6 @@ def save_irreplaceable(
     corpus_dir: Path,
     seen_hashes: set[str],
     irreplaceable_hashes: set[str],
-    bloom: BloomFilter | None = None,
 ) -> bool:
     """Save input to corpus/seeds/irreplaceable/ and mark as irreplaceable.
 
@@ -1107,22 +1081,13 @@ def save_irreplaceable(
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes (updated with new hash).
         irreplaceable_hashes: Set of irreplaceable hashes (updated with new hash).
-        bloom: Optional bloom filter for fast pre-check.
 
     Returns:
         True if saved (new), False if duplicate.
     """
     h = hash_data(data)
-    if bloom is not None:
-        if not bloom.query(h):
-            bloom.add(h)
-        elif h in seen_hashes:
-            return False
-        else:
-            bloom.add(h)
-    else:
-        if h in seen_hashes:
-            return False
+    if h in seen_hashes:
+        return False
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
@@ -1137,7 +1102,6 @@ def save_crashing_seed(
     corpus_dir: Path,
     seen_hashes: set[str],
     irreplaceable_hashes: set[str],
-    bloom: BloomFilter | None = None,
 ) -> bool:
     """Save an input observed to crash the target under seeds/crashing/.
 
@@ -1157,7 +1121,6 @@ def save_crashing_seed(
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes (updated with new hash).
         irreplaceable_hashes: Set of irreplaceable hashes (updated with hash).
-        bloom: Optional bloom filter for fast pre-check.
 
     Returns:
         True if this input was new to seen_hashes, False if already known.
@@ -1168,16 +1131,7 @@ def save_crashing_seed(
     if h in irreplaceable_hashes and _has_seed(store, SeedTree.CRASHING, h, dest):
         return False
 
-    is_new = True
-    if bloom is not None:
-        if not bloom.query(h):
-            bloom.add(h)
-        elif h in seen_hashes:
-            is_new = False
-        else:
-            bloom.add(h)
-    elif h in seen_hashes:
-        is_new = False
+    is_new = h not in seen_hashes
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
@@ -1191,7 +1145,6 @@ def save_timeout_seed(
     corpus_dir: Path,
     seen_hashes: set[str],
     irreplaceable_hashes: set[str],
-    bloom: BloomFilter | None = None,
 ) -> bool:
     """Save an input that timed out under seeds/timeouts/ and mark irreplaceable.
 
@@ -1204,16 +1157,7 @@ def save_timeout_seed(
     if h in irreplaceable_hashes and _has_seed(store, SeedTree.TIMEOUTS, h, dest):
         return False
 
-    is_new = True
-    if bloom is not None:
-        if not bloom.query(h):
-            bloom.add(h)
-        elif h in seen_hashes:
-            is_new = False
-        else:
-            bloom.add(h)
-    elif h in seen_hashes:
-        is_new = False
+    is_new = h not in seen_hashes
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
@@ -1302,13 +1246,9 @@ def classify_crash(
     if h in crash_hashes:
         return CrashVerdict(False, h, sig, stack_h, report, None, False, True)
 
-    # Blocklist check: skip crashes with known stack hashes unless allowlisted
-    if (
-        crash_blocklist
-        and stack_h
-        and stack_h in crash_blocklist
-        and stack_h not in (crash_allowlist or set())
-    ):
+    # Blocklist check: skip crashes with known stack or function hashes
+    # unless allowlisted.
+    if crash_blocklist and _is_blocked(report, stack_h, crash_blocklist, crash_allowlist):
         return CrashVerdict(False, h, sig, stack_h, report, None, True, False)
 
     # Deduplicate by signature: skip if this crash signature was already seen,
@@ -1329,6 +1269,24 @@ def classify_crash(
             return CrashVerdict(False, h, sig, stack_h, report, existing_sig, False, False)
 
     return CrashVerdict(True, h, sig, stack_h, report, None, False, False)
+
+
+def _is_blocked(
+    report: SanitizerReport | None,
+    stack_h: str,
+    blocklist: set[str],
+    allowlist: set[str] | None,
+) -> bool:
+    """True when the stack hash or func_hash is listed and neither is allowed."""
+    if not stack_h or report is None:
+        return False
+
+    fh = report.func_hash()
+    if stack_h not in blocklist and not (fh and fh in blocklist):
+        return False
+
+    allow = allowlist or ()
+    return stack_h not in allow and not (fh and fh in allow)
 
 
 def crash_signature(
@@ -1554,6 +1512,7 @@ def save_crash(
 
     metadata.build_cluster_id(sig)
     metadata.stack_hash = v.stack_hash
+    metadata.func_hash = report.func_hash() if report else ""
 
     # Derive error short name for filename
     error_short, sanitizer_short = _crash_name_parts(report, returncode)
@@ -1648,8 +1607,42 @@ def _publish_crash(crashes_dir: Path, base_name: str, artifacts) -> None:
             tmp.unlink(missing_ok=True)
         raise
 
-    for tmp, final in staged:
-        os.replace(tmp, final)
+    # All or nothing: an existing artifact is set aside, restored if a later
+    # rename fails, dropped once every rename landed.
+    done: list[tuple[Path, Path | None]] = []
+    try:
+        for tmp, final in staged:
+            done.append((final, _set_aside(final)))
+            os.replace(tmp, final)
+    except BaseException:
+        _roll_back(done, staged)
+        raise
+
+    for _, bak in done:
+        if bak is not None:
+            bak.unlink(missing_ok=True)
+
+
+def _set_aside(final: Path) -> Path | None:
+    """Move *final* to ``.<name>.bak``; None when there is nothing to keep."""
+    bak = final.with_name(f".{final.name}.bak")
+    try:
+        os.replace(final, bak)
+    except FileNotFoundError:
+        return None
+    return bak
+
+
+def _roll_back(done: list[tuple[Path, Path | None]], staged: list[tuple[Path, Path]]) -> None:
+    """Undo a partial publish: restore set-aside artifacts, drop new ones and temps."""
+    for final, bak in reversed(done):
+        if bak is None:
+            final.unlink(missing_ok=True)
+            continue
+        os.replace(bak, final)
+
+    for tmp, _ in staged:
+        tmp.unlink(missing_ok=True)
 
 
 def record_repro(crash_input: Path, crashed: int, runs: int) -> bool:
@@ -1691,6 +1684,9 @@ MIN_CRASH_EXT = ".min"
 # Artifact extensions written per crash by save_crash().
 _CRASH_EXTS = (".bin", ".txt", ".sh", ".hex", ".json", MIN_CRASH_EXT)
 
+
+# Novel crashes that failed --repro-gate, kept apart from crashes/.
+NO_REPRO_DIR = "no_repro"
 
 # Crash .json sidecars written by save_crash().
 CRASH_SIDECAR_GLOB = "crash_*.json"

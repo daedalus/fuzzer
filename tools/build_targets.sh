@@ -1712,6 +1712,7 @@ STUBEOF
 #   noasan   ffmpeg-<ver>/*.a            (coverage only)             no-ASAN pass
 #   ubsan    ffmpeg-<ver>/*.a            -fsanitize=undefined        ASAN pass
 #   ng2/ng3  ffmpeg-<ver>/*.a            trace-pc + __AFL_NGRAM_K=k  --ngram
+#   ijon     ffmpeg-<ver>/*.a            -DFUZZ_IJON (IJON_SET/STATE) no-ASAN pass
 #
 # ubsan and ng* reuse the coverage-only tree: UBSAN needs no ASAN-instrumented
 # archives (linking them without -fsanitize=address leaves __asan_* undefined),
@@ -1768,6 +1769,12 @@ build_ffmpeg_versions() {
 build_ffmpeg_version_ubsan() {
     command -v clang &>/dev/null || { warn "clang not found — skipping ffmpeg_read_<ver>_ubsan"; return 0; }
     build_ffmpeg_versions "_ubsan" "-fsanitize=undefined" "clang"
+}
+# IJON_SET / IJON_STATE annotations in ffmpeg_read.c change coverage even
+# without --ijon (synthetic edges; IJON_STATE moves edge ids), so they live
+# in their own variant and the default builds stay annotation-free.
+build_ffmpeg_version_ijon() {
+    build_ffmpeg_versions "_ijon" "-DFUZZ_IJON"
 }
 build_ffmpeg_version_ngram() {
     [ "$WITH_NGRAM" -eq 1 ] || return 0
@@ -2877,6 +2884,25 @@ build_tracecmp_targets() {
         fi
     done
 
+    # fuzzgoat_read_tcg.so: the calibration target with trace-cmp in the
+    # library object too. The default .so instruments edges only, so cmplog
+    # logs nothing there ("0t 0p"). Object without the shim, shim only in the
+    # wrapper (multiple-definition rule), as in compile_fuzzgoat_object.
+    if [ "$HAS_FUZZGOAT" -eq 1 ]; then
+        rc=0
+        $CC -O2 $DEBUG_CFLAGS $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $FUZZGOAT_CFLAGS -fPIC \
+            -I"$VENDOR/fuzzgoat" -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o /tmp/fuzzgoat_tcg.o 2>>"$BUILD_LOG" || rc=$?
+        [ $rc -eq 0 ] && $CC -O2 $DEBUG_CFLAGS $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS \
+            -D__AFL_PRIVATE_HEAP=1 -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" -I"$VENDOR/fuzzgoat" \
+            -o "$TARGETS/fuzzgoat_read_tcg.so" "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" \
+            /tmp/fuzzgoat_tcg.o -lm $CMPLOG_LIBS 2>>"$BUILD_LOG" || rc=1
+        if [ $rc -eq 0 ]; then
+            ok "fuzzgoat_read_tcg.so (trace-cmp + no-builtin)"
+        else
+            warn "failed: fuzzgoat_read_tcg.so (trace-cmp)"
+        fi
+    fi
+
     # Verify the callbacks are DEFINED (T) in the target, not left undefined
     # for a preload that cannot win the lookup, and not the runtime's weak
     # no-op stub (W).
@@ -2904,6 +2930,17 @@ build_tracecmp_targets() {
             warn "$(basename "$f"): memcmp folded away — check \$NOBUILTIN_CMP"
         fi
     done
+
+    # fuzzgoat_read_tcg.so: the default fuzzgoat .so has 0 compare call sites
+    # ("cmplog: 0t 0p"); count them so this build cannot regress to that.
+    local fg="$TARGETS/fuzzgoat_read_tcg.so" sites
+    [ -f "$fg" ] || return 0
+    sites=$(objdump -d "$fg" 2>/dev/null | grep -cE "call.*<__sanitizer_cov_trace_(const_)?cmp[1248]>" || true)
+    if [ "$sites" -gt 0 ]; then
+        ok "fuzzgoat_read_tcg.so: $sites trace-cmp call sites"
+    else
+        warn "fuzzgoat_read_tcg.so: no trace-cmp call sites — cmplog will see nothing"
+    fi
 }
 
 # ── Print build feature matrix ──────────────────────────────────
@@ -3061,6 +3098,7 @@ if [ "$BUILD_NOSAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan_tcg" "" "No-ASAN"
     build_vendored_ffmpeg_sancov ""
     build_ffmpeg_versions "_noasan" ""
+    build_ffmpeg_version_ijon
     build_simple_so_targets "_nosan" "" "No-ASAN"
     build_standalone_so_targets "_nosan" "" "No-ASAN"
 fi

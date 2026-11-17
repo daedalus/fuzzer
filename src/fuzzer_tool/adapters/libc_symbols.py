@@ -53,3 +53,11 @@ def libc_symbol(module: str, offset: int) -> str:
     if info is None or not info.dli_sname or info.dli_fbase != _LIBC_BASE:
         return ""
     return info.dli_sname.decode()
+
+
+def module_base(addr: int) -> int:
+    """Load base of the module holding *addr*; 0 when dladdr knows none."""
+    info = _dladdr(addr)
+    if info is None:
+        return 0
+    return info.dli_fbase or 0

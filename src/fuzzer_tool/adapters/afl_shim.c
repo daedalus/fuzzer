@@ -275,6 +275,8 @@ static void __afl_map_dist_shm(void);
 static void __afl_map_node_shm(void);
 #endif
 static void __afl_map_block_shm(void);
+static void __afl_map_ijon_shm(void);
+static void __afl_map_c11_shm(void);
 
 /* ── Health counters ──────────────────────────────────────────────────
  *
@@ -638,6 +640,15 @@ enum __afl_path {
     __AFL_PATH_LEAF,   /* FAST, main stack only: elsewhere the caller falls back */
 };
 static int __afl_fast = 0;
+
+/* IJON per-thread state (ijon_xor_state, IJON_STATE) and feedback switch
+ * (ijon_disable_feedback, IJON_DISABLE). Both enter every edge id in the
+ * paper (§IV-A1, §IV-A3), which the FAST path cannot carry, so the first
+ * call sets __ijon_edges and drops __afl_fast for the rest of the process.
+ * A target that never calls either keeps the FAST path unchanged. */
+static __thread uint32_t __ijon_state = 0;
+static __thread uint32_t __ijon_off = 0;
+static int __ijon_edges = 0;
 /* noinline: kept out of its callers' bodies, so its mode-dependent branches
  * never become edges should a caller be instrumented. */
 __AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void);
@@ -1341,6 +1352,8 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     __afl_map_node_shm();
 #endif
     __afl_map_block_shm();
+    __afl_map_c11_shm();
+    __afl_map_ijon_shm();
     __afl_mapping = 0;
     __afl_fast_refresh();
 }
@@ -1882,9 +1895,18 @@ static inline uint32_t __afl_edge_hash_as(uint32_t cur_loc, enum __afl_path path
     }
     h ^= cur_loc;
     h *= 16777619u;
+    if (path == __AFL_PATH_ANY && __builtin_expect(__ijon_edges, 0))
+        h ^= __ijon_state & __afl_loc_mask;   /* IJON_STATE */
     return __afl_caller_ctx_as(path, NULL) ^ h;
 #else
-    return __afl_caller_ctx_as(path, NULL) ^ __afl_prev_loc ^ cur_loc;
+    /* IJON_STATE: state ^ (prev ^ cur), the paper's state ⊕ (ids*2) ⊕ idt.
+     * Masked to location width so ids stay on Python's dense path. FAST
+     * folds this away: __ijon_edges keeps a stateful process off it. The
+     * global is tested first: a TLS load in a .so can be a call. */
+    uint32_t st = 0;
+    if (path == __AFL_PATH_ANY && __builtin_expect(__ijon_edges, 0))
+        st = __ijon_state & __afl_loc_mask;
+    return __afl_caller_ctx_as(path, NULL) ^ __afl_prev_loc ^ cur_loc ^ st;
 #endif
 }
 
@@ -2339,6 +2361,10 @@ static inline void __afl_map_loc_push(uint32_t cur_loc, enum __afl_path path,
                                       uint32_t next_prev) {
     const int any = path == __AFL_PATH_ANY;
     if (any && !__afl_area) return;
+    if (any && __builtin_expect(__ijon_edges, 0) && __ijon_off) {   /* IJON_DISABLE */
+        __afl_push_prev(next_prev);
+        return;
+    }
     __afl_wtok_t wk = any ? __afl_wguard_open() : 0;
     if (__afl_stack_on) __afl_note_stack();
 
@@ -2439,7 +2465,8 @@ static struct __afl_dist_entry *__afl_dist_table;
 __AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void) {
     __afl_fast = __afl_area && __afl_gen_word && __afl_path_hash &&
                  __afl_wguard_mode == __AFL_WGUARD_OFF && !__afl_mapping &&
-                 __afl_ctx_on && !__afl_ctx_use_relative() && !__afl_id_tag
+                 __afl_ctx_on && !__afl_ctx_use_relative() && !__afl_id_tag &&
+                 !__ijon_edges
 #if __AFL_DISTANCE_MODE
                  && !__afl_dist_table
 #endif
@@ -2472,6 +2499,40 @@ static uint8_t  *__afl_block_bitmap = NULL;
 static uint32_t *__afl_block_sites = NULL;
 static uint32_t  __afl_block_bits = 0;
 
+/* C11 segment (AFL++ C11 mode, ICSE'26): local-variable count per function
+ * entry guard, filled by core/c11.py from DWARF + the pc-table. The leaf
+ * marks below raise a per-exec max, stamped with the generation word so
+ * Python reads it only at admission and never resets it per exec.
+ *
+ *   [u32 head = 12 + entries][u32 gen][u32 max][u32 pad][u8 locals[entries]]
+ *
+ * Example: main (3 locals) calls parse (11): max = 11 for that exec. */
+struct __afl_c11_seg {
+    uint32_t head;
+    uint32_t gen;
+    uint32_t max;
+    uint32_t pad;
+    uint8_t  locals[];
+};
+#define __AFL_C11_HEAD_BYTES 12  /* gen/max/pad past the u32 head */
+
+static struct __afl_c11_seg *__afl_c11 = NULL;
+static uint32_t __afl_c11_entries = 0;
+
+/* Raise this exec's C11 max. A stale gen means the first mark of a new exec. */
+__AFL_NO_COV static inline void __afl_c11_raise(uint32_t idx) {
+    uint32_t l = __afl_c11->locals[idx];
+    if (!l || !__afl_gen_word) return;
+
+    uint32_t g = *__afl_gen_word;
+    if (__afl_c11->gen != g) {
+        __afl_c11->gen = g;
+        __afl_c11->max = l;
+        return;
+    }
+    if (l > __afl_c11->max) __afl_c11->max = l;
+}
+
 /* One region per module, so the scan is 1-2 compares in practice. Indices
  * past the payload are dropped: the header is a write bound. */
 __AFL_NO_COV __attribute__((noinline))
@@ -2481,6 +2542,7 @@ static void __afl_block_mark(const uint32_t *guard) {
         if (guard < r->start || guard >= r->stop) continue;
 
         uint32_t idx = r->first + (uint32_t)(guard - r->start);
+        if (__afl_c11 && idx < __afl_c11_entries) __afl_c11_raise(idx);
         if (idx >= __afl_block_bits) return;
 
         /* Test first: a set bit is the common case, and a read keeps the
@@ -3392,6 +3454,256 @@ __AFL_GCC_NO_COV static void __afl_map_block_shm(void) {
     __afl_block_bitmap = (uint8_t *)p + 8;
 }
 
+/* C11 segment (see struct __afl_c11_seg). Once, like the block bitmap. */
+__AFL_GCC_NO_COV static void __afl_map_c11_shm(void) {
+    if (__afl_c11) return;
+    void *p = __afl_attach_sized("__AFL_C11_SHM_ID", 1);
+    if (!p) return;
+
+    uint32_t head = *(uint32_t *)p;
+    if (head <= __AFL_C11_HEAD_BYTES || head > (1u << 28)) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return;
+    }
+    __afl_c11_entries = head - __AFL_C11_HEAD_BYTES;
+    __afl_c11 = (struct __afl_c11_seg *)p;
+}
+
+/* ── IJON annotations (ijon.h) ────────────────────────────────────────
+ *
+ * The target names the state it cares about; the fuzzer rewards progress
+ * in it (Aschermann et al., S&P 2020). API and helper hashes follow the
+ * upstream runtime (RUB-SysSec/ijon llvm_mode/afl-llvm-rt.o.c). Channels:
+ *
+ *   ijon_map_set/inc   (state ^ addr) becomes a synthetic edge, like
+ *                      __sfuzz_state, so every coverage consumer sees it.
+ *                      __afl_map_id, not the prev_loc chain: the real edge
+ *                      after an annotation keeps its id (COMPCOV's rule).
+ *   ijon_max/ijon_min  raise a u64 slot in the max-map segment
+ *                      ($__AFL_IJON_SHM_ID); Python admits an input that
+ *                      beats the campaign max of any slot.
+ *   ijon_xor_state     per-thread state xored into map_set/inc addresses
+ *                      and every real edge id (ANY path; see __ijon_edges).
+ *   ijon_disable_*     no edge or IJON write until ijon_enable_feedback.
+ *
+ * Max-map segment, owned by adapters/shm.py IjonMaxShm:
+ *
+ *   offset 0  uint32  head    8-byte words, header included (slots + 1)
+ *   offset 4  uint32  dirty   set here on any raise, cleared by Python
+ *   offset 8  uint64  slots[head - 1]   power of two; slot ids wrap
+ *   ...       4 pad bytes: __afl_attach_sized checks 4 + head * 8
+ *
+ * A separate segment, so the edge segment layout (and __AFL_SHM_LAYOUT)
+ * is unchanged. Python zeroes the slots after every read. No-op without
+ * the segment, and in a target with no annotations nothing calls here.
+ *
+ * Every entry point is noinline: -include puts this file in the target's
+ * TU, and an inlined body's branches become edges of the caller (the
+ * __afl_run_reset lesson). Upstream links them from a separate object. */
+#define IJON_SET_SALT 0x494a4f4e53455431ULL   /* "IJONSET1" */
+#define IJON_INC_SALT 0x494a4f4e494e4331ULL   /* "IJONINC1" */
+#define IJON_MAX_WORDS (1u << 20)             /* header sanity cap */
+#define IJON_STACK_FRAMES 16                  /* upstream hashstack depth */
+
+/* Per-run dedup of map_set ids: direct-mapped, epoch-tagged, so a run
+ * reset is one increment instead of a clear. A collision re-maps an id
+ * (one extra hit), never drops one. Example: IJON_SET(3) in a loop of
+ * 50 leaves count 1, so the hit-count bucket does not move with reps. */
+#define IJON_SEEN_SLOTS 256
+
+struct __ijon_seen_entry {
+    uint32_t id;
+    uint32_t epoch;
+};
+
+static __thread struct __ijon_seen_entry __ijon_seen[IJON_SEEN_SLOTS];
+static __thread uint32_t __ijon_epoch = 1;
+static __thread uint32_t __ijon_state_log = 0;
+
+static uint64_t *__ijon_slots = NULL;
+static uint32_t *__ijon_dirty = NULL;
+static uint32_t  __ijon_mask  = 0;
+
+/* Once: a resize re-runs map_shm, and the segment never changes. */
+__AFL_GCC_NO_COV static void __afl_map_ijon_shm(void) {
+    if (__ijon_slots) return;
+    void *p = __afl_attach_sized("__AFL_IJON_SHM_ID", sizeof(uint64_t));
+    if (!p) return;
+
+    /* Slots must be a power of two: the slot wrap is a mask. */
+    uint32_t head = *(uint32_t *)p;
+    uint32_t n = head - 1;
+    if (head < 2 || head > IJON_MAX_WORDS || (n & (n - 1))) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return;
+    }
+    __ijon_dirty = (uint32_t *)p + 1;
+    __ijon_mask  = n - 1;
+    __atomic_store_n(&__ijon_slots, (uint64_t *)p + 1, __ATOMIC_RELEASE);
+}
+
+/* Per-run reset (__afl_run_reset): set-dedup, state and the feedback
+ * switch must not leak from one input into the next. */
+__AFL_NO_COV static inline void __ijon_run_reset(void) {
+    __ijon_epoch++;
+    __ijon_state = 0;
+    __ijon_state_log = 0;
+    __ijon_off = 0;
+}
+
+__AFL_NO_COV static inline uint32_t __ijon_id(uint64_t salt, uint32_t addr) {
+    uint64_t h = 1469598103934665603ULL;   /* FNV-1a, as __sfuzz_state */
+    h = (h ^ salt) * 1099511628211ULL;
+    h = (h ^ (addr ^ __ijon_state)) * 1099511628211ULL;
+    return __AFL_SYNTH_ID(h >> 32);
+}
+
+/* ── map channel ── */
+
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV void ijon_map_set(uint32_t addr) {
+    if (!__afl_area || __ijon_off) return;
+
+    uint32_t id = __ijon_id(IJON_SET_SALT, addr);
+    struct __ijon_seen_entry *e = &__ijon_seen[id & (IJON_SEEN_SLOTS - 1)];
+    if (e->id == id && e->epoch == __ijon_epoch) return;   /* set this run */
+
+    e->id = id;
+    e->epoch = __ijon_epoch;
+    __afl_map_id(id);
+}
+
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV void ijon_map_inc(uint32_t addr) {
+    if (!__afl_area || __ijon_off) return;
+    __afl_map_id(__ijon_id(IJON_INC_SALT, addr));
+}
+
+/* ── max channel ── */
+
+/* CAS loop: two threads raising one slot must keep the larger value. */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV void ijon_max(uint32_t addr, uint64_t value) {
+    uint64_t *slots = __atomic_load_n(&__ijon_slots, __ATOMIC_ACQUIRE);
+    if (!slots || __ijon_off) return;
+
+    uint64_t *p = &slots[addr & __ijon_mask];
+    uint64_t cur = __atomic_load_n(p, __ATOMIC_RELAXED);
+    while (value > cur) {
+        if (!__atomic_compare_exchange_n(p, &cur, value, 1,
+                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            continue;
+        __atomic_store_n(__ijon_dirty, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+}
+
+/* Smallest value = largest complement; 0 stays "never set". */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV void ijon_min(uint32_t addr, uint64_t value) {
+    ijon_max(addr, UINT64_MAX - value);
+}
+
+/* ── state ── */
+
+/* First use: leave the FAST path for good (see __ijon_edges). */
+__AFL_NO_COV static inline __attribute__((always_inline)) void __ijon_need_edges(void) {
+    if (__builtin_expect(__ijon_edges, 1)) return;
+    __ijon_edges = 1;
+    __afl_fast = 0;
+}
+
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV void ijon_xor_state(uint32_t value) {
+    __ijon_need_edges();
+    __ijon_state ^= value;
+}
+
+/* State = xor of the last four pushed bytes: order-sensitive history.
+ * Example: push(1), push(2) and push(2), push(1) are different states. */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV void ijon_push_state(uint32_t value) {
+    __ijon_need_edges();
+    __ijon_state ^= __ijon_state_log;
+    __ijon_state_log = (__ijon_state_log << 8) | (value & 0xff);
+    __ijon_state ^= __ijon_state_log;
+}
+
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV void ijon_enable_feedback(void) {
+    __ijon_off = 0;
+}
+
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV void ijon_disable_feedback(void) {
+    __ijon_need_edges();
+    __ijon_off = 1;
+}
+
+/* ── helpers (upstream definitions) ── */
+
+/* Bytes equal before the first mismatch or NUL. */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV uint32_t ijon_strdist(char *a, char *b) {
+    uint32_t i = 0;
+    while (a[i] && b[i] && a[i] == b[i]) i++;
+    return i;
+}
+
+/* Bytes equal before the first mismatch, NULs included. */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV uint32_t ijon_memdist(char *a, char *b, size_t len) {
+    uint32_t i = 0;
+    while (i < len && a[i] == b[i]) i++;
+    return i;
+}
+
+/* splitmix64 finalizer. */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV uint64_t ijon_simple_hash(uint64_t x) {
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV uint32_t ijon_hashint(uint32_t old, uint32_t val) {
+    return (uint32_t)ijon_simple_hash(((uint64_t)old << 32) | val);
+}
+
+/* (char) cast kept from upstream: bytes >= 0x80 hash sign-extended. */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV uint32_t ijon_hashmem(uint32_t old, char *val, size_t len) {
+    old = ijon_hashint(old, (uint32_t)len);
+    for (size_t i = 0; i < len; i++) old = ijon_hashint(old, (uint32_t)(int)val[i]);
+    return old;
+}
+
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV uint32_t ijon_hashstr(uint32_t old, char *val) {
+    return ijon_hashmem(old, val, strlen(val));
+}
+
+/* Hash of the call stack. Return addresses are made load-base relative
+ * under FUZZER_KEEP_ASLR, the __afl_compcov_site rule, so ids are
+ * exec-stable. Frame 0 (this function) is skipped. */
+__attribute__((visibility("default"), noinline))
+__AFL_GCC_NO_COV uint32_t ijon_hashstack(void) {
+    void *frames[IJON_STACK_FRAMES];
+    int n = backtrace(frames, IJON_STACK_FRAMES);
+    int rel = __afl_ctx_use_relative();
+
+    uint64_t h = 0;
+    for (int i = 1; i < n; i++) {
+        uintptr_t a = (uintptr_t)frames[i];
+        uintptr_t base = rel ? __afl_ctx_resolve_base(frames[i]) : 0;
+        h ^= ijon_simple_hash(a - base);
+    }
+    return (uint32_t)h;
+}
+
 #if __AFL_DISTANCE_MODE
 /* An id change under a concurrently probing thread can still pair one
  * table with the other's bounds; ids change only at campaign setup. */
@@ -3495,7 +3807,7 @@ __AFL_GCC_NO_COV static void __afl_write_distance_tail(void) {
 /* ── Per-run state ─────────────────────────────────────────────────────
  * What a run must not inherit from the previous one in the same process:
  * the prev_loc chain (else the first edge id depends on the last input),
- * path hash, stack window, and the calling thread's SGFuzz/LTL state.
+ * path hash, stack window, and the calling thread's SGFuzz/LTL/IJON state.
  * Table, generation and header are left alone, so it stacks with the
  * fuzzer's reset_edge_map(). Uninstrumented and out of line: inlined into
  * the instrumented guard, its sfuzz branch became an edge of the run. */
@@ -3508,6 +3820,7 @@ __AFL_NO_COV static void __afl_run_reset(void) {
     __afl_prev_loc = 0;
 #endif
     __ltl_prev_event = LTL_NO_OFFSET;
+    __ijon_run_reset();
     __afl_path_hash_acc = 0;
     __afl_max_stack_depth = 0;
     __afl_stack_base = 0;
@@ -3991,7 +4304,86 @@ __AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b
         if (z == w) return;
     }
 }
+
+/* ── VALUE PROFILE: operand distance as synthetic edges ───────────────
+ *
+ * COMPCOV sees a comparison get closer one matching low byte at a time.
+ * Value profile (libFuzzer -use_value_profile, AFL++ -r) also sees bit
+ * and magnitude progress: per site, the Hamming distance popcount(a^b)
+ * and the bit length of |a-b| each become a synthetic edge, so an input
+ * reaching a distance no earlier input reached is new coverage.
+ *
+ *   cmp4(0x41424344, 0x41424345): ham 1, arith bitlen(1) = 1
+ *   cmp4(100, 4096) (a `<` bound): ham 5, arith bitlen(3996) = 12
+ *
+ * At most 65 + 65 ids per site, so corpus growth per site is bounded.
+ * Each id enters once per run (epoch-tagged dedup, IJON's epoch), so its
+ * hit count stays 1 and a loop around the compare adds no bucket noise.
+ * The table is 2-way: a direct-mapped one let two colliding ids in one
+ * loop evict each other every iteration (measured: count 100 for 100).
+ * Live only with $__AFL_VP_SHM_ID attached; its `on` word lets Python
+ * switch it on mid-run (--value-profile stall). */
+#define VP_HAM_SALT   0x56414c50524f4631ULL   /* "VALPROF1" */
+#define VP_ARITH_SALT 0x56414c50524f4632ULL   /* "VALPROF2" */
+#define VP_SEEN_SETS  512   /* 2-way: 1024 ids per run before eviction */
+
+/* Capability marker: core/elf.detect_vp_capable reads it by name. */
+__attribute__((visibility("default"), used)) const uint32_t __afl_value_profile = 1;
+
+static volatile uint32_t *__afl_vp_on = NULL;   /* segment word 1; NULL = no channel */
+struct __afl_vp_set {
+    struct __ijon_seen_entry way[2];
+    uint32_t mru;   /* way hit or filled last */
+};
+static __thread struct __afl_vp_set __afl_vp_seen[VP_SEEN_SETS];
+
+/* True when *id* was already marked this run; else records it. */
+__AFL_NO_COV static inline int __afl_vp_seen_run(uint32_t id) {
+    struct __afl_vp_set *set = &__afl_vp_seen[id & (VP_SEEN_SETS - 1)];
+    uint32_t ep = __ijon_epoch;
+    for (uint32_t w = 0; w < 2; w++) {
+        if (set->way[w].id == id && set->way[w].epoch == ep) {
+            set->mru = w;
+            return 1;
+        }
+    }
+
+    /* Victim: a stale way first, else the least recently used. */
+    uint32_t v = set->way[0].epoch != ep ? 0 : set->way[1].epoch != ep ? 1 : set->mru ^ 1;
+    set->way[v].id = id;
+    set->way[v].epoch = ep;
+    set->mru = v;
+    return 0;
+}
+
+__AFL_NO_COV static inline void __afl_vp_mark(uint64_t site, uint64_t salt, uint32_t tag) {
+    uint64_t h = 1469598103934665603ULL;   /* FNV-1a, as __afl_compcov_mark */
+    h = (h ^ site) * 1099511628211ULL;
+    h = (h ^ salt) * 1099511628211ULL;
+    h = (h ^ tag) * 1099511628211ULL;
+    uint32_t id = __AFL_SYNTH_ID(h >> 32);
+
+    if (__afl_vp_seen_run(id)) return;
+    __afl_map_id(id);
+}
+
+/* a, b: an n-byte comparison's operands (n in {1,2,4,8}). */
+__AFL_NO_COV static inline void __afl_vp_ints(uint64_t a, uint64_t b, size_t n, void *pc) {
+    if (!__afl_vp_on || !*__afl_vp_on || !__afl_area) return;
+
+    uint64_t mask = n >= 8 ? ~0ULL : ((1ULL << (n * 8)) - 1);
+    a &= mask;
+    b &= mask;
+    uint64_t site = __afl_compcov_site(pc);
+    __afl_vp_mark(site, VP_HAM_SALT, (uint32_t)__builtin_popcountll(a ^ b));
+
+    uint64_t d = a > b ? a - b : b - a;
+    __afl_vp_mark(site, VP_ARITH_SALT, d ? 64u - (uint32_t)__builtin_clzll(d) : 0u);
+}
 #else /* !__AFL_EDGE: __AFL_PRELOAD_ONLY has no edge map to mark into */
+__AFL_NO_COV static inline void __afl_vp_ints(uint64_t a, uint64_t b, size_t n, void *pc) {
+    (void)a; (void)b; (void)n; (void)pc;
+}
 __AFL_NO_COV static inline void __afl_compcov_ints(uint64_t a, uint64_t b, size_t n,
                                                     void *pc, int is_const) {
     (void)a; (void)b; (void)n; (void)pc; (void)is_const;
@@ -4212,9 +4604,67 @@ __AFL_NO_COV static int __afl_cmp_shm_attach(int want_sites) {
 static int __afl_cmp_on = 0;
 static int __afl_cmplog_cfg = 0;   /* records configured at init */
 
+/* ── Record table ($_CMPLOG_RECORDS_SHM) ──────────────────────────────
+ * CMP records as binary operands in a segment the fuzzer created, instead
+ * of hex text on the FIFO: no formatting, no write(2), no parse, nothing
+ * lost to a full pipe. DIV/GEP records stay on the text stream.
+ *
+ *   hdr | sites[S] | recs[R] | bytes[B]
+ *
+ * Trace-cmp records append to one shared array in write order, each
+ * tagged with its site; the site table (keyed by (pc, width), sized per
+ * target by the fuzzer) holds pc, width and a count capped at H per
+ * generation. Memory is S + R entries, not S x H. Libc records (no pc) go
+ * to a flat array. The fuzzer drains, zeroes the used counts and bumps
+ * gen; a site with another stamp is free, so reset is O(1).
+ * Mirrors adapters/cmplog_rec_shm.py. A separate segment, not part of the
+ * edge map: __AFL_SHM_LAYOUT is unchanged (as for __afl_cmp_shm). */
+#define __AFL_REC_MAGIC 0x3230434552504d43ULL   /* "CMPREC02" LE */
+#define __AFL_REC_PROBES 8
+#define __AFL_REC_OPERAND 64   /* == CMPLOG_MAX_OPERAND */
+
+struct __afl_rec_hdr {
+    uint64_t magic;
+    uint32_t gen, int_sites, int_hits, byte_slots;
+    uint32_t rec_slots, rec_used, byte_used, pad;
+    uint64_t site_dropped, hit_dropped, rec_dropped, byte_dropped;
+    uint64_t pad2;
+};
+struct __afl_rec_site { uint64_t pc; uint32_t gen, count; uint8_t width, pad[7]; };
+struct __afl_rec_int { uint64_t a, b; uint32_t site, pad; };
+struct __afl_rec_bytes {
+    unsigned char a[__AFL_REC_OPERAND], b[__AFL_REC_OPERAND];
+    uint32_t n;
+    int32_t result;
+    uint8_t k, pad[3];
+};
+_Static_assert(sizeof(struct __afl_rec_hdr) == 80, "cmplog_rec_shm.py _HEADER");
+_Static_assert(sizeof(struct __afl_rec_site) == 24, "cmplog_rec_shm.py _SITE");
+_Static_assert(sizeof(struct __afl_rec_int) == 24, "cmplog_rec_shm.py _REC");
+_Static_assert(sizeof(struct __afl_rec_bytes) == 140, "cmplog_rec_shm.py _BYTES");
+
+static struct __afl_rec_hdr *__afl_rec;   /* NULL: records go to text */
+static struct __afl_rec_site *__afl_rec_sites;
+static struct __afl_rec_int *__afl_rec_ints;
+static struct __afl_rec_bytes *__afl_rec_bytes_tab;
+/* Sizes copied at attach: the header is the fuzzer's to rewrite, so no
+ * index is ever bounded by a value read back from it. */
+static uint32_t __afl_rec_nsites, __afl_rec_nhits, __afl_rec_nrecs, __afl_rec_nbytes;
+
+/* Value profile attached: callbacks stay live even while its `on` word is
+ * 0 (--value-profile stall), since only init and pause re-gate them. */
+__AFL_NO_COV static inline int __afl_vp_attached(void) {
+#if __AFL_EDGE
+    return __afl_vp_on != NULL;
+#else
+    return 0;
+#endif
+}
+
 __AFL_NO_COV static void __afl_cmp_refresh(void) {
     __afl_cmp_on = __AFL_CMP_COUNTS_ON || __AFL_CMP_SITES_ON ||
-                   __afl_compcov_level > 0 || (__afl_cmplog_cfg && !__afl_cmplog_paused);
+                   __afl_compcov_level > 0 || __afl_vp_attached() ||
+                   ((__afl_cmplog_cfg || __afl_rec) && !__afl_cmplog_paused);
 }
 
 /* splitmix64's finalizer. The low bits of a return address are nearly
@@ -4226,6 +4676,117 @@ __AFL_NO_COV static inline uint64_t __afl_cmp_site_hash(uint64_t pc, uint32_t id
     x ^= x >> 27; x *= 0x94d049bb133111ebULL;
     x ^= x >> 31;
     return x;
+}
+
+/* Attach $_CMPLOG_RECORDS_SHM. 0 (records stay on text) unless the id,
+ * the geometry and the segment size all check out. */
+__AFL_NO_COV static int __afl_rec_attach(void) {
+    const char *id = getenv("_CMPLOG_RECORDS_SHM");
+    if (!id || !id[0]) return 0;
+
+    char *end = NULL;
+    long shmid = strtol(id, &end, 10);
+    if (*end || shmid < 0 || shmid > INT_MAX) return 0;
+
+    struct shmid_ds ds;
+    if (shmctl((int)shmid, IPC_STAT, &ds) < 0) return 0;
+    if (ds.shm_segsz < sizeof(struct __afl_rec_hdr)) return 0;
+
+    void *p = shmat((int)shmid, NULL, 0);
+    if (p == (void *)-1) return 0;
+
+    struct __afl_rec_hdr *h = p;
+    uint64_t ns = h->int_sites, nh = h->int_hits, nr = h->rec_slots, nb = h->byte_slots;
+    uint64_t need = sizeof *h + ns * sizeof(struct __afl_rec_site)
+                  + nr * sizeof(struct __afl_rec_int) + nb * sizeof(struct __afl_rec_bytes);
+    if (ns < 2 || (ns & (ns - 1)) || nh == 0 || nr == 0 || nb == 0 || need > ds.shm_segsz) {
+        shmdt(p);
+        return 0;
+    }
+
+    char *base = p;
+    __afl_rec_sites = (struct __afl_rec_site *)(base + sizeof *h);
+    __afl_rec_ints = (struct __afl_rec_int *)(__afl_rec_sites + ns);
+    __afl_rec_bytes_tab = (struct __afl_rec_bytes *)(__afl_rec_ints + nr);
+    __afl_rec_nsites = (uint32_t)ns;
+    __afl_rec_nhits = (uint32_t)nh;
+    __afl_rec_nrecs = (uint32_t)nr;
+    __afl_rec_nbytes = (uint32_t)nb;
+    __afl_rec = h;
+    __atomic_store_n(&h->magic, __AFL_REC_MAGIC, __ATOMIC_RELEASE);
+    return 1;
+}
+
+/* Site slot of (pc, width) this generation, claimed when free; NULL when
+ * the probe run is full. Caller holds the cmplog lock. */
+__AFL_NO_COV static struct __afl_rec_site *__afl_rec_site(uint64_t pc, uint8_t width,
+                                                          uint32_t *slot) {
+    uint32_t gen = __afl_rec->gen, mask = __afl_rec_nsites - 1;
+    uint64_t idx = __afl_cmp_site_hash(pc, width);
+    for (int probe = 0; probe < __AFL_REC_PROBES; probe++) {
+        uint32_t i = (uint32_t)(idx + (uint64_t)probe) & mask;
+        struct __afl_rec_site *s = &__afl_rec_sites[i];
+        if (s->gen == gen && s->pc == pc && s->width == width) {
+            *slot = i;
+            return s;
+        }
+        if (s->gen == gen) continue;
+
+        /* Free this generation: claim it. */
+        s->pc = pc;
+        s->width = width;
+        s->count = 0;
+        s->gen = gen;
+        *slot = i;
+        return s;
+    }
+    return NULL;
+}
+
+/* One trace-cmp record; caller holds the lock. */
+__AFL_NO_COV static void __afl_rec_put_int(uint64_t a, uint64_t b, size_t n, void *pc) {
+    struct __afl_rec_hdr *h = __afl_rec;
+    uint32_t slot = 0;
+    struct __afl_rec_site *s = __afl_rec_site((uint64_t)(uintptr_t)pc, (uint8_t)n, &slot);
+    if (!s) {
+        h->site_dropped++;
+        return;
+    }
+    if (s->count >= __afl_rec_nhits) {
+        h->hit_dropped++;
+        return;
+    }
+    uint32_t used = h->rec_used;
+    if (used >= __afl_rec_nrecs) {
+        h->rec_dropped++;
+        return;
+    }
+
+    struct __afl_rec_int *e = &__afl_rec_ints[used];
+    e->a = a;
+    e->b = b;
+    e->site = slot;
+    h->rec_used = used + 1;
+    s->count++;
+}
+
+/* One libc record, operands already clipped to k readable bytes. */
+__AFL_NO_COV static void __afl_rec_put_bytes(const unsigned char *a, const unsigned char *b,
+                                             size_t k, size_t n, int result) {
+    struct __afl_rec_hdr *h = __afl_rec;
+    uint32_t used = h->byte_used;
+    if (used >= __afl_rec_nbytes) {
+        h->byte_dropped++;
+        return;
+    }
+
+    struct __afl_rec_bytes *e = &__afl_rec_bytes_tab[used];
+    __builtin_memcpy(e->a, a, k);
+    __builtin_memcpy(e->b, b, k);
+    e->k = (uint8_t)k;
+    e->n = n > UINT32_MAX ? UINT32_MAX : (uint32_t)n;
+    e->result = result;
+    h->byte_used = used + 1;
 }
 
 __AFL_NO_COV static void __afl_cmp_site_count(uint32_t id, int satisfied, void *pc_ptr) {
@@ -4606,6 +5167,67 @@ __AFL_NO_COV static int __afl_cmplog_seen(uint64_t fp) {
     return 0;
 }
 
+/* Dedup scope ($__AFL_CMPLOG_DEDUP_SCOPE). "drain" (default): the table
+ * clears at every __cmplog_reset, so each drain holds one exec's full set.
+ * "campaign": it survives drains, so input-invariant records (init code,
+ * format probes) are written once per campaign and the 10k-line read
+ * window fills with new ones. __cmplog_rescope() clears it on demand for
+ * consumers that need one exec's full set (the I2S probe). Fork children
+ * start a fresh scope either way. A saturated table fails open. */
+static int __afl_cmplog_scope_campaign;
+
+/* ── Per-site record cap ($__AFL_CMPLOG_SITE_CAP) ─────────────────────
+ * A loop compare (i < n, buf[i] == c) writes one distinct record per
+ * iteration, which dedup cannot catch. With a cap N, a trace-cmp site
+ * writes at most N records per drain (AFL++ keeps 32 hits per site).
+ * Repeats dropped by dedup do not use the cap, so under campaign scope
+ * the window advances: drain 1 logs i = 0..N-1, drain 2 logs N..2N-1.
+ *
+ * A slot is one word: pc hash high 32 bits | 16-bit generation | 16-bit
+ * count. Generation as in the dedup table; a full probe run fails open. */
+#define CMPLOG_SITE_SLOTS   (1u << 16)
+#define CMPLOG_SITE_PROBES  4
+#define CMPLOG_SITE_KEY_MASK 0xffffffff00000000ULL
+#define CMPLOG_SITE_GEN_SHIFT 16
+#define CMPLOG_SITE_COUNT_MASK 0xffffULL
+#define CMPLOG_SITE_CAP_MAX 0xffff
+
+static uint64_t __afl_cmplog_site_tab[CMPLOG_SITE_SLOTS];
+static uint64_t __afl_cmplog_site_gen = 1;
+static uint32_t __afl_cmplog_site_cap;   /* 0 = off */
+
+/* New drain for the site counters: O(1), wipe on wrap. */
+__AFL_NO_COV static void __afl_cmplog_site_epoch(void) {
+    if (++__afl_cmplog_site_gen <= CMPLOG_SITE_COUNT_MASK) return;
+    memset(__afl_cmplog_site_tab, 0, sizeof __afl_cmplog_site_tab);
+    __afl_cmplog_site_gen = 1;
+}
+
+/* Counter slot of *pc* this drain, claimed at count 0 when new; NULL when
+ * the cap is off or the probe run is full. Caller holds the lock. */
+__AFL_NO_COV static uint64_t *__afl_cmplog_site_slot(void *pc) {
+    if (!__afl_cmplog_site_cap) return NULL;
+
+    uint64_t h = __afl_rec_mix((uint64_t)(uintptr_t)pc);
+    uint64_t key = h & CMPLOG_SITE_KEY_MASK;
+    uint64_t gen = __afl_cmplog_site_gen << CMPLOG_SITE_GEN_SHIFT;
+    for (int probe = 0; probe < CMPLOG_SITE_PROBES; probe++) {
+        uint64_t *e = &__afl_cmplog_site_tab[((uint32_t)h + (uint32_t)probe) & (CMPLOG_SITE_SLOTS - 1)];
+        if ((*e & ~CMPLOG_SITE_KEY_MASK & ~CMPLOG_SITE_COUNT_MASK) != gen) {
+            *e = key | gen;
+            return e;
+        }
+        if ((*e & CMPLOG_SITE_KEY_MASK) == key) return e;
+    }
+    return NULL;
+}
+
+/* Drain boundary (__cmplog_reset, persistent iteration). */
+__AFL_NO_COV static void __afl_cmplog_drain_scope(void) {
+    __afl_cmplog_site_epoch();
+    if (!__afl_cmplog_scope_campaign) __afl_cmplog_new_scope();
+}
+
 /* Fingerprint of a layer-1 record: every field its line prints. */
 __AFL_NO_COV static uint64_t __afl_bytes_fp(const unsigned char *a, const unsigned char *b,
                                             size_t k, size_t n, int result) {
@@ -4620,7 +5242,9 @@ __AFL_NO_COV static uint64_t __afl_bytes_fp(const unsigned char *a, const unsign
  * result == 0 is dropped: an already-satisfied comparison is exactly the
  * "looks unsolved but is solved" pollution the pair pool must not carry. */
 __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t n, int result) {
-    if (__afl_cmplog_fd < 0 || __afl_cmplog_paused || !a || !b || n == 0 || result == 0) return;
+    if ((__afl_cmplog_fd < 0 && !__afl_rec) || __afl_cmplog_paused || !a || !b || n == 0 ||
+        result == 0)
+        return;
     size_t k = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
     /* Both operands are hexdumped at the same width, so the record can only
      * be as wide as the shorter readable side. */
@@ -4630,6 +5254,11 @@ __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t
     uint64_t fp = __afl_bytes_fp((const unsigned char *)a, (const unsigned char *)b, k, n, result);
     if (!__afl_cmplog_acquire()) return;
     if (__afl_cmplog_seen(fp)) {
+        __afl_cmplog_release();
+        return;
+    }
+    if (__afl_rec) {
+        __afl_rec_put_bytes((const unsigned char *)a, (const unsigned char *)b, k, n, result);
         __afl_cmplog_release();
         return;
     }
@@ -4654,15 +5283,28 @@ __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t
  * after the call, i.e. the comparison site itself once inlined. */
 
 __AFL_NO_COV static inline void __afl_cmplog_ints(uint64_t a, uint64_t b, size_t n, void *pc) {
-    if (__afl_cmplog_fd < 0 || __afl_cmplog_paused) return;
+    if ((__afl_cmplog_fd < 0 && !__afl_rec) || __afl_cmplog_paused) return;
     /* The lock is also the backstop for toolchains where __AFL_NO_COV
      * expands to nothing: an instrumented record writer re-enters through
      * its own trace-cmp callbacks, finds the lock held, and returns
      * instead of recursing until the stack is gone. */
     if (!__afl_cmplog_acquire()) return;
+    /* Cap before dedup: a capped record must stay unseen, or campaign
+     * scope would never write it. */
+    uint64_t *site = __afl_cmplog_site_slot(pc);
+    if (site && (*site & CMPLOG_SITE_COUNT_MASK) >= __afl_cmplog_site_cap) {
+        __afl_cmplog_release();
+        return;
+    }
     /* a and b fix the printed sign field; 'I' keeps it apart from operands. */
     uint64_t fp = __afl_rec_mix(__afl_rec_mix(a ^ 'I') ^ b);
     if (__afl_cmplog_seen(__afl_rec_mix(fp ^ ((uint64_t)n << 56) ^ (uint64_t)(uintptr_t)pc))) {
+        __afl_cmplog_release();
+        return;
+    }
+    if (site) (*site)++;
+    if (__afl_rec) {
+        __afl_rec_put_int(a, b, n, pc);
         __afl_cmplog_release();
         return;
     }
@@ -5523,35 +6165,41 @@ __AFL_NO_COV static inline int __afl_const_pruned(uint64_t c, size_t n) {
 
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 1, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP1, a == b);
     __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp2(uint16_t a, uint16_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 2, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP2, a == b);
     __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 2, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp4(uint32_t a, uint32_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 4, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP4, a == b);
     __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 4, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp8(uint64_t a, uint64_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 8, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP8, a == b);
     __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 8, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 1, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP1, a == b);
     if (!__afl_const_pruned(a, 1))
         __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 2, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP2, a == b);
     if (!__afl_const_pruned(a, 2))
         __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
@@ -5559,6 +6207,7 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 4, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP4, a == b);
     if (!__afl_const_pruned(a, 4))
         __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
@@ -5566,6 +6215,7 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
     __AFL_CMP_GATE();
+    __afl_vp_ints(a, b, 8, __builtin_return_address(0));
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP8, a == b);
     if (!__afl_const_pruned(a, 8))
         __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
@@ -5726,6 +6376,7 @@ __AFL_NO_COV static void __afl_cmplog_atfork_child(void) {
      * wipe what the parent (or the fuzzer, in direct_lite) has not read. */
     if (!__afl_cmp_shm_on) __afl_cmp_counts_zero();
     __afl_cmplog_new_scope();
+    __afl_cmplog_site_epoch();
     /* Forkserver: the parent never flushes, so each child retries. */
     __afl_cmplog_retry();
 }
@@ -5743,8 +6394,20 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
         int v = atoi(compcov);
         __afl_compcov_level = v < 0 ? 0 : (v > 2 ? 2 : v);
     }
+#if __AFL_EDGE
+    /* Value profile segment: [u32 head = 1][u32 on]. */
+    void *vp = __afl_attach_sized("__AFL_VP_SHM_ID", 4);
+    if (vp) __afl_vp_on = (volatile uint32_t *)vp + 1;
+#endif
     const char *prune = getenv("__AFL_CMP_PRUNE_CONST");
     __afl_prune_const = prune && prune[0] && atoi(prune) != 0;
+    /* Record knobs; see "Dedup scope" and "Per-site record cap". */
+    const char *cap = getenv("__AFL_CMPLOG_SITE_CAP");
+    long cap_v = cap && cap[0] ? strtol(cap, NULL, 10) : 0;
+    __afl_cmplog_site_cap = cap_v <= 0 ? 0
+        : (cap_v > CMPLOG_SITE_CAP_MAX ? CMPLOG_SITE_CAP_MAX : (uint32_t)cap_v);
+    const char *scope = getenv("__AFL_CMPLOG_DEDUP_SCOPE");
+    __afl_cmplog_scope_campaign = scope && strcmp(scope, "campaign") == 0;
     /* Opened before the _CMPLOG_OUT check, and on its own fd: the counters
      * are useful on their own (a target's comparison profile costs no
      * record stream at all), and the record stream gets truncated and
@@ -5763,6 +6426,8 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
         if (want_sites)
             __afl_cmp_sites_fd = __afl_log_open(sites, 0, &__afl_cmp_sites_fd_id);
     }
+    /* Before _CMPLOG_OUT: with the table attached, CMP records skip text. */
+    __afl_rec_attach();
     const char *path = getenv("_CMPLOG_OUT");
     /* O_NONBLOCK: see the matching comment in __afl_cmplog_flush. Without
      * it, a FIFO sink with no reader open yet would hang the target here,
@@ -5794,7 +6459,7 @@ __AFL_NO_COV static void __afl_cmplog_fini(void) {
 __AFL_NO_COV __attribute__((visibility("default")))
 void __cmplog_reset(void) {
     __afl_cmplog_flush();
-    __afl_cmplog_new_scope();
+    __afl_cmplog_drain_scope();
     /* The per-iteration sync point in direct_lite/persistent modes. Dumping
      * here (not from __afl_cmplog_flush, which also runs on buffer-full in
      * the hot path) keeps the counts channel off the fast path. */
@@ -5817,6 +6482,13 @@ void __cmplog_reset(void) {
             lseek(__afl_cmplog_fd, 0, SEEK_SET);
         }
     }
+}
+
+/* Fresh dedup scope and site counters, whatever the scope knob says. */
+__AFL_NO_COV __attribute__((visibility("default")))
+void __cmplog_rescope(void) {
+    __afl_cmplog_new_scope();
+    __afl_cmplog_site_epoch();
 }
 
 /* paused != 0: drop CMP/DIV/GEP records until called again with 0. */
@@ -5866,6 +6538,143 @@ __AFL_NO_COV static void __afl_cmplog_fini_dtor(void) { __afl_cmplog_fini(); }
 #endif /* __AFL_CMPLOG */
 
 #if __AFL_EDGE
+
+/* ── Input file alias (wtf fshooks port) ──────────────────────────────
+ *
+ * A library that opens a hardcoded path cannot take the fuzzer's input.
+ * FUZZ_INPUT_ALIAS names that path; the hooks swap it for FUZZ_INPUT_PATH,
+ * the fuzzer's memfd (adapters/memfd_input.py):
+ *
+ *   lib: fopen("/etc/app.conf") -> hook -> real fopen("/proc/<pid>/fd/<n>")
+ *
+ * Hidden, like the signal API: binds every call inside this DSO (library
+ * objects linked in too, -Bsymbolic or not) and nothing outside it. Asm
+ * labels, not C names: _FILE_OFFSET_BITS=64 redirects open to open64 in the
+ * headers, and two C definitions would then share one symbol. Exact string
+ * match only. The alias stands for a regular file: lstat follows the memfd's
+ * /proc symlink, O_NOFOLLOW is dropped. Unset or empty env: pass-through.
+ * Real calls go to RTLD_NEXT (libc), past a sanitizer's open interceptor. */
+#define __AFL_ALIAS_ENV "FUZZ_INPUT_ALIAS"
+#define __AFL_ALIAS_TO_ENV "FUZZ_INPUT_PATH"
+#define __AFL_IO_HOOK __attribute__((visibility("hidden"), used)) __AFL_NO_COV
+
+enum { __AFL_ALIAS_UNREAD, __AFL_ALIAS_ON, __AFL_ALIAS_OFF };
+static int __afl_alias_state = __AFL_ALIAS_UNREAD;
+static const char *__afl_alias_from;
+static const char *__afl_alias_to;
+
+/* Own compare: strcmp is the cmplog hook and would log the shim's compare. */
+__AFL_NO_COV static int __afl_path_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+/* *path*, or the memfd path when *path* is the alias. Env read once, lazily:
+ * in-process targets get it set before their first open, not before load. */
+__AFL_NO_COV static const char *__afl_alias(const char *path) {
+    if (__builtin_expect(__afl_alias_state == __AFL_ALIAS_UNREAD, 0)) {
+        __afl_alias_from = getenv(__AFL_ALIAS_ENV);
+        __afl_alias_to = getenv(__AFL_ALIAS_TO_ENV);
+        int on = __afl_alias_from && *__afl_alias_from && __afl_alias_to && *__afl_alias_to;
+        __afl_alias_state = on ? __AFL_ALIAS_ON : __AFL_ALIAS_OFF;
+    }
+    if (__afl_alias_state != __AFL_ALIAS_ON || !path) return path;
+    return __afl_path_eq(path, __afl_alias_from) ? __afl_alias_to : path;
+}
+
+/* libc's *name*, cached in *slot*; NULL (errno ENOSYS) when unresolvable. */
+__AFL_NO_COV static void *__afl_io_real(void **slot, const char *name) {
+    if (!*slot) *slot = dlsym(RTLD_NEXT, name);
+    if (!*slot) errno = ENOSYS;
+    return *slot;
+}
+
+typedef int (*__afl_open_fn)(const char *, int, ...);
+typedef int (*__afl_openat_fn)(int, const char *, int, ...);
+typedef FILE *(*__afl_fopen_fn)(const char *, const char *);
+typedef int (*__afl_stat_fn)(const char *, struct stat *);
+typedef int (*__afl_stat64_fn)(const char *, struct stat64 *);
+typedef int (*__afl_access_fn)(const char *, int);
+
+/* open(2) passes a mode only with O_CREAT / O_TMPFILE. */
+#define __AFL_OPEN_MODE(flags, mode)                        \
+    do {                                                    \
+        if ((flags) & (O_CREAT | O_TMPFILE)) {              \
+            va_list ap;                                     \
+            va_start(ap, flags);                            \
+            (mode) = va_arg(ap, int);                       \
+            va_end(ap);                                     \
+        }                                                   \
+    } while (0)
+
+/* Swapped path: drop O_NOFOLLOW, the memfd path is a /proc symlink. */
+#define __AFL_ALIAS_FLAGS(orig, p, flags) ((p) == (orig) ? (flags) : ((flags) & ~O_NOFOLLOW))
+
+#define __AFL_DEF_OPEN(cname, sym)                                              \
+    __AFL_IO_HOOK int cname(const char *path, int flags, ...) __asm__(sym);     \
+    __AFL_IO_HOOK int cname(const char *path, int flags, ...) {                 \
+        static void *real;                                                      \
+        int mode = 0;                                                           \
+        __AFL_OPEN_MODE(flags, mode);                                           \
+        const char *p = __afl_alias(path);                                      \
+        __afl_open_fn fn = (__afl_open_fn)__afl_io_real(&real, sym);            \
+        if (!fn) return -1;                                                     \
+        return fn(p, __AFL_ALIAS_FLAGS(path, p, flags), mode);                  \
+    }
+
+#define __AFL_DEF_OPENAT(cname, sym)                                            \
+    __AFL_IO_HOOK int cname(int dirfd, const char *path, int flags, ...)        \
+        __asm__(sym);                                                           \
+    __AFL_IO_HOOK int cname(int dirfd, const char *path, int flags, ...) {      \
+        static void *real;                                                      \
+        int mode = 0;                                                           \
+        __AFL_OPEN_MODE(flags, mode);                                           \
+        const char *p = __afl_alias(path);                                      \
+        __afl_openat_fn fn = (__afl_openat_fn)__afl_io_real(&real, sym);        \
+        if (!fn) return -1;                                                     \
+        return fn(dirfd, p, __AFL_ALIAS_FLAGS(path, p, flags), mode);           \
+    }
+
+#define __AFL_DEF_FOPEN(cname, sym)                                             \
+    __AFL_IO_HOOK FILE *cname(const char *path, const char *mode) __asm__(sym); \
+    __AFL_IO_HOOK FILE *cname(const char *path, const char *mode) {             \
+        static void *real;                                                      \
+        __afl_fopen_fn fn = (__afl_fopen_fn)__afl_io_real(&real, sym);          \
+        return fn ? fn(__afl_alias(path), mode) : NULL;                         \
+    }
+
+/* lstat on the alias stats the memfd (follows the /proc link): real_sym. */
+#define __AFL_DEF_STAT(cname, sym, real_sym, st_t, fn_t)                        \
+    __AFL_IO_HOOK int cname(const char *path, st_t *st) __asm__(sym);           \
+    __AFL_IO_HOOK int cname(const char *path, st_t *st) {                       \
+        static void *real, *follow;                                             \
+        const char *p = __afl_alias(path);                                      \
+        fn_t fn = (fn_t)(p == path ? __afl_io_real(&real, sym)                  \
+                                   : __afl_io_real(&follow, real_sym));         \
+        return fn ? fn(p, st) : -1;                                             \
+    }
+
+__AFL_DEF_OPEN(__afl_io_open, "open")
+__AFL_DEF_OPEN(__afl_io_open64, "open64")
+__AFL_DEF_OPENAT(__afl_io_openat, "openat")
+__AFL_DEF_OPENAT(__afl_io_openat64, "openat64")
+__AFL_DEF_FOPEN(__afl_io_fopen, "fopen")
+__AFL_DEF_FOPEN(__afl_io_fopen64, "fopen64")
+
+/* stat/lstat are libc symbols from glibc 2.33; older ones inline __xstat. */
+#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 33)
+__AFL_DEF_STAT(__afl_io_stat, "stat", "stat", struct stat, __afl_stat_fn)
+__AFL_DEF_STAT(__afl_io_stat64, "stat64", "stat64", struct stat64, __afl_stat64_fn)
+__AFL_DEF_STAT(__afl_io_lstat, "lstat", "stat", struct stat, __afl_stat_fn)
+__AFL_DEF_STAT(__afl_io_lstat64, "lstat64", "stat64", struct stat64, __afl_stat64_fn)
+#endif
+
+__AFL_IO_HOOK int __afl_io_access(const char *path, int mode) __asm__("access");
+__AFL_IO_HOOK int __afl_io_access(const char *path, int mode) {
+    static void *real;
+    __afl_access_fn fn = (__afl_access_fn)__afl_io_real(&real, "access");
+    return fn ? fn(__afl_alias(path), mode) : -1;
+}
 
 /* ── Signal API interposers: real calls ───────────────────────────────
  *
@@ -8110,7 +8919,7 @@ __AFL_GCC_NO_COV static void __afl_persist_sync(void) {
     __afl_cmp_dump_sites();
     /* A fork child starts a scope; a parked one dropped every record an
      * earlier input had already emitted. */
-    __afl_cmplog_new_scope();
+    __afl_cmplog_drain_scope();
 #endif
 }
 

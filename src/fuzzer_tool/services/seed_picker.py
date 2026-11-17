@@ -21,6 +21,7 @@ from collections import Counter
 import numpy as np
 
 from fuzzer_tool.core.analyzers.analyzer_recurrence import Recurrence
+from fuzzer_tool.core.c11 import c11_bounds, c11_weight
 from fuzzer_tool.core.cadence import bucket, due, phase_of
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
@@ -30,7 +31,9 @@ from fuzzer_tool.core.edge_components import components as edge_components
 from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.schedulers.seed_drr import FAVORED_WEIGHT
+from fuzzer_tool.core.schedulers.seed_fess import cell_better, fess_cell
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
 from fuzzer_tool.core.zipf import TailLaw
 
@@ -107,6 +110,10 @@ ZIPF_GROWTH_R2 = 0.9
 # (gale_shapley, auction). Never in _seed_strategy_pool, so the seed arena plays no match for it.
 TARGET_MATCH = "target_match"
 
+# _seed_strategy for a seed from the IJON maximization queue (--ijon, paper
+# §IV-A4). Like TARGET_MATCH, outside the seed arena.
+IJON_MAXMAP = "ijon_maxmap"
+
 # OS / network seed arms (core/schedulers/seed_<name>.py): Elo name -> the
 # fuzzer attribute holding it, and the per-pick signals its select_seed takes
 # after the key list (see _pick_os_seed). Arms absent here take none.
@@ -128,6 +135,7 @@ _OS_SEED_ARMS = {
     "dpp": "_seed_dpp",
     "gram": "_seed_gram",
     "lottery": "_seed_lottery",
+    "fess": "_seed_fess",
 }
 # Fallback chain of _pick_unarbitrated, in priority order: (gating fuzzer
 # attribute, picker method, OS arm name or None). An arm whose attribute is
@@ -155,6 +163,7 @@ _OS_SEED_SIGNALS = {
     "sfq": ("flow",),
     "consolidated": ("cost", "weight", "flow"),
     "lottery": ("weight", "cost", "group", "flow"),
+    "fess": ("cell",),
 }
 
 # Currency label of a seed the last component pass had not seen yet, so a fresh
@@ -542,6 +551,9 @@ class SeedPicker:
 
     # Instances built without __init__ (tests) rebind arms on first pick.
     _armed_cache: tuple[tuple, list] | None = None
+    # (corpus size, exec_count, key -> FESS cell, key map it covers) from the
+    # last feature pass.
+    _fess_memo: tuple[int, int, dict[str, tuple], dict] | None = None
 
     def __init__(self, fuzzer, seed=None):
         self.f = fuzzer
@@ -1117,6 +1129,7 @@ class SeedPicker:
         mean (1.0 = average; unmeasured or empty ledger = neutral 1.0).
         weight: ``FAVORED_WEIGHT`` for AFL-favored seeds, else 1.0.
         flow: the lineage parent (``--lineage``), else None (the seed itself).
+        cell: FESS feature-grid cell (core/schedulers/seed_fess.py).
         """
         f = self.f
         mean = f.mean_exec_time()
@@ -1137,7 +1150,21 @@ class SeedPicker:
         def group(key: str) -> int:
             return self._component_labels(key_to_seed).get(key, FRESH_GROUP)
 
-        return {"cost": cost, "weight": weight, "flow": flow, "group": group}
+        # --plateau-groups: one currency per plateau instead of per component.
+        plateau = getattr(f, "_plateau", None)
+        if plateau is not None:
+            group = plateau.group  # noqa: F811
+
+        # Bound on first call: one memo check per pick, not one per key.
+        fess_lookup = None
+
+        def cell(key: str) -> tuple:
+            nonlocal fess_lookup
+            if fess_lookup is None:
+                fess_lookup = self._fess_cells(key_to_seed).__getitem__
+            return fess_lookup(key)
+
+        return {"cost": cost, "weight": weight, "flow": flow, "group": group, "cell": cell}
 
     def _component_labels(self, key_to_seed: dict[str, bytes]) -> dict[str, int]:
         """Connected component of each seed (core/edge_components.py), memoized.
@@ -1149,11 +1176,7 @@ class SeedPicker:
         f = self.f
         n = len(key_to_seed)
         memo = self._group_memo
-        if (
-            memo is not None
-            and abs(n - memo[0]) <= max(1, int(COMPONENT_DRIFT * memo[0]))
-            and f.exec_count - memo[1] < COMPONENT_REFRESH_EXECS
-        ):
+        if self._memo_fresh(memo, n):
             return memo[2]
         tracker = getattr(f, "_edge_tracker", None)
         labels: dict[str, int] = {}
@@ -1164,6 +1187,90 @@ class SeedPicker:
             labels = edge_components(edges)[0]
         self._group_memo = (n, f.exec_count, labels)
         return labels
+
+    def _memo_fresh(self, memo: tuple | None, n: int) -> bool:
+        """A (size, exec_count, table) memo holds while the corpus drifted at
+        most COMPONENT_DRIFT and fewer than COMPONENT_REFRESH_EXECS execs passed."""
+        if memo is None:
+            return False
+        drift_ok = abs(n - memo[0]) <= max(1, int(COMPONENT_DRIFT * memo[0]))
+        return drift_ok and self.f.exec_count - memo[1] < COMPONENT_REFRESH_EXECS
+
+    def _fess_cells(self, key_to_seed: dict[str, bytes]) -> dict[str, tuple]:
+        """FESS cell of every seed in *key_to_seed*, memoized like the component pass.
+
+        Rare-edge counts are O(edges) per seed, so the corpus is projected
+        once per refresh. Between refreshes, seeds admitted since are added
+        to the table; an unchanged key map (same object, see _corpus_keys)
+        skips even that set difference.
+        """
+        n = len(key_to_seed)
+        memo = self._fess_memo
+        inherit = getattr(self.f, "_fess_inherit", Switch.OFF) is Switch.ON
+        if not self._memo_fresh(memo, n):
+            cells = {k: self._fess_cell(k, s) for k, s in key_to_seed.items()}
+            if inherit:
+                self._fess_project(cells, key_to_seed, list(cells))
+            self._fess_memo = (n, self.f.exec_count, cells, key_to_seed)
+            return cells
+
+        cells = memo[2]
+        if memo[3] is key_to_seed:
+            return cells
+        fresh = key_to_seed.keys() - cells.keys()
+        for key in fresh:
+            cells[key] = self._fess_cell(key, key_to_seed[key])
+        if inherit:
+            self._fess_project(cells, key_to_seed, fresh)
+        self._fess_memo = (*memo[:3], key_to_seed)
+        return cells
+
+    def _fess_project(self, cells: dict, key_to_seed: dict[str, bytes], keys) -> None:
+        """--fess-inherit: a seed in *keys* no better than its parent's cell
+        competes in that cell (soksolv project), so non-improving descendants
+        get no fresh allocation.
+
+        Parents resolve before children (walk up, then assign top-down, no
+        recursion), so a chain lands in its best ancestor's cell. A parent
+        outside *key_to_seed* (evicted) or a lineage cycle leaves the seed its
+        own cell. *cells* already holds every key of *key_to_seed*.
+        """
+        meta_of = self.f.seed_meta.get
+        pending = set(keys)
+        parent_of: dict[str, str] = {}
+
+        for key in keys:
+            chain = []
+            k = key
+            while k in pending:
+                pending.discard(k)
+                chain.append(k)
+                meta = meta_of(key_to_seed[k])
+                parent = meta.get("parent_key") if meta else None
+                if parent not in key_to_seed or parent == k:
+                    break
+                parent_of[k] = parent
+                k = parent
+
+            # Top-down: each parent's cell is final before its child compares.
+            for k in reversed(chain):
+                parent = parent_of.get(k)
+                if parent is not None and not cell_better(cells[k], cells[parent]):
+                    cells[k] = cells[parent]
+
+    def _fess_cell(self, key: str, seed: bytes) -> tuple:
+        """Project one seed: edges and rare edges from the tracker, depth and size from meta."""
+        f = self.f
+        meta = f.seed_meta.get(seed) or {}
+        depth = int(meta.get("lineage_depth", 0))
+        size = int(meta.get("input_size", len(seed)))
+
+        tracker = getattr(f, "_edge_tracker", None)
+        if tracker is None:
+            return fess_cell(0, 0, depth, size)
+        return fess_cell(
+            tracker.get_seed_edge_count(key), tracker.rare_edge_count(key), depth, size
+        )
 
     def _pick_os_seed(self, name: str) -> bytes | None:
         """Run the OS / network seed arm *name*; None when disabled or empty.
@@ -1301,6 +1408,13 @@ class SeedPicker:
         if hint is not None:
             f._seed_strategy = TARGET_MATCH
             return hint
+
+        # --ijon: the max queue takes its IJON_SCHEDULE_MAXMAP share.
+        ijon = getattr(f, "_ijon", None)
+        best = ijon.pick(rng) if ijon is not None else None
+        if best is not None:
+            f._seed_strategy = IJON_MAXMAP
+            return best
 
         overdue = self._pick_lst_seed(clock_of(self.f).time())
         if overdue is not None:
@@ -2056,6 +2170,22 @@ class SeedPicker:
             return w
         return w * VALID_SEED_BONUS
 
+    def _c11_range(self, f) -> tuple[int, int] | None:
+        """(min, max) measured c11 over the corpus, once per pass; None = off.
+
+        Off without --c11 and during stall recovery, where AFL++ drops the
+        factor too (starved: more variability, not more focus).
+        """
+        if getattr(f, "_c11", None) is None or getattr(f, "_stall_recovery_active", False):
+            return None
+        return c11_bounds(m.get("c11", 0) for m in f.seed_meta.values())
+
+    def _weight_c11(self, meta: dict, w: float, c11_range: tuple[int, int] | None) -> float:
+        """AFL++ C11 factor (1.1 + 0.9 t^2) for a seed with measured locals."""
+        if c11_range is None:
+            return w
+        return w * c11_weight(meta.get("c11", 0), *c11_range)
+
     def _weight_fake_novelty(self, meta: dict, w: float) -> float:
         """Demote seeds whose mutants flood the corpus (BranchTrap fake paths)."""
         return w * fake_novelty_factor(meta["fuzz_count"], meta.get("child_count", 0))
@@ -2303,6 +2433,7 @@ class SeedPicker:
             getattr(f, "_use_overlap_density", False)
             and getattr(f, "_overlap_mode", "") == "pareto4d"
         )
+        c11_range = self._c11_range(f)
         try:
             for i, seed in enumerate(corpus):
                 if not has_meta[i]:
@@ -2323,6 +2454,7 @@ class SeedPicker:
                 w = self._weight_fractal_diversity(seed, w, f)
                 w = self._weight_validity(meta, w, f)
                 w = self._weight_fake_novelty(meta, w)
+                w = self._weight_c11(meta, w, c11_range)
                 w *= lineage_div.get(sk, 1.0)
                 w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
 

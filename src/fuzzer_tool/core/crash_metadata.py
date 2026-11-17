@@ -122,6 +122,7 @@ class CrashMetadata:
     # Cluster ID
     cluster_id: str = ""
     stack_hash: str = ""  # --crash-blocklist entry (sanitizer.STACK_HASH_TAG)
+    func_hash: str = ""  # rebuild-stable blocklist entry (sanitizer.FUNC_HASH_TAG)
 
     # Execution metadata
     timestamp: str = ""
@@ -299,6 +300,8 @@ class CrashMetadata:
             lines.append(f"cluster_id:    {self.cluster_id}")
             if self.stack_hash:
                 lines.append(f"stack_hash:    {self.stack_hash}")
+            if self.func_hash:
+                lines.append(f"func_hash:     {self.func_hash}")
             lines.append("")
             return
 
@@ -481,6 +484,7 @@ class CrashMetadata:
             "gadgets": dict(self.gadgets),
             "cluster_id": self.cluster_id,
             "stack_hash": self.stack_hash,
+            "func_hash": self.func_hash,
             "returncode": self.returncode,
             "parent_seed_hash": self.parent_seed_hash,
             "mutation_ops": list(self.mutation_ops),

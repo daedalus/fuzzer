@@ -174,10 +174,35 @@ def is_runtime_module(module: str) -> bool:
     return module.rsplit("/", 1)[-1].startswith(_RUNTIME_MODULES)
 
 
-def _is_runtime(frame: str) -> bool:
+def _is_builtin_runtime(frame: str) -> bool:
     if frame in _RUNTIME_FUNCS or frame.startswith(_RUNTIME_PREFIXES):
         return True
     return "+0x" in frame and is_runtime_module(frame)
+
+
+# Runtime-frame predicate; configure_stack_ignore() rebinds it once per run.
+_is_runtime = _is_builtin_runtime
+
+
+def configure_stack_ignore(patterns: list[str]) -> None:
+    """Extend runtime-frame stripping with *patterns* (``--stack-ignore``).
+
+    Bound once (ifs up): ``[]`` restores the built-in predicate at no cost.
+    ``["^av_free"]`` makes ``[free, av_free, decode_frame]`` sign as
+    ``decode_frame``.
+    """
+    global _is_runtime
+    _FUNC_HASH_CACHE.clear()  # hashes depend on the predicate
+    if not patterns:
+        _is_runtime = _is_builtin_runtime
+        return
+
+    match = re.compile("|".join(f"(?:{p})" for p in patterns)).match
+
+    def _user_runtime(frame: str) -> bool:
+        return _is_builtin_runtime(frame) or match(frame) is not None
+
+    _is_runtime = _user_runtime
 
 
 def signature_frames(frames: list[str]) -> list[str]:
@@ -199,11 +224,40 @@ def signature_frames(frames: list[str]) -> list[str]:
     return out or frames[:1]
 
 
+def _target_frames(frames: list[str]) -> list[str]:
+    """Symbolized target frames for ``func_hash``: runtime and harness cut.
+
+    Unsymbolized "module+0x…" frames are dropped: their offsets move per
+    build. An all-runtime stack keeps its innermost named frame.
+    """
+    named = [f for f in frames if "+0x" not in f]
+    out: list[str] = []
+    for f in named:
+        if f in _HARNESS_FUNCS and out:
+            break
+        if _is_runtime(f):
+            continue
+        out.append(f)
+        if len(out) == _NUM_FRAMES_SANITIZER:
+            break
+    return out or named[:1]
+
+
 # Stack hash format; bump on any change to stack_hash(). Blocklists carry it
 # as their header so a list from another format warns instead of matching
 # nothing.
 STACK_HASH_VERSION = 2
 STACK_HASH_TAG = f"# stack-hash v{STACK_HASH_VERSION}"
+
+# Function-name hash format (func_hash()); rebuild-stable blocklist entries.
+FUNC_HASH_VERSION = 1
+FUNC_HASH_TAG = f"# func-hash v{FUNC_HASH_VERSION}"
+_NAME_SEP = b"\0"
+
+# func_hash memo: repeat crashes share frames; pure-Python XXH64 is ~8 us.
+# Cleared when full (bounded, Hard Rule 54) and on configure_stack_ignore().
+_FUNC_HASH_CACHE: dict[tuple[str, ...], str] = {}
+_FUNC_HASH_CACHE_MAX = 4096
 
 # Stack hash: first N crash-stack PCs, page offset only (survives ASLR).
 _NUM_FRAMES_SANITIZER = 14
@@ -605,3 +659,21 @@ class SanitizerReport:
 
         offsets = array("H", (pc & _PAGE_OFFSET_MASK for pc in pcs[:_NUM_FRAMES_SANITIZER]))
         return f"{xxh64(offsets.tobytes()):016x}"
+
+    def func_hash(self) -> str:
+        """Hash of the target frames' function names (OneFuzz-style bucket).
+
+        Survives rebuilds and ASLR, unlike ``stack_hash``. NUL-joined, so
+        ``[ab, c]`` and ``[a, bc]`` differ. "" when the stack has no names.
+        """
+        key = tuple(self.frames)
+        cached = _FUNC_HASH_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+        names = _target_frames(self.frames)
+        h = f"{xxh64(_NAME_SEP.join(n.encode() for n in names)):016x}" if names else ""
+        if len(_FUNC_HASH_CACHE) >= _FUNC_HASH_CACHE_MAX:
+            _FUNC_HASH_CACHE.clear()
+        _FUNC_HASH_CACHE[key] = h
+        return h
