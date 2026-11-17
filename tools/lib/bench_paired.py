@@ -229,6 +229,10 @@ ARMS: dict[str, list[str]] = {
     # without --elo, one knob against `baseline`.
     "seed-gram": ["--seed-gram-scheduler"],
     "seed-gram-central": ["--seed-gram-scheduler", "--seed-gram-mode", "central"],
+    # FESS feature-grid seed arm (core/schedulers/seed_fess.py): sole picker vs
+    # `baseline`, and as an Elo arm vs `elo`.
+    "seed-fess": ["--seed-fess-scheduler"],
+    "elo-seed-fess": ["--elo", "--mc-bandit", "--seed-fess-scheduler"],
     **{
         f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
         for pct in SEED_NEWEST_PCTS
@@ -428,6 +432,8 @@ ARM_BASELINES: dict[str, str] = {
     "seed-dpp": "baseline",
     "seed-gram": "baseline",
     "seed-gram-central": "baseline",
+    "seed-fess": "baseline",
+    "elo-seed-fess": "elo",
     "novel-crash-reward-abort": "abort-crash",
     "abort-crash-ctl": "abort-crash",
     "seed-branch": "elo",

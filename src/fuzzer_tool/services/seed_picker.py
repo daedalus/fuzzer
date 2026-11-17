@@ -32,6 +32,7 @@ from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.seed_drr import FAVORED_WEIGHT
+from fuzzer_tool.core.schedulers.seed_fess import fess_cell
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
 from fuzzer_tool.core.zipf import TailLaw
 
@@ -133,6 +134,7 @@ _OS_SEED_ARMS = {
     "dpp": "_seed_dpp",
     "gram": "_seed_gram",
     "lottery": "_seed_lottery",
+    "fess": "_seed_fess",
 }
 # Fallback chain of _pick_unarbitrated, in priority order: (gating fuzzer
 # attribute, picker method, OS arm name or None). An arm whose attribute is
@@ -160,6 +162,7 @@ _OS_SEED_SIGNALS = {
     "sfq": ("flow",),
     "consolidated": ("cost", "weight", "flow"),
     "lottery": ("weight", "cost", "group", "flow"),
+    "fess": ("cell",),
 }
 
 # Currency label of a seed the last component pass had not seen yet, so a fresh
@@ -547,6 +550,9 @@ class SeedPicker:
 
     # Instances built without __init__ (tests) rebind arms on first pick.
     _armed_cache: tuple[tuple, list] | None = None
+    # (corpus size, exec_count, key -> FESS cell, key map it covers) from the
+    # last feature pass.
+    _fess_memo: tuple[int, int, dict[str, tuple], dict] | None = None
 
     def __init__(self, fuzzer, seed=None):
         self.f = fuzzer
@@ -1122,6 +1128,7 @@ class SeedPicker:
         mean (1.0 = average; unmeasured or empty ledger = neutral 1.0).
         weight: ``FAVORED_WEIGHT`` for AFL-favored seeds, else 1.0.
         flow: the lineage parent (``--lineage``), else None (the seed itself).
+        cell: FESS feature-grid cell (core/schedulers/seed_fess.py).
         """
         f = self.f
         mean = f.mean_exec_time()
@@ -1142,7 +1149,16 @@ class SeedPicker:
         def group(key: str) -> int:
             return self._component_labels(key_to_seed).get(key, FRESH_GROUP)
 
-        return {"cost": cost, "weight": weight, "flow": flow, "group": group}
+        # Bound on first call: one memo check per pick, not one per key.
+        fess_lookup = None
+
+        def cell(key: str) -> tuple:
+            nonlocal fess_lookup
+            if fess_lookup is None:
+                fess_lookup = self._fess_cells(key_to_seed).__getitem__
+            return fess_lookup(key)
+
+        return {"cost": cost, "weight": weight, "flow": flow, "group": group, "cell": cell}
 
     def _component_labels(self, key_to_seed: dict[str, bytes]) -> dict[str, int]:
         """Connected component of each seed (core/edge_components.py), memoized.
@@ -1154,11 +1170,7 @@ class SeedPicker:
         f = self.f
         n = len(key_to_seed)
         memo = self._group_memo
-        if (
-            memo is not None
-            and abs(n - memo[0]) <= max(1, int(COMPONENT_DRIFT * memo[0]))
-            and f.exec_count - memo[1] < COMPONENT_REFRESH_EXECS
-        ):
+        if self._memo_fresh(memo, n):
             return memo[2]
         tracker = getattr(f, "_edge_tracker", None)
         labels: dict[str, int] = {}
@@ -1169,6 +1181,51 @@ class SeedPicker:
             labels = edge_components(edges)[0]
         self._group_memo = (n, f.exec_count, labels)
         return labels
+
+    def _memo_fresh(self, memo: tuple | None, n: int) -> bool:
+        """A (size, exec_count, table) memo holds while the corpus drifted at
+        most COMPONENT_DRIFT and fewer than COMPONENT_REFRESH_EXECS execs passed."""
+        if memo is None:
+            return False
+        drift_ok = abs(n - memo[0]) <= max(1, int(COMPONENT_DRIFT * memo[0]))
+        return drift_ok and self.f.exec_count - memo[1] < COMPONENT_REFRESH_EXECS
+
+    def _fess_cells(self, key_to_seed: dict[str, bytes]) -> dict[str, tuple]:
+        """FESS cell of every seed in *key_to_seed*, memoized like the component pass.
+
+        Rare-edge counts are O(edges) per seed, so the corpus is projected
+        once per refresh. Between refreshes, seeds admitted since are added
+        to the table; an unchanged key map (same object, see _corpus_keys)
+        skips even that set difference.
+        """
+        n = len(key_to_seed)
+        memo = self._fess_memo
+        if not self._memo_fresh(memo, n):
+            cells = {k: self._fess_cell(k, s) for k, s in key_to_seed.items()}
+            self._fess_memo = (n, self.f.exec_count, cells, key_to_seed)
+            return cells
+
+        cells = memo[2]
+        if memo[3] is key_to_seed:
+            return cells
+        for key in key_to_seed.keys() - cells.keys():
+            cells[key] = self._fess_cell(key, key_to_seed[key])
+        self._fess_memo = (*memo[:3], key_to_seed)
+        return cells
+
+    def _fess_cell(self, key: str, seed: bytes) -> tuple:
+        """Project one seed: edges and rare edges from the tracker, depth and size from meta."""
+        f = self.f
+        meta = f.seed_meta.get(seed) or {}
+        depth = int(meta.get("lineage_depth", 0))
+        size = int(meta.get("input_size", len(seed)))
+
+        tracker = getattr(f, "_edge_tracker", None)
+        if tracker is None:
+            return fess_cell(0, 0, depth, size)
+        return fess_cell(
+            tracker.get_seed_edge_count(key), tracker.rare_edge_count(key), depth, size
+        )
 
     def _pick_os_seed(self, name: str) -> bytes | None:
         """Run the OS / network seed arm *name*; None when disabled or empty.

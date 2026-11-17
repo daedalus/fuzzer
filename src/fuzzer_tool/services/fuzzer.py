@@ -162,6 +162,7 @@ from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
+from fuzzer_tool.core.schedulers.seed_fess import SeedFessScheduler
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
@@ -317,6 +318,7 @@ _SEED_STRATEGY_NAMES = (
     "dpp",
     "gram",
     "lottery",
+    "fess",
 )
 
 
@@ -2167,6 +2169,9 @@ class Fuzzer:
         stack_depth_max=False,
         # --trim-new-coverage: trim each new-coverage seed on admission. Appended.
         trim_new_coverage=Switch.OFF,
+        # --seed-fess-scheduler: FESS feature-grid seed arm
+        # (core/schedulers/seed_fess.py). Off, out of --hail-mary. Appended.
+        seed_fess_scheduler=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3722,6 +3727,7 @@ class Fuzzer:
             if seed_lottery_scheduler
             else None
         )
+        self._seed_fess = SeedFessScheduler(rng=self._rng) if seed_fess_scheduler else None
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:
@@ -3743,6 +3749,7 @@ class Fuzzer:
                 self._seed_dpp,
                 self._seed_gram,
                 self._seed_lottery,
+                self._seed_fess,
             )
             if arm is not None
         )
@@ -5942,6 +5949,8 @@ class Fuzzer:
         self._state_store.set("crash_cov", self._crash_cov.to_dict())
         if self._ijon is not None:
             self._state_store.set("ijon", self._ijon.tracker.to_dict())
+        if self._seed_fess is not None:
+            self._state_store.set("seed_fess", self._seed_fess.to_dict())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -5981,6 +5990,8 @@ class Fuzzer:
         if self._ijon is not None:
             by_key = {key16(s): s for s in self.corpus}
             self._ijon.tracker.from_dict(self._state_store.get("ijon", {}), by_key.get)
+        if self._seed_fess is not None:
+            self._seed_fess.from_dict(self._state_store.get("seed_fess", {}))
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""

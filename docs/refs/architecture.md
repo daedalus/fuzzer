@@ -198,4 +198,6 @@ pool via `_seed_strategy_pool` (so shadow
 matches are only recorded against strategies that were actually selectable),
 and asks `_elo.select_strategy` for the winner using the `seed_*`-prefixed keys,
 then strips the prefix for downstream use (`_seed_strategy`, `strategy_map`,
-convergence report).
+convergence report). Key-based seed arms (`_OS_SEED_ARMS`: `mlfq` … `lottery`,
+`fess`) take per-pick signals from `_seed_signals` (`cost`, `weight`, `flow`,
+`group`, `cell`) as declared in `_OS_SEED_SIGNALS`.
