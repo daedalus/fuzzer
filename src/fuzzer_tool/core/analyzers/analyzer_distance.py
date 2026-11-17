@@ -75,7 +75,9 @@ from pathlib import Path
 
 from fuzzer_tool.core import cfg_cache
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
+from fuzzer_tool.core.deadness import DeadProver, Verdict, VerdictCache
 from fuzzer_tool.core.dominators import gate_blocks, predecessors
+from fuzzer_tool.core.run_mode import Switch
 
 log = logging.getLogger(__name__)
 
@@ -391,10 +393,17 @@ class TargetDistance:
         debug: bool = False,
         gate_bonus: float = 0.0,
         metric: DistanceMetric = DistanceMetric.HARMONIC,
+        prove_dead: Switch = Switch.OFF,
+        verdicts: VerdictCache | None = None,
     ):
         self.target = target
         self.target_names: list[str] = targets or []
         self.target_addrs: set[int] = set()
+        # --prove-dead: targets statically proven unreachable (core/deadness.py),
+        # dropped from target_addrs before any distance is computed.
+        self._prove_dead = prove_dead
+        self._verdicts = verdicts
+        self.dead_targets: set[int] = set()
         self._use_cfg_cache = use_cfg_cache
         self._debug = debug
         # Opt-in control-dependence discount (see core/dominators.py). 0.0
@@ -475,6 +484,8 @@ class TargetDistance:
             print(f"[dist] parse_symbols={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
         self._resolve_targets()
+        if self._prove_dead is Switch.ON:
+            self._drop_dead_targets()
         if self._debug:
             print(f"[dist] resolve_targets={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
@@ -662,6 +673,20 @@ class TargetDistance:
             for fname, (start, _end) in self.functions.items():
                 if name in fname:
                     self.target_addrs.add(start)
+
+    def _drop_dead_targets(self) -> None:
+        """Move proven-dead targets to ``dead_targets``; UNKNOWN keeps them."""
+        prover = None
+        for addr in sorted(self.target_addrs):
+            v = self._verdicts.get(addr) if self._verdicts is not None else None
+            if v is None:
+                prover = prover or DeadProver(self._elf_data)
+                v = prover.verdict(addr)
+                if v is not Verdict.UNKNOWN and self._verdicts is not None:
+                    self._verdicts.put(addr, v)
+            if v is Verdict.DEAD:
+                self.dead_targets.add(addr)
+        self.target_addrs -= self.dead_targets
 
     def _resolve_callee_name(self, addr: int) -> str | None:
         """Map a call target address to a function name (PLT-aware)."""

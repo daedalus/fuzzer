@@ -1074,6 +1074,17 @@ def _orbit_skip(f, repeat: bool, folded: bool) -> bool:
     return repeat
 
 
+def _build_identity(target: str) -> bytes:
+    """GNU build id of *target*, else path + size + mtime: what a proof is about."""
+    from fuzzer_tool.core.elf import build_id
+
+    bid = build_id(target)
+    if bid:
+        return bid
+    st = os.stat(target)
+    return f"{os.path.abspath(target)}:{st.st_size}:{st.st_mtime_ns}".encode()
+
+
 class Fuzzer:
     # Decision clock; __init__ replaces it. Default for __new__-built test fuzzers.
     _clock: Clock = WALL_CLOCK
@@ -2196,6 +2207,9 @@ class Fuzzer:
         # Waypoint race over the target's dominator chain (core/waypoints.py,
         # --waypoints); directed mode only. Appended.
         waypoints=False,
+        # Drop statically proven-dead targets from directed mode (core/deadness.py,
+        # --prove-dead). Appended.
+        prove_dead=False,
         # --advisors: one free advised move per advisor per seed stage
         # (services/advisors.py). Off, out of --hail-mary. Appended.
         advisors=False,
@@ -4854,6 +4868,17 @@ class Fuzzer:
         self._waypoint_bmp = None
         if waypoints and not targets:
             log.warning("--waypoints needs --target-functions; ignored")
+        # --prove-dead: verdict cache shared with the distance spec, keyed to
+        # this build so a rebuilt target never reuses old proofs.
+        self._dead_verdicts = None
+        if prove_dead and targets:
+            from fuzzer_tool.core.deadness import VerdictCache
+
+            self._dead_verdicts = VerdictCache(_build_identity(target))
+            if self.resume:
+                self._dead_verdicts.load_state_dict(self._state_store.get("dead_verdicts", {}))
+        elif prove_dead:
+            log.warning("--prove-dead needs --target-functions; ignored")
         self._trace_crashes_requested = trace_crashes
 
         # Crash MI tracker, length-edge tracker, transfer entropy, occupation,
@@ -6027,6 +6052,8 @@ class Fuzzer:
             self._state_store.set("gravity", self._gravity.state_dict())
         if self._waypoints is not None:
             self._state_store.set("waypoints", self._waypoints.state_dict())
+        if self._dead_verdicts is not None:
+            self._state_store.set("dead_verdicts", self._dead_verdicts.state_dict())
         self._state_store.set("novelty_hist", self._novelty_hist.to_dict())
         self._state_store.set("crash_cov", self._crash_cov.to_dict())
         if self._ijon is not None:

@@ -77,6 +77,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "plateau_groups",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "elo_stale_bench",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_branch_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "prove_dead",  # unmeasured: A/B pending (docs/AB_PENDING.md); directed mode only
         "waypoints",  # unmeasured: A/B pending (docs/AB_PENDING.md); directed mode only
         "cut_damage",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the branch arm
         "inverse_lottery_select",  # unmeasured: A/B pending (docs/AB_PENDING.md)

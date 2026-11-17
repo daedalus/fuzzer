@@ -622,6 +622,7 @@ def _activate_distance(f: FuzzerLike) -> None:
     import os
 
     from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric, TargetDistance
+    from fuzzer_tool.core.run_mode import Switch
 
     f._distance = TargetDistance(
         f.target,
@@ -630,9 +631,13 @@ def _activate_distance(f: FuzzerLike) -> None:
         debug=f.debug,
         gate_bonus=getattr(f, "_gate_bonus", 0.0),
         metric=getattr(f, "_distance_metric", DistanceMetric.HARMONIC),
+        prove_dead=Switch.ON if getattr(f, "_dead_verdicts", None) is not None else Switch.OFF,
+        verdicts=getattr(f, "_dead_verdicts", None),
     )
     f._dist_table_shm = None
     if f._distance.load():
+        for addr in sorted(f._distance.dead_targets):
+            print(f"[!] --prove-dead: target {addr:#x} is statically unreachable; dropped")
         print(
             f"[*] Directed mode: {len(f._distance.target_addrs)} target(s), "
             f"{len(f._distance.functions)} functions mapped"

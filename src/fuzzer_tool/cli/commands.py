@@ -1021,6 +1021,7 @@ def cmd_fuzz(args):
         influence=getattr(args, "influence", False),
         cut_damage=getattr(args, "cut_damage", False),
         waypoints=getattr(args, "waypoints", False),
+        prove_dead=getattr(args, "prove_dead", False),
         field_hmm=getattr(args, "field_hmm", False),
         field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
@@ -2959,6 +2960,9 @@ def cmd_sweep(args):
 #
 # seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
+#
+# prove_dead (--prove-dead) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md); inert without --target-functions.
 #
 # waypoints (--waypoints) is excluded as unmeasured: unit tests only, no paired run
 # (docs/AB_PENDING.md); inert without --target-functions.
@@ -5823,6 +5827,14 @@ def main() -> int:
         help="Target functions for directed fuzzing — names, hex addresses, "
         "or file.c:line (via DWARF). Note: use --target-functions (not the "
         "positional 'targets' binary list).",
+    )
+    fuzz_parser.add_argument(
+        "--prove-dead",
+        action="store_true",
+        help="With --target-functions: drop targets statically proven unreachable "
+        "(no call/jump/address-reference path from entry, exports or address-taken "
+        "functions; core/deadness.py). Unknown keeps the target. Not in --hail-mary "
+        "until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--waypoints",
