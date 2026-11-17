@@ -159,6 +159,7 @@ from fuzzer_tool.core.schedulers.op_swucb import SWUCB_PER_ARM
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
 from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
+from fuzzer_tool.core.schedulers.seed_branch import FrontierRank
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
@@ -2185,6 +2186,9 @@ class Fuzzer:
         # by unsolved-CondStmt count. Opt-in, not implied by position_arena or
         # --hail-mary. Appended.
         pos_hotspot=False,
+        # 'branch' arm ranks frontier branches by cut damage (core/articulation.py,
+        # --cut-damage); needs seed_branch_scheduler. Appended.
+        cut_damage=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3394,11 +3398,15 @@ class Fuzzer:
 
         # The branch arm reads the Katz channel's ICFG and node masks.
         if seed_branch_scheduler and self._katz_channel is not None:
-            self._katz_channel.enable_branch()
+            self._katz_channel.enable_branch(
+                FrontierRank.CUT_DAMAGE if cut_damage else FrontierRank.HITS
+            )
         elif seed_branch_scheduler:
             log.warning(
                 "--seed-branch-scheduler needs the Katz node channel (trace-pc, undirected)"
             )
+        if cut_damage and not seed_branch_scheduler:
+            log.warning("--cut-damage needs --seed-branch-scheduler; ignored")
         self._bind_katz(schedule or "base", elo, seed_branch_scheduler)
 
         self._load_corpus()

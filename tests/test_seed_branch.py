@@ -205,3 +205,81 @@ def test_cli_flag_registered(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         commands.main()
     assert "--seed-branch-scheduler" in capsys.readouterr().out
+
+
+# --- cut damage (--cut-damage) ---------------------------------------------
+
+# CHAIN plus a region 4->6->7->8 that only block 4 leads into.
+GUARDED = CHAIN + [(4, 6), (6, 7), (7, 8)]
+
+
+def test_cut_damage_promotes_branch_into_guarded_region():
+    # Tail 3 ran 4x, tail 1 ran 9x: by hits alone 3->5 is the target.
+    hits = np.array([9, 9, 9, 4, 0, 0, 0, 0, 0], dtype=np.float64)
+    visited = _visited(9, {0, 1, 2, 3})
+    plain = BranchFrontier(_icfg(9, GUARDED))
+    plain.refresh(visited, hits)
+    assert plain.targets.tolist() == [4]  # edge 4: 3->5
+
+    # Cutting block 4 strands {6,7,8}: 9 / (1 + 3) < 4 / (1 + 0).
+    _, damage = _icfg(9, GUARDED).cut_damage(0)
+    guarded = BranchFrontier(_icfg(9, GUARDED), guard=damage)
+    guarded.refresh(visited, hits)
+    assert guarded.targets.tolist() == [3]  # edge 3: 1->4
+
+
+def test_falsification_flat_damage_keeps_hits_order():
+    # No region behind any frontier block: same targets as plain ranking.
+    hits = np.array([9, 9, 9, 4, 0, 0], dtype=np.float64)
+    visited = _visited(6, {0, 1, 2, 3})
+    plain = BranchFrontier(_icfg(6, CHAIN))
+    plain.refresh(visited, hits)
+    flat = BranchFrontier(_icfg(6, CHAIN), guard=np.zeros(6, dtype=np.int64))
+    flat.refresh(visited, hits)
+    assert flat.targets.tolist() == plain.targets.tolist() == [4]
+
+
+def test_guard_length_mismatch_raises():
+    with pytest.raises(ValueError):
+        BranchFrontier(_icfg(6, CHAIN), guard=np.zeros(5, dtype=np.int64))
+
+
+def _main_channel() -> KatzChannel:
+    icfg = InterproceduralCFG([0x100 * i for i in range(9)], ["main"] * 9, *_edges(GUARDED), {})
+    ch = KatzChannel(icfg, {k: k for k in range(9)})
+    bits = np.zeros(9, dtype=bool)
+    bits[[0, 1, 2]] = True
+    for _ in range(8):
+        ch.record(bits, seed_key=None)  # blocks 0-2 run often
+    bits[3] = True
+    for _ in range(4):
+        ch.record(bits, seed_key="tail")
+    return ch
+
+
+def _edges(edges):
+    return (
+        np.array([u for u, _ in edges], dtype=np.int64),
+        np.array([v for _, v in edges], dtype=np.int64),
+    )
+
+
+def test_channel_cut_damage_rank_retargets():
+    from fuzzer_tool.core.schedulers.seed_branch import FrontierRank
+
+    plain, cut = _main_channel(), _main_channel()
+    plain.enable_branch()
+    cut.enable_branch(FrontierRank.CUT_DAMAGE)
+    plain.ensure_scores(force=True)
+    cut.ensure_scores(force=True)
+    assert plain._branch.targets.tolist() == [4]
+    assert cut._branch.targets.tolist() == [3]
+
+
+def test_channel_cut_damage_without_main_falls_back():
+    from fuzzer_tool.core.schedulers.seed_branch import FrontierRank
+
+    ch = _channel()  # functions are all "f": no entry to cut from
+    ch.enable_branch(FrontierRank.CUT_DAMAGE)
+    ch.ensure_scores(force=True)
+    assert ch.branch_energy("tail") == 1.0  # plain hits ranking
