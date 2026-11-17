@@ -265,9 +265,26 @@ def iter_seeds(
 ) -> Iterator[tuple[Media, bytes]]:
     """Distinct (media, body) of the *wanted* types across *caches*."""
     stats = stats if stats is not None else ScanStats()
+    return unique(_carve_all(caches, wanted, max_bytes, stats), stats)
+
+
+def unique(seeds: Iterable[tuple[Media, bytes]], stats: ScanStats) -> Iterator[tuple[Media, bytes]]:
+    """Drop bodies already yielded this run (counted in stats.duplicates)."""
     # 16-byte digests: one profile's body is often cached by another.
     seen: set[bytes] = set()
+    for media, body in seeds:
+        digest = hashlib.blake2b(body, digest_size=16).digest()
+        if digest in seen:
+            stats.duplicates += 1
+            continue
+        seen.add(digest)
+        yield media, body
 
+
+def _carve_all(
+    caches: Iterable[Path], wanted: set[Media], max_bytes: int, stats: ScanStats
+) -> Iterator[tuple[Media, bytes]]:
+    """(media, body) of the *wanted* types, one per cache file, duplicates kept."""
     for cache in caches:
         for path in sorted(cache.iterdir()):
             if path.is_dir():
@@ -280,12 +297,6 @@ def iter_seeds(
                 continue
             if got is None or got[0] not in wanted or not got[1]:
                 continue
-
-            digest = hashlib.blake2b(got[1], digest_size=16).digest()
-            if digest in seen:
-                stats.duplicates += 1
-                continue
-            seen.add(digest)
             yield got
 
 
@@ -354,6 +365,12 @@ def _media_set(spec: str) -> set[Media]:
 
 def _parse(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    add_send_args(ap)
+    return ap.parse_args(argv)
+
+
+def add_send_args(ap: argparse.ArgumentParser) -> None:
+    """Flags shared by the seed feeders (this tool, tools/blockfile_seeds.py)."""
     ap.add_argument(
         "--root", type=Path, action="append", help="cache root (repeatable); default: all known"
     )
@@ -383,20 +400,32 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
         help="skip seeds sent by earlier runs; record new ones (created if missing)",
     )
     ap.add_argument("--dry-run", action="store_true", help="count, send nothing")
-    return ap.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse(argv)
+    caches = discover(args)
+    if not caches:
+        return 1
+    stats = ScanStats()
+    return send_seeds(iter_seeds(caches, args.types, args.max_bytes, stats), args, stats)
 
+
+def discover(args: argparse.Namespace) -> list[Path]:
+    """Cache dirs under --root, or every known Chrome/Chromium profile; printed."""
     roots = args.root or browser_roots(sys.platform, Path.home(), dict(os.environ))
     caches = find_caches(roots)
     if not caches:
         print("[-] no Chrome/Chromium cache found; pass --root", file=sys.stderr)
-        return 1
     for cache in caches:
         print(f"[*] cache: {cache}")
+    return caches
 
+
+def send_seeds(
+    seeds: Iterable[tuple[Media, bytes]], args: argparse.Namespace, stats: ScanStats
+) -> int:
+    """Send *seeds* per the shared flags; 0 when all went out, 1 on failure."""
     # Ifs up: pick the sink once.
     send = (
         (lambda _data: None)
@@ -406,7 +435,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     verb = "would send" if args.dry_run else "sent"
-    stats = ScanStats()
 
     try:
         log = SentLog(args.sent_bloom, Persist.READ_ONLY if args.dry_run else Persist.WRITE)
@@ -416,17 +444,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # Saved on every exit (done, send failure, Ctrl-C) so delivered seeds stay recorded.
     try:
-        return _send_all(caches, args, send, log, stats, verb)
+        return _send_all(seeds, args, send, log, stats, verb)
     finally:
         log.save()
 
 
-def _send_all(caches, args, send, log: SentLog, stats: ScanStats, verb: str) -> int:
+def _send_all(seeds, args, send, log: SentLog, stats: ScanStats, verb: str) -> int:
     """Send every new seed; 0 when all went out, 1 on a send failure."""
     # Count only completed sends: a failed one is reported, not counted.
     sent = 0
     try:
-        for media, body in iter_seeds(caches, args.types, args.max_bytes, stats):
+        for media, body in seeds:
             if log.seen(body):
                 stats.already_sent += 1
                 continue
