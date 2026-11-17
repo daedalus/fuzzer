@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import sys
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -78,7 +79,9 @@ class TestInbox:
             box.close()
 
     def test_stalled_client_does_not_block_others(self):
-        # Adversarial: a client that never closes is cut off at conn_timeout.
+        # Adversarial: a client that never closes is cut off at conn_timeout,
+        # its partial bytes kept. Readers run concurrently, so "next" usually
+        # lands first: order is not part of the contract.
         box = TcpSeedInbox(0, max_bytes=16, conn_timeout=0.2)
         try:
             with socket.create_connection((DEFAULT_HOST, box.port), timeout=WAIT_S) as stall:
@@ -86,7 +89,7 @@ class TestInbox:
                 _send(box.port, b"next")
                 _wait_received(box, 2)
 
-            assert [box.pop(), box.pop()] == [b"partial", b"next"]
+            assert sorted([box.pop(), box.pop()]) == [b"next", b"partial"]
         finally:
             box.close()
 
@@ -228,3 +231,104 @@ class TestCli:
         assert cmd_fuzz(args) == 0
         assert seen["tcp_listen_port"] == port
         assert seen["tcp_listen_host"] == DEFAULT_HOST
+
+
+def _conn_threads() -> list:
+    return [t for t in threading.enumerate() if t.name == "tcp-seed-conn" and t.is_alive()]
+
+
+class TestConcurrency:
+    def test_stalled_client_does_not_delay_others(self):
+        # A client that never closes held the single listener for the whole
+        # conn_timeout; now others are served while it stalls.
+        box = TcpSeedInbox(0, max_bytes=16, conn_timeout=30.0)
+        stall = socket.create_connection((DEFAULT_HOST, box.port), timeout=WAIT_S)
+        try:
+            stall.sendall(b"partial")
+            _send(box.port, b"quick")
+            _wait_received(box, 1)  # within WAIT_S (5 s), far below conn_timeout (30 s)
+            assert box.pop() == b"quick"
+        finally:
+            stall.close()
+            box.close()
+
+    def test_parallel_clients_all_delivered(self):
+        box = TcpSeedInbox(0)
+        payloads = [f"seed-{i:03d}".encode() for i in range(50)]
+        try:
+            senders = [threading.Thread(target=_send, args=(box.port, p)) for p in payloads]
+            for t in senders:
+                t.start()
+            for t in senders:
+                t.join(WAIT_S)
+            _wait_received(box, len(payloads))
+
+            got = []
+            while (seed := box.pop()) is not None:
+                got.append(seed)
+            assert sorted(got) == payloads
+        finally:
+            box.close()
+
+    def test_capacity_exact_under_concurrency(self):
+        # Adversarial: racing producers must not overfill the queue.
+        box = TcpSeedInbox(0, capacity=5)
+        try:
+            senders = [
+                threading.Thread(target=_send, args=(box.port, f"s{i}".encode())) for i in range(30)
+            ]
+            for t in senders:
+                t.start()
+            for t in senders:
+                t.join(WAIT_S)
+            _wait_received(box, 30)
+            assert (box.received, box.dropped) == (5, 25)
+        finally:
+            box.close()
+
+    def test_connection_cap_holds(self):
+        # Adversarial: at most max_connections readers; the next client waits
+        # in the backlog until a slot frees, then is served.
+        box = TcpSeedInbox(0, conn_timeout=30.0, max_connections=2)
+        stalls = [
+            socket.create_connection((DEFAULT_HOST, box.port), timeout=WAIT_S) for _ in range(2)
+        ]
+        try:
+            deadline = time.monotonic() + WAIT_S
+            while len(_conn_threads()) < 2:
+                assert time.monotonic() < deadline, "stalled clients never accepted"
+                time.sleep(0.01)
+
+            _send(box.port, b"queued")  # connects via the backlog, not accepted yet
+            time.sleep(0.5)
+            assert box.received == 0
+            assert len(_conn_threads()) == 2
+
+            stalls[0].close()  # frees a slot: empty message, then "queued" is read
+            _wait_received(box, 1)
+            assert box.pop() == b"queued"
+        finally:
+            for s in stalls:
+                s.close()
+            box.close()
+
+    def test_close_ends_open_connections_promptly(self):
+        # A stalled client must not hold close() for conn_timeout.
+        box = TcpSeedInbox(0, conn_timeout=30.0)
+        stall = socket.create_connection((DEFAULT_HOST, box.port), timeout=WAIT_S)
+        try:
+            deadline = time.monotonic() + WAIT_S
+            while not _conn_threads():
+                assert time.monotonic() < deadline, "client never accepted"
+                time.sleep(0.01)
+
+            t0 = time.monotonic()
+            box.close()
+            assert time.monotonic() - t0 < WAIT_S
+            assert _conn_threads() == []
+        finally:
+            stall.close()
+
+    def test_bad_max_connections_rejected(self):
+        with pytest.raises(ValueError):
+            TcpSeedInbox(0, max_connections=0)

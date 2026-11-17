@@ -4,13 +4,16 @@ One connection = one seed: the listener reads until the peer closes, then
 queues the bytes. ``OperatorEngine.mutate()`` pops one per round, so each seed
 runs the normal exec / coverage / crash / admit path.
 
-    client --connect, send, close--> [listener thread] --append--> deque
-                                                                     |
+    client A --+                  +--> [reader A] --+
+    client B --+--> [acceptor] --+--> [reader B] --+--append--> deque
+    client C --+   (max_connections)               |              |
                                      OperatorEngine.mutate() <--pop--+
 
-One listener thread serves connections in turn. Memory is bounded by
-``capacity * max_bytes``; a stalled client holds the listener for at most
-``conn_timeout`` and its partial bytes are kept as the message.
+Connections are served concurrently: the acceptor hands each one to its own
+reader thread, at most ``max_connections`` at a time; past that, clients wait
+in the listen backlog. A stalled client holds only its own reader, for at most
+``conn_timeout``, and its partial bytes are kept as the message. Memory is
+bounded by ``(capacity + max_connections) * max_bytes``.
 
     printf 'GIF89a...' | nc -N 127.0.0.1 4444
 """
@@ -18,6 +21,7 @@ One listener thread serves connections in turn. Memory is bounded by
 from __future__ import annotations
 
 import collections
+import contextlib
 import logging
 import socket
 import threading
@@ -38,11 +42,13 @@ CONN_TIMEOUT_S = 5.0
 # accept() poll: bounds close() latency.
 ACCEPT_POLL_S = 0.2
 RECV_CHUNK = 1 << 16
-LISTEN_BACKLOG = 16
+# Concurrent reader threads; further clients wait in the backlog.
+MAX_CONNECTIONS = 64
+LISTEN_BACKLOG = 128
 
 
 class TcpSeedInbox:
-    """Bounded queue of seeds received over TCP, filled by a daemon thread.
+    """Bounded queue of seeds received over TCP, filled by per-connection threads.
 
     Binds in the constructor, so a busy port fails at startup (``OSError``).
     """
@@ -54,16 +60,25 @@ class TcpSeedInbox:
         max_bytes: int = DEFAULT_MAX_BYTES,
         capacity: int = INBOX_CAPACITY,
         conn_timeout: float = CONN_TIMEOUT_S,
+        max_connections: int = MAX_CONNECTIONS,
     ) -> None:
+        if max_connections < 1:
+            raise ValueError(f"max_connections must be >= 1, got {max_connections}")
         self._max_bytes = max_bytes
         self._capacity = capacity
         self._conn_timeout = conn_timeout
 
-        # Single producer (listener), single consumer (fuzz loop): deque
-        # append/popleft are atomic, so no lock.
+        # Many producers (readers), one consumer (fuzz loop). The lock makes
+        # the capacity check + append + counters atomic across readers; pop()
+        # skips it (popleft is atomic and only frees room).
+        self._lock = threading.Lock()
         self._queue: collections.deque[bytes] = collections.deque()
         self._received = 0
         self._dropped = 0
+
+        # Reader slots and the live connections, for close().
+        self._slots = threading.BoundedSemaphore(max_connections)
+        self._conns: dict[threading.Thread, socket.socket] = {}
 
         self._stop = threading.Event()
         self._sock = socket.create_server((host, port), backlog=LISTEN_BACKLOG)
@@ -93,29 +108,68 @@ class TcpSeedInbox:
         return self._queue.popleft()
 
     def close(self) -> None:
-        """Stop the listener and release the port. Idempotent."""
+        """Stop accepting, end open connections, release the port. Idempotent.
+
+        Open connections are shut down rather than waited for, so a stalled
+        client cannot hold close() for conn_timeout; their bytes are dropped.
+        """
         if self._stop.is_set():
             return
         self._stop.set()
         self._thread.join()
         self._sock.close()
 
+        with self._lock:
+            active = dict(self._conns)
+        for conn in active.values():
+            # The reader may have closed it already: nothing left to end.
+            with contextlib.suppress(OSError):
+                conn.shutdown(socket.SHUT_RDWR)
+        for reader in active:
+            reader.join()
+
     def _loop(self) -> None:
-        """Accept connections until close(); one bad client never ends the loop."""
+        """Accept until close(), one reader thread per connection, at most max_connections."""
         while not self._stop.is_set():
+            if not self._slots.acquire(timeout=ACCEPT_POLL_S):
+                continue  # all readers busy: clients wait in the backlog
             try:
                 conn, addr = self._sock.accept()
             except TimeoutError:
+                self._slots.release()
                 continue
             except OSError as e:
                 # EMFILE and friends: back off instead of spinning.
+                self._slots.release()
                 log.warning("tcp seed accept failed: %s", e)
                 self._stop.wait(ACCEPT_POLL_S)
                 continue
+            self._spawn(conn, addr)
 
-            with conn:
-                data = self._read(conn)
-            self._enqueue(data, _peer(addr))
+    def _spawn(self, conn: socket.socket, addr: tuple) -> None:
+        """Start a reader for *conn*; registered before start so it can deregister itself."""
+        reader = threading.Thread(
+            target=self._serve, args=(conn, addr), name="tcp-seed-conn", daemon=True
+        )
+        with self._lock:
+            self._conns[reader] = conn
+        reader.start()
+
+    def _serve(self, conn: socket.socket, addr: tuple) -> None:
+        """Read one message and queue it; always frees the slot and the socket."""
+        try:
+            data = self._read(conn)
+            # Shut down by close(): the run is ending, the bytes go nowhere.
+            if not self._stop.is_set():
+                self._enqueue(data, _peer(addr))
+        except Exception:
+            # One bad client must not kill its reader silently (bug-classes).
+            log.warning("tcp seed from %s failed", _peer(addr), exc_info=True)
+        finally:
+            conn.close()
+            with self._lock:
+                self._conns.pop(threading.current_thread(), None)
+            self._slots.release()
 
     def _read(self, conn: socket.socket) -> bytes:
         """Bytes until EOF, max_bytes or the connection deadline."""
@@ -150,15 +204,17 @@ class TcpSeedInbox:
         """
         if not data:
             return
+        # Hashed outside the lock: ~34 ms/MiB, other readers keep going.
         seed = f"seed id_{hash_data(data)} with {len(data)} bytes from {peer}"
 
-        if len(self._queue) >= self._capacity:
-            print(f"[!] Dropped {seed}: inbox full", flush=True)
-            self._dropped += 1
-            return
-        print(f"[*] Received {seed}", flush=True)
-        self._queue.append(data)
-        self._received += 1
+        with self._lock:
+            if len(self._queue) >= self._capacity:
+                print(f"[!] Dropped {seed}: inbox full", flush=True)
+                self._dropped += 1
+                return
+            print(f"[*] Received {seed}", flush=True)
+            self._queue.append(data)
+            self._received += 1
 
 
 def _peer(addr: tuple) -> str:
