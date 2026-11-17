@@ -32,6 +32,7 @@ import time
 from fuzzer_tool.adapters.memfd_input import MemfdInput
 from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
 from fuzzer_tool.adapters.process import _clean_env
+from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
 from fuzzer_tool.core.elf import AflMode, detect_afl_modes
 
 log = logging.getLogger(__name__)
@@ -222,6 +223,8 @@ class ForkserverRunner:
         self._stderr_lines: list[str] = []
         self._stderr_thread: threading.Thread | None = None
         self._reader: PipeReader | None = None
+        # --respawn-backoff pacing; the null object restarts at once.
+        self._backoff = NO_BACKOFF
         # Last: __del__ -> stop() needs every attribute above when this raises.
         if argv is not None:
             _check_argv(argv)
@@ -311,6 +314,7 @@ class ForkserverRunner:
             if self._argv is not None and "argv" not in self.capabilities:
                 log.warning("Forkserver: loader ignores ARG lines, cannot pass argv")
                 return False
+            self._backoff.started()
             log.info(
                 "Forkserver started: %s (mode=%s, caps=%s)",
                 self.target,
@@ -321,6 +325,11 @@ class ForkserverRunner:
 
         log.warning("Forkserver failed to start: %r", resp)
         return False
+
+    def attach_backoff(self, backoff) -> None:
+        """Pace this loader's restarts (--respawn-backoff)."""
+        self._backoff = backoff
+        backoff.started()
 
     @property
     def input_path(self) -> str | None:
@@ -388,6 +397,7 @@ class ForkserverRunner:
 
         self._restarting = True
         try:
+            self._backoff.failed(Failure.DEATH)
             if self.start():
                 return self.run_one(data)
         finally:

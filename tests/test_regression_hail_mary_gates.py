@@ -72,6 +72,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "seed_lottery_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_fess_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "fess_inherit",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
+        "respawn_backoff",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_branch_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "inverse_lottery_select",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "lightweight",  # the inverse preset; the two are mutually exclusive

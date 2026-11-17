@@ -43,6 +43,7 @@ from fuzzer_tool.adapters.process import (
     disable_aslr,
     reset_env_cache,
 )
+from fuzzer_tool.adapters.respawn_backoff import RespawnBackoff
 from fuzzer_tool.adapters.sancov_tables import SANCOV_ENV, SancovTables
 from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import (
@@ -2175,6 +2176,9 @@ class Fuzzer:
         # --fess-inherit: FESS parent-cell inheritance + new-cell jump. Needs
         # the FESS arm. Off, out of --hail-mary. Appended.
         fess_inherit=Switch.OFF,
+        # --respawn-backoff: pace restarts of a target that dies at once
+        # (adapters/respawn_backoff.py). Off, out of --hail-mary. Appended.
+        respawn_backoff=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -5532,6 +5536,9 @@ class Fuzzer:
         if forkserver:
             self._setup_forkserver()
 
+        self._respawn_backoff_on = respawn_backoff
+        self._attach_backoff()
+
     def _cov_env_id(self) -> str | None:
         """SHM id the in-process runner of ``self.target`` attaches to.
 
@@ -5541,6 +5548,16 @@ class Fuzzer:
         if self.multi_targets:
             shm = self._target_shm_covs.get(self.target, shm)
         return shm.env_id if shm else None
+
+    def _attach_backoff(self) -> None:
+        """--respawn-backoff: one pacer per respawning runner, decided once."""
+        if self._respawn_backoff_on is not Switch.ON:
+            return
+
+        inproc = tuple(self._target_runners.values()) or (self._inprocess_runner,)
+        for runner in (self._persistent_runner, self._forkserver, *inproc):
+            if runner is not None:
+                runner.attach_backoff(RespawnBackoff())
 
     def _init_target_runners(self) -> None:
         """Multi-target .so: one in-process runner per target.

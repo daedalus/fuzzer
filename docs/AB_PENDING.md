@@ -164,6 +164,7 @@ Off arm needs a tree without the op.
 | Resume SHM novelty | Skip seed rerun on `--resume` | U | start-to-first-round time, edges |
 | `reset_bitmap()` drop | Skip redundant memset | U | exec/s in direct mode |
 | Auto-dict + `--crash-explore` | Byteflip tokens; AFL `-C` | U | fuzzgoat |
+| Respawn backoff (`--respawn-backoff`) | Pace quick target deaths 20 ms..1 s; 16 in a row abort (soksolv) | U | healthy fuzzgoat (clang) exec/s vs baseline, 20 seeds + A/A; a dies-at-start target: breaker fires, CPU bounded |
 | Pool drift (`--pool-drift`) | `dH`/`JS` of the pool | U | calibrate against edge curve |
 | PLL (`--pll`) | Lock transitions vs stalls | U | ≥ 3 targets before a consumer |
 | Shm write guard (`--shm-write-guard pkey`) | PKU-protected SHM | U | needs PKU host |

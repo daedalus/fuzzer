@@ -1033,6 +1033,7 @@ def cmd_fuzz(args):
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
         fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
+        respawn_backoff=Switch.ON if getattr(args, "respawn_backoff", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2960,6 +2961,9 @@ def cmd_sweep(args):
 # are excluded as unmeasured: unit tests only, no paired run
 # (docs/AB_PENDING.md). The second is also inert without the FESS arm.
 #
+# respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
+#
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md). The first is also inert without the stride arm.
@@ -4257,6 +4261,14 @@ def main() -> int:
         "edges, then rare edges, smaller size, shallower) competes in the parent's cell, and a "
         "cell occupied for the first time is picked next, once (soksolv project / "
         "NewCellJump). No effect without the FESS arm. Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--respawn-backoff",
+        action="store_true",
+        help="Pace restarts of a persistent/forkserver target that dies within 250 ms of "
+        "starting: 20 ms doubling to 1 s per quick failure in a row; a longer run resets. "
+        "16 in a row abort the run with a clear error (adapters/respawn_backoff.py). "
+        "Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--frontier-bin",
