@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.sdr import distinct_reps, reps_report
+from fuzzer_tool.core.sdr import _hopcroft_karp, distinct_reps, reps_report
 
 NUM_RANDOM_CASES = 40
 MAX_SEEDS = 7
@@ -231,3 +231,76 @@ def test_minimize_flag_registered(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         commands.main()
     assert "--hall" in capsys.readouterr().out
+
+
+# -- warm start (soksolv hall.go warm-start Kuhn repair) -----------------------
+
+
+def _csr(adj: list[list[int]]) -> tuple[list[int], list[int]]:
+    ptr, nbr = [0], []
+    for row in adj:
+        nbr += row
+        ptr.append(len(nbr))
+    return ptr, nbr
+
+
+def _size(match_l: list[int]) -> int:
+    return sum(v != -1 for v in match_l)
+
+
+def _valid(adj, match_l, match_r) -> bool:
+    pairs = [(u, v) for u, v in enumerate(match_l) if v != -1]
+    return all(v in adj[u] and match_r[v] == u for u, v in pairs) and len(
+        {v for _, v in pairs}
+    ) == len(pairs)
+
+
+def _random_adj(rng, n_left, n_right):
+    return [
+        sorted({rng.randint(0, n_right - 1) for _ in range(rng.randint(0, 3))})
+        for _ in range(n_left)
+    ]
+
+
+def test_warm_control_cold_matches_itself():
+    """Control (HR46): two cold solves agree in size on every instance."""
+    rng = RandPool(seed=41)
+    for _ in range(NUM_RANDOM_CASES):
+        adj = _random_adj(rng, rng.randint(0, 8), rng.randint(1, 8))
+        n_right = max((max(r) for r in adj if r), default=0) + 1
+        a, b = _hopcroft_karp(*_csr(adj), n_right), _hopcroft_karp(*_csr(adj), n_right)
+
+        assert _size(a[0]) == _size(b[0])
+
+
+def test_warm_reaches_the_cold_size_from_any_start():
+    """Falsification: a partial (or garbage) start still ends maximum and valid."""
+    rng = RandPool(seed=43)
+    for _ in range(NUM_RANDOM_CASES):
+        n_left, n_right = rng.randint(1, 8), rng.randint(1, 8)
+        adj = _random_adj(rng, n_left, n_right)
+        cold = _size(_hopcroft_karp(*_csr(adj), n_right)[0])
+        start = [rng.randint(-1, n_right + 1) for _ in range(n_left)]  # some invalid
+
+        ml, mr = _hopcroft_karp(*_csr(adj), n_right, init=start)
+
+        assert _size(ml) == cold
+        assert _valid(adj, ml, mr)
+
+
+def test_warm_keeps_a_valid_start_and_repairs_one_row():
+    """Parent matching kept; one changed row repaired by augmenting."""
+    adj = [[0], [1], [2], [0, 3]]
+    ml, _ = _hopcroft_karp(*_csr(adj), 4, init=[0, 1, 2, -1])
+
+    assert ml == [0, 1, 2, 3]
+
+
+def test_warm_adversarial_duplicate_claims_and_bad_lengths():
+    adj = [[0, 1], [0]]
+    ml, mr = _hopcroft_karp(*_csr(adj), 2, init=[0, 0, 0])  # dup claim, too long
+
+    assert _size(ml) == 2 and _valid(adj, ml, mr)
+    assert _hopcroft_karp([0], [], 0, init=[3]) == ([], [])
+    ml, _ = _hopcroft_karp(*_csr(adj), 2, init=[])  # too short: rest free
+    assert _size(ml) == 2
