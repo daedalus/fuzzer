@@ -609,6 +609,7 @@ def _arena(
     kadane=None,
     emeans=None,
     learn=None,
+    hotspot=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -640,6 +641,7 @@ def _arena(
         kadane=kadane,
         emeans=emeans,
         learn=learn,
+        hotspot=hotspot,
     )
 
 
@@ -861,6 +863,40 @@ class TestPool:
         arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
         assert seen == []
 
+    def _hotspot_arm(self, rng=None):
+        from fuzzer_tool.core.cond_stmt import LazyConds
+        from fuzzer_tool.core.schedulers.pos_hotspot import PositionHotspotScheduler
+
+        conds = LazyConds([(SEED[40:44] + b"\x01", b"WXYZ")], None, None)
+        return PositionHotspotScheduler(rng or RandPool(seed=1), conds_of=lambda: conds)
+
+    def test_hotspot_joins_only_while_cmplog_is_live(self):
+        f = _Fuzzer(cmplog=True)
+        _, arena = _arena(f, hotspot=self._hotspot_arm())
+        assert "hotspot" in arena.pool()
+        f._cmplog = None
+        assert "hotspot" not in arena.pool()
+
+    def test_hotspot_absent_when_not_supplied(self):
+        _, arena = _arena(_Fuzzer(cmplog=True))
+        assert "hotspot" not in arena.pool()
+
+    def test_hotspot_dropped_by_arms_subset(self):
+        f = _Fuzzer(cmplog=True)
+        arena = PositionArena(
+            f, region_fn=lambda d, n: 55, hotspot=self._hotspot_arm(), arms=["cmplog"]
+        )
+        assert "hotspot" not in arena.pool()
+
+    def test_hotspot_is_not_an_off_policy_extra(self):
+        f = _Fuzzer(cmplog=True)
+        sched = self._hotspot_arm()
+        seen = []
+        sched.record = lambda *a, **k: seen.append(a)
+        _, arena = _arena(f, hotspot=sched)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert seen == []
+
     def _lineage_arm(self, meta, rng=None):
         f = _Fuzzer(lineage=True)
         f.seed_meta = {SEED: meta}
@@ -1034,6 +1070,7 @@ class TestPool:
             kadane=PositionKadaneScheduler(RandPool(seed=1)),
             emeans=PositionEMeansScheduler(RandPool(seed=1)),
             learn=PositionLearnScheduler(RandPool(seed=1), moved=lambda d: None, emit_tokens=list),
+            hotspot=self._hotspot_arm(),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1804,6 +1841,25 @@ class TestRealConstruction:
         expect = bytearray(SEED)
         expect[5] = 0xFF
         assert buf == expect
+
+    def test_position_arena_does_not_imply_hotspot(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert f._pos_hotspot is None
+        assert "hotspot" not in f._position_arena.pool()
+
+    def test_pos_hotspot_builds_and_joins_the_arena(self, tmp_path):
+        from fuzzer_tool.core.schedulers.pos_hotspot import PositionHotspotScheduler
+
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_hotspot=True)
+        assert isinstance(f._pos_hotspot, PositionHotspotScheduler)
+        assert ("hotspot" in f._position_arena.pool()) is (f._cmplog is not None)
+        # Reads the operator engine's CondStmt cache, the one condstmt_solve marks.
+        assert f._pos_hotspot._conds_of() is f._operators._get_cond_stmts()
+
+    def test_pos_hotspot_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_hotspot=True)
+        assert f._pos_hotspot is not None
+        assert f._position_arena is None
 
     def test_learn_tokens_reach_the_dictionary(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True, pos_learn=True)

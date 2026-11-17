@@ -185,6 +185,15 @@ def test_learn_arm_differs_from_control_by_its_flag_and_subset_only(monkeypatch)
     assert ARM_BASELINES["pos-arena-learn"] == "pos-arena-uniform"
 
 
+def test_hotspot_arm_differs_from_control_by_its_flag_and_subset_only(monkeypatch):
+    ctl = vars(_parse(monkeypatch, ARMS["pos-arena-uniform"]))
+    test = vars(_parse(monkeypatch, ARMS["pos-arena-hotspot"]))
+    changed = {k for k in ctl if k != "func" and ctl[k] != test[k]}
+    assert changed == {"pos_arena_arms", "pos_hotspot"}
+    assert test["pos_arena_arms"] == ("uniform", "hotspot")
+    assert ARM_BASELINES["pos-arena-hotspot"] == "pos-arena-uniform"
+
+
 def test_pca_arm_differs_from_control_by_its_flag_and_subset_only(monkeypatch):
     ctl = vars(_parse(monkeypatch, ARMS["pos-arena-uniform"]))
     test = vars(_parse(monkeypatch, ARMS["pos-arena-pca"]))

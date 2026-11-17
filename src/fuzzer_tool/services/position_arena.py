@@ -39,6 +39,10 @@ Arms::
                  arm: joins the pool only while cmplog is live, never an
                  off-policy extra (opt-in, --pos-cmplog; see
                  core/schedulers/pos_cmplog.py)
+    hotspot      PositionHotspotScheduler, offsets ranked by how many unsolved
+                 CondStmts their bytes block (soksolv hotspot table).
+                 Tracker-style like cmplog (opt-in, --pos-hotspot, NOT
+                 implied by --position-arena; see core/schedulers/pos_hotspot.py)
     lineage      PositionLineageScheduler, the mutation sites recorded in
                  ``parent_sites`` seed metadata (+ geometric jitter).
                  Tracker-style arm: joins the pool only while ``--lineage``
@@ -189,6 +193,7 @@ POSITION_STRATEGY_NAMES = (
     "emeans",
     "consolidated",
     "learn",
+    "hotspot",
 )
 
 
@@ -248,6 +253,7 @@ class PositionArena:
         kadane: PositionScheduler | None = None,
         emeans: PositionScheduler | None = None,
         learn: PositionScheduler | None = None,
+        hotspot: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         # None = every arm whose feature is on; otherwise only these (+ uniform).
@@ -264,6 +270,7 @@ class PositionArena:
         self._fibonacci = fibonacci if self.allows("fibonacci") else None
         self._fractal = fractal if self.allows("fractal") else None
         self._cmplog = cmplog if self.allows("cmplog") else None
+        self._hotspot = hotspot if self.allows("hotspot") else None
         self._lineage = lineage if self.allows("lineage") else None
         self._context = context if self.allows("context") else None
         self._levy = levy if self.allows("levy") else None
@@ -368,6 +375,8 @@ class PositionArena:
         ]  # fmt: skip
         if self._cmplog is not None:
             specs.append(("cmplog", self._cmplog.propose, cmplog_ready))
+        if self._hotspot is not None:
+            specs.append(("hotspot", self._hotspot.propose, cmplog_ready))
         if self._lineage is not None:
             specs.append(("lineage", self._lineage.propose, lineage_ready))
         for name, fn, gate in specs:

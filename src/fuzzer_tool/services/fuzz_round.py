@@ -2259,6 +2259,8 @@ class FuzzRound:
     def _on_boring(self) -> bool:
         f = self._f
         mutated = self._mutated
+        if f._plateau is not None:
+            self._join_plateau()
         # ── Metropolis acceptance for non-improving / non-crashing inputs ──
         if f._metropolis and f._anneal_budget > 0 and not self._is_timeout and self._metropolis():
             return True
@@ -2276,6 +2278,19 @@ class FuzzRound:
 
         f._record_fluctuation_observation("boring")
         return False
+
+    def _join_plateau(self) -> None:
+        # --plateau-groups: a boring mutant on another seed's exact path puts
+        # parent and that seed on one plateau. The shim's rolling path hash is
+        # this exec's (one word read); a timeout's path is truncated.
+        f = self._f
+        shm = f.shm_cov
+        if shm is None or self._is_timeout:
+            return
+        path_hash = shm.read_path_hash()
+        if path_hash == 0:
+            return
+        f._plateau.observe(f._seed_key(self._data), path_hash, f._edge_tracker.seed_path_hash)
 
     def _metropolis(self) -> bool:
         f = self._f

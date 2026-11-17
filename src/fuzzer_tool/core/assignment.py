@@ -38,8 +38,15 @@ QUANT = 1 << 8
 # Epsilon shrinks by this factor per scaling phase (4-8 measured fastest).
 EPS_STEP = 8
 
+# Warm start skips the coarse phases: carried prices are near equilibrium.
+WARM_EPS = 1
+
 # Seat heap entry: [price, seat, owner].
 _OWNER = 2
+
+# Seat prices per target index (UNMATCHED: spare seats), quantized; the
+# cheapest seat is 0. Warm-start state carried between ``auction_warm`` calls.
+Prices = dict[int, list[int]]
 
 
 def auction(weights: Sequence[Sequence[float]], quotas: Sequence[int]) -> list[int]:
@@ -56,17 +63,54 @@ def auction(weights: Sequence[Sequence[float]], quotas: Sequence[int]) -> list[i
     if k == 0:
         return []
 
-    # Seat groups: targets with seats, plus UNMATCHED seats if short.
+    groups, sizes = _groups(quotas, k)
+    m = sum(sizes)
+    benefit = _benefits(weights, groups, k, m)
+    return _match(_bid(benefit, [[0] * s for s in sizes], _eps0(benefit)), groups, k)
+
+
+def auction_warm(
+    weights: Sequence[Sequence[float]], quotas: Sequence[int], prices: Prices | None = None
+) -> tuple[list[int], Prices]:
+    """``auction`` started from the seat prices of a previous call.
+
+    Port of soksolv's warm-start matching (``incremental_match.go``): keep the
+    parent's duals, repair what changed. Forward auction stays eps-optimal
+    from any start prices with every person unassigned, so the bound is the
+    cold one, (m + k) / QUANT. Items absent from *prices* start at 0; items
+    gone from *quotas* are dropped from the returned prices.
+
+    Returns:
+        ``(match, prices)``: the match as ``auction`` gives it, and the final
+        seat prices, shifted so the cheapest is 0.
+    """
+    k = len(weights)
+    if k == 0:
+        return [], {}
+
+    groups, sizes = _groups(quotas, k)
+    m = sum(sizes)
+    benefit = _benefits(weights, groups, k, m)
+    if not prices:
+        heaps = _bid(benefit, [[0] * s for s in sizes], _eps0(benefit))
+    else:
+        start = [_seats(prices.get(t), s) for t, s in zip(groups, sizes, strict=True)]
+        heaps = _bid(benefit, start, WARM_EPS)
+    return _match(heaps, groups, k), _prices(heaps, groups)
+
+
+def _groups(quotas: Sequence[int], k: int) -> tuple[list[int], list[int]]:
+    """Seat groups: targets with seats, plus UNMATCHED seats if short."""
     groups = [t for t, q in enumerate(quotas) if q > 0]
     sizes = [quotas[t] for t in groups]
     short = k - sum(sizes)
     if short > 0:
         groups.append(UNMATCHED)
         sizes.append(short)
+    return groups, sizes
 
-    m = sum(sizes)
-    heaps = _bid(_benefits(weights, groups, k, m), sizes, m)
 
+def _match(heaps: list[list[list[int]]], groups: list[int], k: int) -> list[int]:
     match = [UNMATCHED] * k
     for g, heap in enumerate(heaps):
         for seat in heap:
@@ -74,6 +118,22 @@ def auction(weights: Sequence[Sequence[float]], quotas: Sequence[int]) -> list[i
             if p < k:
                 match[p] = groups[g]
     return match
+
+
+def _seats(old: list[int] | None, size: int) -> list[int]:
+    """*size* start prices from a stored group: its cheapest, new seats at 0."""
+    if not old:
+        return [0] * size
+    kept = sorted(old)[:size]
+    return kept + [0] * (size - len(kept))
+
+
+def _prices(heaps: list[list[list[int]]], groups: list[int]) -> Prices:
+    """Final prices per target, shifted so the cheapest seat is 0."""
+    floor = min(seat[0] for heap in heaps for seat in heap)
+    return {
+        t: sorted(seat[0] - floor for seat in heap) for t, heap in zip(groups, heaps, strict=True)
+    }
 
 
 def _benefits(
@@ -90,12 +150,15 @@ def _benefits(
     return out
 
 
-def _bid(benefit: list[list[int]], sizes: list[int], m: int) -> list[list[list[int]]]:
-    """Forward auction with eps-scaling; returns per-group seat heaps."""
-    prices = [[0] * s for s in sizes]
+def _eps0(benefit: list[list[int]]) -> int:
+    """Cold first-phase eps: the benefit span over EPS_STEP."""
     span = max(map(max, benefit)) - min(map(min, benefit))
-    eps = max(span // EPS_STEP, 1)
+    return max(span // EPS_STEP, 1)
 
+
+def _bid(benefit: list[list[int]], prices: list[list[int]], eps: int) -> list[list[list[int]]]:
+    """Forward auction with eps-scaling from *prices* (mutated); per-group seat heaps."""
+    m = len(benefit)
     while True:
         heaps = [[[pr, i, -1] for i, pr in enumerate(ps)] for ps in prices]
         for heap in heaps:

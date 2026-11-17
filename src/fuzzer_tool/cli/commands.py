@@ -1020,6 +1020,7 @@ def cmd_fuzz(args):
         joint_liveness=getattr(args, "joint_liveness", False),
         byte_interaction=getattr(args, "byte_interaction", False),
         influence=getattr(args, "influence", False),
+        cut_damage=getattr(args, "cut_damage", False),
         field_hmm=getattr(args, "field_hmm", False),
         field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
@@ -1031,11 +1032,15 @@ def cmd_fuzz(args):
         pos_emeans_tau=getattr(args, "pos_emeans_tau", 0.0),
         pos_pca=getattr(args, "pos_pca", False),
         pos_learn=getattr(args, "pos_learn", False),
+        pos_hotspot=getattr(args, "pos_hotspot", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
         fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
         seed_fess_mode=FessMode(getattr(args, "seed_fess_mode", FessMode.LEAST_EFFORT.value)),
         fess_cell_novelty=Switch.ON if getattr(args, "fess_cell_novelty", False) else Switch.OFF,
+        respawn_backoff=Switch.ON if getattr(args, "respawn_backoff", False) else Switch.OFF,
+        advisors=getattr(args, "advisors", False),
+        plateau_groups=getattr(args, "plateau_groups", False),
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2944,6 +2949,10 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): LearnAFL's path
 # mask has unit tests only. Bench arm: pos-arena-learn.
 #
+# pos_hotspot (--pos-hotspot) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the soksolv
+# hotspot arm has unit tests only.
+#
 # joint_liveness (--joint-liveness) is excluded: it only has an effect together
 # with --region-profile (the dead-region down-weight is the thing it revokes)
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
@@ -2951,6 +2960,9 @@ def cmd_sweep(args):
 #
 # seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
+#
+# cut_damage (--cut-damage) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md); inert without --seed-branch-scheduler.
 #
 # seed_gram_scheduler (--seed-gram-scheduler) is excluded as unmeasured: unit tests
 # only, no paired run (docs/AB_PENDING.md).
@@ -2963,6 +2975,16 @@ def cmd_sweep(args):
 # and fess_cell_novelty (--fess-cell-novelty) are excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md). The last two are also inert
 # without the FESS arm.
+#
+# respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
+#
+# advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md).
+#
+# plateau_groups (--plateau-groups) is excluded as unmeasured: unit tests only,
+# no paired run (docs/AB_PENDING.md). Inert without --seed-lottery-scheduler and
+# a --seed-lottery-currency other than off.
 #
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
@@ -4210,6 +4232,13 @@ def main() -> int:
         "(core/schedulers/seed_branch.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
+        "--cut-damage",
+        action="store_true",
+        help="With --seed-branch-scheduler: rank frontier branches by tail hits / (1 + "
+        "blocks the head alone guards from main), articulation points of the undirected "
+        "ICFG (core/articulation.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
         "--seed-p2c-scheduler",
         action="store_true",
         help="Seed-arena arm 'p2c': power of two choices: two uniform draws, higher posterior mean"
@@ -4247,6 +4276,23 @@ def main() -> int:
         "until it wins its A/B.",
     )
     fuzz_parser.add_argument(
+        "--plateau-groups",
+        action="store_true",
+        help="Plateau groups (soksolv): a boring mutant taking another seed's exact path "
+        "unions its parent with that seed (core/plateau.py). The groups replace connected "
+        "components as --seed-lottery-scheduler's currency, so each plateau is backed "
+        "once. Needs --seed-lottery-currency equal|sqrt. Not in --hail-mary until it wins "
+        "its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--advisors",
+        action="store_true",
+        help="Advisors (soksolv): on each seed stage, i2s / token / cond advisors each "
+        "propose one move built from the seed's recorded cmplog data, run free of the "
+        "stage's energy and deduped (services/advisors.py). Not in --hail-mary until it "
+        "wins its A/B.",
+    )
+    fuzz_parser.add_argument(
         "--seed-fess-scheduler",
         action="store_true",
         help="Seed-arena arm 'fess': FESS feature-space search. Seeds map to a log2 grid of "
@@ -4279,6 +4325,14 @@ def main() -> int:
         "edges, then rare edges, smaller size, shallower) competes in the parent's cell, and a "
         "cell occupied for the first time is picked next, once (soksolv project / "
         "NewCellJump). No effect without the FESS arm. Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--respawn-backoff",
+        action="store_true",
+        help="Pace restarts of a persistent/forkserver target that dies within 250 ms of "
+        "starting: 20 ms doubling to 1 s per quick failure in a row; a longer run resets. "
+        "16 in a row abort the run with a clear error (adapters/respawn_backoff.py). "
+        "Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--frontier-bin",
@@ -4561,6 +4615,14 @@ def main() -> int:
         "changes, mutable ones (frozen restored) once stable; frozen runs feed the "
         "auto-dictionary (core/schedulers/pos_learn.py). Opt-in: NOT implied by "
         "--position-arena or --hail-mary (unmeasured).",
+    )
+    fuzz_parser.add_argument(
+        "--pos-hotspot",
+        action="store_true",
+        help="Enable the position-arena hotspot scheduler: offsets ranked by how many "
+        "unsolved cmplog comparisons their bytes block, hottest first; solved ones "
+        "drop out (soksolv hotspot table; core/schedulers/pos_hotspot.py). Needs "
+        "cmplog. Opt-in: NOT implied by --position-arena or --hail-mary (unmeasured).",
     )
     fuzz_parser.add_argument(
         "--saliency-targets",

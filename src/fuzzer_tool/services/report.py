@@ -1011,6 +1011,7 @@ def _seed_contribution(f) -> str:
     lines.extend(_format_seed_gen_lines(f))
     lines.extend(_i2s_fixpoint_lines(f))
     lines.extend(_affine_mod_lines(f))
+    lines.extend(_advisor_lines(f))
     return "\n".join(lines)
 
 
@@ -1038,6 +1039,19 @@ def _affine_mod_lines(f) -> list[str]:
     return [
         "",
         f"  Affine mod: {stats['execs']} execs, {outcomes or 'no fits'}, {affine.queued} queued",
+    ]
+
+
+def _advisor_lines(f) -> list[str]:
+    """--advisors: free execs per stage and (proposed, admitted) per advisor."""
+    stage = getattr(f, "_advisors", None)
+    if stage is None:
+        return []
+    stats = stage.stats
+    per = ", ".join(f"{k}={v[0]}/{v[1]}" for k, v in stats.items() if k not in ("execs", "stages"))
+    return [
+        "",
+        f"  Advisors: {stats['execs']} execs / {stats['stages']} stages, proposed/admitted {per}",
     ]
 
 

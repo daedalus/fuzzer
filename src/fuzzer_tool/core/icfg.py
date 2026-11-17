@@ -153,6 +153,22 @@ class InterproceduralCFG:
         _, cut = min_vertex_cut(self.n_nodes, edges, sources, sinks)
         return {self.node_addrs[v] for v in cut}
 
+    def cut_damage(self, entry_addr: int) -> tuple[np.ndarray, np.ndarray]:
+        """Per-node (pieces, damage) on the undirected ICFG, entry at *entry_addr*.
+
+        See ``core/articulation.py``.
+
+        Raises:
+            ValueError: *entry_addr* is not a block start.
+        """
+        # Lazy: articulation -> horizon -> icfg.
+        from fuzzer_tool.core.articulation import cut_damage
+
+        entry = self._node_at(entry_addr)
+        if entry is None:
+            raise ValueError(f"no block starts at {entry_addr:#x}")
+        return cut_damage(self.n_nodes, self.src, self.dst, entry)
+
     def centrality_scores(self, normalized: bool = True) -> dict[int, float]:
         """Betweenness centrality of every block, keyed by start address.
 

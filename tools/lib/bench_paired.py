@@ -236,6 +236,8 @@ ARMS: dict[str, list[str]] = {
     "seed-fess-inherit": ["--seed-fess-scheduler", "--fess-inherit"],
     "seed-fess-triple": ["--seed-fess-scheduler", "--seed-fess-mode", "triple"],
     "seed-fess-novelty": ["--seed-fess-scheduler", "--fess-cell-novelty"],
+    # Advisors (services/advisors.py): free advised moves per stage vs `baseline`.
+    "advisors": ["--advisors"],
     **{
         f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
         for pct in SEED_NEWEST_PCTS
@@ -286,6 +288,8 @@ ARMS: dict[str, list[str]] = {
     "pos-arena-pca": _ARENA + ["--pos-pca", "--pos-arena-arms", "uniform,pca"],
     # LearnAFL path mask is opt-in like kadane.
     "pos-arena-learn": _ARENA + ["--pos-learn", "--pos-arena-arms", "uniform,learn"],
+    # soksolv hotspot table is opt-in like kadane; needs cmplog (on by default).
+    "pos-arena-hotspot": _ARENA + ["--pos-hotspot", "--pos-arena-arms", "uniform,hotspot"],
     # Gravity splice donor (core/gravity.py). Only the seven corpus-crossing
     # operators change; read "Gravity splice: ... hits, refits" in a cell's
     # log before trusting a null -- a closed fit gate means prior exponents.
@@ -315,6 +319,13 @@ ARMS: dict[str, list[str]] = {
     "seed-lottery": ["--seed-lottery-scheduler"],
     "seed-lottery-lineage": ["--seed-lottery-scheduler", "--lineage"],
     "seed-lottery-currency": ["--seed-lottery-scheduler", "--seed-lottery-currency", "sqrt"],
+    # Plateau groups (core/plateau.py) as the currency instead of components.
+    "plateau-groups": [
+        "--seed-lottery-scheduler",
+        "--seed-lottery-currency",
+        "sqrt",
+        "--plateau-groups",
+    ],
     "seed-lottery-transfer": [
         "--seed-lottery-scheduler",
         "--lineage",
@@ -440,6 +451,7 @@ ARM_BASELINES: dict[str, str] = {
     "seed-fess-inherit": "seed-fess",
     "seed-fess-triple": "seed-fess",
     "seed-fess-novelty": "seed-fess",
+    "advisors": "baseline",
     "novel-crash-reward-abort": "abort-crash",
     "abort-crash-ctl": "abort-crash",
     "seed-branch": "elo",
@@ -463,6 +475,7 @@ ARM_BASELINES: dict[str, str] = {
     "pos-arena-emeans-revive": "pos-arena-uniform",
     "pos-arena-pca": "pos-arena-uniform",
     "pos-arena-learn": "pos-arena-uniform",
+    "pos-arena-hotspot": "pos-arena-uniform",
     "splice-gravity": "baseline",
     "elo-op-minimax": "elo",
     "wall-order": "baseline",
@@ -472,6 +485,7 @@ ARM_BASELINES: dict[str, str] = {
     "inverse-lottery-select": "minimize-2k",
     "seed-lottery": "seed-stride-cost",
     "seed-lottery-currency": "seed-lottery",
+    "plateau-groups": "seed-lottery-currency",
     "seed-lottery-lineage": "seed-lottery",
     "seed-lottery-transfer": "seed-lottery-lineage",
     "field-hmm": "baseline",
