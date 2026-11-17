@@ -123,3 +123,9 @@ Reading:
 
 - Confirmation run for private-heap THP on FFmpeg noasan replay, threshold frozen beforehand (`docs/AB_PENDING.md`), then an in-run check (Hard Rule 58).
 - The ~11K non-coverage COW faults per non-persistent FFmpeg ASAN exec are the real fork cost; persistent mode (the default) already avoids them.
+
+## 6. Confirmation of private-heap THP (threshold frozen 2026-11-17, before the run)
+
+- Arms: A = master shim, B = branch shim (`MADV_HUGEPAGE` on the private-heap reservation, unconditional). Both `ffmpeg_read_9.0.2_noasan.so`, clang 18, same FFmpeg archives.
+- Primary: replay CPU (user+sys), `edge-dump --inprocess-direct`, same 1,706-input corpus, 20 pairs ABBA, `taskset -c 2`. Exact sign-flip, two-sided, α 0.05. A/A (A vs A) must give p > 0.05 first.
+- Ship if B is lower with p < 0.05 and median Δ < 0, and the in-run check (fuzzgoat_read_noasan.so clang, direct_lite, 10 pairs × 20k, master vs branch alternated) is not slower than its A/A spread (Hard Rule 58).
