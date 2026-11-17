@@ -3764,7 +3764,6 @@ class Fuzzer:
         self._seed_fess = (
             SeedFessScheduler(rng=self._rng, jump=fess_inherit) if seed_fess_scheduler else None
         )
-        self._seed_fess = SeedFessScheduler(rng=self._rng) if seed_fess_scheduler else None
         self._plateau = PlateauGroups() if plateau_groups else None
         self._frontier_oracle = None
         self._seed_frontier = None
