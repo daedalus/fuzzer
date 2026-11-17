@@ -522,3 +522,18 @@ class TestSentBloomMerge:
         log.save()
         assert path.read_bytes() == before
         assert "--sent-bloom" in capsys.readouterr().err
+
+
+class TestSentLogRepeatedSave:
+    def test_regression_second_save_does_not_recount(self, tmp_path):
+        # save() kept its new-record count, so a periodic save re-added the
+        # same records to n_added (and rewrote an unchanged file).
+        path = tmp_path / "sent.pkl.gz"
+        log = ccs.SentLog(path, ccs.Persist.WRITE)
+        log.record(PNG)
+        log.save()
+        log.record(JPG)
+        log.save()
+        log.save()  # nothing new: no write, no recount
+
+        assert ccs.negative_bloom.load(path).n_added == 2
