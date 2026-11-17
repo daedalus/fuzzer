@@ -186,3 +186,20 @@ class TestMain:
         argv += ["--delay", "0", "--max-bytes", "10", "--retries", "0", "--retry-backoff", "0"]
         argv += ["--root", str(tmp_path)]
         assert ds.main(argv) == 0
+
+
+class TestMaxSize:
+    def test_larger_files_skipped_and_counted(self, tmp_path, monkeypatch, capsys):
+        root = _tree(tmp_path / "c", {"1": TXT, "2": b"x" * 500})
+        sent = _recorder(monkeypatch)
+
+        assert ds.main([str(root), "--max-size", str(len(TXT))]) == 0
+        assert sent == [TXT]
+        assert "too big 1" in capsys.readouterr().out
+
+    def test_file_size_not_truncated_size(self, tmp_path, monkeypatch):
+        # Adversarial: --max-bytes 4 reads 4 B, but the 500 B file is too big.
+        root = _tree(tmp_path / "c", {"big": b"x" * 500})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--max-bytes", "4", "--max-size", "100"]) == 0
+        assert sent == []
