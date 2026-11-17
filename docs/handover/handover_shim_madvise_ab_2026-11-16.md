@@ -129,3 +129,15 @@ Reading:
 - Arms: A = master shim, B = branch shim (`MADV_HUGEPAGE` on the private-heap reservation, unconditional). Both `ffmpeg_read_9.0.2_noasan.so`, clang 18, same FFmpeg archives.
 - Primary: replay CPU (user+sys), `edge-dump --inprocess-direct`, same 1,706-input corpus, 20 pairs ABBA, `taskset -c 2`. Exact sign-flip, two-sided, α 0.05. A/A (A vs A) must give p > 0.05 first.
 - Ship if B is lower with p < 0.05 and median Δ < 0, and the in-run check (fuzzgoat_read_noasan.so clang, direct_lite, 10 pairs × 20k, master vs branch alternated) is not slower than its A/A spread (Hard Rule 58).
+
+Result:
+
+| Test | B vs A | A/A |
+|---|---|---|
+| Replay CPU (primary), 20 pairs | B lower 12/20, med −1.3%, p=0.46 | 7/20, med +0.7%, p=0.19 |
+| Replay user | 12/20, med −1.5%, p=0.34 | 9/20, med +0.5%, p=0.27 |
+| fuzzgoat in-run wall, 10 × 20k | 4/10, med +1.4%, p=0.39 | 6/10, med −2.6%, p=0.34 |
+
+Fails the threshold: #169's −2.2% (p=0.020) did not replicate. Not shipped; the shim change (17ddb773) is reverted. Each build replays deterministically; edge ids differ between the two builds (code layout), total hits within 0.1%.
+
+Verdict on the whole investigation: no `madvise` flag, alone or per region, measurably speeds up fuzzing here.
