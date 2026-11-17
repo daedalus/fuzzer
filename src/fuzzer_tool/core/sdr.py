@@ -107,11 +107,17 @@ def _rare_csr(edges: list[np.ndarray], rare_owners: int) -> tuple[np.ndarray, li
     return e[start[rare]].astype(np.int64), ptr.tolist(), s[np.repeat(rare, held)].tolist()
 
 
-def _hopcroft_karp(ptr: list[int], nbr: list[int], n_right: int) -> tuple[list[int], list[int]]:
-    """Maximum matching; phases of BFS layering, then disjoint augmenting paths."""
+def _hopcroft_karp(
+    ptr: list[int], nbr: list[int], n_right: int, init: list[int] | None = None
+) -> tuple[list[int], list[int]]:
+    """Maximum matching; phases of BFS layering, then disjoint augmenting paths.
+
+    *init* (``match_l`` of an earlier solve) warm-starts it: valid pairs are
+    kept, so only the changed rows augment (soksolv ``hall.go`` warm-start
+    Kuhn repair). Not wired: ``minimize --hall`` solves once per run.
+    """
     n_left = len(ptr) - 1
-    match_l = [UNMATCHED] * n_left
-    match_r = [UNMATCHED] * n_right
+    match_l, match_r = _warm(ptr, nbr, n_right, init or [])
     while True:
         dist = _layers(ptr, nbr, match_l, match_r)
         if dist is None:
@@ -121,6 +127,22 @@ def _hopcroft_karp(ptr: list[int], nbr: list[int], n_right: int) -> tuple[list[i
         for u in range(n_left):
             if match_l[u] == UNMATCHED:
                 _augment(u, ptr, nbr, dist, it, match_l, match_r)
+
+
+def _warm(
+    ptr: list[int], nbr: list[int], n_right: int, init: list[int]
+) -> tuple[list[int], list[int]]:
+    """Start matching from *init*: drop pairs off the graph or already claimed."""
+    n_left = len(ptr) - 1
+    match_l = [UNMATCHED] * n_left
+    match_r = [UNMATCHED] * n_right
+    for u, v in enumerate(init[:n_left]):
+        if not 0 <= v < n_right or match_r[v] != UNMATCHED:
+            continue
+        if v not in nbr[ptr[u] : ptr[u + 1]]:
+            continue
+        match_l[u], match_r[v] = v, u
+    return match_l, match_r
 
 
 def _layers(

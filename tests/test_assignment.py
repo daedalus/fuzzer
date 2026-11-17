@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 import math
 
-from fuzzer_tool.core.assignment import QUANT, UNMATCHED, auction
+from fuzzer_tool.core.assignment import QUANT, UNMATCHED, auction, auction_warm
 from fuzzer_tool.core.rand_pool import RandPool
 
 
@@ -96,3 +96,93 @@ def test_degenerate_shapes():
     assert auction([], [1, 2]) == []
     assert auction([[], []], []) == [UNMATCHED, UNMATCHED]
     assert auction([[0.4]], [1]) == [0]
+
+
+# -- warm start (soksolv incremental_match.go) ---------------------------------
+
+
+def _bound(weights, quotas):
+    k = len(weights)
+    return (max(k, sum(q for q in quotas if q > 0)) + k) / QUANT
+
+
+def _stale(rng, quotas, spread):
+    """Random seat prices per target (and the spare group): stale or garbage."""
+    keys = [*range(len(quotas)), UNMATCHED]
+    return {t: [rng.randint(0, spread) for _ in range(rng.randint(0, 4))] for t in keys}
+
+
+def test_warm_control_cold_matches_itself():
+    """Control (HR46): cold vs a second cold run passes the bound used below."""
+    rng = RandPool(seed=21)
+    for _ in range(40):
+        weights, quotas = _instance(rng, rng.randint(1, 5), rng.randint(1, 3))
+        a, b = auction(weights, quotas), auction(weights, quotas)
+
+        assert _total(weights, b) >= _total(weights, a) - _bound(weights, quotas)
+        assert _total(weights, a) >= _brute(weights, quotas) - _bound(weights, quotas)
+
+
+def test_warm_is_eps_optimal_from_stale_prices():
+    """Falsification: any start prices still end within (m + k) / QUANT of cold and of optimum."""
+    rng = RandPool(seed=23)
+    for _ in range(80):
+        k, n = rng.randint(1, 5), rng.randint(1, 3)
+        weights, quotas = _instance(rng, k, n)
+        prices = _stale(rng, quotas, 4 * QUANT)
+
+        match, _ = auction_warm(weights, quotas, prices)
+
+        assert _fits(match, quotas)
+        best = _brute(weights, quotas)
+        assert _total(weights, match) >= best - _bound(weights, quotas)
+        cold = _total(weights, auction(weights, quotas))
+        assert _total(weights, match) >= cold - _bound(weights, quotas)
+
+
+def test_warm_chain_over_perturbed_epochs():
+    """Prices carried across epochs of small weight changes stay eps-optimal."""
+    rng = RandPool(seed=29)
+    weights, quotas = _instance(rng, 5, 3)
+    prices = None
+    for _ in range(30):
+        weights = [[min(1.0, max(0.0, w + (rng.random() - 0.5) * 0.1)) for w in r] for r in weights]
+        match, prices = auction_warm(weights, quotas, prices)
+
+        assert _fits(match, quotas)
+        assert _total(weights, match) >= _brute(weights, quotas) - _bound(weights, quotas)
+
+
+def test_warm_returns_normalized_prices_for_live_items_only():
+    """Vanished items are dropped; prices are shifted so the cheapest seat is 0."""
+    _, prices = auction_warm([[0.9, 0.1], [0.8, 0.2]], [2, 0], {0: [5, 7], 1: [3], 9: [1]})
+
+    assert set(prices) == {0}
+    assert len(prices[0]) == 2
+    assert min(min(p) for p in prices.values()) == 0
+
+
+def test_warm_without_prices_equals_cold():
+    rng = RandPool(seed=31)
+    for _ in range(20):
+        weights, quotas = _instance(rng, rng.randint(1, 6), rng.randint(1, 4))
+
+        assert auction_warm(weights, quotas)[0] == auction(weights, quotas)
+
+
+def test_warm_adversarial_empty_and_rows_removed():
+    assert auction_warm([], [1, 2], {0: [3]}) == ([], {})
+    weights = [[0.9, 0.1], [0.2, 0.8], [0.5, 0.5]]
+    _, prices = auction_warm(weights, [2, 1])
+    match, _ = auction_warm(weights[:1], [2, 1], prices)  # two rows gone
+
+    assert match == [0]
+
+
+def test_warm_adversarial_duplicate_weights_terminate():
+    """All-equal weights from wildly stale prices: still ends, quotas held."""
+    quotas = [3, 2, 5]
+    match, _ = auction_warm([[0.5] * 3 for _ in range(10)], quotas, {0: [10**6], 2: [0, 0]})
+
+    assert UNMATCHED not in match
+    assert _fits(match, quotas)

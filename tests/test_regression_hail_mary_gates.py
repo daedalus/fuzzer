@@ -71,9 +71,13 @@ _EXCLUDED_OPT_IN = frozenset(
         "seed_stride_cost",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the stride arm
         "seed_lottery_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_fess_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "fess_inherit",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
         "respawn_backoff",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "advisors",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "plateau_groups",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "elo_stale_bench",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_branch_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "cut_damage",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the branch arm
         "inverse_lottery_select",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "lightweight",  # the inverse preset; the two are mutually exclusive
         "trim_new_coverage",  # exec cost (~98% of an FFmpeg run), not a strategy
@@ -128,6 +132,9 @@ _EXCLUDED_OPT_IN = frozenset(
         # Unmeasured: the LearnAFL path-mask position arm (core/schedulers/pos_learn.py),
         # same criterion as pos_kadane above.
         "pos_learn",
+        # Unmeasured: the soksolv hotspot position arm (core/schedulers/pos_hotspot.py),
+        # same criterion as pos_kadane above.
+        "pos_hotspot",
         # Changes maintenance-tick cadence (crash/sanitizer replays and
         # gc.collect move off i % 500 onto the stats-interval cadence),
         # not a fuzzing strategy. --hail-mary force-enabling it would

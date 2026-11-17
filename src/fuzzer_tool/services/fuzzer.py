@@ -101,6 +101,7 @@ from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD, OrbitProbe, canonical
 from fuzzer_tool.core.percolation import CoverageRegime
+from fuzzer_tool.core.plateau import PlateauGroups
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check, structure_check
 from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, StateRestore, Switch
@@ -160,6 +161,7 @@ from fuzzer_tool.core.schedulers.op_swucb import SWUCB_PER_ARM
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
 from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
+from fuzzer_tool.core.schedulers.seed_branch import FrontierRank
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
@@ -202,6 +204,7 @@ from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.stack_depth import StackMax
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
+from fuzzer_tool.services.advisors import AdvisorCtx, AdvisorStage, default_advisors
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
 from fuzzer_tool.services.c11_channel import C11Channel
@@ -978,6 +981,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
+    if getattr(f, "_pos_hotspot", None) is not None and getattr(f, "_cmplog", None) is not None:
+        names.append("hotspot")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
         names.append("lineage")
     if _pos_canary_live(f):
@@ -2174,9 +2179,25 @@ class Fuzzer:
         # --seed-fess-scheduler: FESS feature-grid seed arm
         # (core/schedulers/seed_fess.py). Off, out of --hail-mary. Appended.
         seed_fess_scheduler=False,
+        # --fess-inherit: FESS parent-cell inheritance + new-cell jump. Needs
+        # the FESS arm. Off, out of --hail-mary. Appended.
+        fess_inherit=Switch.OFF,
         # --respawn-backoff: pace restarts of a target that dies at once
         # (adapters/respawn_backoff.py). Off, out of --hail-mary. Appended.
         respawn_backoff=Switch.OFF,
+        # Position-arena hotspot arm (core/schedulers/pos_hotspot.py): offsets
+        # by unsolved-CondStmt count. Opt-in, not implied by position_arena or
+        # --hail-mary. Appended.
+        pos_hotspot=False,
+        # 'branch' arm ranks frontier branches by cut damage (core/articulation.py,
+        # --cut-damage); needs seed_branch_scheduler. Appended.
+        cut_damage=False,
+        # --advisors: one free advised move per advisor per seed stage
+        # (services/advisors.py). Off, out of --hail-mary. Appended.
+        advisors=False,
+        # --plateau-groups: union seeds whose boring mutants take each other's
+        # path (core/plateau.py); lottery "group" signal. Off. Appended.
+        plateau_groups=False,
         # --elo-stale-bench: bench stalest Elo strategies, revive fresh
         # (core/elo_stale_bench.py). Off, out of --hail-mary. Appended.
         elo_stale_bench=Switch.OFF,
@@ -3389,11 +3410,15 @@ class Fuzzer:
 
         # The branch arm reads the Katz channel's ICFG and node masks.
         if seed_branch_scheduler and self._katz_channel is not None:
-            self._katz_channel.enable_branch()
+            self._katz_channel.enable_branch(
+                FrontierRank.CUT_DAMAGE if cut_damage else FrontierRank.HITS
+            )
         elif seed_branch_scheduler:
             log.warning(
                 "--seed-branch-scheduler needs the Katz node channel (trace-pc, undirected)"
             )
+        if cut_damage and not seed_branch_scheduler:
+            log.warning("--cut-damage needs --seed-branch-scheduler; ignored")
         self._bind_katz(schedule or "base", elo, seed_branch_scheduler)
 
         self._load_corpus()
@@ -3735,7 +3760,15 @@ class Fuzzer:
             if seed_lottery_scheduler
             else None
         )
-        self._seed_fess = SeedFessScheduler(rng=self._rng) if seed_fess_scheduler else None
+        if fess_inherit is Switch.ON and not seed_fess_scheduler:
+            log.warning("--fess-inherit has no effect without --seed-fess-scheduler")
+            fess_inherit = Switch.OFF
+        # Read by SeedPicker._fess_cells (parent-cell projection).
+        self._fess_inherit = fess_inherit
+        self._seed_fess = (
+            SeedFessScheduler(rng=self._rng, jump=fess_inherit) if seed_fess_scheduler else None
+        )
+        self._plateau = PlateauGroups() if plateau_groups else None
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:
@@ -3852,6 +3885,17 @@ class Fuzzer:
                 log.warning(
                     "--pos-cmplog needs cmplog, which is off: the arm stays out of the pool"
                 )
+        # Position-arena hotspot: offsets ranked by how many unsolved CondStmts
+        # they block (soksolv hotspot table). Opt-in only (unmeasured); gated
+        # on cmplog like the cmplog arm, reads condstmt_solve's CondStmt cache.
+        self._pos_hotspot = None
+        if pos_hotspot:
+            from fuzzer_tool.core.schedulers.pos_hotspot import PositionHotspotScheduler
+
+            self._pos_hotspot = PositionHotspotScheduler(
+                self._rng, conds_of=self._operators._get_cond_stmts
+            )
+            log.info("Position hotspot scheduling enabled")
         # Position-arena lineage: the mutation sites that produced a seed, as
         # its own landing prior (see core/schedulers/pos_lineage.py).
         # Tracker-style: the arena gates it on --lineage, the only mode that
@@ -4047,6 +4091,7 @@ class Fuzzer:
                 finch=self._pos_finch,
                 pca=self._pos_pca,
                 cmplog=self._pos_cmplog,
+                hotspot=self._pos_hotspot,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,
             )
@@ -4077,6 +4122,8 @@ class Fuzzer:
         self._i2s_fixpoint = (
             I2SFixpoint(self._i2s_probe, i2s_fixpoint_iters) if i2s_fixpoint else None
         )
+        # --advisors: zero-cost proposals per stage, drained by mutate().
+        self._advisors = AdvisorStage(default_advisors()) if advisors else None
         # --affine-mod: solve (a*x + b) % m == t compares on admitted inputs;
         # --derived-cmp adds GF(2), additive and byte-map operand maps.
         families = Families.DERIVED if derived_cmp else Families.MODULAR
@@ -5974,6 +6021,8 @@ class Fuzzer:
             self._state_store.set("ijon", self._ijon.tracker.to_dict())
         if self._seed_fess is not None:
             self._state_store.set("seed_fess", self._seed_fess.to_dict())
+        if self._plateau is not None:
+            self._state_store.set("plateau", self._plateau.to_dict())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -6015,6 +6064,8 @@ class Fuzzer:
             self._ijon.tracker.from_dict(self._state_store.get("ijon", {}), by_key.get)
         if self._seed_fess is not None:
             self._seed_fess.from_dict(self._state_store.get("seed_fess", {}))
+        if self._plateau is not None:
+            self._plateau = PlateauGroups.from_dict(self._state_store.get("plateau", {}))
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""
@@ -7825,6 +7876,23 @@ class Fuzzer:
 
         self._queue_skips = 0
         return self._fuzz_ungated(data)
+
+    def _advise(self, seed: bytes) -> None:
+        """--advisors: run each advisor's move for *seed*, off the stage's energy."""
+        stage = self._advisors
+        cmplog = self._cmplog
+        ops = self._operators
+        ctx = AdvisorCtx(
+            seed_meta=self.seed_meta,
+            dictionary=self.dictionary,
+            conds=lambda: ops._get_cond_stmts().unsolved_view() if cmplog else (),
+            fresh=stage.fresh,
+            max_len=self.max_len,
+        )
+
+        # One round per move; mutate() pops it, so the round is a normal one.
+        for name in stage.plan(seed, ctx):
+            stage.credit(name, self.fuzz_one(seed))
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
@@ -10810,6 +10878,8 @@ class Fuzzer:
                     self._last_perf_score = 100.0
                 if staged is None:
                     self._stage.begin(seed, self._last_perf_score)
+                    if self._advisors is not None:
+                        self._advise(seed)
                 if self._diff_tracker:
                     self._check_differential(seed)
                 # Deterministic-stage mutations are now drawn inline by

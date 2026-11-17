@@ -31,8 +31,9 @@ from fuzzer_tool.core.edge_components import components as edge_components
 from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.schedulers.seed_drr import FAVORED_WEIGHT
-from fuzzer_tool.core.schedulers.seed_fess import fess_cell
+from fuzzer_tool.core.schedulers.seed_fess import cell_better, fess_cell
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
 from fuzzer_tool.core.zipf import TailLaw
 
@@ -1149,6 +1150,11 @@ class SeedPicker:
         def group(key: str) -> int:
             return self._component_labels(key_to_seed).get(key, FRESH_GROUP)
 
+        # --plateau-groups: one currency per plateau instead of per component.
+        plateau = getattr(f, "_plateau", None)
+        if plateau is not None:
+            group = plateau.group  # noqa: F811
+
         # Bound on first call: one memo check per pick, not one per key.
         fess_lookup = None
 
@@ -1200,18 +1206,57 @@ class SeedPicker:
         """
         n = len(key_to_seed)
         memo = self._fess_memo
+        inherit = getattr(self.f, "_fess_inherit", Switch.OFF) is Switch.ON
         if not self._memo_fresh(memo, n):
             cells = {k: self._fess_cell(k, s) for k, s in key_to_seed.items()}
+            if inherit:
+                self._fess_project(cells, key_to_seed, list(cells))
             self._fess_memo = (n, self.f.exec_count, cells, key_to_seed)
             return cells
 
         cells = memo[2]
         if memo[3] is key_to_seed:
             return cells
-        for key in key_to_seed.keys() - cells.keys():
+        fresh = key_to_seed.keys() - cells.keys()
+        for key in fresh:
             cells[key] = self._fess_cell(key, key_to_seed[key])
+        if inherit:
+            self._fess_project(cells, key_to_seed, fresh)
         self._fess_memo = (*memo[:3], key_to_seed)
         return cells
+
+    def _fess_project(self, cells: dict, key_to_seed: dict[str, bytes], keys) -> None:
+        """--fess-inherit: a seed in *keys* no better than its parent's cell
+        competes in that cell (soksolv project), so non-improving descendants
+        get no fresh allocation.
+
+        Parents resolve before children (walk up, then assign top-down, no
+        recursion), so a chain lands in its best ancestor's cell. A parent
+        outside *key_to_seed* (evicted) or a lineage cycle leaves the seed its
+        own cell. *cells* already holds every key of *key_to_seed*.
+        """
+        meta_of = self.f.seed_meta.get
+        pending = set(keys)
+        parent_of: dict[str, str] = {}
+
+        for key in keys:
+            chain = []
+            k = key
+            while k in pending:
+                pending.discard(k)
+                chain.append(k)
+                meta = meta_of(key_to_seed[k])
+                parent = meta.get("parent_key") if meta else None
+                if parent not in key_to_seed or parent == k:
+                    break
+                parent_of[k] = parent
+                k = parent
+
+            # Top-down: each parent's cell is final before its child compares.
+            for k in reversed(chain):
+                parent = parent_of.get(k)
+                if parent is not None and not cell_better(cells[k], cells[parent]):
+                    cells[k] = cells[parent]
 
     def _fess_cell(self, key: str, seed: bytes) -> tuple:
         """Project one seed: edges and rare edges from the tracker, depth and size from meta."""

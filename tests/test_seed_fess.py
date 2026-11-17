@@ -15,9 +15,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.schedulers.seed_fess import (
     FESS_BUCKET_CAP,
     SeedFessScheduler,
+    cell_better,
     fess_cell,
 )
 from fuzzer_tool.core.state_store import safe_load
@@ -323,3 +325,174 @@ class TestFuzzerWiring:
         f._save_learned()
 
         assert "seed_fess" not in f._state_store
+
+
+# --- Parent-cell inheritance + new-cell jump (--fess-inherit) ---------------
+
+
+class TestCellBetter:
+    """Order: more edges, then more rare edges, then smaller size, then shallower."""
+
+    def test_more_edges_wins_over_everything_else(self):
+        assert cell_better((2, 0, 7, 7), (1, 7, 0, 0))
+
+    def test_rare_breaks_edge_tie(self):
+        assert cell_better((1, 2, 0, 0), (1, 1, 0, 0))
+
+    def test_smaller_size_breaks_tie(self):
+        assert cell_better((1, 1, 0, 2), (1, 1, 0, 3))
+
+    def test_shallower_breaks_last_tie(self):
+        assert cell_better((1, 1, 1, 2), (1, 1, 2, 2))
+
+    def test_equal_is_not_strictly_better(self):
+        """Falsification: an equal child must inherit, never self-allocate."""
+        assert not cell_better(X, X)
+
+    def test_order_is_antisymmetric(self):
+        a, b = (1, 1, 0, 2), (1, 1, 0, 3)
+
+        assert cell_better(a, b) != cell_better(b, a)
+
+
+def _inherit_picker(parents: dict, edges: dict, inherit=Switch.ON):
+    """Picker over *parents* (key -> parent key); every seed is 8 bytes, depth 0."""
+    meta = {k.encode(): {"parent_key": p, "input_size": 8} for k, p in parents.items()}
+    sp = _picker([k.encode() for k in parents], meta, _Tracker(edges, {}))
+    sp.f._fess_inherit = inherit
+    return sp, {k: k.encode() for k in parents}
+
+
+class TestInherit:
+    PARENTS = {"p": None, "worse": "p", "better": "p"}
+    EDGES = {"p": 4, "worse": 1, "better": 16}
+
+    def _cells(self, inherit=Switch.ON, parents=None, edges=None):
+        sp, key_to_seed = _inherit_picker(parents or self.PARENTS, edges or self.EDGES, inherit)
+        return sp._fess_cells(key_to_seed)
+
+    def test_non_improving_child_takes_parent_cell(self):
+        cells = self._cells()
+
+        assert cells["worse"] == cells["p"] == fess_cell(4, 0, 0, 8)
+
+    def test_improving_child_keeps_own_cell(self):
+        cells = self._cells()
+
+        assert cells["better"] == fess_cell(16, 0, 0, 8)
+
+    def test_flag_off_is_own_cell(self):
+        """Falsification: without --fess-inherit every seed keeps its own cell."""
+        cells = self._cells(inherit=Switch.OFF)
+
+        assert cells["worse"] == fess_cell(1, 0, 0, 8)
+
+    def test_evicted_parent_means_own_cell(self):
+        cells = self._cells(parents={"worse": "gone"}, edges={"worse": 1})
+
+        assert cells["worse"] == fess_cell(1, 0, 0, 8)
+
+    def test_chain_projects_to_root_in_any_order(self):
+        # Children listed before parents: g -> c -> p, neither beats p.
+        parents = {"g": "c", "c": "p", "p": None}
+        cells = self._cells(parents=parents, edges={"p": 64, "c": 4, "g": 2})
+
+        assert cells["g"] == cells["c"] == cells["p"] == fess_cell(64, 0, 0, 8)
+
+    def test_child_compared_with_projected_parent(self):
+        # c inherits p's cell; g beats c's own cell but not the cell c
+        # competes in, so g inherits too.
+        parents = {"p": None, "c": "p", "g": "c"}
+        cells = self._cells(parents=parents, edges={"p": 64, "c": 2, "g": 8})
+
+        assert cells["g"] == cells["p"]
+
+    @pytest.mark.parametrize(
+        "parents",
+        [{"a": "b", "b": "a"}, {"a": "a"}, {"a": "b", "b": "c", "c": "a"}],
+    )
+    def test_cycles_terminate(self, parents):
+        cells = self._cells(parents=parents, edges=dict.fromkeys(parents, 1))
+
+        assert set(cells) == set(parents)
+
+    def test_seed_admitted_between_refreshes_inherits(self):
+        sp, _ = _inherit_picker({"p": None, "new": "p"}, {"p": 4, "new": 1})
+        sp._fess_cells({"p": b"p"})
+
+        cells = sp._fess_cells({"p": b"p", "new": b"new"})
+
+        assert cells["new"] == cells["p"]
+
+
+class TestNewCellJump:
+    Z = (3, 0, 0, 0)
+
+    def _primed(self, jump=Switch.ON, choice_idxs=(0,)):
+        """X charged once, Y never: two cells known before Z appears."""
+        s = SeedFessScheduler(rng=ScriptedRng(choice_idxs=choice_idxs), jump=jump)
+        cells = {"a": X, "b": Y}
+        s.select_seed(["a", "b"], cells.__getitem__)
+        s.record("a", success=False)
+        return s
+
+    def test_new_cell_picked_without_draw(self):
+        s = self._primed()
+        cells = {"a": X, "b": Y, "z": self.Z}
+
+        # Y and Z tie at effort 0; the jump takes Z and draws nothing.
+        assert s.select_seed(["a", "b", "z"], cells.__getitem__) == "z"
+
+    def test_jump_fires_once(self):
+        s = self._primed()
+        cells = {"a": X, "b": Y, "z": self.Z}
+        s.select_seed(["a", "b", "z"], cells.__getitem__)
+        s.record("z", success=False)
+
+        # Back to least effort: Y is the unique minimum.
+        assert s.select_seed(["a", "b", "z"], cells.__getitem__) == "b"
+
+    def test_off_ties_are_drawn(self):
+        """Falsification: without the jump Y/Z tie and the pool draws (idx 0 -> Y)."""
+        s = self._primed(jump=Switch.OFF, choice_idxs=(0, 0))
+        cells = {"a": X, "b": Y, "z": self.Z}
+
+        assert s.select_seed(["a", "b", "z"], cells.__getitem__) == "b"
+
+    def test_first_select_primes_without_jump(self):
+        # Every cell is new on the first select: least effort decides
+        # (X/Y tie -> scripted idx 1 -> Y), not a jump.
+        s = SeedFessScheduler(rng=ScriptedRng(choice_idxs=[1]), jump=Switch.ON)
+        cells = {"a": X, "b": Y}
+
+        assert s.select_seed(["a", "b"], cells.__getitem__) == "b"
+
+    def test_vanished_new_cell_is_skipped(self):
+        s = self._primed()
+        s.select_seed(["z"], lambda _k: self.Z)
+
+        # Z left before a multi-seed select: no jump to an empty cell.
+        cells = {"a": X, "b": Y}
+        assert s.select_seed(["a", "b"], cells.__getitem__) == "b"
+
+    def test_new_cells_jump_in_arrival_order(self):
+        s = self._primed()
+        cells = {"a": X, "b": Y, "z": self.Z, "w": (4, 0, 0, 0)}
+        ids = list(cells)
+
+        assert s.select_seed(ids, cells.__getitem__) == "z"
+        assert s.select_seed(ids, cells.__getitem__) == "w"
+
+
+class TestInheritWiring:
+    def test_flag_reaches_scheduler_and_picker(self, tmp_path):
+        f = _real_fuzzer(tmp_path, seed_fess_scheduler=True, fess_inherit=Switch.ON)
+
+        assert f._fess_inherit is Switch.ON
+        assert f._seed_fess._jump_on is Switch.ON
+
+    def test_without_arm_is_inert(self, tmp_path, caplog):
+        f = _real_fuzzer(tmp_path, fess_inherit=Switch.ON)
+
+        assert f._fess_inherit is Switch.OFF
+        assert "--fess-inherit" in caplog.text
