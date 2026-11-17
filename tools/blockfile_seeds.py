@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Read block files front to back; send each embedded media file as a TCP seed.
 
-For files holding many messages back to back: Chromium blockfile caches
-(``data_1..3``, Windows / old layouts), disk images, memory dumps. Each
+For anything holding many messages back to back: block devices (/dev/sda1,
+root needed), disk images, memory dumps, Chromium blockfile caches
+(``data_1..3``, Windows / old layouts). Each
 message is found by its magic, its end by walking the format's own
 structure, then it is sent and the read continues after it:
 
@@ -24,6 +25,7 @@ Flags are those of tools/chrome_cache_seeds.py (--types, --host, --port,
 profile cache.
 
 Usage:
+    sudo python tools/blockfile_seeds.py /dev/sda1 --types jpg,png --port 4444
     python tools/blockfile_seeds.py ~/cache_copy/data_2 ~/cache_copy/data_3 --port 4444
     python tools/blockfile_seeds.py disk.img --types jpg,png --dry-run
 """
@@ -385,11 +387,16 @@ def _files(paths: Iterable[Path]) -> Iterator[Path]:
 
 
 def _scan_file(path: Path, wanted: set[Media], max_bytes: int) -> Iterator[tuple[Media, bytes]]:
-    """scan() over an mmap of *path*: memory stays bounded for multi-GB dumps."""
+    """scan() over an mmap of *path*: memory stays bounded for multi-GB dumps / disks.
+
+    Size by seeking to the end, not st_size: a block device (/dev/sda1) reports
+    st_size 0, and mmap length 0 ("whole file") fails on it.
+    """
     with path.open("rb") as fh:
-        if os.fstat(fh.fileno()).st_size == 0:
+        size = fh.seek(0, os.SEEK_END)
+        if size == 0:
             return
-        with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        with mmap.mmap(fh.fileno(), size, access=mmap.ACCESS_READ) as mm:
             yield from scan(mm, wanted, max_bytes)
 
 
@@ -400,14 +407,19 @@ def carve_files(
     for path in _files(paths):
         try:
             yield from _scan_file(path, wanted, max_bytes)
-        except OSError:
+        except OSError as e:
+            # Not fatal, but said: /dev/sda1 without root would otherwise read as "sent 0".
+            print(f"[!] cannot read {path}: {e}", file=sys.stderr)
             stats.unreadable += 1
 
 
 def _parse(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
-        "paths", type=Path, nargs="*", help="block files or dirs (default: browser caches)"
+        "paths",
+        type=Path,
+        nargs="*",
+        help="block devices (/dev/sda1), image/dump files or dirs (default: browser caches)",
     )
     ccs.add_send_args(ap)
     return ap.parse_args(argv)
