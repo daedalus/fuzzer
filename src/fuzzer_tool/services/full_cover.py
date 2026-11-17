@@ -19,6 +19,7 @@ are read-only, so a corpus that lives in one needs ``-o``.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -156,6 +157,10 @@ def _grow(mask: np.ndarray, top: int) -> np.ndarray:
     return np.concatenate([mask, np.zeros(top + 1 - mask.size, dtype=bool)])
 
 
+# Bits reserved for the seed size in _pick_batch's tie-break key.
+_SIZE_BITS = 32
+
+
 def _pick_batch(
     batch: dict[str, np.ndarray], ids: dict[str, int], reach: np.ndarray
 ) -> tuple[list[tuple[str, np.ndarray]], np.ndarray]:
@@ -165,6 +170,7 @@ def _pick_batch(
     union of every counted seed, not just the picks.
     """
     live = [(sid, edges) for sid, edges in batch.items() if sid in ids and edges.size]
+    sizes = [ids[sid] for sid, _ in live]
     picks = []
     while live:
         gains = []
@@ -172,10 +178,14 @@ def _pick_batch(
             reach = _grow(reach, int(edges.max()))
             gains.append(np.count_nonzero(~reach[edges]))
 
-        j = int(np.argmax(gains))
+        # Most new edges; a tie goes to the smaller seed (twins: keep the smallest).
+        # One key: gain in the high bits, size below (seeds are < 4 GiB).
+        key = (np.array(gains, dtype=np.int64) << _SIZE_BITS) - np.array(sizes, dtype=np.int64)
+        j = int(np.argmax(key))
         if gains[j] == 0:
             break
 
+        sizes.pop(j)
         sid, edges = live.pop(j)
         reach[edges] = True
         picks.append((sid, edges))
@@ -193,6 +203,8 @@ def _scan(
     unmeasured = set(ids)
     gone: set[str] = set()
     dump_seeds = 0
+    # Edge-set fingerprint -> the pool seed holding that exact set.
+    twins: dict[bytes, str] = {}
 
     for batch in iter_edges_pickle(dump_path):
         dump_seeds += len(batch)
@@ -206,8 +218,44 @@ def _scan(
 
         picks, reach = _pick_batch(batch, ids, reach)
         pool.update(picks)
+        _swap_twins(pool, twins, picks, batch, ids)
 
     return pool, dump, reach, unmeasured, gone, dump_seeds
+
+
+def _edge_fp(edges: np.ndarray) -> bytes:
+    """128-bit fingerprint of an edge-id array; matches are confirmed by value."""
+    return hashlib.blake2b(edges.tobytes(), digest_size=16).digest()
+
+
+def _swap_twins(
+    pool: dict[str, np.ndarray],
+    twins: dict[bytes, str],
+    picks: list[tuple[str, np.ndarray]],
+    batch: dict[str, np.ndarray],
+    ids: dict[str, int],
+) -> None:
+    """Replace a pool seed by a smaller one with the identical edge set.
+
+    A twin of a pool seed adds no edge, so the greedy never picks it: e.g.
+    ``big {1,2,3}`` picked in batch 0, ``small {1,2,3}`` in batch 1 has gain
+    0. Here it takes big's place, so the cover keeps the smallest twin.
+    """
+    for sid, edges in picks:
+        twins[_edge_fp(edges)] = sid
+
+    picked = {sid for sid, _ in picks}
+    for sid, edges in batch.items():
+        if sid in picked or sid not in ids or not edges.size:
+            continue
+
+        held = twins.get(_edge_fp(edges))
+        if held is None or ids[sid] >= ids[held] or not np.array_equal(pool[held], edges):
+            continue
+
+        del pool[held]
+        pool[sid] = edges
+        twins[_edge_fp(edges)] = sid
 
 
 def _verify(kept: list[str], pool: dict[str, np.ndarray], universe: np.ndarray) -> None:
