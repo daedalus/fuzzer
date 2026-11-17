@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TCP seed ingestion** (`--tcp-listen-port`, `--tcp-listen-host`; `adapters/tcp_seed.py`): each TCP connection's bytes become a seed, popped in `mutate()` and run through exec/coverage/crash/admit. Bounded inbox, loopback by default. `tests/test_tcp_seed.py`.
 - **Stack-depth novelty** (`--stack-depth-max`, `core/stack_depth.py`, `services/fuzz_round.py`): admit a clean run deeper than the campaign max (honggfuzz). Needs SHM. Unmeasured. `tests/test_stack_depth_max.py`.
 - **`cmp_solve` operator** (`core/cmp_solve.py`): write a cmplog operand (exact or +/-1 LE) over the lowest partially matching window (honggfuzz `mangle_CmpSolve`). Unmeasured. `tests/test_cmp_solve.py`.
 - **More opt-in perf counters** (`adapters/perf_event.py`): `l1d_write_access`, `l1d_write_miss`, `l1i_read_miss`, `bpu_read_access`, `bpu_read_miss` (L1I/BPU cache ids and the write op added to the `PERF_TYPE_HW_CACHE` encoding) and `bus_cycles`, selectable with `--hw-perf-counters`; `stats` gets `total_<name>` for each. Not in the defaults: BPU and L1I events are missing on many CPUs and VMs. Not run on real hardware. `tests/test_perf_cache_events.py`.

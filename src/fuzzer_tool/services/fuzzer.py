@@ -54,6 +54,8 @@ from fuzzer_tool.adapters.shm import (
     ShmCoverage,
     unstable_slots,
 )
+from fuzzer_tool.adapters.tcp_seed import DEFAULT_HOST as TCP_DEFAULT_HOST
+from fuzzer_tool.adapters.tcp_seed import TcpSeedInbox
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
@@ -2227,6 +2229,10 @@ class Fuzzer:
         # --elo-stale-bench: bench stalest Elo strategies, revive fresh
         # (core/elo_stale_bench.py). Off, out of --hail-mary. Appended.
         elo_stale_bench=Switch.OFF,
+        # --tcp-listen-port: each TCP message is a seed (adapters/tcp_seed.py);
+        # None disables. Appended.
+        tcp_listen_port=None,
+        tcp_listen_host=TCP_DEFAULT_HOST,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2589,6 +2595,11 @@ class Fuzzer:
             from fuzzer_tool.services.push import PushNotifier
 
             self._push = PushNotifier(push_on_crash)
+        # Popped one per round by OperatorEngine.mutate(); closed by run().
+        self._tcp_inbox = None
+        if tcp_listen_port is not None:
+            self._tcp_inbox = TcpSeedInbox(tcp_listen_port, tcp_listen_host, max_bytes=max_len)
+            print(f"[*] TCP seed listener on {tcp_listen_host}:{self._tcp_inbox.port}")
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
@@ -11260,6 +11271,9 @@ class Fuzzer:
         if self._push is not None:
             # Lets alerts for crashes found just before stop still go out.
             self._push.close()
+        if self._tcp_inbox is not None:
+            # Frees the port; seeds still queued are not run.
+            self._tcp_inbox.close()
         if self._ablation_file:
             self._ablation_file.flush()
             self._ablation_file.close()
