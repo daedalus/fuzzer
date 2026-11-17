@@ -1088,6 +1088,16 @@ def _build_identity(target: str) -> bytes:
     return f"{os.path.abspath(target)}:{st.st_size}:{st.st_mtime_ns}".encode()
 
 
+def _is_tcp_seed(f, mutated) -> bool:
+    """True when *mutated* is the --tcp-listen-port seed popped this round.
+
+    Module-level and getattr-based: stub fuzzers that borrow _dedup_mutate
+    (tests) need no extra member.
+    """
+    pending = getattr(f, "_tcp_pending", None)
+    return pending is not None and mutated is pending.data
+
+
 class Fuzzer:
     # Decision clock; __init__ replaces it. Default for __new__-built test fuzzers.
     _clock: Clock = WALL_CLOCK
@@ -2600,6 +2610,9 @@ class Fuzzer:
         if tcp_listen_port is not None:
             self._tcp_inbox = TcpSeedInbox(tcp_listen_port, tcp_listen_host, max_bytes=max_len)
             print(f"[*] TCP seed listener on {tcp_listen_host}:{self._tcp_inbox.port}")
+        # Seed popped this round (TcpSeed) until FuzzRound reports it; seeds run.
+        self._tcp_pending = None
+        self._tcp_ran = 0
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
@@ -6675,12 +6688,26 @@ class Fuzzer:
         """
         mutated = self.mutate(data)
         for _ in range(EXEC_DEDUP_RETRIES):
-            if not self._is_repeat(mutated, data):
+            # A TCP seed is an explicit input: never re-rolled (that dropped it
+            # unrun, and the re-roll popped the next one), even if a repeat.
+            if _is_tcp_seed(self, mutated) or not self._is_repeat(mutated, data):
                 return mutated
             self._dedup_hits += 1
             mutated = self.mutate(data)
         self._dedup_gaveup += 1
+        if _is_tcp_seed(self, mutated):
+            return mutated
         return self._avoid_pruned(mutated, data)
+
+    def _report_tcp_seeds(self) -> None:
+        """Exit line: every received seed is ran, or still queued (unrun); drops counted."""
+        inbox = self._tcp_inbox
+        if inbox is None:
+            return
+        print(
+            f"[*] TCP seeds: received {inbox.received}, ran {self._tcp_ran}, "
+            f"dropped {inbox.dropped}, unrun {inbox.pending}"
+        )
 
     def _avoid_pruned(self, mutated: bytes, data: bytes) -> bytes:
         """Replace a give-up mutant that is itself a pruned seed.
@@ -11272,8 +11299,9 @@ class Fuzzer:
             # Lets alerts for crashes found just before stop still go out.
             self._push.close()
         if self._tcp_inbox is not None:
-            # Frees the port; seeds still queued are not run.
+            # Frees the port; seeds still queued are not run (counted as unrun).
             self._tcp_inbox.close()
+            self._report_tcp_seeds()
         if self._ablation_file:
             self._ablation_file.flush()
             self._ablation_file.close()

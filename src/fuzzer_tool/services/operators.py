@@ -7451,11 +7451,13 @@ class OperatorEngine:
             return advised
 
         # --tcp-listen-port seed (adapters/tcp_seed.py): run verbatim, off the bandit.
+        # Marked pending so _dedup_mutate never re-rolls it and FuzzRound logs it.
         tcp_inbox = getattr(f, "_tcp_inbox", None)
-        tcp_seed = tcp_inbox.pop() if tcp_inbox is not None else None
+        tcp_seed = tcp_inbox.pop_seed() if tcp_inbox is not None else None
         if tcp_seed is not None:
-            self._reset_round_ops(data, tcp_seed)
-            return tcp_seed
+            f._tcp_pending = tcp_seed
+            self._reset_round_ops(data, tcp_seed.data)
+            return tcp_seed.data
 
         det_mutant = self.maybe_deterministic_mutation(data)
         if det_mutant is not None:

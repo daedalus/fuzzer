@@ -26,6 +26,7 @@ import logging
 import socket
 import threading
 import time
+from typing import NamedTuple
 
 from fuzzer_tool.adapters.filesystem import hash_data
 
@@ -45,6 +46,13 @@ RECV_CHUNK = 1 << 16
 # Concurrent reader threads; further clients wait in the backlog.
 MAX_CONNECTIONS = 64
 LISTEN_BACKLOG = 128
+
+
+class TcpSeed(NamedTuple):
+    """A received message and its id (``hash_data``, as logged on receipt)."""
+
+    data: bytes
+    seed_id: str
 
 
 class TcpSeedInbox:
@@ -72,7 +80,7 @@ class TcpSeedInbox:
         # the capacity check + append + counters atomic across readers; pop()
         # skips it (popleft is atomic and only frees room).
         self._lock = threading.Lock()
-        self._queue: collections.deque[bytes] = collections.deque()
+        self._queue: collections.deque[TcpSeed] = collections.deque()
         self._received = 0
         self._dropped = 0
 
@@ -101,8 +109,18 @@ class TcpSeedInbox:
         """Messages lost to a full inbox."""
         return self._dropped
 
+    @property
+    def pending(self) -> int:
+        """Seeds queued and not popped yet."""
+        return len(self._queue)
+
     def pop(self) -> bytes | None:
-        """Oldest queued seed, or None when empty."""
+        """Oldest queued seed's bytes, or None when empty."""
+        seed = self.pop_seed()
+        return None if seed is None else seed.data
+
+    def pop_seed(self) -> TcpSeed | None:
+        """Oldest queued seed with its id, or None when empty."""
         if not self._queue:
             return None
         return self._queue.popleft()
@@ -204,8 +222,10 @@ class TcpSeedInbox:
         """
         if not data:
             return
-        # Hashed outside the lock: ~34 ms/MiB, other readers keep going.
-        seed = f"seed id_{hash_data(data)} with {len(data)} bytes from {peer}"
+        # Hashed outside the lock: ~34 ms/MiB, other readers keep going; the
+        # id rides along so the fuzz loop never hashes it again.
+        seed_id = hash_data(data)
+        seed = f"seed id_{seed_id} with {len(data)} bytes from {peer}"
 
         with self._lock:
             if len(self._queue) >= self._capacity:
@@ -213,7 +233,7 @@ class TcpSeedInbox:
                 self._dropped += 1
                 return
             print(f"[*] Received {seed}", flush=True)
-            self._queue.append(data)
+            self._queue.append(TcpSeed(data, seed_id))
             self._received += 1
 
 

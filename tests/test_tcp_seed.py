@@ -332,3 +332,83 @@ class TestConcurrency:
     def test_bad_max_connections_rejected(self):
         with pytest.raises(ValueError):
             TcpSeedInbox(0, max_connections=0)
+
+
+class TestProcessingVisible:
+    """Every received seed runs once and says so: "Ran seed id_<h>: ..."."""
+
+    def test_pop_seed_carries_the_received_id(self, inbox):
+        _send(inbox.port, b"hello")
+        _wait_received(inbox, 1)
+        assert inbox.pending == 1
+
+        seed = inbox.pop_seed()
+        assert (seed.data, seed.seed_id) == (b"hello", hash_data(b"hello"))
+        assert inbox.pending == 0 and inbox.pop_seed() is None
+
+    def test_regression_seed_equal_to_parent_not_rerolled(self, tmp_path):
+        # The dedup gate re-rolled a TCP seed identical to the fuzzed parent:
+        # received, logged, never run.
+        from tests.test_regression_end_of_run_persistence import SEED, _make_fuzzer
+
+        f = _make_fuzzer(tmp_path, tcp_listen_port=0)
+        try:
+            _send(f._tcp_inbox.port, SEED)
+            _wait_received(f._tcp_inbox, 1)
+            assert bytes(f._dedup_mutate(SEED)) == SEED
+        finally:
+            f._tcp_inbox.close()
+
+    def test_regression_already_executed_seed_runs_again(self, tmp_path):
+        # Sent twice: the exec bloom flagged the second copy and re-rolled it.
+        from tests.test_regression_end_of_run_persistence import _make_fuzzer
+
+        f = _make_fuzzer(tmp_path, tcp_listen_port=0)
+        try:
+            for _ in range(2):
+                _send(f._tcp_inbox.port, b"TWICE")
+            _wait_received(f._tcp_inbox, 2)
+            assert [bytes(f._dedup_mutate(b"parent")) for _ in range(2)] == [b"TWICE", b"TWICE"]
+        finally:
+            f._tcp_inbox.close()
+
+    def test_run_logs_ran_line_and_summary(self, tmp_path, capsys):
+        from tests.test_regression_end_of_run_persistence import _make_fuzzer
+
+        f = _make_fuzzer(tmp_path, tcp_listen_port=0)
+        for payload in (b"TCP-ONE", b"TCP-TWO"):
+            _send(f._tcp_inbox.port, payload)
+        _wait_received(f._tcp_inbox, 2)
+
+        with patch.object(f, "_run_target", return_value=(0, "")):
+            f.run(max_execs=5)
+
+        out = capsys.readouterr().out
+        for payload in (b"TCP-ONE", b"TCP-TWO"):
+            line = next(ln for ln in out.splitlines() if f"Ran seed id_{hash_data(payload)}" in ln)
+            assert "rc=0" in line and "edges" in line
+            assert any(word in line for word in ("admitted", "crash", "boring"))
+        assert "TCP seeds: received 2, ran 2, dropped 0, unrun 0" in out
+
+    def test_non_tcp_rounds_not_logged(self, tmp_path, capsys):
+        # Falsification: ordinary mutants never print "Ran seed".
+        from tests.test_regression_end_of_run_persistence import _make_fuzzer
+
+        f = _make_fuzzer(tmp_path, tcp_listen_port=0)
+        with patch.object(f, "_run_target", return_value=(0, "")):
+            f.run(max_execs=5)
+        out = capsys.readouterr().out
+        assert "Ran seed" not in out
+        assert "TCP seeds: received 0, ran 0, dropped 0, unrun 0" in out
+
+    def test_unrun_counted_at_exit(self, tmp_path, capsys):
+        # Adversarial: seeds still queued when the run stops are reported, not hidden.
+        from tests.test_regression_end_of_run_persistence import _make_fuzzer
+
+        f = _make_fuzzer(tmp_path, tcp_listen_port=0)
+        for i in range(3):
+            _send(f._tcp_inbox.port, b"Q%d" % i)
+        _wait_received(f._tcp_inbox, 3)
+        f._tcp_inbox.close()
+        f._report_tcp_seeds()
+        assert "TCP seeds: received 3, ran 0, dropped 0, unrun 3" in capsys.readouterr().out
