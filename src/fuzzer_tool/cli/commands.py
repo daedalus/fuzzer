@@ -1033,6 +1033,7 @@ def cmd_fuzz(args):
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
         respawn_backoff=Switch.ON if getattr(args, "respawn_backoff", False) else Switch.OFF,
+        elo_stale_bench=Switch.ON if getattr(args, "elo_stale_bench", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2962,6 +2963,9 @@ def cmd_sweep(args):
 # respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
 # only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
 #
+# elo_stale_bench (--elo-stale-bench) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md).
+#
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md). The first is also inert without the stride arm.
@@ -3941,6 +3945,14 @@ def main() -> int:
         action="store_true",
         help="Judge Elo operator/seed strategy matches per second, not per round "
         "(autofz): a slow strategy must out-yield a fast one to draw. Needs --elo.",
+    )
+    fuzz_parser.add_argument(
+        "--elo-stale-bench",
+        action="store_true",
+        help="Bench the Elo strategy with the most rounds since its last gain once it passes "
+        "max(2000, 4x the pool median); revive it after 10000 rounds with a prior rating. "
+        "Never benches the last armed strategy (soksolv; core/elo_stale_bench.py). Needs --elo. "
+        "Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--lineage",

@@ -53,6 +53,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
+| Elo stale bench (`--elo-stale-bench`) | Bench the stalest Elo strategy past max(2000, 4x median) rounds without a gain; revive fresh after 10k (soksolv) | U | `--elo all --elo-stale-bench` vs `--elo all`, fuzzgoat (clang) 20 seeds x 50k (bench needs > 2k stale rounds) + A/A; count benches/revives |
 | Elo time credit (`--elo-time-credit`) | Strategy matches judged per second (autofz) | U | `--elo all --elo-time-credit` vs `--elo all`, fuzzgoat clang, wall-clock budget (not exec budget: per-exec budgets hide the gain); A/A first |
 | Tempered Elo Thompson | Draw width `2 − favourite win rate` | S | `--elo` vs previous commit |
 | Elo miss scoring | Rate on Beta hit rates / played arms only | U | design, then fuzzgoat |

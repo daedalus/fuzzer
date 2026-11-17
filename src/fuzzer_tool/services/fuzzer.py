@@ -83,6 +83,7 @@ from fuzzer_tool.core.elf import (
     is_elf_executable,
     parse_sancov_guard_count,
 )
+from fuzzer_tool.core.elo_stale_bench import StaleBench
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
@@ -2176,6 +2177,9 @@ class Fuzzer:
         # --respawn-backoff: pace restarts of a target that dies at once
         # (adapters/respawn_backoff.py). Off, out of --hail-mary. Appended.
         respawn_backoff=Switch.OFF,
+        # --elo-stale-bench: bench stalest Elo strategies, revive fresh
+        # (core/elo_stale_bench.py). Off, out of --hail-mary. Appended.
+        elo_stale_bench=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -4806,6 +4810,8 @@ class Fuzzer:
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
         _ANALYZER_REGISTRY.wire_all(self)
+        if elo_stale_bench is Switch.ON and self._elo:
+            self._elo.enable_stale_bench(StaleBench())
 
         # self._frameshift: constructed by analyzer_registry.wire_all() above.
         self._last_ops_used: list[str] = []
