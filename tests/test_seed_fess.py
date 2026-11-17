@@ -935,6 +935,7 @@ class TestNoveltyWiring:
 
         seen = []
         f = SimpleNamespace(
+            _lineage_exhaust=None,
             _seed_quality=None,
             _seed_canary=None,
             _seed_round_robin=None,
