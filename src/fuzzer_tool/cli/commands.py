@@ -41,6 +41,7 @@ from fuzzer_tool.core.run_mode import (
 )
 from fuzzer_tool.core.sanitizer import FUNC_HASH_TAG, STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
+from fuzzer_tool.core.schedulers.seed_fess import FESS_RANDOM_EVERY, FessMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
@@ -1033,6 +1034,7 @@ def cmd_fuzz(args):
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
         fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
+        seed_fess_mode=FessMode(getattr(args, "seed_fess_mode", FessMode.LEAST_EFFORT.value)),
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -4249,6 +4251,15 @@ def main() -> int:
         "(edges, rare edges, lineage depth, size); the least-explored cell is fuzzed next, then "
         "its least-fuzzed seed. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_fess.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-fess-mode",
+        choices=tuple(m.value for m in FessMode),
+        default=FessMode.LEAST_EFFORT.value,
+        help="With --seed-fess-scheduler: cell schedule. least-effort: least-explored cell. "
+        f"triple: every {FESS_RANDOM_EVERY}th pick a random occupied cell, else even picks the "
+        "best cell (success rate over its seeds), odd picks round robin in creation order "
+        "(soksolv selectMove / pickCell).",
     )
     fuzz_parser.add_argument(
         "--fess-inherit",

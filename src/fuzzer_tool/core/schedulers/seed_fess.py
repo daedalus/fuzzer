@@ -18,12 +18,20 @@ effort ledger. Off by default and out of ``--hail-mary`` until it wins its A/B.
 
 ``jump`` (``--fess-inherit``, soksolv fess_search.go NewCellJump): a cell
 occupied for the first time after the first select is picked next, once.
+
+``mode`` (``--seed-fess-mode``, soksolv fess_search.go selectMove / fa2.go
+pickCell): ``LEAST_EFFORT`` above, or ``TRIPLE``::
+
+    turn % FESS_RANDOM_EVERY == 0  uniform random occupied cell
+    even turn                      best cell: max s / (s + f) over its seeds
+    odd turn                       round robin over cells in creation order
 """
 
 from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from enum import Enum
 
 from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.schedulers._arm_counts import ArmCounts
@@ -33,7 +41,17 @@ FESS_BUCKET_CAP = 7
 #: Feature axes: edges, rare edges, lineage depth, size.
 FESS_AXES = 4
 
+#: TRIPLE: one pick in this many is a uniform random occupied cell (soksolv PFTypes).
+FESS_RANDOM_EVERY = 8
+
 Cell = tuple[int, int, int, int]
+
+
+class FessMode(Enum):
+    """Cell schedule of the FESS arm."""
+
+    LEAST_EFFORT = "least-effort"
+    TRIPLE = "triple"
 
 
 def _bucket(n: int, shift: int = 0) -> int:
@@ -58,6 +76,18 @@ def _valid_cell(cell) -> bool:
     return all(isinstance(v, int) and 0 <= v <= FESS_BUCKET_CAP for v in cell)
 
 
+def _valid_order(order) -> bool:
+    """Creation order: a list of distinct valid cells."""
+    if not isinstance(order, list) or not all(_valid_cell(c) for c in order):
+        return False
+    return len(set(order)) == len(order)
+
+
+def _is_count(n) -> bool:
+    """Non-negative int, bool excluded."""
+    return type(n) is int and n >= 0
+
+
 def _ignore(_members) -> None:
     """No-op cell observer (jump off)."""
 
@@ -68,9 +98,13 @@ class SeedFessScheduler(ArmCounts):
     #: Effort counts, not Beta priors, drive selection.
     supports_priors = False
 
-    def __init__(self, rng, jump: Switch = Switch.OFF) -> None:
+    def __init__(
+        self, rng, jump: Switch = Switch.OFF, mode: FessMode = FessMode.LEAST_EFFORT
+    ) -> None:
         if rng is None:
             raise ValueError("SeedFessScheduler requires a RandPool (Hard Rule 16)")
+        if not isinstance(mode, FessMode):
+            raise ValueError(f"mode must be a FessMode, got {mode!r}")
         super().__init__()
         self._rng = rng
         self._effort: dict[Cell, int] = {}  # cell -> execs charged at pick time
@@ -81,8 +115,18 @@ class SeedFessScheduler(ArmCounts):
         self._jump_on = jump
         self._seen_cells: set[Cell] = set()
         self._jumps: deque[Cell] = deque()
-        self._note_cells = self._note_new if jump is Switch.ON else _ignore
-        self._pick_cell = self._jump_cell if jump is Switch.ON else self._least_effort
+
+        # TRIPLE: turn counter, round-robin cursor into creation order.
+        self._mode = mode
+        self._turn = 0
+        self._cursor = 0
+        self._order: list[Cell] = []
+
+        triple = mode is FessMode.TRIPLE
+        self._mode_pick = self._triple if triple else self._least_effort
+        tracked = triple or jump is Switch.ON
+        self._note_cells = self._note_new if tracked else _ignore
+        self._pick_cell = self._jump_cell if jump is Switch.ON else self._mode_pick
 
     def select_seed(self, seed_ids: list[str], cell: Callable[[str], Cell]) -> str:
         if not seed_ids:
@@ -101,13 +145,49 @@ class SeedFessScheduler(ArmCounts):
         return self._argmin({c: self._effort.get(c, 0) for c in members})
 
     def _note_new(self, members: dict[Cell, list[str]]) -> None:
-        """Queue cells occupied for the first time; the first select only primes."""
+        """Append first-time cells to creation order; queue them for a jump
+        unless this is the priming select."""
         fresh = [c for c in members if c not in self._seen_cells]
         if not fresh:
             return
-        if self._seen_cells:
+        if self._seen_cells and self._jump_on is Switch.ON:
             self._jumps.extend(fresh)
         self._seen_cells.update(fresh)
+        self._order.extend(fresh)
+
+    def _triple(self, members: dict[Cell, list[str]]) -> Cell:
+        """Random every FESS_RANDOM_EVERY turns, else best (even) / round robin (odd)."""
+        self._turn += 1
+        if len(members) == 1:
+            return next(iter(members))
+        if self._turn % FESS_RANDOM_EVERY == 0:
+            return self._rng.choice([c for c in self._order if c in members])
+        if self._turn % 2 == 0:
+            return self._best_cell(members)
+        return self._round_robin(members)
+
+    def _best_cell(self, members: dict[Cell, list[str]]) -> Cell:
+        """Highest s / (s + f) summed over the cell's seeds; untried = 0."""
+        rates = {}
+        for c, keys in members.items():
+            s = f = 0.0
+            for k in keys:
+                ks, kf = self._counts[k]
+                s += ks
+                f += kf
+            rates[c] = -s / (s + f) if s + f > 0.0 else 0.0
+        return self._argmin(rates)
+
+    def _round_robin(self, members: dict[Cell, list[str]]) -> Cell:
+        """Next occupied cell in creation order from the cursor."""
+        order = self._order
+        n = len(order)
+        for step in range(n):
+            i = (self._cursor + step) % n
+            if order[i] in members:
+                self._cursor = i + 1
+                return order[i]
+        return next(iter(members))  # unreachable: every member cell is in order
 
     def _jump_cell(self, members: dict[Cell, list[str]]) -> Cell:
         """Oldest owed new cell still occupied, else the normal pick."""
@@ -115,7 +195,7 @@ class SeedFessScheduler(ArmCounts):
             c = self._jumps.popleft()
             if c in members:
                 return c
-        return self._least_effort(members)
+        return self._mode_pick(members)
 
     def _group(self, seed_ids: list[str], cell: Callable[[str], Cell]) -> dict[Cell, list[str]]:
         """Register and trim live seeds, then bucket them by cell for record()."""
@@ -147,16 +227,36 @@ class SeedFessScheduler(ArmCounts):
         self._effort[c] = self._effort.get(c, 0) + 1
 
     def to_dict(self) -> dict:
-        """Effort ledger only: seed keys are corpus-local, cells are not."""
-        return {"effort": dict(self._effort)}
+        """Effort ledger and TRIPLE schedule: seed keys are corpus-local, cells are not."""
+        return {
+            "effort": dict(self._effort),
+            "turn": self._turn,
+            "cursor": self._cursor,
+            "order": list(self._order),
+        }
 
     def from_dict(self, data) -> None:
-        """Restore effort in place (the fuzzer's arm tuple holds this instance).
-
-        Malformed entries are dropped, never trusted.
+        """Restore effort and schedule in place (the fuzzer's arm tuple holds
+        this instance). Malformed entries are dropped, never trusted.
         """
+        data = data if isinstance(data, dict) else {}
+        self._load_schedule(data)
+        self._load_effort(data.get("effort"))
+
+    def _load_schedule(self, data: dict) -> None:
+        """Turn, cursor and creation order restore together or not at all."""
+        self._turn, self._cursor, self._order = 0, 0, []
+        self._seen_cells = set()
+        turn, cursor, order = data.get("turn", 0), data.get("cursor", 0), data.get("order", [])
+        if not (_is_count(turn) and _valid_order(order) and _is_count(cursor)):
+            return
+        if cursor > len(order):
+            return
+        self._turn, self._cursor, self._order = turn, cursor, list(order)
+        self._seen_cells = set(order)
+
+    def _load_effort(self, effort) -> None:
         self._effort = {}
-        effort = data.get("effort") if isinstance(data, dict) else None
         if not isinstance(effort, dict):
             return
 

@@ -162,7 +162,7 @@ from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
-from fuzzer_tool.core.schedulers.seed_fess import SeedFessScheduler
+from fuzzer_tool.core.schedulers.seed_fess import FessMode, SeedFessScheduler
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
@@ -2175,6 +2175,8 @@ class Fuzzer:
         # --fess-inherit: FESS parent-cell inheritance + new-cell jump. Needs
         # the FESS arm. Off, out of --hail-mary. Appended.
         fess_inherit=Switch.OFF,
+        # --seed-fess-mode: FESS cell schedule (least-effort / triple). Appended.
+        seed_fess_mode=FessMode.LEAST_EFFORT,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3736,7 +3738,9 @@ class Fuzzer:
         # Read by SeedPicker._fess_cells (parent-cell projection).
         self._fess_inherit = fess_inherit
         self._seed_fess = (
-            SeedFessScheduler(rng=self._rng, jump=fess_inherit) if seed_fess_scheduler else None
+            SeedFessScheduler(rng=self._rng, jump=fess_inherit, mode=seed_fess_mode)
+            if seed_fess_scheduler
+            else None
         )
         self._frontier_oracle = None
         self._seed_frontier = None

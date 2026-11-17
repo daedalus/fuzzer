@@ -18,6 +18,8 @@ import pytest
 from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.schedulers.seed_fess import (
     FESS_BUCKET_CAP,
+    FESS_RANDOM_EVERY,
+    FessMode,
     SeedFessScheduler,
     cell_better,
     fess_cell,
@@ -496,3 +498,205 @@ class TestInheritWiring:
 
         assert f._fess_inherit is Switch.OFF
         assert "--fess-inherit" in caplog.text
+
+
+# --- Three-way cell schedule (--seed-fess-mode triple) ------------------------
+
+Z = (3, 0, 0, 0)
+TRIO = {"a": X, "b": Y, "c": Z}
+
+
+def _triple(**rng_kw) -> SeedFessScheduler:
+    return SeedFessScheduler(rng=ScriptedRng(**rng_kw), mode=FessMode.TRIPLE)
+
+
+def _turn_kinds(turns: int) -> list[str]:
+    """Schedule from its definition: every Nth random, else even best, odd round robin."""
+    kinds = []
+    for t in range(1, turns + 1):
+        if t % FESS_RANDOM_EVERY == 0:
+            kinds.append("random")
+        elif t % 2 == 0:
+            kinds.append("best")
+        else:
+            kinds.append("rr")
+    return kinds
+
+
+def _picks(s: SeedFessScheduler, n: int, cells=TRIO) -> list[str]:
+    return [s.select_seed(list(cells), cells.__getitem__) for _ in range(n)]
+
+
+class TestTriple:
+    def test_schedule_interleaves_rr_best_random(self):
+        turns = FESS_RANDOM_EVERY + 1
+        random_idx = 2
+        s = _triple(choice_idxs=[random_idx])
+        s.record("b", success=True)  # Y: rate 1.0; X, Z untried: 0.0
+
+        order = list(TRIO)  # creation order = first-select member order
+        expected, rr = [], 0
+        for kind in _turn_kinds(turns):
+            if kind == "rr":
+                expected.append(order[rr % len(order)])
+                rr += 1
+            elif kind == "best":
+                expected.append("b")
+            else:
+                expected.append(order[random_idx])
+
+        assert _picks(s, turns) == expected
+
+    def test_best_rate_aggregates_over_cell_seeds(self):
+        # X: a 1/1 but a2 0/3 -> 1/4. Y: b 1/2. Per-seed max would say X.
+        s = _triple()
+        cells = {"a": X, "a2": X, "b": Y}
+        s.record("a", success=True)
+        for _ in range(3):
+            s.record("a2", success=False)
+        s.record("b", success=True)
+        s.record("b", success=False)
+
+        picks = _picks(s, 2, cells)
+
+        assert picks[1] == "b"
+
+    def test_best_ties_drawn_from_pool(self):
+        s = _triple(choice_idxs=[1])
+        s.record("a", success=True)
+        s.record("b", success=True)
+
+        # Turn 2: X and Y tie at 1.0 -> idx 1 -> Y.
+        assert _picks(s, 2)[1] == "b"
+
+    def test_round_robin_skips_empty_cells(self):
+        s = _triple(choice_idxs=[0])
+        _picks(s, 2)  # rr X, best: all 0.0 tie -> idx 0 -> X
+
+        # Y left: turn 3 round robin moves past it to Z.
+        cells = {"a": X, "c": Z}
+        assert s.select_seed(list(cells), cells.__getitem__) == "c"
+
+    def test_least_fuzzed_seed_inside_chosen_cell(self):
+        s = _triple()
+        cells = {"a": X, "a2": X, "b": Y}
+        s.record("a", success=False)
+
+        # Turn 1 round robin -> X; a2 has fewer execs.
+        assert _picks(s, 1, cells) == ["a2"]
+
+    def test_one_cell_never_draws(self):
+        """Falsification: one occupied cell reduces every turn to least-fuzzed."""
+        s = _triple()
+        cells = {"a": X, "a2": X}
+        s.record("a", success=False)
+
+        assert _picks(s, FESS_RANDOM_EVERY, cells) == ["a2"] * FESS_RANDOM_EVERY
+
+    def test_rejects_non_enum_mode(self):
+        with pytest.raises(ValueError):
+            SeedFessScheduler(rng=ScriptedRng(), mode="triple")
+
+    def test_jump_preempts_without_spending_a_turn(self):
+        s = SeedFessScheduler(rng=ScriptedRng(), mode=FessMode.TRIPLE, jump=Switch.ON)
+        two = {"a": X, "b": Y}
+        _picks(s, 1, two)  # turn 1: rr -> X (priming select, no jump)
+
+        jumped = _picks(s, 1)[0]  # Z is new: jump, turn stays 1
+        s.record("c", success=True)
+
+        assert jumped == "c"
+        assert _picks(s, 2) == ["c", "b"]  # turn 2 best (Z 1.0), turn 3 rr -> Y
+
+
+class TestTriplePersistence:
+    def _driven(self) -> SeedFessScheduler:
+        s = _triple()
+        s.record("b", success=True)
+        _picks(s, 3)  # rr X, best Y, rr Y
+        return s
+
+    def test_round_trip_continues_schedule(self):
+        s = self._driven()
+        blob = pickle.dumps(s.to_dict())
+        t = _triple()
+        t.from_dict(safe_load(io.BytesIO(blob)))
+        t.record("b", success=True)  # seed ledgers are not persisted
+
+        # Turn 4 best (Y), turn 5 round robin resumes after Y -> Z.
+        assert _picks(t, 2) == _picks(s, 2) == ["b", "c"]
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"turn": -1},
+            {"turn": True},
+            {"turn": "3"},
+            {"cursor": 9},
+            {"cursor": -1},
+            {"order": [X, X]},
+            {"order": [(1, 2)]},
+            {"order": "junk"},
+        ],
+    )
+    def test_malformed_schedule_starts_fresh(self, bad):
+        data = {**self._driven().to_dict(), **bad}
+        t = _triple()
+        t.from_dict(data)
+
+        assert t.to_dict()["turn"] == 0
+        assert t.to_dict()["cursor"] == 0
+        assert t.to_dict()["order"] == []
+
+    def test_malformed_schedule_keeps_effort(self):
+        s = _sched(choice_idxs=[0])
+        s.select_seed(["a"], lambda _k: X)
+        s.record("a", success=False)
+        t = _triple()
+        t.from_dict({**s.to_dict(), "turn": -5})
+
+        assert _effort(t) == {X: 1}
+
+
+class TestModeWiring:
+    def test_mode_reaches_scheduler_and_resumes(self, tmp_path):
+        f = _real_fuzzer(tmp_path, seed_fess_scheduler=True, seed_fess_mode=FessMode.TRIPLE)
+        _picks(f._seed_fess, 3)
+        f._save_learned()
+
+        g = _real_fuzzer(tmp_path, seed_fess_scheduler=True, seed_fess_mode=FessMode.TRIPLE)
+        g.resume = True
+        g._state_store = f._state_store
+        g._load_learned()
+
+        assert g._seed_fess._mode is FessMode.TRIPLE
+        assert g._seed_fess.to_dict()["turn"] == 3
+
+    def test_default_is_least_effort(self, tmp_path):
+        f = _real_fuzzer(tmp_path, seed_fess_scheduler=True)
+
+        assert f._seed_fess._mode is FessMode.LEAST_EFFORT
+
+    @pytest.mark.parametrize("mode", list(FessMode))
+    def test_cli_values_map_to_enum(self, monkeypatch, mode):
+        args = _cli_args(monkeypatch, "--seed-fess-mode", mode.value)
+
+        assert FessMode(args.seed_fess_mode) is mode
+
+
+def _cli_args(monkeypatch, *extra: str):
+    """Parse ``fuzz /bin/true *extra`` through the real CLI, cmd_fuzz stubbed."""
+    import sys
+
+    from fuzzer_tool.cli import commands
+
+    captured: dict = {}
+
+    def _spy(args):
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(commands, "cmd_fuzz", _spy)
+    monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", *extra])
+    assert commands.main() == 0
+    return captured["args"]
