@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tools/tcp_corpus.py`**: TCP listener that only builds a corpus: every message (any feeder) written to `CORPUS/seeds/<h[:2]>/id_<h>`, deduplicated by a persistent `--bloom` file and by the disk. `tests/test_tcp_corpus.py`.
+
+### Fixed
+
+- `SentLog.save()` (`--sent-bloom`) re-added already-saved records to `n_added` on a second save.
 - **`--tcp-mode direct`** (`services/tcp_ingest.py`): received TCP seeds skip the fuzz round; all queued seeds run unmutated before each iteration, edges recorded, admitted to the corpus only on new coverage (`--admit-all`: every clean seed). Every TCP seed now logs `Ran seed id_<h>`, is never re-rolled by the dedup gate, and the run ends with a received/ran/dropped/unrun line. `tests/test_tcp_ingest.py`.
 - **`BloomFilter.merge(other)`** (`core/bloom.py`): in-place OR of a same-layout filter, returns whether any bit changed. `--sent-bloom` saves now merge into the file on disk instead of overwriting it, and skip the write when nothing changed. `tests/test_bloom_merge.py`.
 - **`--max-size N`** on `tools/chrome_cache_seeds.py`, `blockfile_seeds.py`, `dir_seeds.py`: skip seeds whose full size exceeds N (counted as `too big`); `--max-bytes` still truncates.

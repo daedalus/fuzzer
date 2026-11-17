@@ -182,6 +182,8 @@ class SentLog:
             return
 
         negative_bloom.save(self._path, target)
+        # The file now holds this run's records: a later save adds only newer ones.
+        self._added = 0
         if target.over_capacity:
             print(
                 f"[!] --sent-bloom holds {target.n_added} seeds, over its "
@@ -207,6 +209,7 @@ class SentLog:
 
         if not changed:
             print(f"[*] --sent-bloom unchanged: {self._path}")
+            self._added = 0  # already on disk
             return None
         disk.n_added += self._added
         return disk
