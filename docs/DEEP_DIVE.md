@@ -480,6 +480,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Auto-minimize**: corpus pruning guided by Wasserstein spatial diversity
 - **Hamming fuzzy dedup**: near-duplicate detection via Hamming distance on equal-length seeds (`--fuzzy-dedup N`)
 - **New edges per seed** (`core/novelty_hist.py`, always on; Fuzzilli's corpus diagnostic): each admission is bucketed by `_last_new_edge_count` into `0 | 1 | 2-5 | 6-10 | 11+`; the exit summary prints `New edges/seed:` with counts and shares. A large `1` share (Fuzzilli: 48% on JavaScriptCore) means features are found one at a time, not combined. `0` = admitted without new edges (seeds, hit-count gains). Persists across `--resume` (`novelty_hist` section). Cost: ~140 ns per admission.
+- **TCP seed ingestion** (`--tcp-listen-port PORT`, `--tcp-listen-host HOST`, default `127.0.0.1`; `adapters/tcp_seed.py`): one connection = one seed (send, close; e.g. `nc -N 127.0.0.1 4444 < seed`). A daemon thread queues each message, truncated to `--max-len`; `OperatorEngine.mutate()` pops one per round after the advisors move and runs it verbatim through exec / coverage / crash / admit (admitted child of the current seed). Bounds: 1024 queued (overflow dropped and counted), 5 s per connection (partial bytes kept), empty connections ignored. Port bound at startup (busy port fails fast); closed at `run()` teardown, unpopped seeds dropped. A seed already run (exec bloom, identical to parent) is re-rolled away by `_dedup_mutate`. Off: ~40 ns per round. Tests: `tests/test_tcp_seed.py`.
 
 ### Pruned Seed Cuckoo Filter (`--cuckoo-seed-filter`)
 - **Purpose**: When enabled, tracks seeds that have been pruned during corpus minimization so their mutations are skipped during fuzzing, preventing re-discovery of low-value seeds.
@@ -1019,6 +1020,8 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--send-mail-test` | Send one test mail with the `--send-email-on-crash` settings, then exit |
 | `--push-on-crash URL` | Push alert per novel crash: ntfy `https://`, `gotify://`, `pushover://`, `json+https://` webhook (repeatable; default `$FUZZER_PUSH_URL`) |
 | `--push-test` | Send one test push to each `--push-on-crash` target, then exit |
+| `--tcp-listen-port PORT` | Accept seeds over TCP, one per connection; run verbatim through the normal pipeline |
+| `--tcp-listen-host HOST` | Bind address for `--tcp-listen-port` (default `127.0.0.1`) |
 | `--coverage-log FILE` | Append (timestamp, edge_count) lines for coverage-over-time plots |
 | `--coverage-report FILE` | Dump edge coverage map to JSON on exit |
 | `--max-corpus N` | Auto-minimize corpus at N entries |

@@ -7450,6 +7450,13 @@ class OperatorEngine:
             self._reset_round_ops(data, advised)
             return advised
 
+        # --tcp-listen-port seed (adapters/tcp_seed.py): run verbatim, off the bandit.
+        tcp_inbox = getattr(f, "_tcp_inbox", None)
+        tcp_seed = tcp_inbox.pop() if tcp_inbox is not None else None
+        if tcp_seed is not None:
+            self._reset_round_ops(data, tcp_seed)
+            return tcp_seed
+
         det_mutant = self.maybe_deterministic_mutation(data)
         if det_mutant is not None:
             self._reset_round_ops(data, det_mutant)

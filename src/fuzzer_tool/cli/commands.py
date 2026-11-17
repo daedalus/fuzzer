@@ -50,7 +50,7 @@ from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.crash_cluster import CLUSTER_THRESHOLD, REDUCE_EXECS, WL_ITERS
-from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, Fuzzer
+from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, TCP_DEFAULT_HOST, Fuzzer
 from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.operators import StallMode
@@ -1313,6 +1313,8 @@ def cmd_fuzz(args):
         afl_custom_mutator=getattr(args, "afl_custom_mutator", None),
         email_on_crash=_mail_config_from_args(args),
         push_on_crash=_push_targets_from_args(args),
+        tcp_listen_port=getattr(args, "tcp_listen_port", None),
+        tcp_listen_host=getattr(args, "tcp_listen_host", TCP_DEFAULT_HOST),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
         enable_arm_mutator=getattr(args, "arm_mutate", False),
         refresh_profile=getattr(args, "refresh_profile", False),
@@ -3340,6 +3342,18 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
     if n < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
+# Highest TCP port number (RFC 793: 16-bit field).
+TCP_PORT_MAX = 65535
+
+
+def _tcp_port_arg(value: str) -> int:
+    """argparse type: a TCP port in 1..65535."""
+    n = _positive_int_arg(value)
+    if n > TCP_PORT_MAX:
+        raise argparse.ArgumentTypeError(f"must be 1..{TCP_PORT_MAX}, got {n}")
     return n
 
 
@@ -7045,6 +7059,22 @@ def main() -> int:
             "Send one test push to each --push-on-crash target and exit "
             "(0 sent, 1 failed, 2 bad config); no fuzzing"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--tcp-listen-port",
+        type=_tcp_port_arg,
+        default=None,
+        metavar="PORT",
+        help=(
+            "Accept seeds over TCP: one connection = one seed (send, then close). "
+            "Each runs verbatim through the exec/coverage/crash path; truncated to --max-len"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--tcp-listen-host",
+        default=TCP_DEFAULT_HOST,
+        metavar="HOST",
+        help=f"Bind address for --tcp-listen-port (default {TCP_DEFAULT_HOST}; seeds run the target)",
     )
     fuzz_parser.add_argument(
         "--save-smaller",
