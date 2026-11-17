@@ -1052,6 +1052,8 @@ def cmd_fuzz(args):
         advisors=getattr(args, "advisors", False),
         plateau_groups=getattr(args, "plateau_groups", False),
         elo_stale_bench=Switch.ON if getattr(args, "elo_stale_bench", False) else Switch.OFF,
+        density_weight=Switch.ON if getattr(args, "density_weight", False) else Switch.OFF,
+        prune_density=Switch.ON if getattr(args, "prune_density", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -3004,6 +3006,9 @@ def cmd_sweep(args):
 # respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
 # only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
 #
+# density_weight (--density-weight) and prune_density (--prune-density) are
+# excluded as unmeasured: unit tests only, no paired run (docs/AB_PENDING.md).
+#
 # advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
 # run (docs/AB_PENDING.md).
 #
@@ -4433,6 +4438,19 @@ def main() -> int:
         action="store_true",
         help="Edge-tracker eviction: among seeds losing equal unique coverage, drop the most "
         "expensive exec first instead of the oldest (core/edge_tracker.py EvictTie). Unmeasured.",
+    )
+    fuzz_parser.add_argument(
+        "--prune-density",
+        action="store_true",
+        help="Edge-tracker eviction: among seeds losing equal unique coverage, drop the one "
+        "hitting the fewest edges per bit first (core/edge_tracker.py EvictTie). Overrides "
+        "--prune-cost. Unmeasured.",
+    )
+    fuzz_parser.add_argument(
+        "--density-weight",
+        action="store_true",
+        help="Seed weight x 0.5..2 by rank of edges hit per bit of input (core/edge_density.py): "
+        "dense seeds are picked more. Unmeasured.",
     )
     fuzz_parser.add_argument(
         "--packed-edges",

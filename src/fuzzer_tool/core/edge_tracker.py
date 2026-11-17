@@ -23,7 +23,7 @@ import time
 import zlib
 from array import array
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from itertools import repeat
 
 from fuzzer_tool.core import fast_json as json
@@ -86,6 +86,7 @@ class EvictTie(enum.Enum):
 
     AGE = "age"  # oldest first (insertion order)
     COST = "cost"  # most expensive exec first (--prune-cost, backlog D5)
+    DENSITY = "density"  # fewest edges per bit first (--prune-density)
 
 
 class EdgeStore(enum.Enum):
@@ -122,6 +123,7 @@ except ImportError:
 from fuzzer_tool.core import edge_stats  # noqa: E402
 from fuzzer_tool.core.count_class import classify_counts  # noqa: E402
 from fuzzer_tool.core.edge_clusters import count_distinct  # noqa: E402
+from fuzzer_tool.core.edge_density import edges_per_bit  # noqa: E402
 from fuzzer_tool.core.edge_set import EdgeSet  # noqa: E402
 from fuzzer_tool.core.elf import (  # noqa: E402
     MAP_SIZE_DEFAULT,
@@ -993,6 +995,9 @@ class EdgeTracker:
         # record) is only kept under EvictTie.COST, and pruned with the seed.
         self.evict_tie = EvictTie.AGE
         self.seed_cost: dict[str, float] = {}
+        # seed key -> input bytes; only kept under EvictTie.DENSITY, pruned
+        # with the seed.
+        self.seed_size: dict[str, int] = {}
         # ── Streaming F0 (CVM) distinct-elements estimator ─────────────────
         # Opt-in: the exact cardinality is already available as
         # len(cumulative_edges), so the estimator only pays for itself when
@@ -1141,6 +1146,7 @@ class EdgeTracker:
         hw_branches: int = 0,
         hw_branch_misses: int = 0,
         exec_s: float = 0.0,
+        nbytes: int = 0,
     ) -> set[int]:
         """Record edges hit by a seed execution.
 
@@ -1158,6 +1164,7 @@ class EdgeTracker:
             hw_branch_misses: Hardware branch miss count delta (from perf_event_open).
             exec_s: Target time of this execution; the eviction cost under
                 EvictTie.COST.
+            nbytes: Input size; the eviction density under EvictTie.DENSITY.
 
         Returns:
             Set of NEW edge indices not previously seen.
@@ -1167,6 +1174,8 @@ class EdgeTracker:
         )
         if self.evict_tie is EvictTie.COST and exec_s > 0:
             self.seed_cost[seed_key] = exec_s
+        if self.evict_tie is EvictTie.DENSITY and nbytes > 0:
+            self.seed_size[seed_key] = nbytes
         new_edges = set()
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
@@ -1737,6 +1746,7 @@ class EdgeTracker:
             self.seed_hw_branch_misses.pop(key, None)
             self.seed_hw_cycles.pop(key, None)
             self.seed_cost.pop(key, None)
+            self.seed_size.pop(key, None)
             self._minhash.remove(key)
 
         # Owner counts are incremented in record_edges but were never adjusted
@@ -1787,6 +1797,25 @@ class EdgeTracker:
         for k in gone:
             del self.evicted_sole[k]
         return len(gone)
+
+    def _evict_ties(self, keys: list[str], lens: np.ndarray) -> Sequence[float]:
+        """Eviction tie keys, smallest evicted first.
+
+        AGE: insertion order. COST: most expensive first. DENSITY: fewest
+        edges per bit first; a seed with no recorded size ranks last.
+        """
+        if self.evict_tie is EvictTie.COST:
+            cost = self.seed_cost
+            return [-cost.get(k, 0.0) for k in keys]
+
+        if self.evict_tie is EvictTie.DENSITY:
+            size = self.seed_size
+            return [
+                edges_per_bit(int(n), size[k]) if k in size else math.inf
+                for k, n in zip(keys, lens.tolist(), strict=True)
+            ]
+
+        return range(len(keys))
 
     def _prune_victims(
         self, excess: int
@@ -1844,12 +1873,7 @@ class EdgeTracker:
         def _loss(i: int) -> int:
             return int(np.count_nonzero(owners[slot[starts[i] : ends[i]]] <= 1))
 
-        # Ties: insertion order (AGE) or most expensive first (COST).
-        if self.evict_tie is EvictTie.COST:
-            cost = self.seed_cost
-            ties = [-cost.get(k, 0.0) for k in keys]
-        else:
-            ties = range(len(keys))
+        ties = self._evict_ties(keys, lens)
         heap = [(loss, tie, i) for i, (loss, tie) in enumerate(zip(losses, ties, strict=True))]
         heapq.heapify(heap)
         victims: list[str] = []
