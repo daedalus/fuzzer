@@ -1150,6 +1150,11 @@ class SeedPicker:
         def group(key: str) -> int:
             return self._component_labels(key_to_seed).get(key, FRESH_GROUP)
 
+        # --plateau-groups: one currency per plateau instead of per component.
+        plateau = getattr(f, "_plateau", None)
+        if plateau is not None:
+            group = plateau.group  # noqa: F811
+
         # Bound on first call: one memo check per pick, not one per key.
         fess_lookup = None
 

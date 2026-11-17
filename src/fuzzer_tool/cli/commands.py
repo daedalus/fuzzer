@@ -1037,6 +1037,7 @@ def cmd_fuzz(args):
         fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
         respawn_backoff=Switch.ON if getattr(args, "respawn_backoff", False) else Switch.OFF,
         advisors=getattr(args, "advisors", False),
+        plateau_groups=getattr(args, "plateau_groups", False),
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2977,6 +2978,10 @@ def cmd_sweep(args):
 # advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
 # run (docs/AB_PENDING.md).
 #
+# plateau_groups (--plateau-groups) is excluded as unmeasured: unit tests only,
+# no paired run (docs/AB_PENDING.md). Inert without --seed-lottery-scheduler and
+# a --seed-lottery-currency other than off.
+#
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md). The first is also inert without the stride arm.
@@ -4265,6 +4270,15 @@ def main() -> int:
         "probability --seed-newest-p, else a uniform seed (DFS-like corridors vs bushy). Elo arm; "
         "also the no-elo pick when enabled (core/schedulers/seed_newest.py). Not in --hail-mary "
         "until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--plateau-groups",
+        action="store_true",
+        help="Plateau groups (soksolv): a boring mutant taking another seed's exact path "
+        "unions its parent with that seed (core/plateau.py). The groups replace connected "
+        "components as --seed-lottery-scheduler's currency, so each plateau is backed "
+        "once. Needs --seed-lottery-currency equal|sqrt. Not in --hail-mary until it wins "
+        "its A/B.",
     )
     fuzz_parser.add_argument(
         "--advisors",

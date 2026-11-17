@@ -74,6 +74,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "fess_inherit",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
         "respawn_backoff",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "advisors",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "plateau_groups",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_branch_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "cut_damage",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the branch arm
         "inverse_lottery_select",  # unmeasured: A/B pending (docs/AB_PENDING.md)
