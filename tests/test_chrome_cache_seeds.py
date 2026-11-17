@@ -199,6 +199,35 @@ class TestMain:
         # Falsification: nothing to send is an error, not a silent success.
         assert ccs.main(["--root", str(tmp_path / "none"), "--dry-run"]) == 1
 
+    def test_failure_reports_count_sent(self, tmp_path, capsys, monkeypatch):
+        # Adversarial: the fuzzer dies mid-run; the user learns how many got through.
+        root = tmp_path / "chromium"
+        _profile(root, "Default", {"1_0": _entry(PNG), "2_0": _entry(JPG), "3_0": _entry(WEBP)})
+        calls = []
+
+        def sink(_host, _port, _delay):
+            def send(data):
+                calls.append(data)
+                if len(calls) == 2:
+                    raise ConnectionRefusedError(111, "Connection refused")
+
+            return send
+
+        monkeypatch.setattr(ccs, "tcp_sink", sink)
+        assert ccs.main(["--root", str(root)]) == 1
+        assert "sent 1 seeds before failure" in capsys.readouterr().err
+
+    def test_progress_line_every_n(self, tmp_path, capsys, monkeypatch):
+        root = tmp_path / "chromium"
+        _profile(root, "Default", {"1_0": _entry(PNG), "2_0": _entry(JPG), "3_0": _entry(WEBP)})
+        monkeypatch.setattr(ccs, "tcp_sink", lambda *_a: lambda _d: None)
+        monkeypatch.setattr(ccs, "PROGRESS_EVERY", 2)
+
+        assert ccs.main(["--root", str(root)]) == 0
+        out = capsys.readouterr().out
+        assert out.count("[*] sent 2 seeds so far") == 1
+        assert "[*] sent 3 seeds (" in out
+
     def test_refused_connection_fails(self, tmp_path, capsys):
         root = tmp_path / "chromium"
         _profile(root, "Default", {"1_0": _entry(PNG)})
