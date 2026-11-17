@@ -205,6 +205,47 @@ int t_stale_aware(const uint8_t *d, size_t n) {
     return 0;
 }
 #endif
+/* VmFlags of the mapping holding p: 1 if it carries "hg" (MADV_HUGEPAGE),
+ * 0 if not, -1 if no mapping holds p. */
+static int vm_hg(const void *p) {
+    FILE *f = fopen("/proc/self/smaps", "r");
+    if (!f) return -1;
+    char line[512];
+    int in = 0, hg = -1;
+    uintptr_t a = (uintptr_t)p;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long lo, hi;
+        if (sscanf(line, "%lx-%lx ", &lo, &hi) == 2 && strchr(line, '-') < strchr(line, ' ')) {
+            in = a >= lo && a < hi;
+            continue;
+        }
+        if (in && !strncmp(line, "VmFlags:", 8)) {
+            hg = strstr(line, " hg") != NULL;
+            break;
+        }
+    }
+    fclose(f);
+    return hg;
+}
+/* Slot from the class regions: advised. */
+int t_thp_slot(const uint8_t *d, size_t n) {
+    (void)d; (void)n;
+    char *p = malloc(64);
+    p[0] = 1;
+    return vm_hg(p) == 1 ? 0 : 1;
+}
+/* Advice stays inside the reservation: a host libc pointer and a >1 MiB
+ * block (own mmap) carry no hg. */
+int t_thp_scope(const uint8_t *d, size_t n) {
+    (void)d; (void)n;
+    char *s = strdup("libc-owned");
+    char *b = malloc(@BIG@);
+    b[0] = 1;
+    int rc = vm_hg(s) == 0 && vm_hg(b) == 0 ? 0 : 1;
+    free(s);
+    free(b);
+    return rc;
+}
 int t_zero(const uint8_t *d, size_t n) {
     (void)d; (void)n;
     void *a = malloc(0), *b = malloc(0);
@@ -347,3 +388,15 @@ def test_stale_global_after_abort_poisons_every_later_call(build):
 def test_abandon_count_lets_the_target_drop_stale_state(build):
     rc, rcs, out = _run(build, "priv.so", "t_stale_aware", n=5)
     assert rc == 0 and rcs == [-6, 0, 0, 0, 0] and "host=OK" in out, out
+
+
+@requires_clang
+def test_class_regions_are_advised_hugepage(build):
+    rc, rcs, out = _run(build, "priv.so", "t_thp_slot")
+    assert rc == 0 and rcs == [0] and "host=OK" in out
+
+
+@requires_clang
+def test_hugepage_advice_stays_in_reservation(build):
+    rc, rcs, out = _run(build, "priv.so", "t_thp_scope")
+    assert rc == 0 and rcs == [0] and "host=OK" in out

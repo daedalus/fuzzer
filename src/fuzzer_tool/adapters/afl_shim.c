@@ -7704,6 +7704,11 @@ __AFL_GCC_NO_COV static int __afl_ph_init(void) {
         return 0;
     }
 
+    /* THP for the whole reservation: fewer dTLB misses in target code
+     * (FFmpeg noasan replay: user -2.5%, ledger #169). Advisory; a kernel
+     * without THP leaves 4 KiB pages, so the result is not checked. */
+    (void)madvise(m, data + __AFL_PH_REGION + meta, MADV_HUGEPAGE);
+
     /* Slots are size-aligned only if the span is region-aligned. */
     __afl_ph.base = (char *)(((uintptr_t)m + __AFL_PH_REGION - 1) & ~(uintptr_t)(__AFL_PH_REGION - 1));
     char *cur = m + data + __AFL_PH_REGION;
