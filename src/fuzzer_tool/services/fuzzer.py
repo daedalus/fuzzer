@@ -99,6 +99,7 @@ from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD, OrbitProbe, canonical
 from fuzzer_tool.core.percolation import CoverageRegime
+from fuzzer_tool.core.plateau import PlateauGroups
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check, structure_check
 from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, StateRestore, Switch
@@ -2176,6 +2177,9 @@ class Fuzzer:
         # --advisors: one free advised move per advisor per seed stage
         # (services/advisors.py). Off, out of --hail-mary. Appended.
         advisors=False,
+        # --plateau-groups: union seeds whose boring mutants take each other's
+        # path (core/plateau.py); lottery "group" signal. Off. Appended.
+        plateau_groups=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3732,6 +3736,7 @@ class Fuzzer:
             else None
         )
         self._seed_fess = SeedFessScheduler(rng=self._rng) if seed_fess_scheduler else None
+        self._plateau = PlateauGroups() if plateau_groups else None
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:
@@ -5957,6 +5962,8 @@ class Fuzzer:
             self._state_store.set("ijon", self._ijon.tracker.to_dict())
         if self._seed_fess is not None:
             self._state_store.set("seed_fess", self._seed_fess.to_dict())
+        if self._plateau is not None:
+            self._state_store.set("plateau", self._plateau.to_dict())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -5998,6 +6005,8 @@ class Fuzzer:
             self._ijon.tracker.from_dict(self._state_store.get("ijon", {}), by_key.get)
         if self._seed_fess is not None:
             self._seed_fess.from_dict(self._state_store.get("seed_fess", {}))
+        if self._plateau is not None:
+            self._plateau = PlateauGroups.from_dict(self._state_store.get("plateau", {}))
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""

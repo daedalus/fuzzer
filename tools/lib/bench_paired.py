@@ -314,6 +314,13 @@ ARMS: dict[str, list[str]] = {
     "seed-lottery": ["--seed-lottery-scheduler"],
     "seed-lottery-lineage": ["--seed-lottery-scheduler", "--lineage"],
     "seed-lottery-currency": ["--seed-lottery-scheduler", "--seed-lottery-currency", "sqrt"],
+    # Plateau groups (core/plateau.py) as the currency instead of components.
+    "plateau-groups": [
+        "--seed-lottery-scheduler",
+        "--seed-lottery-currency",
+        "sqrt",
+        "--plateau-groups",
+    ],
     "seed-lottery-transfer": [
         "--seed-lottery-scheduler",
         "--lineage",
@@ -469,6 +476,7 @@ ARM_BASELINES: dict[str, str] = {
     "inverse-lottery-select": "minimize-2k",
     "seed-lottery": "seed-stride-cost",
     "seed-lottery-currency": "seed-lottery",
+    "plateau-groups": "seed-lottery-currency",
     "seed-lottery-lineage": "seed-lottery",
     "seed-lottery-transfer": "seed-lottery-lineage",
     "field-hmm": "baseline",
