@@ -293,3 +293,33 @@ class TestDevices:
             assert got == [(Media.JPG, SAMPLES[Media.JPG]), (Media.WEBP, SAMPLES[Media.WEBP])]
         finally:
             subprocess.run(["losetup", "-d", str(dev)], check=True)
+
+
+class TestNotADisk:
+    def test_character_device_named_with_hint(self, capsys):
+        # /dev/nvme0 (controller) is a char device; the disk is /dev/nvme0n1.
+        stats = ccs.ScanStats()
+        assert list(bfs.carve_files([Path("/dev/null")], ALL, 1 << 20, stats)) == []
+        err = capsys.readouterr().err
+        assert "cannot read /dev/null: character device" in err
+        assert stats.unreadable == 1
+
+    def test_fifo_rejected_without_blocking(self, tmp_path, capsys):
+        # Adversarial: opening a FIFO with no writer would block forever.
+        fifo = tmp_path / "pipe"
+        os.mkfifo(fifo)
+        stats = ccs.ScanStats()
+        assert list(bfs.carve_files([fifo], ALL, 1 << 20, stats)) == []
+        assert f"cannot read {fifo}: FIFO" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("path", "hint"),
+        [("/dev/nvme0", "/dev/nvme0n1"), ("/dev/nvme12", "/dev/nvme12n1")],
+    )
+    def test_nvme_controller_points_to_namespace(self, path, hint):
+        assert hint in bfs.not_a_disk(path, stat.S_IFCHR)
+
+    def test_other_char_device_gets_generic_hint(self):
+        # Falsification: no NVMe advice for an unrelated device.
+        msg = bfs.not_a_disk("/dev/tty0", stat.S_IFCHR)
+        assert "NVMe controller" not in msg and "block device" in msg

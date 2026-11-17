@@ -35,6 +35,8 @@ from __future__ import annotations
 import argparse
 import mmap
 import os
+import re
+import stat
 import struct
 import sys
 from collections.abc import Callable, Iterable, Iterator
@@ -42,6 +44,16 @@ from pathlib import Path
 
 import chrome_cache_seeds as ccs
 from chrome_cache_seeds import Media
+
+# Inputs that mmap: regular files and block devices (sized by seeking).
+READABLE_KINDS = frozenset({stat.S_IFREG, stat.S_IFBLK})
+NOT_A_DISK_KINDS = {
+    stat.S_IFCHR: "character device",
+    stat.S_IFIFO: "FIFO",
+    stat.S_IFSOCK: "socket",
+}
+# /dev/nvme0 is the controller (char device); namespaces are /dev/nvme0n1.
+NVME_CONTROLLER = re.compile(r"/dev/nvme\d+")
 
 # Magic probes: (magic, bytes before the magic where the file starts, media).
 PROBES = (
@@ -392,12 +404,25 @@ def _scan_file(path: Path, wanted: set[Media], max_bytes: int) -> Iterator[tuple
     Size by seeking to the end, not st_size: a block device (/dev/sda1) reports
     st_size 0, and mmap length 0 ("whole file") fails on it.
     """
+    # stat before open: a FIFO open blocks forever; char devices don't seek.
+    fmt = stat.S_IFMT(path.stat().st_mode)
+    if fmt not in READABLE_KINDS:
+        raise OSError(not_a_disk(str(path), fmt))
+
     with path.open("rb") as fh:
         size = fh.seek(0, os.SEEK_END)
         if size == 0:
             return
         with mmap.mmap(fh.fileno(), size, access=mmap.ACCESS_READ) as mm:
             yield from scan(mm, wanted, max_bytes)
+
+
+def not_a_disk(path: str, fmt: int) -> str:
+    """Why *path* (file type *fmt*) can't be scanned, and what to pass instead."""
+    kind = NOT_A_DISK_KINDS.get(fmt, "not a regular file or block device")
+    if NVME_CONTROLLER.fullmatch(path):
+        return f"{kind} (NVMe controller); the disk is {path}n1, its partitions {path}n1p1, ..."
+    return f"{kind}; pass a block device (/dev/sda1, /dev/nvme0n1p1), an image or a dump"
 
 
 def carve_files(
