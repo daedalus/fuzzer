@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tools/dir_seeds.py`**: walks directories and sends every file as a `--tcp-listen-port` seed. Same flags as `chrome_cache_seeds.py`; `--types other` selects files without a known magic. `tests/test_dir_seeds.py`.
 - **`tools/blockfile_seeds.py`**: sequential carve of back-to-back media in block files (Chromium `data_N`, dumps); each message sent as a `--tcp-listen-port` seed. Same flags as `chrome_cache_seeds.py`. `tests/test_blockfile_seeds.py`.
 - **`tools/chrome_cache_seeds.py`**: carves media from all Chrome/Chromium profile caches and sends each as a `--tcp-listen-port` seed. `tests/test_chrome_cache_seeds.py`.
 - **TCP seed ingestion** (`--tcp-listen-port`, `--tcp-listen-host`; `adapters/tcp_seed.py`): each TCP connection's bytes become a seed, popped in `mutate()` and run through exec/coverage/crash/admit. Bounded inbox, loopback by default. `tests/test_tcp_seed.py`.

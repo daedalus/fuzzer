@@ -53,6 +53,8 @@ class Media(enum.Enum):
     WEBP = "webp"
     MP4 = "mp4"
     WEBM = "webm"
+    # No known magic at offset 0; only tools/dir_seeds.py yields it.
+    OTHER = "other"
 
 
 # Fixed-offset signatures: (media, magic).

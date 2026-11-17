@@ -1,10 +1,16 @@
 """Tests for tools/blockfile_seeds.py: sequential carve of concatenated media, sent over TCP."""
 
+import os
+import shutil
+import stat
 import struct
+import subprocess
 import sys
 import time
 import zlib
 from pathlib import Path
+
+import pytest
 
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(TOOLS))
@@ -240,3 +246,50 @@ class TestMain:
         argv = [str(f), "--dry-run", "--types", "png", "--host", "127.0.0.1", "--port", "1"]
         argv += ["--delay", "0", "--max-bytes", "10", "--retries", "0", "--retry-backoff", "0"]
         assert bfs.main(argv) == 0
+
+
+class TestDevices:
+    def test_regression_block_device_zero_st_size(self, tmp_path, monkeypatch):
+        # Block devices report st_size 0; the size must come from seeking to the end.
+        f = _write(tmp_path, "sda1", _blob(SAMPLES[Media.PNG], SAMPLES[Media.GIF]))
+        real_fstat = bfs.os.fstat
+
+        def device_fstat(fd):
+            st = real_fstat(fd)
+            return bfs.os.stat_result((stat.S_IFBLK | 0o600, *st[1:6], 0, *st[7:]))
+
+        monkeypatch.setattr(bfs.os, "fstat", device_fstat)
+        assert list(bfs.carve_files([f], ALL, 1 << 20, ccs.ScanStats())) == [
+            (Media.PNG, SAMPLES[Media.PNG]),
+            (Media.GIF, SAMPLES[Media.GIF]),
+        ]
+
+    def test_unreadable_path_reported(self, tmp_path, monkeypatch, capsys):
+        # Adversarial: /dev/sda1 without root must say why, not just "sent 0".
+        f = _write(tmp_path, "sda1", _blob(SAMPLES[Media.PNG]))
+
+        def denied(*_a, **_k):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "open", denied)
+        stats = ccs.ScanStats()
+        assert list(bfs.carve_files([f], ALL, 1 << 20, stats)) == []
+        assert stats.unreadable == 1
+        assert f"cannot read {f}" in capsys.readouterr().err
+
+    @pytest.mark.skipif(
+        shutil.which("losetup") is None or os.geteuid() != 0, reason="needs root + losetup"
+    )
+    def test_real_loop_device(self, tmp_path):
+        img = tmp_path / "disk.img"
+        img.write_bytes(bytes(4096) + _blob(SAMPLES[Media.JPG], SAMPLES[Media.WEBP]) + bytes(4096))
+        made = subprocess.run(["losetup", "-f", "--show", str(img)], capture_output=True, text=True)
+        if made.returncode != 0:
+            pytest.skip(f"losetup refused: {made.stderr.strip()}")
+        dev = Path(made.stdout.strip())
+        try:
+            assert stat.S_ISBLK(dev.stat().st_mode)
+            got = list(bfs.carve_files([dev], ALL, 1 << 20, ccs.ScanStats()))
+            assert got == [(Media.JPG, SAMPLES[Media.JPG]), (Media.WEBP, SAMPLES[Media.WEBP])]
+        finally:
+            subprocess.run(["losetup", "-d", str(dev)], check=True)
