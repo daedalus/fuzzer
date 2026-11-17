@@ -27,6 +27,7 @@ from fuzzer_tool.core.count_items import CountItems
 from fuzzer_tool.core.crash_graph import Linkage
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
+from fuzzer_tool.core.edge_density import edges_per_bit
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
@@ -385,6 +386,13 @@ class ProfileMode(Enum):
     CPROFILE = "cprofile"  # deterministic; tottime/cumtime/ncalls + .prof dump
     SAMPLE = "sample"  # SIGPROF stack sampler; collapsed stacks, low overhead
     PERF = "perf"  # perf trampoline for an external `perf record` (Python >= 3.12)
+
+
+class RankSort(Enum):
+    """``rank --sort``: the score key seeds are ordered by, highest first."""
+
+    SCORE = "score"  # composite interestingness
+    DENSITY = "density"  # edges hit per bit of input
 
 
 SAMPLE_TOP_SELF = 40
@@ -1054,6 +1062,7 @@ def cmd_fuzz(args):
         elo_stale_bench=Switch.ON if getattr(args, "elo_stale_bench", False) else Switch.OFF,
         density_weight=Switch.ON if getattr(args, "density_weight", False) else Switch.OFF,
         prune_density=Switch.ON if getattr(args, "prune_density", False) else Switch.OFF,
+        trim_sparse=Switch.ON if getattr(args, "trim_sparse", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2423,7 +2432,6 @@ def cmd_compact_seeds(args):
 def cmd_rank(args):
     """Rank corpus seeds by interestingness."""
     _validate_target(args.target)
-    import hashlib
     import math
     import time
 
@@ -2469,7 +2477,8 @@ def cmd_rank(args):
         meta = seed_meta.get(seed, {})
         fuzz_count = max(meta.get("fuzz_count", 0), 1)
         coverage = meta.get("coverage_edges", 0)
-        key = hashlib.sha256(seed).hexdigest()[:16]
+        # The tracker's key scheme; sha256 here never matched a tracked seed.
+        key = seed_key_for(seed)
 
         # Edge tracker signals (only if this seed is tracked)
         seed_edges = et.seed_edges.get(key, set())
@@ -2500,10 +2509,12 @@ def cmd_rank(args):
             "coverage": coverage,
             "subsumption": sub,
             "proximity": prox,
+            "density": edges_per_bit(edge_count, len(seed)),
         }
 
     scored = [(score(s), s) for s in corpus]
-    scored.sort(key=lambda x: x[0]["score"], reverse=True)
+    sort_by = RankSort(getattr(args, "sort", RankSort.SCORE.value)).value
+    scored.sort(key=lambda x: x[0][sort_by], reverse=True)
 
     n = min(args.top, len(scored))
     n_edges = (
@@ -2512,17 +2523,17 @@ def cmd_rank(args):
     print(f"[*] Corpus: {len(corpus)} seeds, {len(et.seed_edges)} tracked, {n_edges} edges\n")
     print(
         f"{'#':>4}  {'Score':>7}  {'Edges':>5}  {'Rare':>4}  {'Fuzz':>5}  "
-        f"{'Sub':>5}  {'Prox':>5}  {'Hash':>16}  Preview"
+        f"{'Sub':>5}  {'Prox':>5}  {'E/bit':>7}  {'Hash':>16}  Preview"
     )
-    print("-" * 95)
+    print("-" * 104)
 
     for i, (s, seed) in enumerate(scored[:n]):
-        h = hashlib.sha256(seed).hexdigest()[:16]
+        h = seed_key_for(seed)
         pstr = _rank_preview(seed)
         print(
             f"{i + 1:>4}  {s['score']:>7.2f}  {s['edges']:>5}  {s['rare']:>4}  "
             f"{s['fuzz_count']:>5}  {s['subsumption']:>5.2f}  "
-            f"{s['proximity']:>5.2f}  {h}  {pstr}"
+            f"{s['proximity']:>5.2f}  {s['density']:>7.4f}  {h}  {pstr}"
         )
 
     if args.dump:
@@ -3006,8 +3017,9 @@ def cmd_sweep(args):
 # respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
 # only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
 #
-# density_weight (--density-weight) and prune_density (--prune-density) are
-# excluded as unmeasured: unit tests only, no paired run (docs/AB_PENDING.md).
+# density_weight (--density-weight), prune_density (--prune-density) and
+# trim_sparse (--trim-sparse) are excluded as unmeasured: unit tests only, no
+# paired run (docs/AB_PENDING.md).
 #
 # advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
 # run (docs/AB_PENDING.md).
@@ -6736,6 +6748,13 @@ def main() -> int:
         "--no-auto-minimize overrides it.",
     )
     fuzz_parser.add_argument(
+        "--trim-sparse",
+        action="store_true",
+        help="Once per stats interval, trim the corpus seed hitting the fewest edges per bit "
+        "(each seed once; shares the 25%% trim exec budget). --no-auto-minimize overrides it. "
+        "Unmeasured.",
+    )
+    fuzz_parser.add_argument(
         "--prune-corpus-on-max-memory",
         type=int,
         default=80,
@@ -8430,6 +8449,13 @@ def main() -> int:
         default=None,
         metavar="PREFIX",
         help="Dump top seeds to files named PREFIX.0, PREFIX.1, ...",
+    )
+    rank_parser.add_argument(
+        "--sort",
+        choices=[m.value for m in RankSort],
+        default=RankSort.SCORE.value,
+        help="score (default): composite interestingness | density: edges hit per bit, "
+        "densest first (needs a prior run's edge_tracker state).",
     )
     rank_parser.set_defaults(func=cmd_rank)
 
