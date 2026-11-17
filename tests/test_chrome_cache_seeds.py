@@ -310,3 +310,86 @@ class TestRetry:
     def test_negative_values_rejected(self, tmp_path, flag):
         with pytest.raises(SystemExit):
             ccs.main(["--root", str(tmp_path), flag, "-1"])
+
+
+class TestSentBloom:
+    @staticmethod
+    def _recorder(monkeypatch, fail_on: bytes | None = None):
+        """Patch tcp_sink with a sender that records seeds; refuses *fail_on*."""
+        sent = []
+
+        def send(data):
+            if data == fail_on:
+                raise ConnectionRefusedError(111, "Connection refused")
+            sent.append(data)
+
+        monkeypatch.setattr(ccs, "tcp_sink", lambda *_a: send)
+        return sent
+
+    def test_second_run_skips_seeds_already_sent(self, tmp_path, capsys, monkeypatch):
+        root = tmp_path / "chromium"
+        cache = _profile(root, "Default", {"1_0": _entry(PNG), "2_0": _entry(JPG)})
+        bloom = tmp_path / "state" / "sent.pkl.gz"  # parent created on save
+        argv = ["--root", str(root), "--sent-bloom", str(bloom)]
+        sent = self._recorder(monkeypatch)
+
+        assert ccs.main(argv) == 0
+        assert sent == [PNG, JPG]
+
+        # Second run: only the newly cached body goes out.
+        (cache / "3_0").write_bytes(_entry(WEBP))
+        assert ccs.main(argv) == 0
+        assert sent == [PNG, JPG, WEBP]
+        assert "already sent 2" in capsys.readouterr().out
+
+    def test_without_bloom_everything_resent(self, tmp_path, monkeypatch):
+        # Falsification: the skip comes from the file, not from in-run dedup.
+        root = tmp_path / "chromium"
+        _profile(root, "Default", {"1_0": _entry(PNG)})
+        sent = self._recorder(monkeypatch)
+
+        for _ in range(2):
+            assert ccs.main(["--root", str(root)]) == 0
+        assert sent == [PNG, PNG]
+
+    def test_failed_send_not_recorded(self, tmp_path, monkeypatch):
+        # Adversarial: a seed the fuzzer never got must be sent on the next run;
+        # seeds sent before the failure must not be.
+        root = tmp_path / "chromium"
+        _profile(root, "Default", {"1_0": _entry(PNG), "2_0": _entry(JPG)})
+        bloom = tmp_path / "sent.pkl.gz"
+        argv = ["--root", str(root), "--sent-bloom", str(bloom), "--retries", "0"]
+
+        self._recorder(monkeypatch, fail_on=JPG)
+        assert ccs.main(argv) == 1
+
+        sent = self._recorder(monkeypatch)
+        assert ccs.main(argv) == 0
+        assert sent == [JPG]
+
+    def test_dry_run_leaves_bloom_untouched(self, tmp_path, capsys, monkeypatch):
+        root = tmp_path / "chromium"
+        _profile(root, "Default", {"1_0": _entry(PNG)})
+        bloom = tmp_path / "sent.pkl.gz"
+
+        assert ccs.main(["--root", str(root), "--sent-bloom", str(bloom), "--dry-run"]) == 0
+        assert not bloom.exists()
+
+        # A real run after a dry run still sends the seed.
+        sent = self._recorder(monkeypatch)
+        assert ccs.main(["--root", str(root), "--sent-bloom", str(bloom)]) == 0
+        assert sent == [PNG]
+
+    def test_corrupt_bloom_fails_and_is_kept(self, tmp_path, capsys, monkeypatch):
+        # Adversarial: a damaged file must not be silently replaced by an empty
+        # filter (that would resend everything and lose the history).
+        root = tmp_path / "chromium"
+        _profile(root, "Default", {"1_0": _entry(PNG)})
+        bloom = tmp_path / "sent.pkl.gz"
+        bloom.write_bytes(b"not a gzip pickle")
+        sent = self._recorder(monkeypatch)
+
+        assert ccs.main(["--root", str(root), "--sent-bloom", str(bloom)]) == 1
+        assert sent == []
+        assert bloom.read_bytes() == b"not a gzip pickle"
+        assert "sent-bloom" in capsys.readouterr().err

@@ -40,6 +40,11 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
+from fuzzer_tool.core import negative_bloom
+from fuzzer_tool.core.bloom import BloomFilter
+from fuzzer_tool.core.negative_bloom import NEG_BLOOM_ERROR_RATE, NegativeBloomError
+from fuzzer_tool.core.state_store import UnsafeStateError
+
 
 class Media(enum.Enum):
     JPG = "jpg"
@@ -84,6 +89,8 @@ PROGRESS_EVERY = 100
 DEFAULT_RETRIES = 5
 DEFAULT_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 30.0
+# --sent-bloom size: 1M seeds at a 1e-3 false-positive rate is ~2 MiB on disk.
+SENT_BLOOM_CAPACITY = 1_000_000
 
 PLATFORM_MAC = "darwin"
 PLATFORM_WIN = "win"  # sys.platform prefix (win32)
@@ -95,7 +102,68 @@ class ScanStats:
 
     unreadable: int = 0
     duplicates: int = 0
+    already_sent: int = 0
+    # Seeds sent (or, on --dry-run, that would be sent), per type.
     by_media: collections.Counter = dataclasses.field(default_factory=collections.Counter)
+
+
+class Persist(enum.Enum):
+    """Whether a run may change the --sent-bloom file."""
+
+    WRITE = "write"
+    READ_ONLY = "read_only"  # --dry-run: skip known seeds, record nothing
+
+
+class SentLog:
+    """Seeds delivered in earlier runs, kept in a bloom file (--sent-bloom).
+
+        run 1: send A, B   -> file {A, B}
+        run 2: A, B, C     -> skip A, B; send C -> file {A, B, C}
+
+    Only completed sends are recorded, so a seed lost to a failure goes out next
+    run. A bloom false positive (rate 1e-3) skips a never-sent seed. Without a
+    path it holds nothing and records nothing. File format and loader:
+    ``core/negative_bloom`` (gzip'd pickle, read through the safe unpickler).
+    """
+
+    def __init__(self, path: Path | None, persist: Persist) -> None:
+        self._path = path
+        self._persist = persist
+        self._dirty = False
+        self._bloom: BloomFilter | None = None
+        if path is None:
+            return
+
+        # A damaged file raises: replacing it with an empty filter would
+        # resend everything and lose the history.
+        if path.exists():
+            self._bloom = negative_bloom.load(path)
+            return
+        self._bloom = BloomFilter(capacity=SENT_BLOOM_CAPACITY, error_rate=NEG_BLOOM_ERROR_RATE)
+
+    def seen(self, body: bytes) -> bool:
+        """True when *body* was sent by an earlier run (or this one)."""
+        return self._bloom is not None and self._bloom.query_bytes(body)
+
+    def record(self, body: bytes) -> None:
+        """Remember a delivered *body*; no-op without a file or on --dry-run."""
+        if self._bloom is None or self._persist is Persist.READ_ONLY:
+            return
+        self._bloom.update_bytes(body)
+        self._dirty = True
+
+    def save(self) -> None:
+        """Write the file when this run recorded anything (atomic replace)."""
+        if not self._dirty:
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        negative_bloom.save(self._path, self._bloom)
+        if self._bloom.over_capacity:
+            print(
+                f"[!] --sent-bloom holds {self._bloom.n_added} seeds, over its "
+                f"{SENT_BLOOM_CAPACITY} capacity: more new seeds will be skipped; start a new file",
+                file=sys.stderr,
+            )
 
 
 def sniff(buf: bytes) -> tuple[Media, int] | None:
@@ -218,7 +286,6 @@ def iter_seeds(
                 stats.duplicates += 1
                 continue
             seen.add(digest)
-            stats.by_media[got[0]] += 1
             yield got
 
 
@@ -309,6 +376,12 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
         default=DEFAULT_BACKOFF_S,
         help=f"first wait in s, doubled per retry, capped at {MAX_BACKOFF_S:g} (default {DEFAULT_BACKOFF_S:g})",
     )
+    ap.add_argument(
+        "--sent-bloom",
+        type=Path,
+        metavar="FILE",
+        help="skip seeds sent by earlier runs; record new ones (created if missing)",
+    )
     ap.add_argument("--dry-run", action="store_true", help="count, send nothing")
     return ap.parse_args(argv)
 
@@ -335,11 +408,31 @@ def main(argv: list[str] | None = None) -> int:
     verb = "would send" if args.dry_run else "sent"
     stats = ScanStats()
 
+    try:
+        log = SentLog(args.sent_bloom, Persist.READ_ONLY if args.dry_run else Persist.WRITE)
+    except (NegativeBloomError, UnsafeStateError) as e:
+        print(f"[-] --sent-bloom: {e}", file=sys.stderr)
+        return 1
+
+    # Saved on every exit (done, send failure, Ctrl-C) so delivered seeds stay recorded.
+    try:
+        return _send_all(caches, args, send, log, stats, verb)
+    finally:
+        log.save()
+
+
+def _send_all(caches, args, send, log: SentLog, stats: ScanStats, verb: str) -> int:
+    """Send every new seed; 0 when all went out, 1 on a send failure."""
     # Count only completed sends: a failed one is reported, not counted.
     sent = 0
     try:
-        for _media, body in iter_seeds(caches, args.types, args.max_bytes, stats):
+        for media, body in iter_seeds(caches, args.types, args.max_bytes, stats):
+            if log.seen(body):
+                stats.already_sent += 1
+                continue
             send(body)
+            log.record(body)
+            stats.by_media[media] += 1
             sent += 1
             if sent % PROGRESS_EVERY == 0:
                 print(f"[*] {verb} {sent} seeds so far", flush=True)
@@ -352,7 +445,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{m.value}: {n}" for m, n in sorted(stats.by_media.items(), key=lambda kv: kv[0].value)
     )
     print(
-        f"[*] {verb} {sent} seeds ({counts or 'none'}); dup {stats.duplicates}, unreadable {stats.unreadable}"
+        f"[*] {verb} {sent} seeds ({counts or 'none'}); already sent {stats.already_sent}, "
+        f"dup {stats.duplicates}, unreadable {stats.unreadable}"
     )
     return 0
 
