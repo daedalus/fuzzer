@@ -36,7 +36,7 @@ except ImportError:
     _HAS_NUMPY = False
 
 from fuzzer_tool.adapters import process, seed_zip
-from fuzzer_tool.adapters.filesystem import without_timeout_seeds
+from fuzzer_tool.adapters.filesystem import DeltaStore, without_timeout_seeds
 from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
@@ -2036,6 +2036,7 @@ class Fuzzer:
         ctx_sensitive=None,
         # --zip-seed-corpus (adapters/seed_zip.py). Appended: positional signature.
         zip_seed_corpus=False,
+        delta_corpus=False,
         # --zip-compact-ratio (seed_zip.compact_over). Appended: positional signature.
         zip_compact_ratio=0.0,
         # --op-good-turing (core/schedulers/op_good_turing.py), prior shared with
@@ -2807,6 +2808,8 @@ class Fuzzer:
         if zip_seed_corpus:  # zip mode off never writes the archive
             seed_zip.uproot(self.corpus_dir)
         seed_zip.configure(self.corpus_dir, ZipMode.ON if zip_seed_corpus else ZipMode.OFF)
+        # --delta-corpus: children stored as delta records (keyframes bound chains).
+        self._delta_store = DeltaStore(self.corpus_dir) if delta_corpus else None
 
         # Single-file state store (replaces per-component JSON files).
         # Loaded eagerly so all components can fetch their section via get().

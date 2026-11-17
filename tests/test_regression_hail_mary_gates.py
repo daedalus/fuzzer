@@ -101,6 +101,7 @@ _EXCLUDED_OPT_IN = frozenset(
         # Storage layout, not a strategy: would move corpus writes into
         # seeds.zip, which a later run without the flag does not load.
         "zip_seed_corpus",
+        "delta_corpus",  # storage layout (delta records), not a strategy
         # Scales -M, which --slopt (on under --hail-mary) replaces: a no-op there.
         "one_fifth",
         # Unmeasured: the Growing Tree 'newest' arm stays out until it wins

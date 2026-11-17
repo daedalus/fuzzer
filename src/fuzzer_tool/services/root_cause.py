@@ -40,7 +40,7 @@ def _load_corpus(corpus_dir: str) -> list[tuple[str, bytes]]:
     wastes a target execution per candidate. ``irreplaceable/`` is kept —
     those are ordinary seeds that are merely exempt from pruning.
     """
-    from fuzzer_tool.adapters.filesystem import discover_seed_files
+    from fuzzer_tool.adapters.filesystem import discover_seed_files, iter_delta_seeds
 
     seeds: list[tuple[str, bytes]] = []
     for p in discover_seed_files(corpus_dir, include_crashing=False):
@@ -48,6 +48,8 @@ def _load_corpus(corpus_dir: str) -> list[tuple[str, bytes]]:
             seeds.append((p.name, p.read_bytes()))
         except OSError:
             continue
+    # Delta records (--delta-corpus): rebuilt, named as on disk.
+    seeds.extend((f"delta_{h}.json", data) for h, data in iter_delta_seeds(Path(corpus_dir)))
     return seeds
 
 

@@ -143,6 +143,7 @@ Off arm needs a tree without the op.
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
 | Edge clusters (`--edge-clusters`) | Class rarity + near-miss bonus | N | fuzzgoat null; FFmpeg/png |
+| Delta corpus store (`--delta-corpus`) | Children as delta records, keyframe every 20 hops | S | storage only: FFmpeg (large seeds) disk bytes + eps vs off, A/A control |
 | Inline sancov modes | `inline-8bit-counters`, `inline-bool-flag` | N | −23/−38 edges; fold buckets, 20×20k rerun |
 | Shim bit tricks | SWAR fold, masked probe, `bit_compress` | S | rebuild + fuzzgoat calibration |
 | Map size 2^16 vs 2^19 | Map size from observed edges | U | interleaved A/B + A/A on ffmpeg |
