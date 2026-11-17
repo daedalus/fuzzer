@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`BloomFilter.merge(other)`** (`core/bloom.py`): in-place OR of a same-layout filter, returns whether any bit changed. `--sent-bloom` saves now merge into the file on disk instead of overwriting it, and skip the write when nothing changed. `tests/test_bloom_merge.py`.
 - **`--max-size N`** on `tools/chrome_cache_seeds.py`, `blockfile_seeds.py`, `dir_seeds.py`: skip seeds whose full size exceeds N (counted as `too big`); `--max-bytes` still truncates.
 - **`tools/dir_seeds.py`**: walks directories and sends every file as a `--tcp-listen-port` seed. Same flags as `chrome_cache_seeds.py`; `--types other` selects files without a known magic. `tests/test_dir_seeds.py`.
 - **`tools/blockfile_seeds.py`**: sequential carve of back-to-back media in block files (Chromium `data_N`, dumps); each message sent as a `--tcp-listen-port` seed. Same flags as `chrome_cache_seeds.py`. `tests/test_blockfile_seeds.py`.

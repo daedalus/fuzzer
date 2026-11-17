@@ -272,6 +272,28 @@ class BloomFilter:
         self.n_queries += 1
         return self._check(value)
 
+    def _layout(self) -> tuple[int, int, bool, int]:
+        """Everything that decides which bits a key sets; equal layouts can be ORed."""
+        return (self.m, self._k, self._double, self._bits_per_slice)
+
+    def merge(self, other: "BloomFilter") -> bool:
+        """OR *other*'s bits into this filter in place; True if any bit changed.
+
+        E.g. two writers of one sent-seeds file: disk.merge(mine) keeps both.
+        Layouts must match (ValueError otherwise, nothing changed). Counters
+        are left to the caller: the union's key count is not in the bits.
+        """
+        if other._layout() != self._layout():
+            raise ValueError(f"bloom layout mismatch: {self._layout()} vs {other._layout()}")
+
+        # Vectorized OR over the byte arrays; the view writes into self._bits.
+        mine = np.frombuffer(self._bits, dtype=np.uint8)
+        merged = mine | np.frombuffer(other._bits, dtype=np.uint8)
+        if np.array_equal(merged, mine):
+            return False
+        mine[:] = merged
+        return True
+
     def to_dict(self) -> dict[str, object]:
         """Serialise to a plain dict (gzip+pickle on the wire).
 

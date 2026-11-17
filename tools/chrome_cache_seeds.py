@@ -135,12 +135,21 @@ class SentLog:
     run. A bloom false positive (rate 1e-3) skips a never-sent seed. Without a
     path it holds nothing and records nothing. File format and loader:
     ``core/negative_bloom`` (gzip'd pickle, read through the safe unpickler).
+
+    Saving merges, never overwrites: the file is re-read, this run's bits are
+    ORed in, and it is rewritten only if a bit changed. Two feeders sharing a
+    file keep each other's records:
+
+        A loads {}, sends x     B loads {}, sends y
+        A saves: {} | {x} -> write {x}
+        B saves: {x} | {y} -> write {x, y}    (not {y})
     """
 
     def __init__(self, path: Path | None, persist: Persist) -> None:
         self._path = path
         self._persist = persist
-        self._dirty = False
+        # Keys this run added (new to the filter): nothing to save when 0.
+        self._added = 0
         self._bloom: BloomFilter | None = None
         if path is None:
             return
@@ -160,21 +169,47 @@ class SentLog:
         """Remember a delivered *body*; no-op without a file or on --dry-run."""
         if self._bloom is None or self._persist is Persist.READ_ONLY:
             return
-        self._bloom.update_bytes(body)
-        self._dirty = True
+        if not self._bloom.update_bytes(body):
+            self._added += 1
 
     def save(self) -> None:
-        """Write the file when this run recorded anything (atomic replace)."""
-        if not self._dirty:
+        """Merge this run's records into the file; write only when its bits change."""
+        if not self._added:
             return
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        negative_bloom.save(self._path, self._bloom)
-        if self._bloom.over_capacity:
+        target = self._merged()
+        if target is None:
+            return
+
+        negative_bloom.save(self._path, target)
+        if target.over_capacity:
             print(
-                f"[!] --sent-bloom holds {self._bloom.n_added} seeds, over its "
+                f"[!] --sent-bloom holds {target.n_added} seeds, over its "
                 f"{SENT_BLOOM_CAPACITY} capacity: more new seeds will be skipped; start a new file",
                 file=sys.stderr,
             )
+
+    def _merged(self) -> BloomFilter | None:
+        """Filter to write: ours (no file yet), file | ours, or None to leave the file as is.
+
+        None when the merge adds no bit (the file already holds every seed)
+        or when the file can't take ours (damaged meanwhile, other layout):
+        it is kept, and this run's seeds are resent next time, never lost.
+        """
+        if not self._path.exists():
+            return self._bloom
+        try:
+            disk = negative_bloom.load(self._path)
+            changed = disk.merge(self._bloom)
+        except (NegativeBloomError, UnsafeStateError, ValueError) as e:
+            print(f"[-] --sent-bloom: {self._path} kept, not updated ({e})", file=sys.stderr)
+            return None
+
+        if not changed:
+            print(f"[*] --sent-bloom unchanged: {self._path}")
+            return None
+        disk.n_added += self._added
+        return disk
 
 
 def sniff(buf: bytes) -> tuple[Media, int] | None:

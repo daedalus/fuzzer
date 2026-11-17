@@ -438,3 +438,72 @@ class TestMaxSize:
     def test_bad_values_rejected(self, tmp_path, value):
         with pytest.raises(SystemExit):
             ccs.main(["--root", str(tmp_path), "--max-size", value])
+
+
+class TestSentBloomMerge:
+    """Saving merges into the file on disk instead of overwriting it."""
+
+    @staticmethod
+    def _log(path):
+        return ccs.SentLog(path, ccs.Persist.WRITE)
+
+    def test_concurrent_writers_keep_both_records(self, tmp_path):
+        # Two feeders on one file: the second save must not erase the first's seeds.
+        path = tmp_path / "sent.pkl.gz"
+        a, b = self._log(path), self._log(path)
+        a.record(PNG)
+        b.record(JPG)
+        a.save()
+        b.save()
+
+        merged = self._log(path)
+        assert merged.seen(PNG) and merged.seen(JPG)
+
+    def test_no_change_leaves_file_untouched(self, tmp_path, capsys):
+        # Same seeds already on disk: the file is not rewritten (same inode, mtime).
+        path = tmp_path / "sent.pkl.gz"
+        a, b = self._log(path), self._log(path)
+        a.record(PNG)
+        b.record(PNG)
+        a.save()
+        before = path.stat()
+
+        b.save()
+        after = path.stat()
+        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+        assert "unchanged" in capsys.readouterr().out
+
+    def test_new_records_counted_on_top_of_disk(self, tmp_path):
+        path = tmp_path / "sent.pkl.gz"
+        a, b = self._log(path), self._log(path)
+        a.record(PNG)
+        b.record(JPG)
+        b.record(WEBP)
+        a.save()
+        b.save()
+        assert ccs.negative_bloom.load(path).n_added == 3
+
+    def test_file_corrupted_meanwhile_kept(self, tmp_path, capsys):
+        # Adversarial: the file went bad after load; don't replace it blindly.
+        path = tmp_path / "sent.pkl.gz"
+        log = self._log(path)
+        log.record(PNG)
+        path.write_bytes(b"garbage")
+
+        log.save()
+        assert path.read_bytes() == b"garbage"
+        assert "--sent-bloom" in capsys.readouterr().err
+
+    def test_layout_mismatch_kept(self, tmp_path, capsys):
+        # Adversarial: a file from another capacity cannot be ORed; keep it.
+        path = tmp_path / "sent.pkl.gz"
+        log = self._log(path)
+        log.record(PNG)
+        other = ccs.BloomFilter(capacity=10, error_rate=0.01)
+        other.update_bytes(JPG)
+        ccs.negative_bloom.save(path, other)
+        before = path.read_bytes()
+
+        log.save()
+        assert path.read_bytes() == before
+        assert "--sent-bloom" in capsys.readouterr().err
