@@ -55,7 +55,7 @@ from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.operators import StallMode
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
-from fuzzer_tool.services.tcp_ingest import TcpMode
+from fuzzer_tool.services.tcp_ingest import Admission, TcpMode
 from fuzzer_tool.services.value_profile import ValueProfile
 
 _original_print = builtins.print
@@ -512,6 +512,13 @@ def cmd_fuzz(args):
         return _run_mail_test(args)
     if getattr(args, "push_test", False):
         return _run_push_test(args)
+    # Checked first: in round mode the flag would silently do nothing.
+    if (
+        getattr(args, "admit_all", False)
+        and getattr(args, "tcp_mode", TcpMode.ROUND.value) != TcpMode.DIRECT.value
+    ):
+        print("[-] --admit-all needs --tcp-mode direct")
+        sys.exit(1)
 
     # Applied before anything can spawn a child, so the setting is in force
     # for the whole run including early teardown.
@@ -1317,6 +1324,9 @@ def cmd_fuzz(args):
         tcp_listen_port=getattr(args, "tcp_listen_port", None),
         tcp_listen_host=getattr(args, "tcp_listen_host", TCP_DEFAULT_HOST),
         tcp_mode=TcpMode(getattr(args, "tcp_mode", TcpMode.ROUND.value)),
+        tcp_admission=Admission.ALL
+        if getattr(args, "admit_all", False)
+        else Admission.NEW_COVERAGE,
         enable_x86_mutator=getattr(args, "x86_mutate", False),
         enable_arm_mutator=getattr(args, "arm_mutate", False),
         refresh_profile=getattr(args, "refresh_profile", False),
@@ -7079,6 +7089,14 @@ def main() -> int:
         help=(
             "round (default): one TCP seed per fuzz round, unmutated, with round bookkeeping; "
             "direct: every queued seed before each round, run as is, kept only on new coverage"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--admit-all",
+        action="store_true",
+        help=(
+            "--tcp-mode direct: add every seed that runs cleanly to the corpus, "
+            "new coverage or not (crashes/timeouts are still only saved as such)"
         ),
     )
     fuzz_parser.add_argument(

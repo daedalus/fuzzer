@@ -12,6 +12,9 @@ recorded, and it joins the corpus only if it showed new coverage.
                                      else       boring (not kept)
 
     [*] Ran seed id_3f2a9c0d1e4b5a67 (direct): rc=0, +12 edges, admitted
+
+--admit-all keeps every seed that ran cleanly (new coverage or not);
+crashes and timeouts are still only saved as such.
 """
 
 from __future__ import annotations
@@ -37,12 +40,22 @@ class TcpMode(enum.Enum):
     DIRECT = "direct"  # all queued, before each round, no mutate()/round
 
 
-class TcpIngest:
-    """Runs every queued TCP seed unmutated; keeps those with new coverage."""
+class Admission(enum.Enum):
+    """Which direct-mode seeds join the corpus (--admit-all)."""
 
-    def __init__(self, fuzzer: Fuzzer, inbox: TcpSeedInbox) -> None:
+    NEW_COVERAGE = "new-coverage"  # only seeds that showed new edges
+    ALL = "all"  # every seed that ran cleanly; crashes/timeouts never
+
+
+class TcpIngest:
+    """Runs every queued TCP seed unmutated; keeps those per *admission*."""
+
+    def __init__(
+        self, fuzzer: Fuzzer, inbox: TcpSeedInbox, admission: Admission = Admission.NEW_COVERAGE
+    ) -> None:
         self._f = fuzzer
         self._inbox = inbox
+        self._admission = admission
 
     def drain(self) -> int:
         """Run every seed queued right now; returns how many ran."""
@@ -78,8 +91,10 @@ class TcpIngest:
             return RoundOutcome.TIMEOUT, 0
 
         has_new, edge_ids = f._unmutated_coverage(data)
-        if not has_new:
+        if not has_new and self._admission is Admission.NEW_COVERAGE:
             return RoundOutcome.BORING, 0
-        # A root seed: no parent, like an initial corpus file.
+        # A root seed: no parent, like an initial corpus file. --admit-all
+        # keeps no-gain seeds too, with whatever edges they reached.
         f.save_to_corpus(data)
-        return RoundOutcome.ADMITTED, f._record_direct_edges(data, edge_ids)
+        gained = f._record_direct_edges(data, edge_ids) if edge_ids else 0
+        return RoundOutcome.ADMITTED, gained
