@@ -401,3 +401,38 @@ class TestDiskScale:
         finder = bfs._Finder(data)
         assert finder.next(0) == (100, Media.PNG)
         assert finder.next(101) is None
+
+
+class TestMaxSize:
+    def test_larger_messages_skipped_and_scan_continues(self):
+        small, big = SAMPLES[Media.GIF], _mp4(mdat=b"M" * 300 + SAMPLES[Media.PNG])
+        too_big = []
+        got = list(
+            bfs.scan(
+                _blob(big, small),
+                ALL,
+                1 << 20,
+                max_size=len(small),
+                on_too_big=lambda: too_big.append(1),
+            )
+        )
+        # The PNG inside the skipped MP4 is not split out either.
+        assert got == [(Media.GIF, small)]
+        assert too_big == [1]
+
+    def test_unwanted_types_not_counted(self):
+        # Falsification: a big MP4 filtered out by --types is not "too big".
+        too_big = []
+        big = _mp4(mdat=b"M" * 300)
+        got = list(
+            bfs.scan(
+                _blob(big), {Media.PNG}, 1 << 20, max_size=10, on_too_big=lambda: too_big.append(1)
+            )
+        )
+        assert got == [] and too_big == []
+
+    def test_cli_flag(self, tmp_path, capsys):
+        f = _write(tmp_path, "data_1", _blob(SAMPLES[Media.GIF], SAMPLES[Media.MP4]))
+        limit = len(SAMPLES[Media.GIF])
+        assert bfs.main([str(f), "--dry-run", "--max-size", str(limit)]) == 0
+        assert "would send 1 seeds (gif: 1)" in capsys.readouterr().out

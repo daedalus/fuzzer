@@ -418,17 +418,25 @@ def _no_progress(_pos: int) -> None:
     """Default on_progress: report nothing."""
 
 
+def _not_counted() -> None:
+    """Default on_too_big: count nothing."""
+
+
 def scan(
     data,
     wanted: set[Media],
     max_bytes: int,
     on_progress: Callable[[int], None] = _no_progress,
+    max_size: int = ccs.NO_LIMIT,
+    on_too_big: Callable[[], None] = _not_counted,
 ) -> Iterator[tuple[Media, bytes]]:
     """(media, bytes) of each message in *data*, in order, capped at *max_bytes*.
 
     *data* is bytes-like with ``find`` (bytes, mmap). Unwanted types are walked
     over, not searched inside. *on_progress* gets the scan offset at least once
-    per SCAN_WINDOW, stretches without any magic included.
+    per SCAN_WINDOW, stretches without any magic included. A wanted message
+    over *max_size* (full size; a truncated one: what is there) is skipped,
+    reported to *on_too_big*, and walked over like an unwanted one.
     """
     finder = _Finder(data)
     n = len(data)
@@ -456,7 +464,10 @@ def scan(
         if end is TRUNCATED:
             end, resume = n, start + 1
         if media in wanted:
-            yield media, bytes(data[start : min(end, start + max_bytes)])
+            if end - start <= max_size:
+                yield media, bytes(data[start : min(end, start + max_bytes)])
+            else:
+                on_too_big()
         pos = resume
     on_progress(n)
 
@@ -490,7 +501,9 @@ def _files(paths: Iterable[Path]) -> Iterator[Path]:
             yield path
 
 
-def _scan_file(path: Path, wanted: set[Media], max_bytes: int) -> Iterator[tuple[Media, bytes]]:
+def _scan_file(
+    path: Path, wanted: set[Media], max_bytes: int, stats: ccs.ScanStats, max_size: int
+) -> Iterator[tuple[Media, bytes]]:
     """scan() over an mmap of *path*: memory stays bounded for multi-GB dumps / disks.
 
     Size by seeking to the end, not st_size: a block device (/dev/sda1) reports
@@ -506,7 +519,9 @@ def _scan_file(path: Path, wanted: set[Media], max_bytes: int) -> Iterator[tuple
         if size == 0:
             return
         with mmap.mmap(fh.fileno(), size, access=mmap.ACCESS_READ) as mm:
-            yield from scan(mm, wanted, max_bytes, _Progress(path, size))
+            yield from scan(
+                mm, wanted, max_bytes, _Progress(path, size), max_size, stats.count_too_big
+            )
 
 
 def not_a_disk(path: str, fmt: int) -> str:
@@ -518,12 +533,16 @@ def not_a_disk(path: str, fmt: int) -> str:
 
 
 def carve_files(
-    paths: Iterable[Path], wanted: set[Media], max_bytes: int, stats: ccs.ScanStats
+    paths: Iterable[Path],
+    wanted: set[Media],
+    max_bytes: int,
+    stats: ccs.ScanStats,
+    max_size: int = ccs.NO_LIMIT,
 ) -> Iterator[tuple[Media, bytes]]:
     """Messages of every file in order; unreadable files counted, not fatal."""
     for path in _files(paths):
         try:
-            yield from _scan_file(path, wanted, max_bytes)
+            yield from _scan_file(path, wanted, max_bytes, stats, max_size)
         except OSError as e:
             # Not fatal, but said: /dev/sda1 without root would otherwise read as "sent 0".
             print(f"[!] cannot read {path}: {e}", file=sys.stderr)
@@ -554,7 +573,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     stats = ccs.ScanStats()
-    seeds = ccs.unique(carve_files(paths, args.types, args.max_bytes, stats), stats)
+    found = carve_files(paths, args.types, args.max_bytes, stats, args.max_size)
+    seeds = ccs.unique(found, stats)
     return ccs.send_seeds(seeds, args, stats)
 
 

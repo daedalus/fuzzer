@@ -393,3 +393,48 @@ class TestSentBloom:
         assert sent == []
         assert bloom.read_bytes() == b"not a gzip pickle"
         assert "sent-bloom" in capsys.readouterr().err
+
+
+class TestMaxSize:
+    def test_larger_bodies_skipped_and_counted(self, tmp_path, capsys, monkeypatch):
+        root = tmp_path / "chromium"
+        small, big = PNG, JPG + b"J" * 100
+        _profile(root, "Default", {"1_0": _entry(small), "2_0": _entry(big)})
+        sent = []
+        monkeypatch.setattr(ccs, "tcp_sink", lambda *_a: sent.append)
+
+        assert ccs.main(["--root", str(root), "--max-size", str(len(small))]) == 0
+        assert sent == [small]
+        assert "too big 1" in capsys.readouterr().out
+
+    def test_full_size_judged_not_truncated_size(self, tmp_path, monkeypatch):
+        # Adversarial: --max-bytes cuts to 8 B, but the 124 B body is still too big.
+        root = tmp_path / "chromium"
+        big = JPG + b"J" * 100
+        _profile(root, "Default", {"1_0": _entry(big)})
+        sent = []
+        monkeypatch.setattr(ccs, "tcp_sink", lambda *_a: sent.append)
+
+        assert ccs.main(["--root", str(root), "--max-bytes", "8", "--max-size", "50"]) == 0
+        assert sent == []
+
+    def test_body_past_read_window_sized_by_trailer(self, tmp_path):
+        # The trailer sits beyond max_bytes: the full size still comes from it.
+        p = tmp_path / "a_0"
+        body = JPG + b"J" * 5000
+        p.write_bytes(_entry(body))
+        assert ccs.carve_full(p, 16) == (ccs.Media.JPG, body[:16], len(body))
+
+    def test_at_limit_is_sent(self, tmp_path, monkeypatch):
+        # Falsification: exactly max-size is not "larger".
+        root = tmp_path / "chromium"
+        _profile(root, "Default", {"1_0": _entry(PNG)})
+        sent = []
+        monkeypatch.setattr(ccs, "tcp_sink", lambda *_a: sent.append)
+        assert ccs.main(["--root", str(root), "--max-size", str(len(PNG))]) == 0
+        assert sent == [PNG]
+
+    @pytest.mark.parametrize("value", ["0", "-5", "x"])
+    def test_bad_values_rejected(self, tmp_path, value):
+        with pytest.raises(SystemExit):
+            ccs.main(["--root", str(tmp_path), "--max-size", value])

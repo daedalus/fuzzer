@@ -63,13 +63,14 @@ def classify(data: bytes) -> Media:
     return hit[0]
 
 
-def _read(path: Path, max_bytes: int) -> bytes:
-    """First *max_bytes* of a regular file; OSError for anything else."""
+def _read(path: Path, max_bytes: int) -> tuple[bytes, int]:
+    """(first *max_bytes*, file size) of a regular file; OSError for anything else."""
     # stat before open: opening a FIFO for reading blocks until a writer appears.
-    if not stat.S_ISREG(path.stat().st_mode):
+    st = path.stat()
+    if not stat.S_ISREG(st.st_mode):
         raise OSError(f"not a regular file: {path}")
     with path.open("rb") as fh:
-        return fh.read(max_bytes)
+        return fh.read(max_bytes), st.st_size
 
 
 def iter_dir_seeds(
@@ -78,13 +79,18 @@ def iter_dir_seeds(
     max_bytes: int,
     stats: ccs.ScanStats,
     skip: frozenset[Path] = frozenset(),
+    max_size: int = ccs.NO_LIMIT,
 ) -> Iterator[tuple[Media, bytes]]:
-    """(media, bytes) of every non-empty file of the *wanted* types, in walk order."""
+    """(media, bytes) of every non-empty file of the *wanted* types, in walk order.
+
+    A wanted file over *max_size* bytes (file size, before *max_bytes*) is
+    skipped and counted in stats.too_big.
+    """
     for path in walk(paths):
         if path.resolve() in skip:
             continue
         try:
-            data = _read(path, max_bytes)
+            data, size = _read(path, max_bytes)
         except OSError:
             # Dangling link, permission, FIFO/device: counted, not fatal.
             stats.unreadable += 1
@@ -92,8 +98,12 @@ def iter_dir_seeds(
         if not data:
             continue
         media = classify(data)
-        if media in wanted:
-            yield media, data
+        if media not in wanted:
+            continue
+        if size > max_size:
+            stats.too_big += 1
+            continue
+        yield media, data
 
 
 def _parse(argv: list[str] | None) -> argparse.Namespace:
@@ -115,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stats = ccs.ScanStats()
     skip = frozenset({args.sent_bloom.resolve()}) if args.sent_bloom else frozenset()
-    found = iter_dir_seeds(args.paths, args.types, args.max_bytes, stats, skip)
+    found = iter_dir_seeds(args.paths, args.types, args.max_bytes, stats, skip, args.max_size)
     return ccs.send_seeds(ccs.unique(found, stats), args, stats)
 
 

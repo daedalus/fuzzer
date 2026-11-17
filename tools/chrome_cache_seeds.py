@@ -32,6 +32,7 @@ import collections
 import dataclasses
 import enum
 import hashlib
+import mmap
 import os
 import socket
 import struct
@@ -77,6 +78,8 @@ TRAILER = struct.pack("<Q", 0xF4FA6F45970D41D8)  # SimpleFileEOF magic
 
 # Bytes read to find a body start; bodies begin right after header + key.
 SNIFF_WINDOW = 4096
+# --max-size default: every size passes, so no None check per seed.
+NO_LIMIT = sys.maxsize
 # Per-seed cap; matches the fuzzer inbox's default cap.
 DEFAULT_MAX_BYTES = 1 << 20
 DEFAULT_PORT = 4444
@@ -105,8 +108,14 @@ class ScanStats:
     unreadable: int = 0
     duplicates: int = 0
     already_sent: int = 0
+    # Wanted seeds over --max-size, not sent.
+    too_big: int = 0
     # Seeds sent (or, on --dry-run, that would be sent), per type.
     by_media: collections.Counter = dataclasses.field(default_factory=collections.Counter)
+
+    def count_too_big(self) -> None:
+        """on_too_big hook for scanners that report skips one at a time."""
+        self.too_big += 1
 
 
 class Persist(enum.Enum):
@@ -199,22 +208,32 @@ def _body_start(head: bytes) -> int:
 
 def carve(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> tuple[Media, bytes] | None:
     """(media, body) from one cache file, at most *max_bytes*; None if no media."""
+    got = carve_full(path, max_bytes)
+    return None if got is None else got[:2]
+
+
+def carve_full(path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> tuple[Media, bytes, int] | None:
+    """(media, first *max_bytes* of the body, full body size); None if no media.
+
+    The full size (for --max-size) runs to the EOF trailer, found over an mmap
+    so a large body is measured without being read into memory.
+    """
     with path.open("rb") as fh:
-        head = fh.read(SNIFF_WINDOW)
-        start = _body_start(head)
-        hit = sniff(head[start:])
-        if hit is None:
+        size = os.fstat(fh.fileno()).st_size
+        if size == 0:
             return None
+        with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            head = mm[:SNIFF_WINDOW]
+            start = _body_start(head)
+            hit = sniff(head[start:])
+            if hit is None:
+                return None
 
-        media, rel = hit
-        fh.seek(start + rel)
-        # Read past the cap by the trailer length so a trailer at the cap is still cut.
-        body = fh.read(max_bytes + len(TRAILER))
-
-    end = body.find(TRAILER)
-    if end >= 0:
-        body = body[:end]
-    return media, body[:max_bytes]
+            media, rel = hit
+            begin = start + rel
+            end = mm.find(TRAILER, begin)
+            full = (end if end >= 0 else size) - begin
+            return media, mm[begin : begin + min(full, max_bytes)], full
 
 
 def browser_roots(platform: str, home: Path, env: dict) -> list[Path]:
@@ -264,10 +283,11 @@ def iter_seeds(
     wanted: set[Media],
     max_bytes: int = DEFAULT_MAX_BYTES,
     stats: ScanStats | None = None,
+    max_size: int = NO_LIMIT,
 ) -> Iterator[tuple[Media, bytes]]:
-    """Distinct (media, body) of the *wanted* types across *caches*."""
+    """Distinct (media, body) of the *wanted* types across *caches*, bodies <= *max_size*."""
     stats = stats if stats is not None else ScanStats()
-    return unique(_carve_all(caches, wanted, max_bytes, stats), stats)
+    return unique(_carve_all(caches, wanted, max_bytes, stats, max_size), stats)
 
 
 def unique(seeds: Iterable[tuple[Media, bytes]], stats: ScanStats) -> Iterator[tuple[Media, bytes]]:
@@ -284,7 +304,11 @@ def unique(seeds: Iterable[tuple[Media, bytes]], stats: ScanStats) -> Iterator[t
 
 
 def _carve_all(
-    caches: Iterable[Path], wanted: set[Media], max_bytes: int, stats: ScanStats
+    caches: Iterable[Path],
+    wanted: set[Media],
+    max_bytes: int,
+    stats: ScanStats,
+    max_size: int = NO_LIMIT,
 ) -> Iterator[tuple[Media, bytes]]:
     """(media, body) of the *wanted* types, one per cache file, duplicates kept."""
     for cache in caches:
@@ -292,14 +316,18 @@ def _carve_all(
             if path.is_dir():
                 continue
             try:
-                got = carve(path, max_bytes)
+                got = carve_full(path, max_bytes)
             except OSError:
                 # Evicted or locked mid-scan: counted, not fatal.
                 stats.unreadable += 1
                 continue
             if got is None or got[0] not in wanted or not got[1]:
                 continue
-            yield got
+            media, body, full = got
+            if full > max_size:
+                stats.too_big += 1
+                continue
+            yield media, body
 
 
 def tcp_sink(host: str, port: int, delay: float) -> Callable[[bytes], None]:
@@ -344,6 +372,14 @@ def with_retry(
     return send_retrying
 
 
+def _positive_int(text: str) -> int:
+    """argparse type: a whole number, at least 1."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {text}")
+    return value
+
+
 def _non_negative(kind: type) -> Callable[[str], int | float]:
     """argparse type: *kind* parsed from text, at least 0."""
 
@@ -384,6 +420,13 @@ def add_send_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY_S, help="seconds between seeds")
     ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help="per-seed cap")
     ap.add_argument(
+        "--max-size",
+        type=_positive_int,
+        default=NO_LIMIT,
+        metavar="N",
+        help="skip seeds over N bytes (full size, before --max-bytes); default: no limit",
+    )
+    ap.add_argument(
         "--retries",
         type=_non_negative(int),
         default=DEFAULT_RETRIES,
@@ -410,7 +453,8 @@ def main(argv: list[str] | None = None) -> int:
     if not caches:
         return 1
     stats = ScanStats()
-    return send_seeds(iter_seeds(caches, args.types, args.max_bytes, stats), args, stats)
+    seeds = iter_seeds(caches, args.types, args.max_bytes, stats, args.max_size)
+    return send_seeds(seeds, args, stats)
 
 
 def discover(args: argparse.Namespace) -> list[Path]:
@@ -476,7 +520,7 @@ def _send_all(seeds, args, send, log: SentLog, stats: ScanStats, verb: str) -> i
     )
     print(
         f"[*] {verb} {sent} seeds ({counts or 'none'}); already sent {stats.already_sent}, "
-        f"dup {stats.duplicates}, unreadable {stats.unreadable}"
+        f"dup {stats.duplicates}, too big {stats.too_big}, unreadable {stats.unreadable}"
     )
     return 0
 
