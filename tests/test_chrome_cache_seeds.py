@@ -228,6 +228,21 @@ class TestMain:
         assert out.count("[*] sent 2 seeds so far") == 1
         assert "[*] sent 3 seeds (" in out
 
+    def test_progress_line_counts_repeats(self, tmp_path, capsys, monkeypatch):
+        # A repeat-heavy cache shows why "sent" lags: dups and already-sent so far.
+        root = tmp_path / "chromium"
+        files = {"1_0": _entry(PNG), "2_0": _entry(PNG), "3_0": _entry(JPG), "4_0": _entry(WEBP)}
+        _profile(root, "Default", files)
+        bloom = tmp_path / "sent.pkl.gz"
+        log = ccs.SentLog(bloom, ccs.Persist.WRITE)
+        log.record(JPG)
+        log.save()  # JPG already delivered by an earlier run
+        monkeypatch.setattr(ccs, "tcp_sink", lambda *_a: lambda _d: None)
+        monkeypatch.setattr(ccs, "PROGRESS_EVERY", 2)
+
+        assert ccs.main(["--root", str(root), "--sent-bloom", str(bloom)]) == 0
+        assert "[*] sent 2 seeds so far; dup 1, already sent 1" in capsys.readouterr().out
+
     def test_refused_connection_fails(self, tmp_path, capsys):
         root = tmp_path / "chromium"
         _profile(root, "Default", {"1_0": _entry(PNG)})

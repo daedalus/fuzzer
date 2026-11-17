@@ -544,7 +544,11 @@ def _send_all(seeds, args, send, log: SentLog, stats: ScanStats, verb: str) -> i
             stats.by_media[media] += 1
             sent += 1
             if sent % PROGRESS_EVERY == 0:
-                print(f"[*] {verb} {sent} seeds so far", flush=True)
+                print(
+                    f"[*] {verb} {sent} seeds so far; dup {stats.duplicates}, "
+                    f"already sent {stats.already_sent}",
+                    flush=True,
+                )
     except OSError as e:
         print(f"[-] send to {args.host}:{args.port} failed: {e}", file=sys.stderr)
         print(f"[-] sent {sent} seeds before failure", file=sys.stderr)
