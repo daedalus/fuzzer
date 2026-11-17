@@ -234,6 +234,8 @@ ARMS: dict[str, list[str]] = {
     "seed-fess": ["--seed-fess-scheduler"],
     "elo-seed-fess": ["--elo", "--mc-bandit", "--seed-fess-scheduler"],
     "seed-fess-inherit": ["--seed-fess-scheduler", "--fess-inherit"],
+    # Advisors (services/advisors.py): free advised moves per stage vs `baseline`.
+    "advisors": ["--advisors"],
     **{
         f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
         for pct in SEED_NEWEST_PCTS
@@ -438,6 +440,7 @@ ARM_BASELINES: dict[str, str] = {
     "seed-fess": "baseline",
     "elo-seed-fess": "elo",
     "seed-fess-inherit": "seed-fess",
+    "advisors": "baseline",
     "novel-crash-reward-abort": "abort-crash",
     "abort-crash-ctl": "abort-crash",
     "seed-branch": "elo",

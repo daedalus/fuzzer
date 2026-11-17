@@ -7443,6 +7443,13 @@ class OperatorEngine:
         # Cleared every round: only a round that builds a joint probe below
         # may leave it set, or the exec loop would credit a stale pair.
         f._last_joint_probe = None
+        # --advisors move (Fuzzer._advise): first, so it runs on its own seed.
+        advisors = getattr(f, "_advisors", None)
+        advised = advisors.pop() if advisors is not None else None
+        if advised is not None:
+            self._reset_round_ops(data, advised)
+            return advised
+
         det_mutant = self.maybe_deterministic_mutation(data)
         if det_mutant is not None:
             self._reset_round_ops(data, det_mutant)

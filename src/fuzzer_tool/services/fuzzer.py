@@ -202,6 +202,7 @@ from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.stack_depth import StackMax
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
+from fuzzer_tool.services.advisors import AdvisorCtx, AdvisorStage, default_advisors
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
 from fuzzer_tool.services.c11_channel import C11Channel
@@ -2189,6 +2190,9 @@ class Fuzzer:
         # 'branch' arm ranks frontier branches by cut damage (core/articulation.py,
         # --cut-damage); needs seed_branch_scheduler. Appended.
         cut_damage=False,
+        # --advisors: one free advised move per advisor per seed stage
+        # (services/advisors.py). Off, out of --hail-mary. Appended.
+        advisors=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -4109,6 +4113,8 @@ class Fuzzer:
         self._i2s_fixpoint = (
             I2SFixpoint(self._i2s_probe, i2s_fixpoint_iters) if i2s_fixpoint else None
         )
+        # --advisors: zero-cost proposals per stage, drained by mutate().
+        self._advisors = AdvisorStage(default_advisors()) if advisors else None
         # --affine-mod: solve (a*x + b) % m == t compares on admitted inputs;
         # --derived-cmp adds GF(2), additive and byte-map operand maps.
         families = Families.DERIVED if derived_cmp else Families.MODULAR
@@ -7856,6 +7862,23 @@ class Fuzzer:
         self._queue_skips = 0
         return self._fuzz_ungated(data)
 
+    def _advise(self, seed: bytes) -> None:
+        """--advisors: run each advisor's move for *seed*, off the stage's energy."""
+        stage = self._advisors
+        cmplog = self._cmplog
+        ops = self._operators
+        ctx = AdvisorCtx(
+            seed_meta=self.seed_meta,
+            dictionary=self.dictionary,
+            conds=lambda: ops._get_cond_stmts().unsolved_view() if cmplog else (),
+            fresh=stage.fresh,
+            max_len=self.max_len,
+        )
+
+        # One round per move; mutate() pops it, so the round is a normal one.
+        for name in stage.plan(seed, ctx):
+            stage.credit(name, self.fuzz_one(seed))
+
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
         mark = self._exec_timer.cycle_mark()
@@ -10840,6 +10863,8 @@ class Fuzzer:
                     self._last_perf_score = 100.0
                 if staged is None:
                     self._stage.begin(seed, self._last_perf_score)
+                    if self._advisors is not None:
+                        self._advise(seed)
                 if self._diff_tracker:
                     self._check_differential(seed)
                 # Deterministic-stage mutations are now drawn inline by
