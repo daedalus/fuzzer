@@ -204,6 +204,7 @@ from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.stack_depth import StackMax
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
+from fuzzer_tool.core.waypoints import NO_STRATUM
 from fuzzer_tool.services.advisors import AdvisorCtx, AdvisorStage, default_advisors
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
@@ -1071,6 +1072,17 @@ def _orbit_skip(f, repeat: bool, folded: bool) -> bool:
             return False
     f._orbit_folded += repeat and folded
     return repeat
+
+
+def _build_identity(target: str) -> bytes:
+    """GNU build id of *target*, else path + size + mtime: what a proof is about."""
+    from fuzzer_tool.core.elf import build_id
+
+    bid = build_id(target)
+    if bid:
+        return bid
+    st = os.stat(target)
+    return f"{os.path.abspath(target)}:{st.st_size}:{st.st_mtime_ns}".encode()
 
 
 class Fuzzer:
@@ -2197,6 +2209,12 @@ class Fuzzer:
         # 'branch' arm ranks frontier branches by cut damage (core/articulation.py,
         # --cut-damage); needs seed_branch_scheduler. Appended.
         cut_damage=False,
+        # Waypoint race over the target's dominator chain (core/waypoints.py,
+        # --waypoints); directed mode only. Appended.
+        waypoints=False,
+        # Drop statically proven-dead targets from directed mode (core/deadness.py,
+        # --prove-dead). Appended.
+        prove_dead=False,
         # --advisors: one free advised move per advisor per seed stage
         # (services/advisors.py). Off, out of --hail-mary. Appended.
         advisors=False,
@@ -4862,6 +4880,23 @@ class Fuzzer:
         self._use_cfg_cache = use_cfg_cache
         self._gate_bonus = gate_bonus
         self._distance_metric = distance_metric
+        # --waypoints: the distance spec builds the race (analyzer_registry).
+        self._waypoints_requested = bool(waypoints and targets)
+        self._waypoints = None
+        self._waypoint_bmp = None
+        if waypoints and not targets:
+            log.warning("--waypoints needs --target-functions; ignored")
+        # --prove-dead: verdict cache shared with the distance spec, keyed to
+        # this build so a rebuilt target never reuses old proofs.
+        self._dead_verdicts = None
+        if prove_dead and targets:
+            from fuzzer_tool.core.deadness import VerdictCache
+
+            self._dead_verdicts = VerdictCache(_build_identity(target))
+            if self.resume:
+                self._dead_verdicts.load_state_dict(self._state_store.get("dead_verdicts", {}))
+        elif prove_dead:
+            log.warning("--prove-dead needs --target-functions; ignored")
         self._trace_crashes_requested = trace_crashes
 
         # Crash MI tracker, length-edge tracker, transfer entropy, occupation,
@@ -6033,6 +6068,10 @@ class Fuzzer:
             self._state_store.set("dict_picker", self._dict_picker.to_dict())
         if self._gravity is not None:
             self._state_store.set("gravity", self._gravity.state_dict())
+        if self._waypoints is not None:
+            self._state_store.set("waypoints", self._waypoints.state_dict())
+        if self._dead_verdicts is not None:
+            self._state_store.set("dead_verdicts", self._dead_verdicts.state_dict())
         self._state_store.set("novelty_hist", self._novelty_hist.to_dict())
         self._state_store.set("crash_cov", self._crash_cov.to_dict())
         if self._ijon is not None:
@@ -6075,6 +6114,8 @@ class Fuzzer:
             self._dict_picker.from_dict(self._state_store.get("dict_picker", {}))
         if self._gravity is not None:
             self._gravity.load_state_dict(self._state_store.get("gravity", {}))
+        if self._waypoints is not None:
+            self._waypoints.load_state_dict(self._state_store.get("waypoints", {}))
         self._novelty_hist.from_dict(self._state_store.get("novelty_hist", {}))
         self._crash_cov.from_dict(self._state_store.get("crash_cov", {}))
         if self._ijon is not None:
@@ -8680,6 +8721,10 @@ class Fuzzer:
         dist = self._exec_distance()
         if dist is not None:
             meta["avg_distance"] = dist
+        if self._waypoints is not None:
+            stratum = self._waypoints.stratum_of(self._waypoint_bmp.read_and_clear())
+            meta["waypoint"] = stratum
+            self._waypoints.admit(stratum)
 
     def _warn_no_dist_source(self) -> None:
         """Warn once: directed mode on, but nothing measures real blocks.
@@ -10902,6 +10947,12 @@ class Fuzzer:
                         # The picked seed's own counts, not the last execution's.
                         **self._edge_tracker.seed_hw(seed_key),
                     )
+                    if self._waypoints is not None:
+                        self._last_perf_score = min(
+                            self._last_perf_score
+                            * self._waypoints.multiplier(meta.get("waypoint", NO_STRATUM)),
+                            self._seed_scorer.max_mult * 100.0,
+                        )
                 elif staged is None:
                     # Markov-generated or synthetic seed: reset to neutral multiplier
                     self._last_perf_score = 100.0

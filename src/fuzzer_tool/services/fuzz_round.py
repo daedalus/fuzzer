@@ -143,6 +143,7 @@ class FuzzRound:
         "_effective",
         "_surprisal_weight",
         "_distance",
+        "_stratum",
     )
 
     def __init__(self, fuzzer: "Fuzzer", data: bytes):
@@ -175,6 +176,8 @@ class FuzzRound:
         self._effective = None
         self._surprisal_weight = 0.0
         self._distance: float | None = None
+        # Deepest waypoint this exec reached (--waypoints only).
+        self._stratum: int | None = None
         # Round start, stamped only under --elo-time-credit.
         self._t_round: float | None = None
 
@@ -1536,6 +1539,12 @@ class FuzzRound:
         f = self._f
         if not f._distance:
             return
+        self._measure_distance()
+        if f._waypoints is not None:
+            self._note_waypoint()
+
+    def _measure_distance(self) -> None:
+        f = self._f
         runtime_avg = f._read_runtime_avg_distance()
         if runtime_avg is not None:
             self._distance = runtime_avg
@@ -1550,6 +1559,12 @@ class FuzzRound:
         if avg_dist < _NO_VALUE_DISTANCE:  # exclude the no-valued-blocks sentinel
             self._note_distance(avg_dist)
 
+    def _note_waypoint(self) -> None:
+        # --waypoints: every exec, so the bitmap never carries bits over.
+        f = self._f
+        self._stratum = f._waypoints.stratum_of(f._waypoint_bmp.read_and_clear())
+        f._waypoints.note(self._distance)
+
     def _tag_distance(self) -> None:
         # Admitted mutant inherits this round's measured distance; aflgo/go
         # rank it by that. A duplicate re-measures the same bytes: same value.
@@ -1559,6 +1574,9 @@ class FuzzRound:
         if meta is None:
             return
         meta["avg_distance"] = self._distance
+        if self._stratum is not None:
+            meta["waypoint"] = self._stratum
+            self._f._waypoints.admit(self._stratum)
 
     def _note_distance(self, value: float) -> None:
         f = self._f

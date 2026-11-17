@@ -622,6 +622,7 @@ def _activate_distance(f: FuzzerLike) -> None:
     import os
 
     from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric, TargetDistance
+    from fuzzer_tool.core.run_mode import Switch
 
     f._distance = TargetDistance(
         f.target,
@@ -630,9 +631,13 @@ def _activate_distance(f: FuzzerLike) -> None:
         debug=f.debug,
         gate_bonus=getattr(f, "_gate_bonus", 0.0),
         metric=getattr(f, "_distance_metric", DistanceMetric.HARMONIC),
+        prove_dead=Switch.ON if getattr(f, "_dead_verdicts", None) is not None else Switch.OFF,
+        verdicts=getattr(f, "_dead_verdicts", None),
     )
     f._dist_table_shm = None
     if f._distance.load():
+        for addr in sorted(f._distance.dead_targets):
+            print(f"[!] --prove-dead: target {addr:#x} is statically unreachable; dropped")
         print(
             f"[*] Directed mode: {len(f._distance.target_addrs)} target(s), "
             f"{len(f._distance.functions)} functions mapped"
@@ -650,13 +655,19 @@ def _activate_distance(f: FuzzerLike) -> None:
                     table = {
                         bb_start - base: dist for bb_start, dist in f._distance._bb_value.items()
                     }
-                f._dist_table_shm = DistanceTableShm(table)
+                plan = _plan_waypoints(f)
+                node_of = plan.node_of if plan is not None else None
+                if plan is not None:
+                    table = {**plan.dist, **table}
+                f._dist_table_shm = DistanceTableShm(table, node_of)
                 if f._dist_table_shm.shm_id >= 0:
                     os.environ["__AFL_DIST_SHM_ID"] = f._dist_table_shm.env_id
                     print(
                         f"[*] AFLGo distance table: {len(table)} sites "
                         "uploaded (SHM-tail channel active)"
                     )
+                    if plan is not None:
+                        _attach_waypoints(f, plan)
             except OSError as e:
                 log.warning("Distance table upload failed: %s", e)
     else:
@@ -664,9 +675,40 @@ def _activate_distance(f: FuzzerLike) -> None:
         f._distance = None
 
 
+def _plan_waypoints(f: FuzzerLike):
+    """--waypoints: dominator stages to probe keys; None when off or unresolved."""
+    if not getattr(f, "_waypoints_requested", False):
+        return None
+    from fuzzer_tool.core.waypoints import plan_waypoints
+
+    plan = plan_waypoints(f._distance)
+    if plan is None:
+        log.warning("--waypoints: no waypoint resolved to a probe site; off")
+    return plan
+
+
+def _attach_waypoints(f: FuzzerLike, plan) -> None:
+    """Waypoint race + its node bitmap (one bit per stage)."""
+    import os
+
+    from fuzzer_tool.adapters.shm import NodeBitmapShm
+    from fuzzer_tool.core.waypoints import WaypointRace
+
+    try:
+        f._waypoint_bmp = NodeBitmapShm(num_nodes=plan.n_stages)
+    except OSError as e:
+        log.warning("--waypoints: node bitmap upload failed: %s", e)
+        return
+    os.environ["__AFL_NODE_BITMAP_ID"] = f._waypoint_bmp.env_id
+    f._waypoints = WaypointRace(plan.n_stages)
+    print(f"[*] Waypoints: {plan.n_stages} stages, {len(plan.node_of)} probe sites")
+
+
 def _deactivate_distance(f: FuzzerLike) -> None:
     f._distance = None
     f._dist_table_shm = None
+    f._waypoints = None
+    f._waypoint_bmp = None
 
 
 REGISTRY.register(
