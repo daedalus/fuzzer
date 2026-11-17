@@ -63,6 +63,7 @@ def test_regression_trimmed_seed_swaps_in_readout(tmp_path):
     f, mgr = _mgr(tmp_path, [parent, data])
     f.ptrace_cov = types.SimpleNamespace(edge_map=bytearray([1, 1]))
     f._runner = types.SimpleNamespace(run_target=lambda d: (0, None))
+    f.exec_count = 10**9  # fuzz execs: the trim exec share never binds
 
     mgr.trim_new_coverage(data, parent)
 

@@ -24,11 +24,26 @@
 /* AFL edge coverage — provided by afl_shim.c */
 extern void __afl_map_edge(unsigned int cur_loc);
 
+/* IJON (--ijon): per JSON value type, the deepest nesting and (objects,
+ * arrays) the longest container one input reached, so the input pushing
+ * the parser furthest is kept and scheduled (adapters/ijon.h). Length is
+ * not coverage: [1] and [1,1,1] walk the same edges. Inert without
+ * --ijon; compiled out without the shim. */
+#define IJON_SLOT_DEPTH 0x4744u   /* "GD": salt for depth slots */
+#define IJON_SLOT_LEN   0x474cu   /* "GL": salt for length slots */
+#if defined(__AFL_EDGE) && __AFL_EDGE
+#define FUZZ_IJON_MAX(salt, type, v) \
+    ijon_max(ijon_hashint((salt), (uint32_t)(type)), (uint64_t)(v))
+#else
+#define FUZZ_IJON_MAX(salt, type, v) ((void)0)
+#endif
+
 static void process_value(json_value *value, int depth);
 
 static void process_object(json_value *value, int depth)
 {
     int length = value->u.object.length;
+    FUZZ_IJON_MAX(IJON_SLOT_LEN, json_object, length);
     for (int x = 0; x < length; x++) {
         __afl_map_edge(0x1100 + (depth & 0xFF));
         process_value(value->u.object.values[x].value, depth + 1);
@@ -38,6 +53,7 @@ static void process_object(json_value *value, int depth)
 static void process_array(json_value *value, int depth)
 {
     int length = value->u.array.length;
+    FUZZ_IJON_MAX(IJON_SLOT_LEN, json_array, length);
     for (int x = 0; x < length; x++) {
         __afl_map_edge(0x1200 + (depth & 0xFF));
         process_value(value->u.array.values[x], depth);
@@ -50,6 +66,7 @@ static void process_value(json_value *value, int depth)
         __afl_map_edge(0x1300);
         return;
     }
+    FUZZ_IJON_MAX(IJON_SLOT_DEPTH, value->type, depth);
     switch (value->type) {
     case json_none:
         __afl_map_edge(0x1400);

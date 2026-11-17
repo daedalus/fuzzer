@@ -149,6 +149,9 @@ class _FakeRunner:
     def run_target(self, _data):
         return (0, "")
 
+    def is_crash(self, rc, stderr):
+        return False
+
 
 def _seed(f: Fuzzer, data: bytes, parent_key: str | None) -> None:
     f.corpus.append(data)

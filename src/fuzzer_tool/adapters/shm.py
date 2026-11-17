@@ -2093,3 +2093,168 @@ class BlockBitmapShm:
 
     def __del__(self):
         self.cleanup()
+
+
+# IjonMaxShm header: u32 head (8-byte words incl. header), u32 dirty.
+_VP_HEAD = 1  # one u32 after the head: the `on` word
+_VP_ON_OFFSET = 4
+
+
+class ValueProfileShm:
+    """Value-profile switch shared with the shim (``__afl_vp_on``).
+
+    Attached means the shim's trace-cmp callbacks are live; ``on`` decides
+    whether they mark distance ids, so Python can switch it mid-run.
+
+    Layout::
+
+        uint32 head            1 (u32 words after the head)
+        uint32 on              0 = off, 1 = mark distances
+    """
+
+    def __init__(self):
+        self._ptr = None
+        self.shm_id = -1
+        self.shm_bytes = 4 + _VP_HEAD * 4
+
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes, "value profile")
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        ctypes.c_uint32.from_address(self._ptr).value = _VP_HEAD
+        self._on = ctypes.c_uint32.from_address(self._ptr + _VP_ON_OFFSET)
+        self.env_id = str(self.shm_id)
+        _atexit_weak(self)
+
+    def enable(self) -> None:
+        self._on.value = 1
+
+    def is_on(self) -> bool:
+        return self._on.value != 0
+
+    def cleanup(self):
+        if self._ptr:
+            libc_shm.shmdt(self._ptr)
+        self._ptr = None
+        if self.shm_id >= 0:
+            libc_shm.shmctl_rmid(self.shm_id)
+            self.shm_id = -1
+
+    def __del__(self):
+        self.cleanup()
+
+
+_C11_HEAD_BYTES = 16  # head gen max pad
+_C11_GEN_OFFSET = 4
+_C11_MAX_OFFSET = 8
+_C11_GEN_MASK = 0xFF  # ShmCoverage.GEN_MASK: the tag the shim stamps
+
+
+class C11Shm:
+    """C11 guard table shared with the shim (``struct __afl_c11_seg``).
+
+    Python fills ``locals``; the shim raises ``max`` per exec and stamps it
+    with the edge segment's generation word, so a read needs no reset.
+
+    Layout::
+
+        uint32 head            12 + entries (the shim's write bound)
+        uint32 gen             generation of the exec that wrote max
+        uint32 max             largest locals entered in that exec
+        uint32 pad
+        uint8  locals[entries]
+    """
+
+    def __init__(self, entries: int):
+        self._ptr = None
+        self.shm_id = -1
+        if entries <= 0:
+            raise ValueError(f"C11 entries must be positive, got {entries}")
+        self.entries = entries
+        self.shm_bytes = _C11_HEAD_BYTES + entries
+
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes, "c11 table")
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        ctypes.c_uint32.from_address(self._ptr).value = 12 + entries
+        self.env_id = str(self.shm_id)
+        _atexit_weak(self)
+
+    def fill(self, table: np.ndarray) -> None:
+        """Copy a ``uint8`` guard table in; longer tables are cut."""
+        n = min(int(table.size), self.entries)
+        src = np.ascontiguousarray(table[:n], dtype=np.uint8)
+        ctypes.memmove(self._ptr + _C11_HEAD_BYTES, src.ctypes.data, n)
+
+    def read(self, gen: int) -> int:
+        """Max locals of the exec tagged *gen*; 0 when the max is older."""
+        stamped = ctypes.c_uint32.from_address(self._ptr + _C11_GEN_OFFSET).value
+        if (stamped & _C11_GEN_MASK) != (gen & _C11_GEN_MASK):
+            return 0
+        return ctypes.c_uint32.from_address(self._ptr + _C11_MAX_OFFSET).value
+
+    def cleanup(self):
+        if self._ptr:
+            libc_shm.shmdt(self._ptr)
+        self._ptr = None
+        if self.shm_id >= 0:
+            libc_shm.shmctl_rmid(self.shm_id)
+            self.shm_id = -1
+
+    def __del__(self):
+        self.cleanup()
+
+
+_IJON_HEAD_BYTES = 8
+_IJON_DIRTY_OFFSET = 4
+
+
+class IjonMaxShm:
+    """IJON max-map shared with the shim (``ijon_max`` / ``ijon_min``).
+
+    The shim raises ``slots[slot & (slots - 1)]`` to the annotated value and
+    sets ``dirty``; Python reads and zeroes after every execution. ``dirty``
+    lets an exec that touched no slot cost one u32 load.
+
+    Layout::
+
+        uint32 head            slots + 1 (8-byte words, header included)
+        uint32 dirty           set by the shim, cleared here
+        uint64 slots[slots]
+        uint8  pad[4]          sizes the segment to 4 + head * 8
+    """
+
+    def __init__(self, slots: int):
+        self._ptr = None  # cleanup() is safe if validation raises
+        self.shm_id = -1
+        if slots <= 0 or slots & (slots - 1):
+            raise ValueError(f"IJON slots must be a power of two, got {slots}")
+        self.slots = slots
+        self._payload = slots * 8
+        # 4 + head * 8: the bound the shim's __afl_attach_sized checks.
+        self.shm_bytes = 4 + (slots + 1) * 8
+
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes, "ijon max-map")
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        ctypes.c_uint32.from_address(self._ptr).value = slots + 1
+        self._dirty = ctypes.c_uint32.from_address(self._ptr + _IJON_DIRTY_OFFSET)
+        self.env_id = str(self.shm_id)
+        _atexit_weak(self)
+
+    def dirty(self) -> bool:
+        """Whether any slot was raised since the last read."""
+        return self._dirty.value != 0
+
+    def read_into(self, out: np.ndarray) -> None:
+        """Copy the slots into *out* (``uint64``, ``slots`` long) and zero them."""
+        ctypes.memmove(out.ctypes.data, self._ptr + _IJON_HEAD_BYTES, self._payload)
+        ctypes.memset(self._ptr + _IJON_HEAD_BYTES, 0, self._payload)
+        self._dirty.value = 0
+
+    def cleanup(self):
+        if self._ptr:
+            libc_shm.shmdt(self._ptr)
+        self._ptr = None
+        if self.shm_id >= 0:
+            libc_shm.shmctl_rmid(self.shm_id)
+            self.shm_id = -1
+
+    def __del__(self):
+        self.cleanup()

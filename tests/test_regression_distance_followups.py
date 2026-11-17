@@ -299,11 +299,16 @@ def _trim(f, trimmed_tail: tuple[int, int]) -> None:
     shm = _Shm()
     f.shm_cov = shm
     f._distance = _Dist(DIST)
+    f.exec_count = 10**9  # fuzz execs: the trim exec share never binds
     f.save_to_corpus(LONG, parent=PARENT)
     f.seed_meta[LONG]["avg_distance"] = OLD_DIST
 
+    # Only the first cut keeps the trace; later cuts change it, nothing new.
+    shm.is_new_coverage_with_edges = lambda: (False, set(shm.edges))
+
     def run(data):
         shm.tail = trimmed_tail if data == TRIMMED else NO_TAIL
+        shm.edges = {1, 2} if data == TRIMMED else {7}
         return _CLEAN
 
     with patch.object(f._runner, "run_target", side_effect=run):
@@ -326,16 +331,18 @@ def test_adversarial_trim_without_source_inherits(fuzzer):
 
 
 def test_falsify_rejected_trim_tags_nothing(fuzzer):
-    """Falsification: a trim whose trace differs adds no seed; the original keeps its value."""
+    """Falsification: a trim whose trace differs, with nothing new, adds no seed; the original keeps its value."""
     shm = _Shm()
     fuzzer.shm_cov = shm
     fuzzer._distance = _Dist(DIST)
     fuzzer.save_to_corpus(LONG, parent=PARENT)
     fuzzer.seed_meta[LONG]["avg_distance"] = OLD_DIST
+    # Novel traces from a trim are admitted (test_regression_trim_keeps_finds.py).
+    shm.is_new_coverage_with_edges = lambda: (False, set(shm.edges))
 
     def run(data):
         shm.tail = TAIL
-        shm.edges = {9} if data == TRIMMED else {1, 2}
+        shm.edges = {9}
         return _CLEAN
 
     with patch.object(fuzzer._runner, "run_target", side_effect=run):

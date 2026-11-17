@@ -14,6 +14,7 @@ sees.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,9 @@ class _FakeShm:
     def get_edge_ids(self):
         return set(self._edges)
 
+    def is_new_coverage_with_edges(self):
+        return False, set(self._edges)
+
 
 class _FakeRunner:
     def __init__(self, rc=0):
@@ -53,18 +57,23 @@ class _FakeFuzzer:
         self.seed_meta: dict[bytes, dict] = {}
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = None
         self.shm_cov = _FakeShm({1, 2, 3})
         self.ptrace_cov = None
         self._runner = _FakeRunner()
         self._agg_cache_valid = True
         self._use_lineage = False
         self._edge_tracker = self
-        self.exec_count = 0
+        self.exec_count = 10**9  # fuzz execs: the trim exec share never binds
 
     # stand-in for EdgeTracker.get_seed_edge_count
     def get_seed_edge_count(self, key):
         return 3
+
+    def _is_crash(self, rc, stderr):
+        return False
+
+    def _confirm_new_coverage(self, data, shm, has_new, edge_ids):
+        return has_new, edge_ids
 
     # not directed: trim_new_coverage measures no distance
     def _exec_distance(self):
@@ -79,11 +88,12 @@ def fuzzer(tmp_path):
 
 
 ORIGINAL = b"A" * 64
-TRIMMED = ORIGINAL[:32]
+# The fake keeps every trace, so the trim_case walk (cuts 32, 16, 8, 4) ends at 4 B.
+TRIMMED = ORIGINAL[:4]
 
 
 def _seed_the_corpus(f: _FakeFuzzer) -> None:
-    save_to_corpus(ORIGINAL, f.corpus_dir, f.seen_hashes, f.bloom)
+    save_to_corpus(ORIGINAL, f.corpus_dir, f.seen_hashes)
     f.corpus.append(ORIGINAL)
     f.seed_meta[ORIGINAL] = {
         "fuzz_count": 3,
@@ -178,7 +188,7 @@ class TestTrimDeclineIsUnchanged:
 
     def test_short_seed_rejects_trim(self, fuzzer):
         tiny = b"AB"
-        save_to_corpus(tiny, fuzzer.corpus_dir, fuzzer.seen_hashes, fuzzer.bloom)
+        save_to_corpus(tiny, fuzzer.corpus_dir, fuzzer.seen_hashes)
         fuzzer.corpus.append(tiny)
         CorpusManager(fuzzer).trim_new_coverage(tiny, tiny)
         assert fuzzer.corpus == [tiny]
@@ -186,7 +196,7 @@ class TestTrimDeclineIsUnchanged:
 
 class TestRetireHelper:
     def test_moves_full_seed(self, fuzzer):
-        save_to_corpus(ORIGINAL, fuzzer.corpus_dir, fuzzer.seen_hashes, fuzzer.bloom)
+        save_to_corpus(ORIGINAL, fuzzer.corpus_dir, fuzzer.seen_hashes)
         h = hash_data(ORIGINAL)
         assert _retire_seed_file(fuzzer.corpus_dir, h) is True
         assert not (fuzzer.corpus_dir / "seeds" / h[:2] / f"id_{h}").is_file()
@@ -204,7 +214,7 @@ def test_regression_trim_rejects_lost_edges(fuzzer):
     (trimmed ⊆ current), so coverage loss passed. AFL keeps a trim only when
     the trace is unchanged."""
     _seed_the_corpus(fuzzer)
-    traces = iter([{1, 2, 3}, {1, 2}])
+    traces = itertools.chain([{1, 2, 3}], itertools.repeat({1, 2}))
     fuzzer.shm_cov.get_edge_ids = lambda: next(traces)
 
     CorpusManager(fuzzer).trim_new_coverage(ORIGINAL, ORIGINAL)

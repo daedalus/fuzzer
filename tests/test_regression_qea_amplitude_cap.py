@@ -83,9 +83,9 @@ class TestQeaLifecycleCapsOversizedSeeds:
         assert len(big_ind.amplitudes) == QEA_MAX_INPUT_BYTES * 8
         # seed_key must still key off the REAL data (matches edge_tracker's
         # keying elsewhere in the fuzzer), not the truncated bytes.
-        import hashlib
+        from fuzzer_tool.services.corpus_manager import seed_key
 
-        assert big_ind.seed_key == hashlib.sha256(oversized).hexdigest()[:16]
+        assert big_ind.seed_key == seed_key(oversized)
 
     def test_on_fuzz_result_caps_oversized_new_coverage_input(self):
         qea = QEALifecycle(pop_size=4, generation_size=10**9)

@@ -226,6 +226,21 @@ class TargetRunner:
             if fs:
                 fs.set_timeout(fs_base)
 
+    def bind_post_process(self, post) -> None:
+        """Route every exec through *post* (``afl_custom_post_process``).
+
+        Bound once as an instance attribute, so runs without a plugin pay
+        nothing. *post* returning None runs the input unchanged.
+        Example: post = lambda d: b"PP:" + d -> the target reads b"PP:abc".
+        """
+        run = self.run_target
+
+        def processed(data: bytes) -> tuple[int, str]:
+            out = post(data)
+            return run(data if out is None else out)
+
+        self.run_target = processed
+
     def run_target(self, data: bytes) -> tuple[int, str]:
         f = self.f
         # Resolve per-target SHM for multi-target mode
@@ -431,6 +446,7 @@ class TargetRunner:
             perf_counters=f._perf_counters,
             pt_session=f._pt_session,
             lbr_session=f._lbr_session,
+            input_file=f._input_file,
         )
         f._last_child_pid = pid
         if f._perf_counters:

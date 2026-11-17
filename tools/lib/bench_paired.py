@@ -61,6 +61,7 @@ from fuzzer_tool.core.exact_tests import (  # noqa: E402
     wilcoxon_signed_rank,
 )
 from fuzzer_tool.core.state_store import StateStore  # noqa: E402
+from fuzzer_tool.services.mutant_kill import KillScorer, KillSetError  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 # $FUZZ_BENCH_RESULTS keeps results out of the source tree (AGENTS.md Rule 17).
@@ -228,6 +229,13 @@ ARMS: dict[str, list[str]] = {
     # without --elo, one knob against `baseline`.
     "seed-gram": ["--seed-gram-scheduler"],
     "seed-gram-central": ["--seed-gram-scheduler", "--seed-gram-mode", "central"],
+    # FESS feature-grid seed arm (core/schedulers/seed_fess.py): sole picker vs
+    # `baseline`, and as an Elo arm vs `elo`.
+    "seed-fess": ["--seed-fess-scheduler"],
+    "elo-seed-fess": ["--elo", "--mc-bandit", "--seed-fess-scheduler"],
+    "seed-fess-inherit": ["--seed-fess-scheduler", "--fess-inherit"],
+    # Advisors (services/advisors.py): free advised moves per stage vs `baseline`.
+    "advisors": ["--advisors"],
     **{
         f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
         for pct in SEED_NEWEST_PCTS
@@ -278,6 +286,8 @@ ARMS: dict[str, list[str]] = {
     "pos-arena-pca": _ARENA + ["--pos-pca", "--pos-arena-arms", "uniform,pca"],
     # LearnAFL path mask is opt-in like kadane.
     "pos-arena-learn": _ARENA + ["--pos-learn", "--pos-arena-arms", "uniform,learn"],
+    # soksolv hotspot table is opt-in like kadane; needs cmplog (on by default).
+    "pos-arena-hotspot": _ARENA + ["--pos-hotspot", "--pos-arena-arms", "uniform,hotspot"],
     # Gravity splice donor (core/gravity.py). Only the seven corpus-crossing
     # operators change; read "Gravity splice: ... hits, refits" in a cell's
     # log before trusting a null -- a closed fit gate means prior exponents.
@@ -307,6 +317,13 @@ ARMS: dict[str, list[str]] = {
     "seed-lottery": ["--seed-lottery-scheduler"],
     "seed-lottery-lineage": ["--seed-lottery-scheduler", "--lineage"],
     "seed-lottery-currency": ["--seed-lottery-scheduler", "--seed-lottery-currency", "sqrt"],
+    # Plateau groups (core/plateau.py) as the currency instead of components.
+    "plateau-groups": [
+        "--seed-lottery-scheduler",
+        "--seed-lottery-currency",
+        "sqrt",
+        "--plateau-groups",
+    ],
     "seed-lottery-transfer": [
         "--seed-lottery-scheduler",
         "--lineage",
@@ -328,6 +345,44 @@ ARMS: dict[str, list[str]] = {
     # the arm's own synthetic edges inflate "edges". ctl is baseline again (Rule 46).
     "alloc-sizes": ["--alloc-sizes"],
     "alloc-sizes-ctl": [],
+    # GA crossover (silennai NAS: crossover r=-0.47). Paired against "ga";
+    # ctl is "ga" again (Rule 46).
+    "ga": ["--ga"],
+    "ga-no-crossover": ["--ga", "--ga-crossover-rate", "0.0"],
+    "ga-ctl": ["--ga"],
+    # FOX secant step (zero-exec operand fit). ctl is baseline again (Rule 46).
+    "fox-newton": ["--fox-newton"],
+    "fox-newton-ctl": [],
+    # Cmplog per-site record cap + campaign dedup scope (TODO "Cmplog pool
+    # frozen"). Needs --set fuzzgoat_tcg or another trace-cmp build. ctl is
+    # baseline again (Rule 46).
+    "cmp-cap-dedup": ["--cmplog-site-cap", "32", "--cmplog-dedup-scope", "campaign"],
+    "cmp-cap-dedup-ctl": [],
+    # Cmplog records in a shared binary table instead of FIFO text. Needs a
+    # trace-cmp build (--set fuzzgoat_tcg, ffmpeg). ctl is baseline again (Rule 46).
+    "cmp-rec-shm": ["--cmplog-records", "shm"],
+    "cmp-rec-shm-ctl": [],
+    # Table + campaign dedup scope: records the pool already holds are not
+    # re-sent every collect round. ctl is cmp-rec-shm-ctl (baseline).
+    "cmp-rec-shm-campaign": ["--cmplog-records", "shm", "--cmplog-dedup-scope", "campaign"],
+    # Campaign dedup on the text channel: isolates #145's CPU drop from the table.
+    "cmp-campaign": ["--cmplog-dedup-scope", "campaign"],
+    # IJON max-map + max queue. Needs an IJON_MAX-annotated target (ffmpeg_read:
+    # frames decoded per codec); inert elsewhere. ctl is baseline again (Rule 46).
+    "ijon": ["--ijon"],
+    "ijon-ctl": [],
+    # Weizz structure tags (passive, cmplog-fed) + field/chunk/repair ops.
+    # Needs cmplog live; seeds > --weizz-tags-max-len stay untagged. ctl is
+    # baseline again (Rule 46).
+    "weizz-tags": ["--weizz-tags"],
+    "weizz-tags-ctl": [],
+    # honggfuzz stack-depth novelty. ctl is baseline again (Rule 46).
+    "stack-depth-max": ["--stack-depth-max"],
+    "stack-depth-max-ctl": [],
+    # cmp_solve op: no flag; `baseline` from a tree with the op is the on arm,
+    # these two run from a tree without it (UNWIRED_ARMS). ctl pairs off vs off.
+    "cmp-solve-off": [],
+    "cmp-solve-off-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -389,6 +444,10 @@ ARM_BASELINES: dict[str, str] = {
     "seed-dpp": "baseline",
     "seed-gram": "baseline",
     "seed-gram-central": "baseline",
+    "seed-fess": "baseline",
+    "elo-seed-fess": "elo",
+    "seed-fess-inherit": "seed-fess",
+    "advisors": "baseline",
     "novel-crash-reward-abort": "abort-crash",
     "abort-crash-ctl": "abort-crash",
     "seed-branch": "elo",
@@ -412,6 +471,7 @@ ARM_BASELINES: dict[str, str] = {
     "pos-arena-emeans-revive": "pos-arena-uniform",
     "pos-arena-pca": "pos-arena-uniform",
     "pos-arena-learn": "pos-arena-uniform",
+    "pos-arena-hotspot": "pos-arena-uniform",
     "splice-gravity": "baseline",
     "elo-op-minimax": "elo",
     "wall-order": "baseline",
@@ -421,6 +481,7 @@ ARM_BASELINES: dict[str, str] = {
     "inverse-lottery-select": "minimize-2k",
     "seed-lottery": "seed-stride-cost",
     "seed-lottery-currency": "seed-lottery",
+    "plateau-groups": "seed-lottery-currency",
     "seed-lottery-lineage": "seed-lottery",
     "seed-lottery-transfer": "seed-lottery-lineage",
     "field-hmm": "baseline",
@@ -431,6 +492,24 @@ ARM_BASELINES: dict[str, str] = {
     "colorize-ctl": "baseline",
     "alloc-sizes": "baseline",
     "alloc-sizes-ctl": "baseline",
+    "ga": "baseline",
+    "ga-no-crossover": "ga",
+    "ga-ctl": "ga",
+    "fox-newton": "baseline",
+    "fox-newton-ctl": "baseline",
+    "cmp-cap-dedup": "baseline",
+    "cmp-cap-dedup-ctl": "baseline",
+    "cmp-rec-shm": "baseline",
+    "cmp-rec-shm-ctl": "baseline",
+    "cmp-rec-shm-campaign": "baseline",
+    "cmp-campaign": "baseline",
+    "ijon": "baseline",
+    "ijon-ctl": "baseline",
+    "weizz-tags": "baseline",
+    "weizz-tags-ctl": "baseline",
+    "stack-depth-max": "baseline",
+    "stack-depth-max-ctl": "baseline",
+    "cmp-solve-off-ctl": "cmp-solve-off",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
@@ -450,6 +529,9 @@ UNWIRED_ARMS = {
     "boltzmann-cost": "services/seed_picker.py: n = effective_fuzz_count(meta, mean_exec)",
     # Off arm: a tree without the op (no per-op CLI switch). 2026-10-17 used a master worktree.
     "literal-mismatch": "core/operator_registry.py: drop literal_mismatch from _CATEGORIES['dict']",
+    # On arm is `baseline` (analyse --baseline cmp-solve-off).
+    "cmp-solve-off": "core/operator_registry.py: drop cmp_solve from _CATEGORIES['adaptive']",
+    "cmp-solve-off-ctl": "core/operator_registry.py: drop cmp_solve from _CATEGORIES['adaptive']",
 }
 
 # ── Running ────────────────────────────────────────────────────────────
@@ -463,6 +545,9 @@ _UNIQUE = re.compile(r"Crashes:\s+\d+ \((\d+) unique")
 _EPS = re.compile(r"(?:Avg eps|Avg throughput):\s+([\d.]+)")
 # Run summary "Executions:        10,000": execs actually run.
 _EXECS = re.compile(r"Executions:\s+([\d,]+)")
+# Guard sites hit / instrumented, on every stats line; the bitmap is
+# cumulative, so the last line is the campaign's figure.
+_BLOCKS = re.compile(r" blocks: (\d+)/\d+")
 
 
 def _parse(log: str) -> dict:
@@ -470,7 +555,7 @@ def _parse(log: str) -> dict:
         m = rx.search(log)
         return int(m.group(1)) if m else default
 
-    return {
+    row = {
         "edges": one(_EDGES),
         "corpus": one(_CORPUS),
         "crashes": one(_CRASHES),
@@ -479,13 +564,28 @@ def _parse(log: str) -> dict:
         "execs": int(m.group(1).replace(",", "")) if (m := _EXECS.search(log)) else 0,
         "coverage_attached": _EDGES.search(log) is not None and one(_EDGES) > 0,
     }
+    # Absent, not 0: analyse skips a cell without the field (no block bitmap).
+    blocks = _BLOCKS.findall(log)
+    if blocks:
+        row["blocks"] = int(blocks[-1])
+    return row
 
 
 # Time to exposure: a cell's first exec_count per sanitizer error_type, read
 # from its crash records. tte_<kind> scores it; a kind that never fired is
 # censored at iters + 1 (later than any exec in the budget).
 TTE_PREFIX = "tte_"
-_PLAIN_METRICS = ("edges", "real_edges", "corpus", "crashes", "unique", "eps", "cpu_user")
+_PLAIN_METRICS = (
+    "edges",
+    "real_edges",
+    "blocks",
+    "corpus",
+    "crashes",
+    "unique",
+    "eps",
+    "cpu_user",
+    "kills",
+)
 
 # Synthetic edge channels (COMPCOV, dataflow, allocation sizes) set bit 31;
 # real ids never do (afl_shim.c, __AFL_SYNTH_ID_BIT).
@@ -502,6 +602,19 @@ def _real_edges(corpus: Path) -> int | None:
     if edges is None:
         return None
     return sum(1 for e in edges if not int(e) & SYNTH_ID_BIT)
+
+
+def _kill_fields(scorer: KillScorer | None, workdir: Path) -> dict[str, int]:
+    """Mutant-kill columns for one cell's corpus; none without ``--kill-set``."""
+    if scorer is None:
+        return {}
+    got = scorer.score(workdir)
+    return {
+        "kills": got.kills,
+        "kill_hangs": got.hangs,
+        "kill_flaky": got.flaky,
+        "clean_inputs": got.clean_inputs,
+    }
 
 
 def _first_crash_execs(crashes: Path) -> dict[str, int]:
@@ -548,9 +661,20 @@ def _seed_workdir(target: str, workdir: Path) -> None:
 
 
 def run_cell(
-    arm: str, target: str, flags: str, seed: int, iters: int, timeout: int, rep: int = 0
+    arm: str,
+    target: str,
+    flags: str,
+    seed: int,
+    iters: int,
+    timeout: int,
+    rep: int = 0,
+    scorer: KillScorer | None = None,
 ) -> dict:
-    """Run one campaign and return its parsed outcome."""
+    """Run one campaign and return its parsed outcome.
+
+    With *scorer* (``--kill-set``), the final corpus is also scored by the
+    mutants it kills, after the timed run: ``secs``/``cpu_user`` exclude it.
+    """
     workdir = Path(tempfile.mkdtemp(prefix=f"paired_{arm}_"))
     _seed_workdir(target, workdir)
     # Per cell: a shared crashes dir re-syncs earlier cells' signatures.
@@ -579,6 +703,7 @@ def run_cell(
         run = run_timed(cmd, timeout, cwd=REPO)
         tte = _first_crash_execs(crashes)
         real = _real_edges(workdir)
+        kills = _kill_fields(scorer, workdir)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     log = run.log
@@ -599,13 +724,27 @@ def run_cell(
     }
     if real is not None:  # absent key: analyse skips the cell, never scores 0
         row["real_edges"] = real
+    row.update(kills)
     # Short of the budget: not a result. Keep the log for diagnosis.
     if row["execs"] < iters:
         row["log"] = log
     return row
 
 
+def _open_scorer(args: argparse.Namespace) -> KillScorer | None:
+    """The ``--kill-set`` scorer, or None. Raises KillSetError on an unbuilt set."""
+    if not args.kill_set:
+        return None
+    return KillScorer.open(Path(args.kill_set), args.kill_jobs)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    try:
+        scorer = _open_scorer(args)
+    except KillSetError as exc:
+        print(f"--kill-set: {exc}", file=sys.stderr)
+        return 2
+
     # Refuse to share the machine with another campaign when asked to:
     # contention perturbs mean_exec, which the Boltzmann arm reads.
     lock = bench_lock.engage(getattr(args, "lock_single_thread", False))
@@ -637,7 +776,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     done = 0
     for arm in arms:
-        done = _run_arm(args, arm, matrix, done, total)
+        done = _run_arm(args, arm, matrix, done, total, scorer)
     if lock:
         lock.release()
     return 0
@@ -696,7 +835,14 @@ def _keep_early(out: Path, row: dict) -> None:
     )
 
 
-def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total: int) -> int:
+def _run_arm(
+    args: argparse.Namespace,
+    arm: str,
+    matrix: list,
+    done: int,
+    total: int,
+    scorer: KillScorer | None = None,
+) -> int:
     """Run every missing cell of one arm, checkpointing each; returns updated *done*."""
     out = RESULTS / f"{args.set}_{arm}.json"
     # Resume from whatever is already on disk. A full matrix is hours of
@@ -715,12 +861,14 @@ def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total:
             done += 1
             if (target, seed, rep) in have:
                 continue
-            row = run_cell(arm, target, flags, seed, args.iters, args.timeout, rep)
+            row = run_cell(arm, target, flags, seed, args.iters, args.timeout, rep, scorer)
             if "log" in row:
                 _keep_early(out, row)
                 continue
             rows.append(row)
             flag = "" if row["coverage_attached"] else "  [NO COVERAGE]"
+            if "kills" in row:
+                flag += f" kills={row['kills']}"
             print(
                 f"  [{done:>4}/{total}] {arm:<18} {Path(target).name:<18} "
                 f"seed={seed:<3} rep={rep} edges={row['edges']:<6} "
@@ -1223,6 +1371,18 @@ def main() -> int:
         ),
     )
     r.add_argument("--timeout", type=int, default=900, help="per-campaign timeout, seconds")
+    r.add_argument(
+        "--kill-set",
+        default=None,
+        help=(
+            "mutant set from `fuzzer-tool mutants-build`: also score each cell's final corpus "
+            "by mutants killed (row key `kills`, read with `analyse --metric kills`). Scored "
+            "after the timed run; secs/cpu_user exclude it"
+        ),
+    )
+    r.add_argument(
+        "--kill-jobs", type=int, default=os.cpu_count() or 1, help="parallel mutants when scoring"
+    )
     r.add_argument(
         "--restart",
         action="store_true",

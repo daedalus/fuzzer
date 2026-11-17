@@ -164,6 +164,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "region_shuffle",
         "punctuation_insert",
         "special_strings",
+        "c_source_mutate",
         "magic_values",
         "splice_common_prefix",
         "corpus_literal_insert",
@@ -348,7 +349,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "auto_extras",
         "redqueen_xform",
         "gradient_cmp",
+        "cmp_solve",
         "gradient_descent",
+        "fox_newton",
         "condstmt_solve",
         "magic_byte_search",
         "climb_hill",
@@ -363,6 +366,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "regex_bomb",
         "grammar_mutate",
         "grammar_tree_mutate",
+        "gramatron_random",
+        "gramatron_splice",
+        "gramatron_recurse",
         "fsm_regen",
         "crc_learn",
         "prng_predict",
@@ -375,6 +381,12 @@ _CATEGORIES: dict[str, set[str]] = {
 
 def _has_cmplog_pairs(fuzzer, _data) -> bool:
     return bool(getattr(fuzzer, "_cmplog", None) and fuzzer._cmplog.pairs)
+
+
+def _has_secant_fit(fuzzer, _data) -> bool:
+    """--fox-newton logged two runs of some compare site that fit a line."""
+    log = getattr(fuzzer, "_secant_log", None)
+    return bool(log is not None and log.ready())
 
 
 def _has_branch_records(fuzzer, _data) -> bool:
@@ -912,6 +924,13 @@ def _has_grammar(f, _d) -> bool:
     return bool(getattr(f, "grammar", None))
 
 
+def _is_text_input(_f, d) -> bool:
+    """c_source_mutate: source-level rules only make sense on text."""
+    from fuzzer_tool.core.mutations.generic import InputMode, input_mode  # noqa: PLC0415
+
+    return input_mode(d) is InputMode.TEXT
+
+
 def _has_delims(_f, d) -> bool:
     return _tree_mutator_has_delims(d)
 
@@ -969,6 +988,9 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     ),
     "grammar_mutate": _has_grammar,
     "grammar_tree_mutate": _has_grammar,
+    "gramatron_random": _has_grammar,
+    "gramatron_splice": _has_grammar,
+    "gramatron_recurse": _has_grammar,
     "fsm_regen": lambda f, _d: bool(getattr(f, "fsm", None)),
     "region_shuffle": _region_sized,
     # sequence edits need a message-boundary model; sniffed from the input
@@ -976,7 +998,9 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "seq_rule": _has_msgs,
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
+    "cmp_solve": _has_cmplog_pairs,
     "gradient_descent": _has_cmplog_pairs,
+    "fox_newton": _has_secant_fit,
     "condstmt_solve": _has_cmplog_pairs,
     "magic_byte_search": _has_cmplog_pairs,
     "climb_hill": _has_cmplog_pairs,
@@ -1036,6 +1060,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "rs_fix": lambda f, _d: getattr(f, "rs_nsym", None) is not None,
     # Manchester and friends; --op-line-code
     "line_code": lambda f, _d: bool(getattr(f, "op_line_code", False)),
+    "c_source_mutate": _is_text_input,
     # Grimoire (--grimoire): extend/string need generalized inputs in the book;
     # recurse also needs this parent to be one of them.
     "grimoire_extend": lambda f, _d: _grimoire_book(f) is not None and _grimoire_book(f).seeds > 0,

@@ -79,7 +79,7 @@ digraph fuzzer_tool {
     subgraph cluster_exec {
         label="3 · Execution";
         color="#d9c2c2"; fillcolor="#fbf4f4"; fontcolor="#7a4a4a";
-        runner [label="services/runner.py  +  adapters/\lforkserver · process · inprocess\lpersistent_signal · ptrace\l",
+        runner [label="services/runner.py  +  adapters/\lforkserver · process · inprocess\lpersistent_signal · ptrace\lglobal_snapshot (--snapshot-restore)\lmemfd_input (-F, --input-alias)\l",
                 fillcolor="#f2dcdc", fontcolor="#5c3232"];
         shim [label="adapters/afl_shim.c\ledge map · forkserver\lcmplog interceptors (18 libc + 11 IR)\lpc-table / CFG -> $__AFL_SANCOV_OUT\lhealth counters (core/shim_health.py)\l__fuzz_event[_at] -> $__LTL_EVENTS_OUT (--ltl)\l",
               fillcolor="#e8c9c9", fontcolor="#5c3232"];
@@ -95,9 +95,9 @@ digraph fuzzer_tool {
              fillcolor="#c6dcea", fontcolor="#22475c"];
         ltl [label="core/ltl.py  (--ltl)\lBuchi monitor over event trace\lltl:trap / ltl:lasso crash · frontier prefix\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];
-        cmplog [label="core/cmplog.py\lpairs + tokens · fired/asserted\lper callback and per call site (PC)\lwalls · progress reward\l",
+        cmplog [label="core/cmplog.py\lrecords: FIFO text or SHM table (adapters/cmplog_rec_shm.py)\lpairs + tokens · fired/asserted\lper callback and per call site (PC)\lwalls · progress reward\l",
                 fillcolor="#c6dcea", fontcolor="#22475c"];
-        infoth [label="mi · transfer_entropy · renyi · sensitivity\linteraction (2nd-order coupled bytes)\lstructure_function · critical_slowing · running_stats\lperf_event (HW counters) · pll (lock vs stall)\lhw_signals (perf max novelty · fault budget)\lpool_drift (corpus vs seed bytes)\lrecurrence (RQA limit cycle -> saturation gate)\l",
+        infoth [label="mi · transfer_entropy · renyi · sensitivity\linteraction (2nd-order coupled bytes)\lstructure_function · critical_slowing · running_stats\lperf_event (HW counters) · pll (lock vs stall)\lhw_signals (perf max novelty · fault budget)\lijon (IJON_MAX max-map novelty)\lc11 (DWARF locals seed weight)\lvalue_profile (cmp distance ids)\lpool_drift (corpus vs seed bytes)\lrecurrence (RQA limit cycle -> saturation gate)\l",
                 fillcolor="#d6e6f0", fontcolor="#22475c"];
         ledger [label="core/edge_ledger.py\lconfirmed ids → families (id >> ctx)\lfrontier · trust · tag occupancy\l",
                 fillcolor="#d6e6f0", fontcolor="#22475c"];
@@ -109,7 +109,7 @@ digraph fuzzer_tool {
     subgraph cluster_corpus {
         label="5 · Corpus lifecycle";
         color="#cfc6d8"; fillcolor="#f7f4fa"; fontcolor="#5a4a6b";
-        corpus [label="services/corpus_manager.py\ladmission · prune · sync\lga · qea · rate_distortion · bloom dedup\lstate_store (resume) · parallel workers\l",
+        corpus [label="services/corpus_manager.py\ladmission · prune · sync\lga · qea · rate_distortion · hash dedup\lstate_store (resume) · parallel workers\l",
                 fillcolor="#e6dcee", fontcolor="#453454"];
     }
 
@@ -125,6 +125,13 @@ digraph fuzzer_tool {
         color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
         obs [label="services/stats.py · stats_reporter.py · report.py\llive stat line · JSONL · --report · Comparison Profile\l",
              fillcolor="#e3e7ec", fontcolor="#242a31"];
+    }
+
+    subgraph cluster_eval {
+        label="Evaluation (offline)";
+        color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
+        mkill [label="core/ir_mutants → adapters/mutant_build · mutant_replay.c\lservices/mutant_kill (mutants-build · mutants-score)\ltools/lib/bench_paired --kill-set (metric: kills)\l",
+               fillcolor="#e3e7ec", fontcolor="#242a31"];
     }
 
     // ------------------------------------------------------------ spine
@@ -165,6 +172,7 @@ digraph fuzzer_tool {
     cmplog -> corpus [label="  cmp progress"];
     crash -> corpus [style=dashed, label="  minimized · -C variants"];
 
+    corpus -> mkill [style=dashed, label="  final corpus"];
     cov -> obs [style=dashed];
     cmplog -> obs [style=dashed];
     infoth -> obs [style=dashed];

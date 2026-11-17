@@ -406,7 +406,6 @@ class _Fuzzer:
         self.crash_allowlist: set = set()
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
-        self.bloom = None
         if parent is not None:
             self._last_parent_seed = parent
 

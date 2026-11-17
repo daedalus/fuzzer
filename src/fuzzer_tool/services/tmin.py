@@ -8,7 +8,7 @@ from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import hash_data, rehydrate_by_hash, save_crash
 from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, signal_number, stderr_crash_marker
-from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
+from fuzzer_tool.core.reducer import Oracle, Phase, Reducer, Verdict, shrink_passes
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.state_store import StateStore
 
@@ -283,10 +283,10 @@ def tmin(
                 )
                 data = candidate
 
-        # Phase 2: grammar + byte passes to a fixpoint over a cached oracle.
+        # Phase 2: grammar, message and byte passes to a fixpoint over a cached oracle.
         judge = _CrashJudge(_probe, original_sig)
         oracle = Oracle(judge.verdict, on_also=judge.keep)
-        passes = [(Phase.MAIN, ChunkPass())]
+        passes = shrink_passes()
         if grammar is not None:
             rounds = min(max_stages // 4, _TREE_ROUND_CAP)
             passes.insert(0, (Phase.MAIN, _GrammarPass(grammar, oracle, rounds)))

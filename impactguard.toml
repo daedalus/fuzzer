@@ -103,4 +103,19 @@ suppress = [
     # Pinned the os.urandom stall seed that the PRNG-bypass fix removed;
     # replaced by test_unseeded_run_skips_os_entropy.
     "tests/test_reseed_on_stall.py:TestDeriveStallSeed.test_unseeded_run_uses_os_entropy",
+    # Bloom audit 2026-11-16: the corpus bloom pre-check never changed a
+    # result (the exact set decides), so its `bloom` parameter is gone. All
+    # src/ and tools/ callers updated; the tests below covered only it.
+    "src/fuzzer_tool/adapters/filesystem.py:load_corpus",
+    "src/fuzzer_tool/adapters/filesystem.py:save_crashing_seed",
+    "src/fuzzer_tool/adapters/filesystem.py:save_irreplaceable",
+    "src/fuzzer_tool/adapters/filesystem.py:save_timeout_seed",
+    "src/fuzzer_tool/adapters/filesystem.py:save_to_corpus",
+    "tests/test_delta_corpus.py:TestDeltaSaveLoad.test_load_with_bloom",
+    "tests/test_filesystem.py:TestLoadCorpus.test_populates_bloom",
+    "tests/test_filesystem.py:TestSaveToCorpus.test_with_bloom_duplicate",
+    "tests/test_filesystem.py:TestSaveToCorpus.test_with_bloom_false_positive_path",
+    "tests/test_filesystem.py:TestSaveToCorpus.test_with_bloom_new",
+    "tests/test_filesystem_extended.py:TestLoadCorpusDelta.test_delta_with_bloom",
+    "tests/test_filesystem_extended.py:TestSaveToCorpus.test_with_bloom",
 ]

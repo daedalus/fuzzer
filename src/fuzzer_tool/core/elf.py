@@ -14,10 +14,11 @@ import enum
 import logging
 import mmap
 import os
-import re
 import struct
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
+
+import numpy as np
 
 log = logging.getLogger(__name__)
 
@@ -975,39 +976,85 @@ def trace_pc_call_sites(target: str) -> int | None:
         or None when it cannot be determined (unsupported arch, stripped,
         symbol absent, unreadable).
     """
+    return _call_sites(target, (_TRACE_PC_SYM,))
+
+
+# Clang trace-cmp callbacks (afl_shim.c Layer 2): one call per compare site.
+_TRACE_CMP_SYMS = tuple(
+    f"__sanitizer_cov_trace_{k}cmp{w}" for k in ("", "const_") for w in (1, 2, 4, 8)
+) + ("__sanitizer_cov_trace_switch",)
+
+_E8_LEN = 5  # call rel32: opcode + 4-byte displacement
+_X86_64 = 62  # e_machine EM_X86_64
+
+
+def trace_cmp_call_sites(target: str) -> int | None:
+    """Direct calls to the trace-cmp callbacks in *target* (compare sites).
+
+    Sizes the cmplog record table per target. Same scan and caveats as
+    ``trace_pc_call_sites``; None when no callback is in the symbol table.
+    """
+    return _call_sites(target, _TRACE_CMP_SYMS)
+
+
+def _call_sites(target: str, names: tuple[str, ...]) -> int | None:
+    """Count ``E8 rel32`` calls landing on any of *names* in executable sections.
+
+    None: unreadable, not x86-64 LE ELF, or none of *names* defined.
+    """
     try:
         with open(target, "rb") as f:
             elf = f.read()
-        if not _elf64_le(elf) or struct.unpack_from("<H", elf, 18)[0] != 62:
+        if not _elf64_le(elf) or struct.unpack_from("<H", elf, 18)[0] != _X86_64:
             return None
-        sym = _static_symbol_addr(elf, _TRACE_PC_SYM)
-        if sym is None:
+        syms = [a for a in (_static_symbol_addr(elf, n) for n in names) if a is not None]
+        if not syms:
             return None
-        e_shoff = struct.unpack_from("<Q", elf, 40)[0]
-        e_shentsize = struct.unpack_from("<H", elf, 58)[0]
-        e_shnum = struct.unpack_from("<H", elf, 60)[0]
-        total = 0
-        for i in range(e_shnum):
-            sh = e_shoff + i * e_shentsize
-            sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
-            sh_flags = struct.unpack_from("<Q", elf, sh + 8)[0]
-            if sh_type != 1 or not sh_flags & 0x4:  # PROGBITS + SHF_EXECINSTR
-                continue
-            sh_addr = struct.unpack_from("<Q", elf, sh + 16)[0]
-            sh_off = struct.unpack_from("<Q", elf, sh + 24)[0]
-            sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
-            code = elf[sh_off : sh_off + sh_size]
-            for m in re.finditer(b"\xe8", code):
-                at = m.start()
-                if at + 5 > len(code):
-                    break
-                rel = struct.unpack_from("<i", code, at + 1)[0]
-                if sh_addr + at + 5 + rel == sym:
-                    total += 1
-        return total
+
+        want = np.array(sorted(set(syms)), dtype=np.int64)
+        return sum(_section_calls(elf, sec, want) for sec in _exec_sections(elf))
     except (OSError, struct.error) as e:
-        log.debug("trace-pc call scan failed for %s: %s", target, e)
+        log.debug("call-site scan failed for %s: %s", target, e)
         return None
+
+
+def _exec_sections(elf: bytes):
+    """``(sh_addr, sh_off, sh_size)`` of each PROGBITS + SHF_EXECINSTR section."""
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
+        sh_flags = struct.unpack_from("<Q", elf, sh + 8)[0]
+        if sh_type != 1 or not sh_flags & 0x4:
+            continue
+        yield (
+            struct.unpack_from("<Q", elf, sh + 16)[0],
+            struct.unpack_from("<Q", elf, sh + 24)[0],
+            struct.unpack_from("<Q", elf, sh + 32)[0],
+        )
+
+
+def _section_calls(elf: bytes, sec: tuple[int, int, int], want: np.ndarray) -> int:
+    """Calls in one section whose rel32 target is in sorted *want* (vectorized)."""
+    sh_addr, sh_off, sh_size = sec
+    code = np.frombuffer(elf, np.uint8, count=sh_size, offset=sh_off)
+    if code.size < _E8_LEN:
+        return 0
+
+    at = np.flatnonzero(code[: code.size - _E8_LEN + 1] == 0xE8)
+    rel = (
+        code[at + 1].astype(np.int64)
+        | code[at + 2].astype(np.int64) << 8
+        | code[at + 3].astype(np.int64) << 16
+        | code[at + 4].astype(np.int64) << 24
+    )
+    rel = np.where(rel >= 1 << 31, rel - (1 << 32), rel)
+    dest = sh_addr + at + _E8_LEN + rel
+    hit = np.searchsorted(want, dest)
+    hit = np.minimum(hit, want.size - 1)
+    return int(np.count_nonzero(want[hit] == dest))
 
 
 def find_load_segment(elf_data: bytes, vaddr: int) -> tuple[int, int, int] | None:
@@ -1206,6 +1253,104 @@ def _find_text_section(elf: bytes) -> tuple[bytes, int, int] | None:
         if name == b".text":
             return elf[sh_offset : sh_offset + sh_size], sh_addr, sh_size
     return None
+
+
+# ── Snapshot spans (--snapshot-restore) ──────────────────────────────
+#
+#   RW PT_LOAD:  [.got][.got.plt][.data][afl_shim_data][.bss][afl_shim_bss]
+#                 └─ loader ──────┘└ span ┘└── shim ───┘└span┘└── shim ──┘
+#
+# Only target state is restored: loader tables (RELRO, GOT, init arrays),
+# shim globals (afl_shim.c section pragma) and sancov metadata are not.
+_SHF_WRITE = 0x1
+_SHF_ALLOC = 0x2
+_SHF_TLS = 0x400
+_SNAP_FLAGS = _SHF_WRITE | _SHF_ALLOC
+_PT_GNU_RELRO = 0x6474E552
+_SHIM_SECTIONS = frozenset((b"afl_shim_data", b"afl_shim_bss"))
+_SNAP_SKIP = _SHIM_SECTIONS | frozenset(
+    (
+        b".got", b".got.plt", b".dynamic", b".init_array", b".fini_array",
+        b".preinit_array", b".data.rel.ro", b".tm_clone_table",
+        b"__sancov_guards", b"__sancov_cntrs", b"__sancov_bools",
+    )
+)  # fmt: skip
+
+
+class DataRanges(NamedTuple):
+    """Link-time ``(vaddr, size)`` spans of target-owned writable data."""
+
+    spans: tuple[tuple[int, int], ...]
+    shim_isolated: bool  # shim globals are in afl_shim_{data,bss}
+
+
+def _relro(elf: bytes) -> tuple[int, int]:
+    """``[lo, hi)`` of PT_GNU_RELRO; ``(0, 0)`` when absent or out of bounds."""
+    n = len(elf)
+    e_phoff = struct.unpack_from("<Q", elf, _E_PHOFF)[0]
+    e_phentsize, e_phnum = struct.unpack_from("<HH", elf, _E_PHENTSIZE)
+    if e_phentsize < 56 or e_phoff > n or e_phnum * e_phentsize > n - e_phoff:
+        return 0, 0
+
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        if struct.unpack_from("<I", elf, off)[0] != _PT_GNU_RELRO:
+            continue
+        vaddr = struct.unpack_from("<Q", elf, off + 16)[0]
+        return vaddr, vaddr + struct.unpack_from("<Q", elf, off + 40)[0]
+    return 0, 0
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """Sort and join touching spans: fewer memmoves per restore."""
+    out: list[tuple[int, int]] = []
+    for addr, size in sorted(spans):
+        if out and out[-1][0] + out[-1][1] >= addr:
+            last, last_size = out[-1]
+            out[-1] = (last, max(last_size, addr + size - last))
+            continue
+        out.append((addr, size))
+    return tuple(out)
+
+
+def data_ranges(elf: bytes) -> DataRanges | None:
+    """Writable spans ``--snapshot-restore globals`` copies; None if malformed.
+
+    Example: probe.so -> spans ((0x4010, 0xc), (0x4024, 0xc)), shim_isolated.
+    """
+    if not _elf64_le(elf):
+        return None
+    n = len(elf)
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", elf, 58)
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return None
+    if not _shdrs_in_bounds(n, e_shoff, e_shnum, e_shentsize):
+        return None
+
+    shstr = struct.unpack_from("<Q", elf, e_shoff + e_shstrndx * e_shentsize + 24)[0]
+    relro_lo, relro_hi = _relro(elf)
+    spans: list[tuple[int, int]] = []
+    isolated = False
+
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        flags = struct.unpack_from("<Q", elf, sh + 8)[0]
+        if flags & (_SNAP_FLAGS | _SHF_TLS) != _SNAP_FLAGS:
+            continue
+
+        name_at = min(shstr + struct.unpack_from("<I", elf, sh)[0], n)
+        name = elf[name_at : name_at + 64].split(b"\x00")[0]
+        isolated |= name in _SHIM_SECTIONS
+        addr = struct.unpack_from("<Q", elf, sh + 16)[0]
+        size = struct.unpack_from("<Q", elf, sh + 32)[0]
+
+        # Skip loader/shim state and anything inside RELRO (read-only after load).
+        if name in _SNAP_SKIP or not size or relro_lo <= addr < relro_hi:
+            continue
+        spans.append((addr, size))
+
+    return DataRanges(_merge_spans(spans), isolated)
 
 
 def _word_is_noise(value: int, width: int) -> bool:
@@ -1800,6 +1945,39 @@ def detect_ctx_relative_capable(target: str) -> bool | None:
     if not names:
         return None
     return "__afl_ctx_relative_capable" in names
+
+
+def detect_ijon_capable(target: str) -> bool | None:
+    """Say whether *target*'s shim carries the IJON runtime (``ijon_max``).
+
+    Returns:
+        True when present; False when the symbol table was read and it is
+        absent (an older shim); None when no names could be read.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("IJON detection failed for %s: %s", target, e)
+        return None
+    if not names:
+        return None
+    return "ijon_max" in names
+
+
+def detect_vp_capable(target: str) -> bool | None:
+    """Say whether *target*'s shim carries value profile (``__afl_value_profile``).
+
+    True when present; False when the symbol table was read and it is
+    absent (an older shim, or no cmplog build); None when unreadable.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("value-profile detection failed for %s: %s", target, e)
+        return None
+    if not names:
+        return None
+    return "__afl_value_profile" in names
 
 
 def detect_edge_id_scheme(target: str) -> int | None:

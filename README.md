@@ -86,6 +86,10 @@ target the code that assumes its input looks random (hash tables, geometry, samp
 **Adaptive havoc**: the 11 inline havoc sub-mutations are drawn by inverse-CDF sampling from
 per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uniform draws).
 
+**Plugins**: `--custom-mutator SO` (libFuzzer `LLVMFuzzerCustomMutator`/`CrossOver`) and
+`--afl-custom-mutator PATH` (AFL++ `afl_custom_*` `.so` or Python module) run third-party
+mutators as registry operators.
+
 **FrameShift** auto-adjusts length fields after a mutation resizes the region they describe.
 
 **Grammar-aware**: format-specific structural mutations for PNG (IHDR/IDAT/CRC/filter/interlace), JPEG (SOF/DHT/DQT/DRI/SOS), BMP (header/pixel), gzip/zlib (CMF/FLG/Adler-32), **PGS** (PCS/WDS/PDS/ODS/END segment mutations), **ISO-BMFF** (box-type/size/container nesting/codec/handler mutations for MP4/MOV), **NAL** (H.264/H.265 NAL unit type/ref_idc/SPS/PPS/slice mutations), **MPEG-TS** (sync/PID/adaptation-field/PAT-PMT mutations), **ADTS** (AAC frame_length/profile/sampling-rate/channel-config mutations), **MP3** (bitrate/sampling-rate index/version/layer mutations), **Ogg** (page header_type/granule/serial/segment-table mutations), **FLV** (tag type/data_size/timestamp/stream_id mutations), **ASF** (GUID-object size/type/header-count mutations), **RIFF** (AVI/WAV chunk size/fourcc/LIST-type mutations), **Protobuf** (tag/wire-type/varint/length re-encode, field splice/duplicate/delete), **GIF** (LSD/GCT/image/extension/trailer), **WebP** (RIFF chunk type/size/VP8/VP8L/VP8X/ANMF), **WebM** (EBML element ID/size-vint/codec/nest-unnest), **ZIP** (LFH/CD/EOCD fields, crc/name/method), **AVIF** (AV1 item/property/`mdat` box mutations over the ISO-BMFF container), **SQLite** (page header/b-tree cell/freeblock/schema-page mutations — sniffed on the 16-byte magic, so the DB image must stay at offset 0), **DER** (tag/length/TLV insert/reorder for ASN.1), **ELF** (header/section/segment field mutations), **x86/x86-64** (opcode-class, modrm, imm/disp, insn delete/duplicate/swap/splice), **ARM** (A32/T32 word-level). **Format lock**: magic-prefix detection with protected-byte-tail-havoc for autoprobe targets. **Tree mutator**: Radamsa-style delimiter-based mutations (delete, duplicate, swap, stutter) with correct round-trip invariants.
@@ -102,6 +106,7 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 - **Perf counters** via `perf_event_open` (`--hw-perf`): grouped, multiplex-scaled reads on every backend; campaign-max instruction/branch novelty, per-seed energy, `--hw-instr-limit` deterministic hangs, leak restarts for `--persistent`; software events without a PMU
 - **AFLGo directed fuzzing**: harmonic call-graph + CFG distance to targets (function names, addresses, or `file.c:line` via pure-Python DWARF), with the exact AFLGo power schedule (`--schedule aflgo --t-x N`) and a runtime SHM-tail distance channel on `trace-pc` builds (`build_targets.sh --distance`)
 - **n-gram edge coverage** (`build_targets.sh --ngram`): k=2 keeps byte-identical legacy edge ids; k=3+ hashes a predecessor ring with FNV-1a for path-sensitive feedback — `png_read_ng2.so` / `png_read_ng3.so` ship with trace-pc vendored libpng/zlib and feed the K-Scheduler node channel
+- **IJON annotations** (`adapters/ijon.h`, `--ijon`): the paper's and upstream's `IJON_SET/INC/MAX/MIN/CMP/DIST/STRDIST/STATE/CTX/ENABLE/DISABLE` plus the max-input queue — the target names the state worth exploring (maze position, protocol state, checksum bits)
 - **PerfFuzz-style hit-count maxima**: a per-edge high-water mark of execution count, so an
   input that runs the *same* edges far more times than any predecessor is interesting even
   with zero new edges — the signal that finds algorithmic blowups, not just new branches
@@ -470,7 +475,7 @@ verify the link before tuning schedulers or dictionaries. See
 | `replay` | Replay a crash input |
 | `verify` | Confirm crashes with ASAN target |
 | `estimate` | Crash ETA via Chao2 incidence richness + calibration (`good_turing_estimate()` keeps its name and its old keys for compatibility; the estimator underneath is Chao2) |
-| `import` | Import corpus from AFL/libFuzzer/honggfuzz (`--autotokens FILE` also tokenizes the corpus into an AFL-format dictionary) |
+| `import` | Import corpus from AFL/libFuzzer/honggfuzz/pcap (`--format pcap`: packets as length-prefixed message seeds; `--autotokens FILE` also tokenizes the corpus into an AFL-format dictionary) |
 | `ppmd` | Analyze corpus compressibility with PPMD |
 
 ---

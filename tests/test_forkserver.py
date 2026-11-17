@@ -109,10 +109,12 @@ class TestForkserverRunner:
         assert r._ready is False
 
     def test_input_file_cleanup_with_proc(self, tmp_path):
+        from fuzzer_tool.adapters.memfd_input import MemfdInput
+
         r = ForkserverRunner("/fake/target")
-        fd, cur = tempfile.mkstemp(suffix=".cur")
-        os.close(fd)
-        r._input_file = cur
+        r._memfd = MemfdInput()
+        cur = r._input_file = r._memfd.path
+        ino = os.stat(cur).st_ino
 
         class FakeStdin:
             def write(self, data):
@@ -133,7 +135,8 @@ class TestForkserverRunner:
         r._proc = FakeProc()
         r.stop()
         assert r._input_file is None
-        assert not os.path.exists(cur)
+        # The memfd is released: its /proc path no longer names it.
+        assert not os.path.exists(cur) or os.stat(cur).st_ino != ino
 
     def test_restart_flag_prevents_recursive_restart(self):
         r = ForkserverRunner("/fake/target")

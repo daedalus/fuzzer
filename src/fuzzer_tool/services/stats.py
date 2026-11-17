@@ -25,6 +25,8 @@ import os
 import resource
 import time
 
+import numpy as np
+
 from fuzzer_tool.adapters import libc_mem
 from fuzzer_tool.core.analyzers.analyzer_elo import (
     Arena,
@@ -40,6 +42,7 @@ from fuzzer_tool.core.edge_stats import CurveShape
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.lineage import LineageTree
+from fuzzer_tool.core.novelty_hist import BUCKET_LABELS
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
@@ -758,6 +761,30 @@ class StatsReporter:
             f"{st['refits']} refits)"
         )
 
+    def _print_summary_novelty(self, f) -> None:
+        """New edges per admitted seed, e.g. ``1:48 (48%)``; mostly ``1`` = single-feature finds."""
+        hist = getattr(f, "_novelty_hist", None)
+        if hist is None or hist.total() == 0:
+            return
+        parts = [
+            f"{label}:{c} ({share:.0%})"
+            for label, c, share in zip(BUCKET_LABELS, hist.counts(), hist.shares(), strict=True)
+        ]
+        print(f"  New edges/seed:    {' '.join(parts)}")
+
+    def _print_summary_crash_cov(self, f) -> None:
+        """Crashes that hit edges no earlier crash hit; sig-dup ones hint at merged bugs."""
+        cov = getattr(f, "_crash_cov", None)
+        if cov is None:
+            return
+        st = cov.summary()
+        if st["crashes"] == 0:
+            return
+        print(
+            f"  Crash coverage:    {st['crashes']} crashes, {st['cov_new']} hit new crash "
+            f"edges ({st['sig_dup_cov_new']} sig-dup), {st['edges']} edges"
+        )
+
     def _print_summary_confirm(self, f) -> None:
         """Say what --confirm-novelty did: reruns paid, successes it withdrew."""
         if not getattr(f, "_confirm_novelty", False):
@@ -973,6 +1000,8 @@ class StatsReporter:
             )
         self._print_summary_coverage(f)
         self._print_summary_seeds(f)
+        self._print_summary_novelty(f)
+        self._print_summary_crash_cov(f)
         self._print_summary_rarity(f)
         self._print_summary_gravity(f)
 
@@ -1136,6 +1165,18 @@ class StatsReporter:
             arr = bytes(f.ptrace_cov.edge_map)
             return {i for i, v in enumerate(arr) if v}
         return set()
+
+    def get_current_edge_array(self) -> np.ndarray:
+        """Array twin of :meth:`get_current_edge_set` (no Python set built)."""
+        f = self.f
+        shm_cov = f.shm_cov
+        if f.multi_targets:
+            shm_cov = f._target_shm_covs.get(f.target) or shm_cov
+        if shm_cov:
+            return shm_cov.edge_id_array()
+        if f.ptrace_cov:
+            return np.flatnonzero(np.frombuffer(bytes(f.ptrace_cov.edge_map), dtype=np.uint8))
+        return np.empty(0, dtype=np.uint32)
 
     def format_elapsed(self) -> str:
         return _format_elapsed_fn(self.f.start_time, clock_of(self.f).time())
@@ -1462,6 +1503,17 @@ class StatsReporter:
             del f._eps_history[: -f._eps_history_max]
         return elapsed, eps
 
+    def _wall_eps(self, f) -> tuple[float, float]:
+        """Host-clock (elapsed, eps) for display; decisions keep ``_update_eps``."""
+        # Partial fuzzers (mocks, ``__new__``-built) carry no wall stamp.
+        start = getattr(f, "_wall_start", None)
+        if not isinstance(start, float):
+            start = f.start_time
+        elapsed = time.time() - start
+        base = getattr(f, "_resume_baseline_exec", 0)
+        eps = (f.exec_count - base) / elapsed if elapsed > 0 else 0
+        return elapsed, eps
+
     def _print_stats_cmplog_str(self, f) -> str:
         """Cmplog token/pair counts, evictions and comparison totals."""
         cmplog_str = ""
@@ -1474,6 +1526,11 @@ class StatsReporter:
             fired, asserted = f._cmplog.total_comparisons()
             if fired:
                 cmplog_str += f" {_format_count(fired)}c/{_format_count(asserted)}a"
+            # Records the shared table refused (--cmplog-records shm).
+            rdrop = getattr(f._cmplog, "records_dropped", 0)
+            if rdrop:
+                s, h, r, b = (_format_count(n) for n in f._cmplog.records_drops)
+                cmplog_str += f" rdrop:{_format_count(rdrop)}(s{s}/h{h}/r{r}/b{b})"
 
             # Shim record loss, from the periodic health read (direct mode only).
             shim = getattr(f, "_shim_counters", None)
@@ -2012,6 +2069,7 @@ class StatsReporter:
     def print_stats(self):
         f = self.f
         elapsed, eps = self._update_eps(f)
+        wall_elapsed, wall_eps = self._wall_eps(f)
 
         dict_str = f" | dict: {len(f.dictionary)}" if f.dictionary else ""
         markov_str = " | markov: trained" if f.markov_trained else ""
@@ -2092,9 +2150,9 @@ class StatsReporter:
         line += "\n"
         line += (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
-            f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f}"
+            f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {wall_eps:.0f}"
             f"{self._print_stats_timer_str(f)} | "
-            f"time: {elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
+            f"time: {wall_elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
             f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{kc_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"

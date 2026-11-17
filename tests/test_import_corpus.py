@@ -7,6 +7,7 @@ from fuzzer_tool.services.import_corpus import (
     import_from_afl,
     import_from_honggfuzz,
     import_from_libfuzzer,
+    import_from_pcap,
     write_dictionary,
 )
 
@@ -268,3 +269,76 @@ class TestWriteDictionary:
 
         loaded = load_dictionary(str(out))
         assert loaded == tokens
+
+
+class TestImportFromPcap:
+    @staticmethod
+    def _capture(packets) -> bytes:
+        """Classic little-endian pcap, Ethernet link type."""
+        import struct
+
+        out = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
+        for p in packets:
+            out += struct.pack("<IIII", 0, 0, len(p), len(p)) + p
+        return out
+
+    @staticmethod
+    def _seeds(corpus):
+        return sorted(f.read_bytes() for f in corpus.rglob("id_*"))
+
+    def test_windows_framed(self, tmp_path):
+        src = tmp_path / "caps"
+        src.mkdir()
+        pkts = [b"p%d" % i for i in range(5)]
+        (src / "a.pcap").write_bytes(self._capture(pkts))
+        corpus = tmp_path / "corpus"
+
+        # u32 BE prefix per packet, windows of 2: [p0 p1] [p2 p3] [p4].
+        def framed(*ps):
+            return b"".join(len(p).to_bytes(4, "big") + p for p in ps)
+
+        want = [framed(*pkts[i : i + 2]) for i in range(0, len(pkts), 2)]
+        assert import_from_pcap(str(src), str(corpus), window=2) == len(want)
+        assert self._seeds(corpus) == sorted(want)
+
+    def test_reimport_dedups(self, tmp_path):
+        src = tmp_path / "caps"
+        src.mkdir()
+        (src / "a.pcap").write_bytes(self._capture([b"aa", b"bb"]))
+        corpus = tmp_path / "corpus"
+        assert import_from_pcap(str(src), str(corpus)) == 1
+        assert import_from_pcap(str(src), str(corpus)) == 0
+
+    def test_non_capture_skipped(self, tmp_path):
+        # Adversarial: junk and empty files beside a capture write nothing.
+        src = tmp_path / "caps"
+        src.mkdir()
+        (src / "junk.pcap").write_bytes(b"not a capture at all")
+        (src / "empty.pcap").write_bytes(b"")
+        corpus = tmp_path / "corpus"
+        assert import_from_pcap(str(src), str(corpus)) == 0
+        assert self._seeds(corpus) == []
+
+    def test_nonexistent_dir(self, tmp_path):
+        assert import_from_pcap("/nonexistent", str(tmp_path / "c")) == 0
+
+    def test_cli_format_pcap(self, tmp_path):
+        import argparse
+
+        from fuzzer_tool.cli.commands import cmd_import
+
+        src = tmp_path / "caps"
+        src.mkdir()
+        (src / "a.pcap").write_bytes(self._capture([b"aa", b"bb"]))
+        corpus = tmp_path / "corpus"
+        args = argparse.Namespace(
+            source_dir=str(src),
+            corpus=str(corpus),
+            crashes=None,
+            format="pcap",
+            autotokens=None,
+            window=64,
+            framing="u16be",
+        )
+        assert cmd_import(args) == 0
+        assert self._seeds(corpus) == [b"\x00\x02aa\x00\x02bb"]

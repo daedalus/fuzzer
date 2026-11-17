@@ -225,15 +225,15 @@ def test_markov_on_trains(tmp):
 
 def test_no_auto_minimize_trim(tmp):
     """Falsification: Switch.OFF skips trimming on a FULL-mode admission."""
-    f = _make(tmp, auto_minimize=Switch.OFF)
+    f = _make(tmp, auto_minimize=Switch.OFF, trim_new_coverage=Switch.ON)
     with patch.object(f, "_trim_new_coverage") as trim:
         assert _round(f, _CLEAN, crash=False, new_cov=True) is True
     trim.assert_not_called()
 
 
 def test_auto_minimize_trims(tmp):
-    """Control: by default the same admission is trimmed."""
-    f = _make(tmp)
+    """Control: with --trim-new-coverage the same admission is trimmed."""
+    f = _make(tmp, trim_new_coverage=Switch.ON)
     with patch.object(f, "_trim_new_coverage") as trim:
         _round(f, _CLEAN, crash=False, new_cov=True)
     trim.assert_called_once()

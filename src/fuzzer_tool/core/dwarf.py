@@ -156,11 +156,19 @@ _ELFCOMPRESS_ZLIB = 1
 _CHDR_SIZE = 24
 # Largest section inflated: a few hundred KB of zlib can declare gigabytes.
 _MAX_INFLATE = 1 << 30
+# Above _FREE_INFLATE a section may expand at most _MAX_RATIO times its
+# compressed size, so memory tracks the file: real DWARF is ~3-8x, zlib's
+# ceiling ~1032x. Small sections (unrelocated .debug_addr: 150x) stay free.
+_FREE_INFLATE = 16 << 20
+_MAX_RATIO = 32
 
 
 def _inflate(payload: bytes, declared: int) -> bytes:
-    """At most ``min(declared, _MAX_INFLATE)`` bytes of a zlib section body."""
-    limit = min(declared, _MAX_INFLATE)
+    """At most ``min(declared, _MAX_INFLATE)`` bytes of a zlib section body,
+    and past ``_FREE_INFLATE`` no more than ``_MAX_RATIO`` x the payload."""
+    limit = min(declared, _MAX_INFLATE, max(_FREE_INFLATE, len(payload) * _MAX_RATIO))
+    if limit < declared:
+        log.warning("compressed debug section truncated: declares %d, reading %d", declared, limit)
     # max_length 0 means "no limit" to zlib, so an empty section is spelled out.
     if limit == 0:
         return b""
@@ -929,3 +937,173 @@ class DwarfSiteResolver(DwarfLineResolver):
             else (self._names[int(self._fid_np[i])], int(self._line_np[i]), int(self._addr_np[i]))
             for i in idx.tolist()
         ]
+
+
+# ── Function local counts (C11 seed weight) ────────────────────────────
+
+_DW_TAG_formal_parameter = 0x05
+_DW_TAG_inlined_subroutine = 0x1D
+_DW_TAG_subprogram = 0x2E
+_DW_TAG_variable = 0x34
+_DW_AT_low_pc = 0x11
+_DW_AT_addr_base = 0x73
+_DW_UT_compile = 0x01
+_DW_UT_partial = 0x03
+_LOCAL_TAGS = frozenset({_DW_TAG_formal_parameter, _DW_TAG_variable})
+_ADDRX_FORMS = frozenset(
+    {_DW_FORM_addrx, _DW_FORM_addrx1, _DW_FORM_addrx2, _DW_FORM_addrx3, _DW_FORM_addrx4}
+)
+_DEBUG_ADDR_HEADER = 8  # unit_length(4) version(2) addr_size(1) seg_size(1)
+
+
+def _abbrev_table(abbrev: bytes, off: int) -> dict[int, tuple[int, bool, list]]:
+    """Whole abbrev table at *off*: code -> (tag, has_children, [(name, form)])."""
+    table = {}
+    while off < len(abbrev):
+        code, off = _uleb(abbrev, off)
+        if code == 0:
+            break
+        tag, off = _uleb(abbrev, off)
+        children = abbrev[off] != 0
+        off += 1
+        specs = []
+        while True:
+            name, off = _uleb(abbrev, off)
+            form, off = _uleb(abbrev, off)
+            if name == 0 and form == 0:
+                break
+            specs.append((name, form))
+            if form == _DW_FORM_implicit_const:
+                _v, off = _sleb(abbrev, off)
+        table[code] = (tag, children, specs)
+    return table
+
+
+class _LocalsWalker:
+    """Walks one CU's DIE tree, counting the params + variables each
+    concrete subprogram owns. Lexical blocks are the function's own scope;
+    an inlined or nested subprogram body is somebody else's.
+
+        subprogram f (low_pc)      <- owner
+          formal_parameter a       +1
+          lexical_block
+            variable y             +1
+          inlined_subroutine g
+            variable w             (g's, not f's)
+    """
+
+    def __init__(self, sections: dict[bytes, bytes], info: bytes) -> None:
+        self._sections = sections
+        self._info = info
+        self._addr = sections.get(b".debug_addr", b"")
+        self.counts: dict[int, int] = {}
+
+    def walk_unit(self, cu_off: int) -> None:
+        info = self._info
+        unit_length = struct.unpack_from("<I", info, cu_off)[0]
+        end = cu_off + 4 + unit_length
+        version = struct.unpack_from("<H", info, cu_off + 4)[0]
+        if version >= 5:
+            if info[cu_off + 6] not in (_DW_UT_compile, _DW_UT_partial):
+                return  # type/skeleton units hold no code
+            addr_size = info[cu_off + 7]
+            abbrev_off = struct.unpack_from("<I", info, cu_off + 8)[0]
+            off = cu_off + 12
+        else:
+            abbrev_off = struct.unpack_from("<I", info, cu_off + 6)[0]
+            addr_size = info[cu_off + 10]
+            off = cu_off + 11
+
+        abbrevs = _abbrev_table(self._sections.get(b".debug_abbrev", b""), abbrev_off)
+        self._walk_dies(abbrevs, off, end, addr_size)
+
+    def _walk_dies(self, abbrevs, off: int, end: int, addr_size: int) -> None:
+        # stack entry: (tag, owner low_pc or None). The owner is inherited
+        # through lexical blocks and cut by inlined/nested subprograms.
+        stack: list[tuple[int, int | None]] = []
+        addr_base = _DEBUG_ADDR_HEADER
+        while off < end:
+            code, off = _uleb(self._info, off)
+            if code == 0:
+                if stack:
+                    stack.pop()
+                continue
+
+            tag, children, specs = abbrevs[code]
+            attrs, off = self._read_attrs(specs, off, addr_size)
+            if not stack and _DW_AT_addr_base in attrs:
+                addr_base = attrs[_DW_AT_addr_base]
+
+            owner = self._owner(tag, attrs, stack, addr_base, addr_size)
+            if tag in _LOCAL_TAGS and owner is not None:
+                self.counts[owner] = self.counts.get(owner, 0) + 1
+            if children:
+                stack.append((tag, owner))
+
+    def _owner(self, tag: int, attrs: dict, stack, addr_base: int, addr_size: int) -> int | None:
+        parent = stack[-1][1] if stack else None
+        if tag == _DW_TAG_inlined_subroutine:
+            return None
+        if tag != _DW_TAG_subprogram:
+            return parent
+
+        low = self._low_pc(attrs, addr_base, addr_size)
+        if low is not None:
+            self.counts.setdefault(low, 0)
+        return low
+
+    def _low_pc(self, attrs: dict, addr_base: int, addr_size: int) -> int | None:
+        entry = attrs.get(_DW_AT_low_pc)
+        if entry is None:
+            return None
+
+        form, value = entry
+        if form not in _ADDRX_FORMS:
+            return value
+        at = addr_base + value * addr_size
+        if at + addr_size > len(self._addr):
+            return None
+        return int.from_bytes(self._addr[at : at + addr_size], "little")
+
+    def _read_attrs(self, specs, off: int, addr_size: int) -> tuple[dict, int]:
+        # Only low_pc (with its form) and addr_base are kept; the rest is
+        # read to advance past it.
+        attrs: dict = {}
+        for name, form in specs:
+            value, off = _read_attr(self._sections, form, self._info, off, addr_size=addr_size)
+            if name == _DW_AT_low_pc:
+                attrs[name] = (form, value)
+            elif name == _DW_AT_addr_base:
+                attrs[name] = value
+        return attrs, off
+
+
+def function_local_counts(target: str) -> dict[int, int]:
+    """Concrete function low_pc (ELF vaddr) -> params + locals it owns.
+
+    AFL++'s C11 pass counts allocas before mem2reg, i.e. params and locals;
+    DWARF records the same set. Empty when there is no debug info or the
+    file is unreadable. Example: ``void f(int a) { int b; }`` -> ``{f: 2}``.
+    """
+    try:
+        sections = _elf_sections(Path(target).read_bytes())
+    except OSError as e:
+        log.warning("Cannot read target ELF: %s", e)
+        return {}
+
+    info = sections.get(b".debug_info")
+    if not info:
+        return {}
+
+    walker = _LocalsWalker(sections, info)
+    cu_off = 0
+    while cu_off + 4 <= len(info):
+        unit_length = struct.unpack_from("<I", info, cu_off)[0]
+        if unit_length in (0, 0xFFFFFFFF):
+            break
+        try:
+            walker.walk_unit(cu_off)
+        except (struct.error, IndexError, KeyError, ValueError):
+            log.debug("DWARF locals walk failed at CU 0x%x", cu_off, exc_info=True)
+        cu_off += 4 + unit_length
+    return walker.counts

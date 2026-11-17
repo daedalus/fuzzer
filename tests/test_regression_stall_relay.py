@@ -44,6 +44,7 @@ class _Relay:
         self._stall_cycle_edges = 0
         self._stall_cycle_execs = 0
         self._stall_release_reason = None
+        self._vp = None  # --value-profile off: the engage hook is a no-op
         self._cumulative_edges = 0
         self._edge_tracker = types.SimpleNamespace(
             get_cumulative_edge_count=lambda: self._cumulative_edges
@@ -53,6 +54,7 @@ class _Relay:
             "_stall_recovery_exit",
             "_stall_note_coverage",
             "_stall_relay_stats",
+            "_vp_on_stall",
         ):
             setattr(self, name, getattr(Fuzzer, name).__get__(self))
 

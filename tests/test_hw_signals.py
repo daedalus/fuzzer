@@ -97,6 +97,7 @@ def _round(hw_max, deltas, timeout=False, crash=False):
         _perf_novelty=False,
         _perf_novelty_hits=0,
         _hw_max=hw_max,
+        _ijon=None,
         _last_perf_deltas=deltas,
     )
     r = FuzzRound(f, b"seed")

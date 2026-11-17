@@ -26,17 +26,32 @@ import logging
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 
+from fuzzer_tool.adapters.memfd_input import MemfdInput
 from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
 from fuzzer_tool.adapters.process import _clean_env
+from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
 from fuzzer_tool.core.elf import AflMode, detect_afl_modes
 
 log = logging.getLogger(__name__)
 
 _FUZZ_LOADER_BIN = os.path.join(os.path.dirname(__file__), "fuzz_loader")
+
+# fuzz_loader.c MAX_ARGS / MAX_LINE: one "ARG <value>\n" line per entry.
+_MAX_ARGS = 64
+_MAX_ARG_LEN = 4096 - len("ARG ") - 1
+FILE_PLACEHOLDER = "{file}"
+
+
+def _check_argv(argv: list[str]) -> None:
+    """Reject what the line protocol cannot carry, before any process starts."""
+    if len(argv) > _MAX_ARGS:
+        raise ValueError(f"forkserver argv: {len(argv)} entries, max {_MAX_ARGS}")
+    for arg in argv:
+        if "\n" in arg or len(arg.encode()) > _MAX_ARG_LEN:
+            raise ValueError(f"forkserver argv entry not sendable: {arg!r}")
 
 
 def _drain_stream(stream, sink: list) -> None:
@@ -172,7 +187,17 @@ class ForkserverRunner:
         timeout: float = 5.0,
         env: dict[str, str] | None = None,
         perf_counters=None,
+        argv: list[str] | None = None,
+        input_file: MemfdInput | None = None,
     ):
+        """*argv*: target arguments, ``{file}`` -> the input path (``-F`` mode).
+
+        None keeps ``<target> <input>`` with stdin from the same file.
+        *input_file*: the caller's memfd, staged into per exec instead of one
+        of our own, so ``$FUZZ_INPUT_PATH`` names what the target reads.
+        """
+        self._shared_input = input_file
+        self._argv = argv
         self.target = target
         # Attached to the loader before INIT, inherited by every child it
         # forks: an exited child's counts fold into the loader's counters.
@@ -193,10 +218,16 @@ class ForkserverRunner:
         self.capabilities: frozenset[str] = frozenset()
         self._last_stderr: str = ""
         self._input_file: str | None = None
+        self._memfd: MemfdInput | None = None
         self._restarting = False
         self._stderr_lines: list[str] = []
         self._stderr_thread: threading.Thread | None = None
         self._reader: PipeReader | None = None
+        # --respawn-backoff pacing; the null object restarts at once.
+        self._backoff = NO_BACKOFF
+        # Last: __del__ -> stop() needs every attribute above when this raises.
+        if argv is not None:
+            _check_argv(argv)
 
     def start(self) -> bool:
         if self._proc and self._proc.poll() is None:
@@ -207,9 +238,11 @@ class ForkserverRunner:
             log.warning("fuzz_loader binary not available")
             return False
 
+        # Memory-backed input: the loader rewrites it per exec, no disk I/O.
         if self._input_file is None:
-            fd, self._input_file = tempfile.mkstemp(suffix=".cur", prefix="fuzz_fork_")
-            os.close(fd)
+            if self._shared_input is None:
+                self._memfd = MemfdInput()
+            self._input_file = (self._shared_input or self._memfd).path
 
         # Same env treatment run_target_fast() gives its children: merge the
         # caller's overrides over os.environ, then strip the LD_PRELOAD
@@ -259,8 +292,11 @@ class ForkserverRunner:
         # then substituted 5s -- so asking for a tighter timeout silently
         # produced a 125x looser one. The loader parses this with strtod.
         init = f"INIT {self.target} {self.function_name} {self._input_file} {self.timeout:.6f}\n"
+        args = "".join(
+            f"ARG {a.replace(FILE_PLACEHOLDER, self._input_file)}\n" for a in self._argv or ()
+        )
         try:
-            self._proc.stdin.write(init.encode())
+            self._proc.stdin.write((args + init).encode())
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
             log.warning("Forkserver: failed to send INIT")
@@ -275,6 +311,10 @@ class ForkserverRunner:
             # identical in every mode, so nothing branches on it.
             self.exec_mode = parts[1] if len(parts) > 1 else ""
             self.capabilities = frozenset(parts[2:])
+            if self._argv is not None and "argv" not in self.capabilities:
+                log.warning("Forkserver: loader ignores ARG lines, cannot pass argv")
+                return False
+            self._backoff.started()
             log.info(
                 "Forkserver started: %s (mode=%s, caps=%s)",
                 self.target,
@@ -285,6 +325,16 @@ class ForkserverRunner:
 
         log.warning("Forkserver failed to start: %r", resp)
         return False
+
+    def attach_backoff(self, backoff) -> None:
+        """Pace this loader's restarts (--respawn-backoff)."""
+        self._backoff = backoff
+        backoff.started()
+
+    @property
+    def input_path(self) -> str | None:
+        """Path the target reads the input from (memfd), None before start()."""
+        return self._input_file
 
     def _drain_stderr(self):
         """Kept for callers/tests that invoke it directly.
@@ -347,6 +397,7 @@ class ForkserverRunner:
 
         self._restarting = True
         try:
+            self._backoff.failed(Failure.DEATH)
             if self.start():
                 return self.run_one(data)
         finally:
@@ -470,10 +521,11 @@ class ForkserverRunner:
         # would otherwise keep the stderr-drain thread blocked forever,
         # leaving the process permanently multi-threaded.
         _close_streams(proc)
-        if self._input_file and os.path.exists(self._input_file):
-            with contextlib.suppress(OSError):
-                os.unlink(self._input_file)
-            self._input_file = None
+        # The caller's memfd stays open: it owns it.
+        self._input_file = None
+        if self._memfd is not None:
+            self._memfd.close()
+            self._memfd = None
 
     def __del__(self):
         self.stop()

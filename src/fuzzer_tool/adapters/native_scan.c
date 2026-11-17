@@ -9,6 +9,7 @@
  *   SHM edge table --fs_live_fold--> both of the above in one call
  *   cmplog counters --fs_drain_counts / fs_drain_sites--> deltas, zeroed
  *   input bytes --fs_mi_bump--> CrashMITracker histograms + running sums
+ *   sorted keys (S+ tree) + queries --fs_splus_lb--> lower_bound per query
  *
  * Layouts mirror adapters/shm.py (_ENTRY_DTYPE) and adapters/cmp_shm.py
  * (_SITE). Pure code, no state: not linked into targets.
@@ -228,3 +229,92 @@ long fs_mi_bump(const uint8_t *v, long n, long is_crash, const struct mi_state *
     }
     return n;
 }
+
+/*
+ * S+ tree lower_bound (curiouscoding.nl/posts/static-search-tree), x86 AVX2.
+ *
+ *   tree = [root level | ... | last internal level | leaf]   (64-byte aligned)
+ *   off[l] = start of level l in int64s; off[h] = leaf.
+ *
+ * Leaf = the sorted keys padded to SP_B with INT64_MAX. Internal node k of a
+ * level holds the first key of children 1..8 (child 0 needs none); its
+ * children are nodes 9k..9k+8 of the next level. Per node: count keys < q
+ * (two cmpgt + movemask + popcount), child = 9k + count. Fixed depth, no
+ * data-dependent branch; the answer is leaf_node * 8 + count, because leaves
+ * are contiguous: "all 8 below q" lands on the next leaf's first slot.
+ *
+ * SP_LANES queries walk in lockstep so their cache misses overlap.
+ * fs_splus_ok() gates the call: 0 off x86 or without AVX2/POPCNT.
+ */
+#define SP_B 8
+#define SP_LANES 16
+
+#if defined(__x86_64__)
+#include <immintrin.h>
+
+#define SP_TARGET __attribute__((target("avx2,popcnt")))
+
+SP_TARGET static inline long sp_count(const int64_t *node, __m256i x) {
+    __m256i lo = _mm256_load_si256((const __m256i *)node);
+    __m256i hi = _mm256_load_si256((const __m256i *)(node + 4));
+    int m = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpgt_epi64(x, lo)))
+          | _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpgt_epi64(x, hi))) << 4;
+    return __builtin_popcount(m);
+}
+
+/* One query, for the tail that does not fill a lockstep batch. */
+SP_TARGET static long sp_one(const int64_t *tree, const int64_t *off, long h, int64_t q) {
+    __m256i x = _mm256_set1_epi64x(q);
+    long k = 0;
+    for (long l = 0; l < h; l++)
+        k = k * (SP_B + 1) + sp_count(tree + off[l] + k * SP_B, x);
+    return k * SP_B + sp_count(tree + off[h] + k * SP_B, x);
+}
+
+SP_TARGET long fs_splus_lb(const int64_t *tree, const int64_t *off, long h,
+                           const int64_t *q, long m, int64_t *out) {
+    const int64_t *leaf = tree + off[h];
+    long j = 0;
+
+    for (; j + SP_LANES <= m; j += SP_LANES) {
+        long k[SP_LANES];
+        __m256i x[SP_LANES];
+        for (int i = 0; i < SP_LANES; i++) {
+            k[i] = 0;
+            x[i] = _mm256_set1_epi64x(q[j + i]);
+        }
+
+        /* One level for every lane, then prefetch each lane's next node. */
+        for (long l = 0; l < h; l++) {
+            const int64_t *level = tree + off[l], *next = tree + off[l + 1];
+            for (int i = 0; i < SP_LANES; i++) {
+                k[i] = k[i] * (SP_B + 1) + sp_count(level + k[i] * SP_B, x[i]);
+                __builtin_prefetch(next + k[i] * SP_B);
+            }
+        }
+
+        for (int i = 0; i < SP_LANES; i++)
+            out[j + i] = k[i] * SP_B + sp_count(leaf + k[i] * SP_B, x[i]);
+    }
+
+    for (; j < m; j++)
+        out[j] = sp_one(tree, off, h, q[j]);
+    return m;
+}
+
+long fs_splus_ok(void) {
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt");
+}
+
+#else
+
+long fs_splus_lb(const int64_t *tree, const int64_t *off, long h,
+                 const int64_t *q, long m, int64_t *out) {
+    (void)tree, (void)off, (void)h, (void)q, (void)m, (void)out;
+    return -1;
+}
+
+long fs_splus_ok(void) { return 0; }
+
+#endif

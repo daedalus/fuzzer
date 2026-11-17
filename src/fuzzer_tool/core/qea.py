@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.mutations import crossover
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
@@ -112,6 +113,21 @@ def _bits_to_bytes(bits: list[int]) -> bytes:
 # ── Individual ─────────────────────────────────────────────────────────
 
 
+def _current_key(key: str, best_hex: str) -> str:
+    """Migrate a pre-2026-11-14 sha256 seed key to key16.
+
+    Recoverable only while best_collapsed is still the original seed
+    (uncapped, not yet evolved); otherwise the original is gone and the
+    stale key is kept until the individual is culled.
+    """
+    if not key or not best_hex:
+        return key
+    best = bytes.fromhex(best_hex)
+    if key != hashlib.sha256(best).hexdigest()[:16]:
+        return key
+    return key16(best)
+
+
 @dataclass
 class QEAIndividual:
     """A QEA individual: qubit-amplitude representation per bit.
@@ -128,7 +144,7 @@ class QEAIndividual:
         generation: Generation this individual was created in.
         best_collapsed: Best concrete byte string found so far.
         best_fitness: Fitness of the best collapsed output.
-        seed_key: SHA-256 hash prefix of best_collapsed.
+        seed_key: XXH64 key (core.hashing.key16) of best_collapsed.
         crash: Whether this individual triggered a crash.
         coupling: Optional per-byte intra-byte coupling tensor, shape
             (num_bytes, 8, 8). None (the default) means this individual
@@ -156,7 +172,7 @@ class QEAIndividual:
 
     def __post_init__(self):
         if not self.seed_key and self.best_collapsed:
-            self.seed_key = hashlib.sha256(self.best_collapsed).hexdigest()[:16]
+            self.seed_key = key16(self.best_collapsed)
         # Ensure amplitudes are always ndarray
         if isinstance(self.amplitudes, list):
             self.amplitudes = np.array(self.amplitudes, dtype=np.float64)
@@ -208,7 +224,7 @@ class QEAIndividual:
             generation=d.get("generation", 0),
             best_collapsed=bytes.fromhex(bc) if bc else b"",
             best_fitness=d.get("best_fitness", 0.0),
-            seed_key=d.get("seed_key", ""),
+            seed_key=_current_key(d.get("seed_key", ""), bc),
             crash=d.get("crash", False),
             coupling=_coupling_from_state(coupling),
         )
@@ -840,7 +856,7 @@ class QEALifecycle:
             # seed_key is keyed on the corpus's original hash (edge_tracker
             # tracks seeds by their real content), so hash before capping —
             # only the amplitude/best_collapsed representation is bounded.
-            seed_key = hashlib.sha256(data).hexdigest()[:16]
+            seed_key = key16(data)
             edge_set = edge_tracker.seed_edges.get(seed_key, set())
             capped = _qea_cap(data)
             ind = QEAIndividual(
@@ -993,7 +1009,7 @@ class QEALifecycle:
             # Hash the real data for seed_key (matches edge_tracker's
             # keying), but cap what actually gets converted to amplitudes —
             # see QEA_MAX_INPUT_BYTES.
-            seed_key = hashlib.sha256(data).hexdigest()[:16]
+            seed_key = key16(data)
             capped = _qea_cap(data)
             new_ind = QEAIndividual(
                 amplitudes=_bias_amplitudes_from(capped, strong_prob=self.strong_bias),

@@ -22,6 +22,7 @@ from collections.abc import Iterable, Mapping
 
 import numpy as np
 
+from fuzzer_tool.adapters import native_scan
 from fuzzer_tool.core.edge_matrix import DEFAULT_REFIT_INTERVAL, RefitCadence
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
 
@@ -73,6 +74,7 @@ class EdgeClusters:
     def _reset(self) -> None:
         self._canon = EdgeCanonicalizer()
         self._heads = _EMPTY  # class head edge ids, ascending
+        self._head_index = native_scan.sorted_index(_EMPTY)
         self._owners = _EMPTY  # seeds per class
         self._sizes = _EMPTY  # edges per class
         self._leader = _EMPTY  # class index of each class's cluster leader
@@ -119,6 +121,7 @@ class EdgeClusters:
         edge_cls = cls[first]
 
         self._heads, self._owners = heads, owners
+        self._head_index = native_scan.sorted_index(heads)
         self._sizes = np.bincount(edge_cls, minlength=n_cls)
         self._singleton_edges = int(np.count_nonzero(owners[edge_cls] == 1))
         self._leader = self._medoid = np.arange(n_cls)
@@ -196,7 +199,7 @@ class EdgeClusters:
         if not self._heads.size:
             return np.full(len(edges), -1, dtype=np.int64)
         heads = self._canon.class_array(np.asarray(edges, dtype=np.int64))
-        at = np.searchsorted(self._heads, heads).clip(max=self._heads.size - 1)
+        at = self._head_index.lower_bound(heads).clip(max=self._heads.size - 1)
         return np.where(self._heads[at] == heads, at, -1)
 
     def _seen(self, edges: Iterable[int]) -> np.ndarray:
@@ -207,10 +210,20 @@ class EdgeClusters:
         """Head edge id of *edge*'s class (the edge itself if unseen)."""
         return self._canon.class_of(edge)
 
+    def _class_at(self, edge: int) -> int:
+        """Class index of one edge; -1 if unseen.
+
+        Scalar path: a dict lookup and one array-method search, ~10x under
+        the batch round trip (``_seen``: wrap, two searches, unwrap).
+        """
+        head = self._canon.class_of(edge)
+        i = int(self._heads.searchsorted(head))
+        return i if i < self._heads.size and self._heads[i] == head else -1
+
     def cluster_of(self, edge: int) -> int:
         """Head edge id of *edge*'s cluster leader; -1 if unseen."""
-        idx = self._seen([edge])
-        return int(self._heads[self._leader[idx[0]]]) if idx.size else -1
+        i = self._class_at(edge)
+        return int(self._heads[self._leader[i]]) if i >= 0 else -1
 
     def rare_classes(self, edges: Iterable[int], max_owners: int = RARE_OWNERS) -> int:
         """Distinct classes among *edges* held by at most *max_owners* seeds."""
@@ -224,8 +237,8 @@ class EdgeClusters:
 
     def medoid_of(self, edge: int) -> int:
         """Head edge id of *edge*'s cluster medoid; -1 if unseen."""
-        idx = self._seen([edge])
-        return int(self._heads[self._medoid[idx[0]]]) if idx.size else -1
+        i = self._class_at(edge)
+        return int(self._heads[self._medoid[i]]) if i >= 0 else -1
 
     def gaps(self, edges: Iterable[int], limit: int = GAP_LIMIT) -> list[int]:
         """Head edges of member classes *edges* lack, in clusters whose medoid they hold.
