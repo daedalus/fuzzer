@@ -15,6 +15,7 @@ from fuzzer_tool.adapters.shm import SIZEOF_ENTRY
 from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strategy_display_name
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD, fit_tracker
+from fuzzer_tool.core.edge_density import edges_per_bit
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.shim_health import Attach, health_issues
 from fuzzer_tool.core.size_bloat import seed_size_bloat
@@ -979,7 +980,7 @@ def _seed_contribution(f) -> str:
         fc = meta.get("fuzz_count", 0)
         if ce > 0:
             name = _preview(seed, 40)
-            ranked.append((name, ce, fc))
+            ranked.append((name, ce, fc, edges_per_bit(ce, len(seed))))
 
     if not ranked:
         return ""
@@ -994,9 +995,11 @@ def _seed_contribution(f) -> str:
 
     top_n = min(15, len(ranked))
     lines.append(f"  Top {top_n} seeds by unique edges discovered:")
-    for i, (name, ce, fc) in enumerate(ranked[:top_n], 1):
+    for i, (name, ce, fc, epb) in enumerate(ranked[:top_n], 1):
         pct = ce / total_edges * 100 if total_edges else 0
-        lines.append(f"    {i:>2d}. [{ce:>3d} edges, {pct:>5.1f}%] fuzzed {fc:>3d}x  {name}")
+        lines.append(
+            f"    {i:>2d}. [{ce:>3d} edges, {pct:>5.1f}%, {epb:.3f} e/bit] fuzzed {fc:>3d}x  {name}"
+        )
 
     total_cov_seeds = len(ranked)
     lines.append(f"\n  {total_cov_seeds} of {len(f.corpus)} seeds contributed new coverage")
