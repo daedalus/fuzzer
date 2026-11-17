@@ -29,18 +29,48 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import enum
 import os
 import stat
 import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import chrome_cache_seeds as ccs
 from chrome_cache_seeds import Media
 
+from fuzzer_tool.core.rand_pool import RandPool
 
-def walk(paths: Iterable[Path]) -> Iterator[Path]:
-    """Files under *paths*: per directory its files then subdirs, both sorted.
+# Drawn seeds stay printable and pasteable.
+MAX_SEED = (1 << 32) - 1
+
+
+class WalkOrder(enum.Enum):
+    """Order of files and subdirectories within each directory (--order)."""
+
+    SORTED = "sorted"
+    RANDOM = "random"
+
+
+def arranger(order: WalkOrder, seed: int) -> Callable[[list], None]:
+    """In-place list orderer for walk(): sort, or sort then shuffle with *seed*.
+
+    Sorting first makes the shuffle depend on the seed only, not on the
+    order the filesystem lists entries in: same seed, same walk, any machine.
+    """
+    if order is WalkOrder.SORTED:
+        return list.sort
+    rng = RandPool(seed)
+
+    def shuffled(items: list) -> None:
+        items.sort()
+        rng.shuffle(items)
+
+    return shuffled
+
+
+def walk(paths: Iterable[Path], arrange: Callable[[list], None] = list.sort) -> Iterator[Path]:
+    """Files under *paths*: per directory its files then subdirs, each list ordered by *arrange*.
 
     A file argument is yielded as is. Directory symlinks are listed by os.walk
     but not entered, so a link back to an ancestor cannot loop.
@@ -50,8 +80,9 @@ def walk(paths: Iterable[Path]) -> Iterator[Path]:
             yield path
             continue
         for top, dirs, files in os.walk(path, followlinks=False):
-            dirs.sort()  # in place: os.walk descends in this order
-            for name in sorted(files):
+            arrange(dirs)  # in place: os.walk descends in this order
+            arrange(files)
+            for name in files:
                 yield Path(top) / name
 
 
@@ -80,13 +111,14 @@ def iter_dir_seeds(
     stats: ccs.ScanStats,
     skip: frozenset[Path] = frozenset(),
     max_size: int = ccs.NO_LIMIT,
+    arrange: Callable[[list], None] = list.sort,
 ) -> Iterator[tuple[Media, bytes]]:
     """(media, bytes) of every non-empty file of the *wanted* types, in walk order.
 
     A wanted file over *max_size* bytes (file size, before *max_bytes*) is
     skipped and counted in stats.too_big.
     """
-    for path in walk(paths):
+    for path in walk(paths, arrange):
         if path.resolve() in skip:
             continue
         try:
@@ -109,8 +141,19 @@ def iter_dir_seeds(
 def _parse(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("paths", type=Path, nargs="+", help="directories (walked) or files")
+    ap.add_argument(
+        "--order",
+        choices=[o.value for o in WalkOrder],
+        default=WalkOrder.SORTED.value,
+        help="sorted (default) or random: shuffle the paths, and each directory's files and subdirs",
+    )
+    ap.add_argument("--seed", type=int, help="seed for --order random (default: drawn and printed)")
     ccs.add_send_args(ap)
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    args.order = WalkOrder(args.order)
+    if args.seed is not None and args.order is not WalkOrder.RANDOM:
+        ap.error("--seed needs --order random")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -120,12 +163,19 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         print(f"[-] no such file: {', '.join(missing)}", file=sys.stderr)
         return 1
-    for path in args.paths:
+    # Ifs up: the ordering is chosen once and bound into walk().
+    seed = args.seed if args.seed is not None else RandPool().randint(0, MAX_SEED)
+    arrange = arranger(args.order, seed)
+    paths = list(args.paths)
+    if args.order is WalkOrder.RANDOM:
+        arrange(paths)
+        print(f"[*] walk order: random (seed {seed})")
+    for path in paths:
         print(f"[*] walking: {path}")
 
     stats = ccs.ScanStats()
     skip = frozenset({args.sent_bloom.resolve()}) if args.sent_bloom else frozenset()
-    found = iter_dir_seeds(args.paths, args.types, args.max_bytes, stats, skip, args.max_size)
+    found = iter_dir_seeds(paths, args.types, args.max_bytes, stats, skip, args.max_size, arrange)
     return ccs.send_seeds(ccs.unique(found, stats), args, stats)
 
 
