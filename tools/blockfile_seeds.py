@@ -45,6 +45,15 @@ from pathlib import Path
 import chrome_cache_seeds as ccs
 from chrome_cache_seeds import Media
 
+# _end_of() result: the message runs past the end of the data.
+TRUNCATED = -1
+
+# Magic search span per step: first seeds come out without reading a whole disk.
+SCAN_WINDOW = 64 << 20
+# Bytes between "scanned X of Y GiB" lines.
+GIB = 1 << 30
+PROGRESS_BYTES = GIB
+
 # Inputs that mmap: regular files and block devices (sized by seeking).
 READABLE_KINDS = frozenset({stat.S_IFREG, stat.S_IFBLK})
 NOT_A_DISK_KINDS = {
@@ -256,8 +265,8 @@ def _mp4_end(data, start: int) -> int:
             _need(data, p, MP4_LARGE_HEADER)
             (size,) = struct.unpack_from(">Q", data, p + 8)
             header = MP4_LARGE_HEADER
-        elif size == 0:  # box runs to the end of the file
-            return n
+        elif size == 0:  # "to end of file": on a disk, the rest of the disk
+            raise _Truncated
         if size < header:
             return p
 
@@ -319,8 +328,8 @@ def _webm_children_end(data, p: int) -> int:
         if ident not in WEBM_SEGMENT_CHILDREN:
             return p
         size, q = _ebml_size(data, q)
-        if size is None:  # live stream cluster: runs to the end
-            return n
+        if size is None:  # live stream cluster: end unknown
+            raise _Truncated
         p = q + size
         if p > n:
             raise _Truncated
@@ -339,53 +348,136 @@ ENDS: dict[Media, Callable[[object, int], int]] = {
 
 # -------------------------------------------------------------------- scanner
 class _Finder:
-    """Next magic at or after a position; caches each probe's last hit."""
+    """Earliest magic in a bounded window; caches each probe's result.
+
+    Windows bound every find(): a rare magic is never searched to the end of a
+    disk before the first seed goes out. Per probe, a hit at or after the
+    window start is reused; a miss remembers how far it searched.
+    """
 
     def __init__(self, data) -> None:
         self._data = data
-        self._next = [-1] * len(PROBES)  # file start of each probe's next hit
+        self._n = len(data)
+        self._hit: list[int | None] = [None] * len(PROBES)  # file start of the probe's next hit
+        self._upto = [0] * len(PROBES)  # starts below this were searched (when no hit)
 
     def next(self, pos: int) -> tuple[int, Media] | None:
-        """Earliest (start, media) with start >= pos, or None."""
-        best: tuple[int, Media] | None = None
+        """Earliest (start, media) with start >= pos, or None; searched window by window."""
+        while pos < self._n:
+            hit, hi = self.in_window(pos)
+            if hit is not None:
+                return hit
+            pos = hi
+        return None
+
+    def in_window(self, pos: int) -> tuple[tuple[int, Media] | None, int]:
+        """(earliest (start, media) in [pos, end), or None; end of the window)."""
+        hi = min(pos + SCAN_WINDOW, self._n)
+        hits, upto = self._hit, self._upto
+        best, best_media = hi, None
+
+        # Hot loop (once per message): cached hit and cached miss are checked
+        # inline; only a real search pays for a call.
         for i, (magic, back, media) in enumerate(PROBES):
-            if self._next[i] < pos:
-                hit = self._data.find(magic, pos + back)
-                self._next[i] = hit - back if hit >= 0 else len(self._data) + 1
-            start = self._next[i]
-            if start <= len(self._data) and (best is None or start < best[0]):
-                best = (start, media)
-        return best
+            hit = hits[i]
+            if hit is None or hit < pos:
+                frm = pos if hit is not None else max(pos, upto[i])
+                if frm >= hi:
+                    continue
+                hit = self._search(i, magic, back, frm, hi)
+                if hit is None:
+                    continue
+            if hit < best:
+                best, best_media = hit, media
+
+        return ((best, best_media) if best_media is not None else None), hi
+
+    def _search(self, i: int, magic: bytes, back: int, frm: int, hi: int) -> int | None:
+        """First file start of probe *i* in [frm, hi); caches hit or miss."""
+        # A magic straddling hi still counts: its file start is below hi.
+        j = self._data.find(magic, frm + back, min(hi + back + len(magic) - 1, self._n))
+        if j < 0:
+            self._hit[i], self._upto[i] = None, hi
+            return None
+        self._hit[i] = j - back
+        return j - back
 
 
 def _end_of(media: Media, data, start: int) -> int | None:
-    """End offset of the message at *start*; None when it is not one."""
+    """End of the message at *start*, TRUNCATED when it runs past the data, None if not one."""
     try:
         end = ENDS[media](data, start)
     except _Truncated:
-        return len(data)
+        return TRUNCATED
     except _Invalid:
         return None
     return end if end > start else None
 
 
-def scan(data, wanted: set[Media], max_bytes: int) -> Iterator[tuple[Media, bytes]]:
+def _no_progress(_pos: int) -> None:
+    """Default on_progress: report nothing."""
+
+
+def scan(
+    data,
+    wanted: set[Media],
+    max_bytes: int,
+    on_progress: Callable[[int], None] = _no_progress,
+) -> Iterator[tuple[Media, bytes]]:
     """(media, bytes) of each message in *data*, in order, capped at *max_bytes*.
 
     *data* is bytes-like with ``find`` (bytes, mmap). Unwanted types are walked
-    over, not searched inside.
+    over, not searched inside. *on_progress* gets the scan offset at least once
+    per SCAN_WINDOW, stretches without any magic included.
     """
     finder = _Finder(data)
+    n = len(data)
     pos = 0
-    while (hit := finder.next(pos)) is not None:
+    report_at = SCAN_WINDOW
+    while pos < n:
+        if pos >= report_at:
+            on_progress(pos)
+            report_at = pos + SCAN_WINDOW
+
+        hit, hi = finder.in_window(pos)
+        if hit is None:
+            pos = hi
+            continue
+
         start, media = hit
         end = _end_of(media, data, start)
         if end is None:
             pos = start + 1
             continue
+
+        # Truncated: sent as far as it goes, but the scan resumes at start + 1,
+        # or a bogus length near the start of a raw disk would skip all the rest.
+        resume = end
+        if end is TRUNCATED:
+            end, resume = n, start + 1
         if media in wanted:
             yield media, bytes(data[start : min(end, start + max_bytes)])
-        pos = end
+        pos = resume
+    on_progress(n)
+
+
+class _Progress:
+    """on_progress for one file: a stderr line each PROGRESS_BYTES scanned."""
+
+    def __init__(self, path: Path, size: int) -> None:
+        self._path = path
+        self._size = size
+        self._next = PROGRESS_BYTES
+
+    def __call__(self, pos: int) -> None:
+        if pos < self._next:
+            return
+        print(
+            f"[*] {self._path}: scanned {pos / GIB:.1f} of {self._size / GIB:.1f} GiB",
+            file=sys.stderr,
+            flush=True,
+        )
+        self._next = (pos // PROGRESS_BYTES + 1) * PROGRESS_BYTES
 
 
 # ---------------------------------------------------------------------- files
@@ -414,7 +506,7 @@ def _scan_file(path: Path, wanted: set[Media], max_bytes: int) -> Iterator[tuple
         if size == 0:
             return
         with mmap.mmap(fh.fileno(), size, access=mmap.ACCESS_READ) as mm:
-            yield from scan(mm, wanted, max_bytes)
+            yield from scan(mm, wanted, max_bytes, _Progress(path, size))
 
 
 def not_a_disk(path: str, fmt: int) -> str:

@@ -323,3 +323,81 @@ class TestNotADisk:
         # Falsification: no NVMe advice for an unrelated device.
         msg = bfs.not_a_disk("/dev/tty0", stat.S_IFCHR)
         assert "NVMe controller" not in msg and "block device" in msg
+
+
+class _FindLog(bytes):
+    """bytes that records the furthest offset any find() was allowed to read."""
+
+    furthest = 0
+
+    def find(self, sub, start=0, end=None):
+        stop = len(self) if end is None else min(end, len(self))
+        type(self).furthest = max(type(self).furthest, stop)
+        return super().find(sub, start, end)
+
+
+class TestDiskScale:
+    def test_regression_first_seed_without_reading_whole_disk(self, monkeypatch):
+        # A rare magic (GIF, RIFF, ftyp, ...) was searched to the end of the
+        # data before the first seed came out: 31 s on an 8 GiB file for a
+        # PNG at offset 4096, hours on a whole NVMe disk.
+        monkeypatch.setattr(bfs, "SCAN_WINDOW", 4096)
+        _FindLog.furthest = 0
+        data = _FindLog(JUNK + SAMPLES[Media.PNG] + bytes(1 << 20))
+
+        assert next(bfs.scan(data, ALL, 1 << 20)) == (Media.PNG, SAMPLES[Media.PNG])
+        assert _FindLog.furthest < 4 * 4096
+
+    @pytest.mark.parametrize("window", [1, 7, 64, 4096])
+    def test_window_size_does_not_change_result(self, monkeypatch, window):
+        # Control (Rule 46): the default window agrees with itself; tiny
+        # windows must agree with it, magics straddling a window edge included.
+        blob = _blob(*SAMPLES.values(), *SAMPLES.values())
+        expected = _scan(blob)
+        assert expected == _scan(blob)
+
+        monkeypatch.setattr(bfs, "SCAN_WINDOW", window)
+        assert _scan(blob) == expected
+
+    def test_regression_bogus_length_does_not_swallow_rest(self):
+        # Raw disks are full of false starts: a PNG claiming a 2 GiB chunk must
+        # not make the scan jump to the end and skip every later message.
+        bogus = (
+            b"\x89PNG\r\n\x1a\n"
+            + _chunk(b"IHDR", bytes(13))
+            + struct.pack(">I", 0x7FFF0000)
+            + b"IDAT"
+        )
+        gif = SAMPLES[Media.GIF]
+        got = _scan(_blob(bogus, gif))
+        assert (Media.GIF, gif) in got
+
+    def test_mp4_box_to_eof_does_not_swallow_rest(self):
+        # size 0 = "to end of file": on a disk that is the rest of the disk.
+        mp4 = _box(b"ftyp", b"isom\x00\x00\x00\x00") + b"\x00\x00\x00\x00mdat"
+        gif = SAMPLES[Media.GIF]
+        assert (Media.GIF, gif) in _scan(_blob(mp4 + b"frames", gif))
+
+    def test_progress_reported_through_hitless_stretch(self, monkeypatch):
+        monkeypatch.setattr(bfs, "SCAN_WINDOW", 1000)
+        seen = []
+        data = bytes(10_000)  # no magic at all
+        assert list(bfs.scan(data, ALL, 1 << 20, on_progress=seen.append)) == []
+        assert seen == sorted(seen) and seen[-1] == len(data) and len(seen) >= 10
+
+    def test_cli_prints_progress(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(bfs, "SCAN_WINDOW", 1000)
+        monkeypatch.setattr(bfs, "PROGRESS_BYTES", 4000)
+        f = _write(tmp_path, "disk", bytes(10_000))
+        assert bfs.main([str(f), "--dry-run"]) == 0
+        err = capsys.readouterr().err
+        assert err.count(f"[*] {f}: scanned") >= 2
+
+    def test_finder_next_crosses_windows(self, monkeypatch):
+        # next() keeps its contract (earliest magic at or after pos) across windows.
+        monkeypatch.setattr(bfs, "SCAN_WINDOW", 16)
+        png = SAMPLES[Media.PNG]
+        data = bytes(100) + png
+        finder = bfs._Finder(data)
+        assert finder.next(0) == (100, Media.PNG)
+        assert finder.next(101) is None
