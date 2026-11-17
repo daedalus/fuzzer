@@ -1162,6 +1162,7 @@ def cmd_fuzz(args):
         elo_time_credit=getattr(args, "elo_time_credit", False),
         lineage=getattr(args, "lineage", False),
         lineage_backtrack=getattr(args, "lineage_backtrack", False),
+        lineage_exhaust=getattr(args, "lineage_exhaust", False),
         mds_select=getattr(args, "mds_select", False),
         minimax_select=getattr(args, "minimax_select", False),
         inverse_lottery_select=getattr(args, "inverse_lottery_select", False),
@@ -2850,6 +2851,9 @@ def cmd_sweep(args):
 # field_hmm (--field-hmm) is excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md).
 #
+# lineage_exhaust (--lineage-exhaust) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md).
+#
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
 # RandPool.sample for k>=3. It explores nothing --hail-mary is not already
@@ -3782,6 +3786,14 @@ def main() -> int:
         "seeds whose subtree has gained no edges are penalised by depth, "
         "shifting selection back toward shallow seeds with unexplored "
         "siblings (implies --lineage)",
+    )
+    fuzz_parser.add_argument(
+        "--lineage-exhaust",
+        action="store_true",
+        help="Backtrack on incremental exhaustion (soksolv dead ends): a seed is dead "
+        "once fuzzed --lineage-backtrack's min rounds without new coverage and every "
+        "child is dead; new coverage revives its ancestors. Replaces the per-weight "
+        "subtree DFS. Needs --lineage --lineage-backtrack.",
     )
     fuzz_parser.add_argument(
         "--mds-select",

@@ -1068,6 +1068,9 @@ class FuzzRound:
         # The weight is bounded above by 1.0, so the F0 signal never inflates
         # a posterior beyond the default -- it only ever re-weights.
         f = self._f
+        if f._lineage_exhaust:
+            novelty = Novelty.NEW if self._has_new_coverage else Novelty.NONE
+            f._record_lineage_exhaust(self._data, novelty)
         if not (
             f._seed_quality
             or f._seed_canary

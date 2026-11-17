@@ -2093,6 +2093,12 @@ class SeedPicker:
         node = tree.nodes.get(seed_key)
         if node is None or node.depth <= 0:
             return w
+        # --lineage-exhaust: O(1) incremental flag replaces the subtree DFS.
+        if getattr(f, "_lineage_exhaust", False):
+            if not node.exhausted:
+                return w
+            return w * max(f._lineage_backtrack_decay**node.depth, 0.05)
+
         # Require enough fuzzing before treating "no new edges" as signal.
         min_fuzz = getattr(f, "_lineage_backtrack_min_fuzz", 8)
         if fuzz_count < min_fuzz:

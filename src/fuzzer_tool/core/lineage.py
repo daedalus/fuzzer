@@ -37,6 +37,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import NamedTuple
 
+from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
+
 GAMMA = 0.9
 """Discount factor per tree edge for structural subtree weights."""
 
@@ -64,6 +66,11 @@ class LineageNode:
     operators and byte positions applied to ``parent_key`` that produced
     this node. Op names are interned into ``LineageTree.op_table`` so the
     stored lists are small int ids.
+
+    Exhaustion (``--lineage-exhaust``, soksolv ``fess_deadends.go``):
+    ``idle`` = rounds since this seed last found coverage; ``spent`` = idle
+    reached the budget; ``exhausted`` = spent and ``live`` (non-exhausted
+    children) is 0.
     """
 
     __slots__ = (
@@ -76,6 +83,10 @@ class LineageNode:
         "subtree_weight",
         "active",
         "seq",
+        "idle",
+        "spent",
+        "exhausted",
+        "live",
     )
 
     def __init__(
@@ -97,6 +108,10 @@ class LineageNode:
         self.subtree_weight = float(node_weight)
         self.active = True
         self.seq = seq
+        self.idle = 0
+        self.spent = False
+        self.exhausted = False
+        self.live = 0
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return (
@@ -206,6 +221,9 @@ class LineageTree:
         self.nodes[child_key] = node
         if parent is not None:
             self._children.setdefault(parent_key, set()).add(child_key)
+            # A live child keeps the parent (and its chain) alive.
+            parent.live += 1
+            self._wake(parent)
         else:
             # No resolvable parent — a root of its own tree in the forest.
             self._root_keys.add(child_key)
@@ -515,6 +533,76 @@ class LineageTree:
 
         return dfs(key)
 
+    # ── exhaustion (soksolv fess_deadends.go) ─────────────────────────
+
+    def is_exhausted(self, key: str) -> bool:
+        """Spent and every child exhausted; False for an unknown key."""
+        node = self.nodes.get(key)
+        return node is not None and node.exhausted
+
+    def record_fuzz(self, key: str, novelty: Novelty, budget: int) -> None:
+        """One fuzz round of *key*: NEW revives it, else idle counts toward *budget*."""
+        node = self.nodes.get(key)
+        if node is None:
+            return
+        if novelty is Novelty.NEW:
+            self.revive(key)
+            return
+
+        node.idle += 1
+        if node.idle == budget:
+            self.mark_exhausted(key)
+
+    def mark_exhausted(self, key: str) -> None:
+        """*key*'s own budget is spent; exhaust it (and ancestors) once no child is live."""
+        node = self.nodes.get(key)
+        if node is None:
+            return
+        node.spent = True
+        self._settle(node)
+
+    def revive(self, key: str) -> None:
+        """*key* found new coverage: reset its budget and un-exhaust its chain."""
+        node = self.nodes.get(key)
+        if node is None:
+            return
+        node.idle = 0
+        node.spent = False
+        self._wake(node)
+
+    def _settle(self, node: LineageNode | None) -> None:
+        # Walk up while nodes die: O(depth). Stops at the first live node, so
+        # a cycle stops too (its members never all reach live == 0 first).
+        while node is not None and not node.exhausted and node.spent and node.live <= 0:
+            node.exhausted = True
+            node = self._parent_of(node)
+            if node is not None:
+                node.live -= 1
+
+    def _wake(self, node: LineageNode | None) -> None:
+        # Walk up while nodes were dead: each revival adds one live child above.
+        while node is not None and node.exhausted:
+            node.exhausted = False
+            node = self._parent_of(node)
+            if node is not None:
+                node.live += 1
+
+    def exhaust_state(self) -> dict[str, int]:
+        """Idle counters worth persisting (non-zero only); exhaustion is derived."""
+        return {k: n.idle for k, n in self.nodes.items() if n.idle}
+
+    def load_exhaust(self, state: object, budget: int) -> None:
+        """Restore :meth:`exhaust_state` after a rebuild; malformed entries are skipped."""
+        if not isinstance(state, dict):
+            return
+        for key, idle in state.items():
+            node = self.nodes.get(key) if isinstance(key, str) else None
+            if node is None or not isinstance(idle, int) or idle <= 0:
+                continue
+            node.idle = idle
+            if idle >= budget:
+                self.mark_exhausted(key)
+
     def shape(self) -> LineageShape:
         """Maze-style topology metrics over the live (active) forest.
 
@@ -719,6 +807,7 @@ class LineageTree:
         node = self.nodes.get(key)
         if node is None:
             return 0
+        was_live = node.active and not node.exhausted
         stack = [key]
         count = 0
         while stack:
@@ -727,11 +816,24 @@ class LineageTree:
             if n is None or not n.active:
                 continue
             n.active = False
+            # A pruned seed is never fuzzed again: it is dead for exhaustion.
+            n.spent = n.exhausted = True
+            n.live = 0
             self._inactive_keys.append(k)
             count += 1
             stack.extend(self._children.get(k, ()))
+        if was_live:
+            self._release(node)
         self._trim_inactive()
         return count
+
+    def _release(self, node: LineageNode) -> None:
+        """*node* stopped being a live child: decrement its parent and settle up."""
+        parent = self._parent_of(node)
+        if parent is None:
+            return
+        parent.live -= 1
+        self._settle(parent)
 
     def _trim_inactive(self) -> None:
         while len(self._inactive_keys) > self._max_inactive:
@@ -739,9 +841,12 @@ class LineageTree:
             self._drop(k)
 
     def _drop(self, key: str) -> None:
-        node = self.nodes.pop(key, None)
+        node = self.nodes.get(key)
         if node is None:
             return
+        if not node.exhausted:
+            self._release(node)
+        del self.nodes[key]
         if node.parent_key is not None:
             siblings = self._children.get(node.parent_key)
             if siblings is not None:
@@ -888,6 +993,11 @@ class LineageTree:
             if node.parent_key is not None:
                 self._children.setdefault(node.parent_key, set()).add(node.key)
         self._cut_cycles()
+        # Every rebuilt node starts live, so live = child count.
+        for pk, kids in self._children.items():
+            parent = self.nodes.get(pk)
+            if parent is not None:
+                parent.live = len(kids)
 
         # Roots are recomputed in one pass rather than maintained during the
         # loop above: a node whose parent_key is set but whose parent never
