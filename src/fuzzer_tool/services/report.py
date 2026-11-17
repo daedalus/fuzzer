@@ -974,13 +974,17 @@ def _seed_contribution(f) -> str:
         return ""
 
     # Seeds ranked by coverage contribution
+    # found = edges discovered by mutating the seed; hit = edges the seed runs.
+    seed_edges = f._edge_tracker.seed_edges
     ranked = []
     for seed, meta in f.seed_meta.items():
         ce = meta.get("coverage_edges", 0)
         fc = meta.get("fuzz_count", 0)
         if ce > 0:
             name = _preview(seed, 40)
-            ranked.append((name, ce, fc, edges_per_bit(ce, len(seed))))
+            hit = len(seed_edges.get(f._seed_key(seed)) or ())
+            density = (edges_per_bit(ce, len(seed)), edges_per_bit(hit, len(seed)))
+            ranked.append((name, ce, fc, density))
 
     if not ranked:
         return ""
@@ -995,10 +999,11 @@ def _seed_contribution(f) -> str:
 
     top_n = min(15, len(ranked))
     lines.append(f"  Top {top_n} seeds by unique edges discovered:")
-    for i, (name, ce, fc, epb) in enumerate(ranked[:top_n], 1):
+    for i, (name, ce, fc, (found, hit)) in enumerate(ranked[:top_n], 1):
         pct = ce / total_edges * 100 if total_edges else 0
         lines.append(
-            f"    {i:>2d}. [{ce:>3d} edges, {pct:>5.1f}%, {epb:.3f} e/bit] fuzzed {fc:>3d}x  {name}"
+            f"    {i:>2d}. [{ce:>3d} edges, {pct:>5.1f}%, found {found:.3f} e/bit, "
+            f"hit {hit:.3f} e/bit] fuzzed {fc:>3d}x  {name}"
         )
 
     total_cov_seeds = len(ranked)

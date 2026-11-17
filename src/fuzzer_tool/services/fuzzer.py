@@ -7558,9 +7558,13 @@ class Fuzzer:
         """
         seed_edges = self._edge_tracker.seed_edges
         mean_us = self.mean_exec_time() * 1_000_000
+
+        # seed_edges is keyed by hash, seed_meta by seed bytes: map back.
+        # A key outside the corpus falls through and costs the mean.
+        key_to_seed, _ = self._seed_picker._corpus_keys()
         costs = []
         for key in seed_edges:
-            m = self.seed_meta.get(key) or {}
+            m = self.seed_meta.get(key_to_seed.get(key, key)) or {}
             costs.append(seed_exec_us(m, mean_us) * max(1, m.get("input_size", 1)))
 
         # Cover the rarest edges first: an edge reached by one seed forces that
