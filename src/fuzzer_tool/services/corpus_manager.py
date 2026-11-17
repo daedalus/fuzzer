@@ -39,6 +39,7 @@ from fuzzer_tool.adapters.filesystem import (
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import seed_exec_us
+from fuzzer_tool.core.edge_density import edges_per_bit
 from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.inverse_lottery import inverse_lottery_victims
 from fuzzer_tool.core.mutations.custom_mutator import AflHook
@@ -83,6 +84,12 @@ _TRIM_MAX_EXECS = 512
 # FFmpeg 9.0.2 (~99% of cuts change the trace, 2.7 KB seeds) spent 512 execs
 # per admission: 9,920 -> 65 fuzz execs in 90 s.
 _TRIM_EXEC_SHARE = 0.25
+
+#: seed_meta flag: --trim-sparse already tried this seed (persisted).
+TRIM_TRIED = "trim_tried"
+
+#: Seeds at or below this size are never trimmed (as on admission).
+_TRIM_MIN_LEN = 16
 
 
 class _Cut(Enum):
@@ -701,6 +708,7 @@ class CorpusManager:
                 "coverage_edges_baseline": meta.get("coverage_edges_baseline", 0),
                 "record_stride": meta.get("record_stride", None),
                 "c11": meta.get("c11", 0),
+                TRIM_TRIED: meta.get(TRIM_TRIED, False),
             }
             # Weizz tags: only when collected, so untagged seeds stay unarmed.
             state["seed_meta"][key].update({k: meta[k] for k in _WEIZZ_TAG_KEYS if k in meta})
@@ -868,6 +876,7 @@ class CorpusManager:
                         "record_stride": sm.get("record_stride", None),
                         # --c11 locals; 0 = unmeasured (older state, flag off).
                         "c11": sm.get("c11", 0),
+                        TRIM_TRIED: sm.get(TRIM_TRIED, False),
                     }
                 )
                 f.seed_meta[seed].update({k: sm[k] for k in _WEIZZ_TAG_KEYS if k in sm})
@@ -1700,6 +1709,56 @@ class CorpusManager:
                     }
                 )
             log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
+
+    def trim_sparsest(self) -> bool:
+        """--trim-sparse: trim the least dense untried seed; True when one ran.
+
+        Edges hit per bit orders the work: a sparse seed carries the most
+        bytes the target ignores, so it is trimmed first. One probe exec
+        loads its trace, then trim_new_coverage cuts against it. Shares the
+        admission trim budget; each seed is tried once.
+        """
+        f = self.f
+        if self._trim_budget() <= 0:
+            return False
+
+        seed = self._sparsest_untried()
+        if seed is None:
+            return False
+
+        idx = f.corpus.index(seed)
+        f.seed_meta.setdefault(seed, {})[TRIM_TRIED] = True
+        rc, stderr = f._runner.run_target(seed)
+        self._trim_execs += 1
+
+        # Timeout or crash on replay: the seed is not trimmable as it stands.
+        if rc in (-2, -1) or f._is_crash(rc, stderr):
+            return True
+
+        self.trim_new_coverage(seed, seed)
+        f.seed_meta.setdefault(f.corpus[idx], {})[TRIM_TRIED] = True
+        return True
+
+    def _sparsest_untried(self) -> bytes | None:
+        """Tracked, untried, trimmable seed with the fewest edges hit per bit."""
+        f = self.f
+        from fuzzer_tool.adapters.filesystem import hash_data
+
+        seed_edges = f._edge_tracker.seed_edges
+        best, best_density = None, math.inf
+        for seed in f.corpus:
+            if len(seed) <= _TRIM_MIN_LEN or f.seed_meta.get(seed, {}).get(TRIM_TRIED):
+                continue
+
+            edges = seed_edges.get(self.seed_key(seed))
+            if not edges:
+                continue
+
+            # Hash only a would-be winner: crash seeds are few, hashing is not.
+            density = edges_per_bit(len(edges), len(seed))
+            if density < best_density and hash_data(seed) not in f.irreplaceable_hashes:
+                best, best_density = seed, density
+        return best
 
     def _trim_strategy(self):
         """The plugin's trim trio when it serves one (AFL++ precedence), else trim_case."""

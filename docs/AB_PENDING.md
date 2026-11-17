@@ -30,6 +30,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | C11 seed weight (`--c11`) | Weight `1.1 + 0.9 t^2` by most locals entered (AFL++ C11) | U | fuzzgoat built `-g --sancov=trace-pc-guard,pc-table`, 20 seeds, vs default + A/A; metric real edges |
 | Packed edge sets (`--packed-edges`) | Survivors' `seed_edges` as sorted uint32 (`EdgeSet`) | N | fuzzgoat + FFmpeg 10k null (ledger 94-95); owed: FFmpeg >= 60k execs at the 1,000-seed cap, live RSS + wall, A/A |
 | Density seed weight (`--density-weight`) | Weight x 0.5..2 by rank of hit edges per bit | U | fuzzgoat (clang) 20 seeds, vs default + A/A; metric real edges |
+| Sparse-first trim (`--trim-sparse`) | Trim least dense untried seed per stats interval | U | fuzzgoat (clang) 20 seeds vs default + A/A; metrics real edges, corpus bytes, exec/s |
 | Prune density tie (`--prune-density`) | Evict least dense of equally redundant tracked seeds first | U | needs > 1,000 tracked seeds (FFmpeg, or a long fuzzgoat run); vs default, A/A control |
 | Prune cost tie (`--prune-cost`) | Evict the costliest of equally redundant tracked seeds first | U | needs > 1,000 tracked seeds (FFmpeg, or a long fuzzgoat run); vs default, A/A control |
 | Seed stage (`--stage-execs K`) | One pick serves up to K execs, sized by perf score | S | fuzzgoat exe K=8 vs 1, 8 paired reps: wall -5% (8/8, p=0.008; A/A 4/8), edges unchanged (p=0.73). Open: K in {4, 16}, FFmpeg, edges at fixed wall time; default flip |

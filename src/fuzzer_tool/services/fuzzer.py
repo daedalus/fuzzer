@@ -1107,6 +1107,7 @@ class Fuzzer:
     _markov_switch = Switch.ON
     _auto_minimize = Switch.ON
     _trim_new_coverage_on = Switch.OFF
+    _trim_sparse_on = Switch.OFF
     # Multi-target .so: target -> its in-process runner; __init__ fills it.
     _target_runners: MappingProxyType = MappingProxyType({})
 
@@ -2255,6 +2256,9 @@ class Fuzzer:
         # --prune-density: tracker eviction tie by edges per bit (EvictTie).
         # Off, out of --hail-mary. Appended.
         prune_density=Switch.OFF,
+        # --trim-sparse: trim the least dense untried seed once per stats
+        # interval (CorpusManager.trim_sparsest). Off, out of --hail-mary. Appended.
+        trim_sparse=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2449,6 +2453,7 @@ class Fuzzer:
         # The memory-pressure prune stays (bounded memory).
         self._auto_minimize = auto_minimize
         self._trim_new_coverage_on = trim_new_coverage
+        self._trim_sparse_on = trim_sparse
         # --lightweight: FuzzRound.run picks the lean pipeline.
         self._run_mode = run_mode
         self.prune_corpus_max_memory = prune_corpus_max_memory
@@ -7162,6 +7167,12 @@ class Fuzzer:
     def _auto_minimize_corpus(self):
         return self._corpus_manager.auto_minimize_corpus()
 
+    def _maybe_trim_sparse(self) -> None:
+        """--trim-sparse: one least-dense seed per stats interval; --no-auto-minimize wins."""
+        if self._trim_sparse_on is not Switch.ON or self._auto_minimize is not Switch.ON:
+            return
+        self._corpus_manager.trim_sparsest()
+
     def _maybe_periodic_minimize(self, dedup: bool = False) -> None:
         """Fire --minimize-every-execs, exactly once per exec_count value.
 
@@ -11095,6 +11106,7 @@ class Fuzzer:
                 if self.exec_count - self._last_stats_exec >= effective_interval:
                     # Update favored set / top_rated cull queue every interval
                     if self._edge_tracker.seed_edges:
+                        self._maybe_trim_sparse()
                         self._cull_queue()
                         self._refresh_cover(clock_of(self).time())
                     # Sample Shannon entropy for rate-of-change tracking

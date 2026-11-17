@@ -76,6 +76,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "respawn_backoff",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "density_weight",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "prune_density",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "trim_sparse",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "advisors",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "plateau_groups",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "elo_stale_bench",  # unmeasured: A/B pending (docs/AB_PENDING.md)
