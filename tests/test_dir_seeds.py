@@ -271,3 +271,124 @@ class TestWalkOrder:
         root = _tree(tmp_path / "c", {"f": b"x"})
         with pytest.raises(SystemExit):
             ds.main([str(root), "--seed", "5"])
+
+
+def _tar(members: dict[str, bytes], mode: str = "w") -> bytes:
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode=mode) as tf:
+        d = tarfile.TarInfo("adir")
+        d.type = tarfile.DIRTYPE
+        tf.addfile(d)
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+        link = tarfile.TarInfo("alink")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        tf.addfile(link)
+    return buf.getvalue()
+
+
+def _zip(members: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("sub/", b"")  # a directory entry: skipped
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+class TestDecompress:
+    @pytest.mark.parametrize("codec", ["gzip", "bz2", "lzma"])
+    def test_single_stream_sent_decompressed(self, tmp_path, monkeypatch, codec):
+        import importlib
+
+        packed = importlib.import_module(codec).compress(PNG)
+        root = _tree(tmp_path / "c", {"img.bin": packed})
+        sent = _recorder(monkeypatch)
+
+        assert ds.main([str(root), "--decompress"]) == 0
+        assert sent == [PNG]
+
+    def test_zip_members_in_order_dirs_skipped(self, tmp_path, monkeypatch):
+        root = _tree(tmp_path / "c", {"a.zip": _zip({"one.png": PNG, "sub/two.txt": TXT})})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--decompress"]) == 0
+        assert sent == [PNG, TXT]
+
+    @pytest.mark.parametrize("mode", ["w", "w:gz", "w:bz2", "w:xz"])
+    def test_tar_members_dirs_and_links_skipped(self, tmp_path, monkeypatch, mode):
+        root = _tree(tmp_path / "c", {"a.tar": _tar({"x/one": JPG, "two": TXT}, mode)})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--decompress"]) == 0
+        assert sent == [JPG, TXT]
+
+    def test_without_flag_archive_sent_as_is(self, tmp_path, monkeypatch):
+        # Falsification: the option is off by default.
+        import gzip
+
+        packed = gzip.compress(PNG)
+        root = _tree(tmp_path / "c", {"img.gz": packed})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root)]) == 0
+        assert sent == [packed]
+
+    def test_plain_files_unchanged(self, tmp_path, monkeypatch):
+        root = _tree(tmp_path / "c", {"1": PNG, "2": TXT})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--decompress"]) == 0
+        assert sent == [PNG, TXT]
+
+    def test_types_filter_applies_to_members(self, tmp_path, monkeypatch):
+        root = _tree(tmp_path / "c", {"a.zip": _zip({"one.png": PNG, "t.txt": TXT})})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--decompress", "--types", "png"]) == 0
+        assert sent == [PNG]
+
+    def test_corrupt_archive_counted_others_sent(self, tmp_path, monkeypatch, capsys):
+        # Adversarial: gzip magic, then garbage.
+        root = _tree(tmp_path / "c", {"0bad.gz": b"\x1f\x8b\x08\x00" + b"\xff" * 40, "1": TXT})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--decompress"]) == 0
+        assert sent == [TXT]
+        assert "unreadable 1" in capsys.readouterr().out
+
+    def test_bomb_read_only_up_to_max_bytes(self, tmp_path, monkeypatch):
+        # Adversarial: 64 MiB of zeros in ~64 KiB; only --max-bytes is kept.
+        import gzip
+
+        root = _tree(tmp_path / "c", {"bomb.gz": gzip.compress(bytes(64 << 20))})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--decompress", "--max-bytes", "10"]) == 0
+        assert sent == [bytes(10)]
+
+    def test_max_size_judged_on_decompressed_size(self, tmp_path, monkeypatch, capsys):
+        import gzip
+
+        root = _tree(
+            tmp_path / "c", {"big.gz": gzip.compress(bytes(5000)), "s.gz": gzip.compress(TXT)}
+        )
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--decompress", "--max-size", "1000"]) == 0
+        assert sent == [TXT]
+        assert "too big 1" in capsys.readouterr().out
+
+    def test_stream_over_hard_cap_is_too_big(self, tmp_path, monkeypatch, capsys):
+        # A stream larger than MAX_UNPACKED is cut off and judged too big.
+        import gzip
+
+        import unpack
+
+        monkeypatch.setattr(unpack, "MAX_UNPACKED", 1000)
+        root = _tree(tmp_path / "c", {"z.gz": gzip.compress(bytes(5000))})
+        sent = _recorder(monkeypatch)
+        assert ds.main([str(root), "--decompress"]) == 0
+        assert sent == []
+        assert "too big 1" in capsys.readouterr().out
