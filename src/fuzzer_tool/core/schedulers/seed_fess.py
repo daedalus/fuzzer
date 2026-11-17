@@ -25,13 +25,23 @@ pickCell): ``LEAST_EFFORT`` above, or ``TRIPLE``::
     turn % FESS_RANDOM_EVERY == 0  uniform random occupied cell
     even turn                      best cell: max s / (s + f) over its seeds
     odd turn                       round robin over cells in creation order
+
+``novelty`` (``--fess-cell-novelty``, soksolv fess_moves.go scoped novelty):
+each cell keeps the edges seen by execs charged to it (the seed's own edges
+are absorbed free on its first exec there). An exec bringing edges new to
+its cell, even if globally known, is credited n / (n + FESS_NOVELTY_HALF).
+A cell is hot while never charged or fewer than FESS_HOT_WINDOW charges
+passed since its last in-cell novelty; picks (bar TRIPLE's random turn)
+choose among hot cells when any exist. Edge memory is capped per cell and
+in total; cell edge sets are not persisted.
 """
 
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from enum import Enum
+from itertools import islice
 
 from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.schedulers._arm_counts import ArmCounts
@@ -43,6 +53,14 @@ FESS_AXES = 4
 
 #: TRIPLE: one pick in this many is a uniform random occupied cell (soksolv PFTypes).
 FESS_RANDOM_EVERY = 8
+
+#: Novelty: edges remembered per cell, and across all cells (bounded memory).
+FESS_CELL_EDGE_CAP = 4096
+FESS_NOVELTY_BUDGET = 1 << 18
+#: Novelty credit n / (n + HALF): 1 edge 0.2, 4 edges 0.5.
+FESS_NOVELTY_HALF = 4
+#: A cell stays hot for this many charges after its last in-cell novelty.
+FESS_HOT_WINDOW = 64
 
 Cell = tuple[int, int, int, int]
 
@@ -88,8 +106,13 @@ def _is_count(n) -> bool:
     return type(n) is int and n >= 0
 
 
-def _ignore(_members) -> None:
-    """No-op cell observer (jump off)."""
+def _ignore(*_args) -> None:
+    """No-op hook (feature off)."""
+
+
+def _same(members: dict) -> dict:
+    """Identity cell filter (novelty off)."""
+    return members
 
 
 class SeedFessScheduler(ArmCounts):
@@ -99,7 +122,12 @@ class SeedFessScheduler(ArmCounts):
     supports_priors = False
 
     def __init__(
-        self, rng, jump: Switch = Switch.OFF, mode: FessMode = FessMode.LEAST_EFFORT
+        self,
+        rng,
+        jump: Switch = Switch.OFF,
+        mode: FessMode = FessMode.LEAST_EFFORT,
+        novelty: Switch = Switch.OFF,
+        seed_edges: Callable[[str], Iterable[int]] | None = None,
     ) -> None:
         if rng is None:
             raise ValueError("SeedFessScheduler requires a RandPool (Hard Rule 16)")
@@ -122,8 +150,25 @@ class SeedFessScheduler(ArmCounts):
         self._cursor = 0
         self._order: list[Cell] = []
 
+        # Novelty: cell -> edges seen there, key -> cell its own edges were
+        # absorbed into, cell -> charges since its last in-cell novelty, and
+        # the (key, new edges) stash observe_edges hands the next record().
+        self._novelty = novelty
+        self._seed_edges = seed_edges or (lambda _k: ())
+        self._cell_edges: dict[Cell, set[int]] = {}
+        self._absorbed: dict[str, Cell] = {}
+        self._since_novel: dict[Cell, int] = {}
+        self._stash: tuple[str, int] | None = None
+        self._stored = 0  # edges across all cell sets
+
         triple = mode is FessMode.TRIPLE
-        self._mode_pick = self._triple if triple else self._least_effort
+        novel = novelty is Switch.ON
+        self._narrow = self._hot if novel else _same
+        least = self._hot_least_effort if novel else self._least_effort
+        self._mode_pick = self._triple if triple else least
+        if novel:
+            self.observe_edges = self._observe_edges
+            self.record = self._record_novel
         tracked = triple or jump is Switch.ON
         self._note_cells = self._note_new if tracked else _ignore
         self._pick_cell = self._jump_cell if jump is Switch.ON else self._mode_pick
@@ -139,6 +184,73 @@ class SeedFessScheduler(ArmCounts):
         # Chosen cell, then its least-fuzzed seed (s + f is one per recorded exec).
         chosen = self._pick_cell(members)
         return self._argmin({k: sum(self._counts[k]) for k in members[chosen]})
+
+    def observe_edges(self, key: str, edges) -> None:
+        """Novelty hook, fed before record(); off: a no-op."""
+
+    def _observe_edges(self, key: str, edges) -> None:
+        """Stash how many of this exec's *edges* are new to *key*'s pick-time cell.
+
+        O(len(edges)) per exec; the seed's own edges are absorbed once per
+        (seed, cell) at O(its edges), uncredited.
+        """
+        self._stash = None
+        c = self._cell_of.get(key)
+        if c is None:
+            return
+        seen = self._cell_edges.get(c)
+        if seen is None:
+            seen = self._cell_edges[c] = set()
+        if self._absorbed.get(key) != c:
+            self._absorbed[key] = c
+            self._remember(seen, set(self._seed_edges(key)) - seen)
+
+        new = edges - seen
+        if new:
+            self._stash = (key, self._remember(seen, new))
+
+    def _remember(self, seen: set[int], new: set[int]) -> int:
+        """Add *new* within the cell cap and global budget; returns how many fit."""
+        room = min(FESS_CELL_EDGE_CAP - len(seen), FESS_NOVELTY_BUDGET - self._stored)
+        if room <= 0 or not new:
+            return 0
+        if len(new) > room:
+            new = set(islice(new, room))
+        seen |= new
+        self._stored += len(new)
+        return len(new)
+
+    def _record_novel(self, name: str, success: bool, weight: float = 1.0) -> None:
+        """record() with in-cell novelty credit and the hot-cell clock."""
+        stash, self._stash = self._stash, None
+        n = stash[1] if stash is not None and stash[0] == name else 0
+        if n:
+            credit = n / (n + FESS_NOVELTY_HALF)
+            weight = max(weight, credit) if success else credit
+            success = True
+        SeedFessScheduler.record(self, name, success, weight)
+
+        c = self._cell_of.get(name)
+        if c is None:
+            return
+        if n:
+            self._since_novel[c] = 0
+        elif c in self._since_novel:
+            self._since_novel[c] += 1
+
+    def _hot(self, members: dict[Cell, list[str]]) -> dict[Cell, list[str]]:
+        """Cells never charged or with in-cell novelty in the last FESS_HOT_WINDOW
+        charges; all of *members* when none is hot."""
+        since, effort = self._since_novel, self._effort
+        hot = {
+            c: keys
+            for c, keys in members.items()
+            if not effort.get(c, 0) or since.get(c, FESS_HOT_WINDOW) < FESS_HOT_WINDOW
+        }
+        return hot or members
+
+    def _hot_least_effort(self, members: dict[Cell, list[str]]) -> Cell:
+        return self._least_effort(self._hot(members))
 
     def _least_effort(self, members: dict[Cell, list[str]]) -> Cell:
         """Least-explored occupied cell (never charged = 0)."""
@@ -163,8 +275,8 @@ class SeedFessScheduler(ArmCounts):
         if self._turn % FESS_RANDOM_EVERY == 0:
             return self._rng.choice([c for c in self._order if c in members])
         if self._turn % 2 == 0:
-            return self._best_cell(members)
-        return self._round_robin(members)
+            return self._best_cell(self._narrow(members))
+        return self._round_robin(self._narrow(members))
 
     def _best_cell(self, members: dict[Cell, list[str]]) -> Cell:
         """Highest s / (s + f) summed over the cell's seeds; untried = 0."""
@@ -204,6 +316,8 @@ class SeedFessScheduler(ArmCounts):
         self._trim(seed_ids)
         if len(self._cell_of) > len(self._counts):
             self._cell_of = {k: c for k, c in self._cell_of.items() if k in self._counts}
+        if len(self._absorbed) > len(self._counts):
+            self._absorbed = {k: c for k, c in self._absorbed.items() if k in self._counts}
 
         members: dict[Cell, list[str]] = {}
         for key in seed_ids:

@@ -1146,6 +1146,12 @@ class FuzzRound:
         # For round-robin and DRR an Elo-compatibility signal only: their own
         # selection ignores it (deterministic cycling).
         f._record_seed_floor_arms(data, found, weight)
+        # --fess-cell-novelty: in-cell novelty needs this exec's edges, read
+        # before the record it credits. Timeouts earn no coverage.
+        fess_observe = getattr(f, "_fess_observe", None)
+        if fess_observe is not None:
+            edges = () if self._is_timeout else self._edges_now()
+            fess_observe(data, edges if isinstance(edges, set | frozenset) else ())
         f._record_seed_os_arms(data, found, weight)
 
     def _feed_models(self) -> None:

@@ -1035,6 +1035,7 @@ def cmd_fuzz(args):
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
         fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
         seed_fess_mode=FessMode(getattr(args, "seed_fess_mode", FessMode.LEAST_EFFORT.value)),
+        fess_cell_novelty=Switch.ON if getattr(args, "fess_cell_novelty", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -2958,9 +2959,10 @@ def cmd_sweep(args):
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
 #
-# seed_fess_scheduler (--seed-fess-scheduler) and fess_inherit (--fess-inherit)
-# are excluded as unmeasured: unit tests only, no paired run
-# (docs/AB_PENDING.md). The second is also inert without the FESS arm.
+# seed_fess_scheduler (--seed-fess-scheduler), fess_inherit (--fess-inherit)
+# and fess_cell_novelty (--fess-cell-novelty) are excluded as unmeasured: unit
+# tests only, no paired run (docs/AB_PENDING.md). The last two are also inert
+# without the FESS arm.
 #
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
@@ -4260,6 +4262,15 @@ def main() -> int:
         f"triple: every {FESS_RANDOM_EVERY}th pick a random occupied cell, else even picks the "
         "best cell (success rate over its seeds), odd picks round robin in creation order "
         "(soksolv selectMove / pickCell).",
+    )
+    fuzz_parser.add_argument(
+        "--fess-cell-novelty",
+        action="store_true",
+        help="With --seed-fess-scheduler: per-cell scoped novelty. Each cell remembers the "
+        "edges its execs reached (bounded); an exec bringing edges new to its cell, even if "
+        "globally known, is credited, and picks prefer cells with recent in-cell novelty "
+        "(soksolv scoped novelty). No effect without the FESS arm. Not in --hail-mary until "
+        "it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--fess-inherit",

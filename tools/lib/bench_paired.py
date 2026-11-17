@@ -235,6 +235,7 @@ ARMS: dict[str, list[str]] = {
     "elo-seed-fess": ["--elo", "--mc-bandit", "--seed-fess-scheduler"],
     "seed-fess-inherit": ["--seed-fess-scheduler", "--fess-inherit"],
     "seed-fess-triple": ["--seed-fess-scheduler", "--seed-fess-mode", "triple"],
+    "seed-fess-novelty": ["--seed-fess-scheduler", "--fess-cell-novelty"],
     **{
         f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
         for pct in SEED_NEWEST_PCTS
@@ -438,6 +439,7 @@ ARM_BASELINES: dict[str, str] = {
     "elo-seed-fess": "elo",
     "seed-fess-inherit": "seed-fess",
     "seed-fess-triple": "seed-fess",
+    "seed-fess-novelty": "seed-fess",
     "novel-crash-reward-abort": "abort-crash",
     "abort-crash-ctl": "abort-crash",
     "seed-branch": "elo",

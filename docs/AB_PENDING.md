@@ -40,6 +40,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | FESS seed arm (`--seed-fess-scheduler`) | Least-explored cell of a log2 (edges, rare, depth, size) grid, then its least-fuzzed seed | U | `seed-fess` vs `baseline`, `elo-seed-fess` vs `elo`; fuzzgoat (clang) 20 seeds x 10k + A/A; FFmpeg if not NULL |
 | FESS inherit + jump (`--fess-inherit`) | Non-improving child competes in parent's cell; first-occupied cell picked next, once | U | `seed-fess-inherit` vs `seed-fess`; fuzzgoat (clang) 20 seeds x 10k + A/A |
 | FESS triple schedule (`--seed-fess-mode triple`) | Every 8th pick random cell, else best cell (even) / round robin (odd) | U | `seed-fess-triple` vs `seed-fess`; fuzzgoat (clang) 20 seeds x 10k + A/A |
+| FESS cell novelty (`--fess-cell-novelty`) | Credit edges new to the seed's cell; prefer cells with recent in-cell novelty | U | `seed-fess-novelty` vs `seed-fess`; fuzzgoat (clang) 20 seeds x 10k + A/A |
 | Doppler energy (`--schedule doppler`) | Power-Doppler seed energy | U | vs `fast` |
 | Consolidated seed arm | Merged seed-arm features | U | vs `p2c`/`drr` |
 | OS/net ports (`mlfq`, `stride`, `eevdf`, `bfq`, `sfq`, `codel`, `aimd`, `p2c`, `op_stride`, `op_p2c`) | Kernel/network schedulers as seed/op arms | U | each vs `seed_round_robin`/`drr` |
