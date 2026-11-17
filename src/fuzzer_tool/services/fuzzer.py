@@ -36,7 +36,7 @@ except ImportError:
     _HAS_NUMPY = False
 
 from fuzzer_tool.adapters import process, seed_zip
-from fuzzer_tool.adapters.filesystem import without_timeout_seeds
+from fuzzer_tool.adapters.filesystem import DeltaStore, without_timeout_seeds
 from fuzzer_tool.adapters.memfd_input import ALIAS_ENV, INPUT_PATH_ENV, MemfdInput
 from fuzzer_tool.adapters.process import (
     _child_pids,
@@ -57,6 +57,7 @@ from fuzzer_tool.adapters.shm import (
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
@@ -1789,6 +1790,7 @@ class Fuzzer:
         fractal_diversity_bonus=1.3,
         lineage=False,
         lineage_backtrack=False,
+        lineage_exhaust=False,
         mds_select=False,
         minimax_select=False,
         inverse_lottery_select=False,
@@ -2077,6 +2079,7 @@ class Fuzzer:
         ctx_sensitive=None,
         # --zip-seed-corpus (adapters/seed_zip.py). Appended: positional signature.
         zip_seed_corpus=False,
+        delta_corpus=False,
         # --zip-compact-ratio (seed_zip.compact_over). Appended: positional signature.
         zip_compact_ratio=0.0,
         # --op-good-turing (core/schedulers/op_good_turing.py), prior shared with
@@ -2960,6 +2963,8 @@ class Fuzzer:
         if zip_seed_corpus:  # zip mode off never writes the archive
             seed_zip.uproot(self.corpus_dir)
         seed_zip.configure(self.corpus_dir, ZipMode.ON if zip_seed_corpus else ZipMode.OFF)
+        # --delta-corpus: children stored as delta records (keyframes bound chains).
+        self._delta_store = DeltaStore(self.corpus_dir) if delta_corpus else None
 
         # Single-file state store (replaces per-component JSON files).
         # Loaded eagerly so all components can fetch their section via get().
@@ -3359,6 +3364,9 @@ class Fuzzer:
         self._use_lineage_backtrack = bool(lineage_backtrack and lineage)
         self._lineage_backtrack_decay = 0.7
         self._lineage_backtrack_min_fuzz = 8
+        # --lineage-exhaust: backtrack reads an incremental exhausted flag
+        # (soksolv dead-end propagation) instead of a subtree DFS per weight.
+        self._lineage_exhaust = bool(lineage_exhaust and self._use_lineage_backtrack)
         # Weighted local-search Maximum Disjoint Set selection in
         # auto_minimize_corpus: replaces flat top-K-by-score with a
         # value-weighted packing over Jaccard-signature space (see
@@ -6080,6 +6088,8 @@ class Fuzzer:
             self._state_store.set("seed_fess", self._seed_fess.to_dict())
         if self._plateau is not None:
             self._state_store.set("plateau", self._plateau.to_dict())
+        if self._lineage_exhaust:
+            self._state_store.set("lineage_exhaust", self._lineage.exhaust_state())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -6125,6 +6135,10 @@ class Fuzzer:
             self._seed_fess.from_dict(self._state_store.get("seed_fess", {}))
         if self._plateau is not None:
             self._plateau = PlateauGroups.from_dict(self._state_store.get("plateau", {}))
+        if self._lineage_exhaust:
+            self._lineage.load_exhaust(
+                self._state_store.get("lineage_exhaust", {}), self._lineage_backtrack_min_fuzz
+            )
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""
@@ -6175,6 +6189,10 @@ class Fuzzer:
         key = self._seed_key(parent)
         for arm in self._seed_os_arms:
             arm.record(key, success=success, weight=weight)
+
+    def _record_lineage_exhaust(self, parent: bytes, novelty: Novelty) -> None:
+        """Feed one round of *parent* to the lineage exhaustion counters (--lineage-exhaust)."""
+        self._lineage.record_fuzz(self._seed_key(parent), novelty, self._lineage_backtrack_min_fuzz)
 
     def _record_seed_floor_arms(self, parent: bytes, success: bool, weight: float) -> None:
         """Feed one corpus parent's outcome to the canary / round-robin / DRR seed arms.
@@ -10472,6 +10490,8 @@ class Fuzzer:
             groups["Analysis"].append("lineage")
         if getattr(self, "_use_lineage_backtrack", False):
             groups["Analysis"].append("lineage-backtrack")
+        if getattr(self, "_lineage_exhaust", False):
+            groups["Analysis"].append("lineage-exhaust")
         if getattr(self, "_use_overlap_density", False):
             groups["Analysis"].append("overlap-density")
         if getattr(self, "_use_region_profile", False):

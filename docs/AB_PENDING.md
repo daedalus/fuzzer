@@ -83,6 +83,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Lottery ports (`--seed-stride-cost`, `--inverse-lottery-select`) | Compensation tickets on the stride arm; inverse-lottery eviction in `auto_minimize_corpus` | U | arms `seed-stride-cost` vs `seed-stride`, `inverse-lottery-select` vs `minimize-2k`; judge stride-cost on edges at fixed wall time, `--set ffmpeg` (widest exec-cost spread) |
 | Lottery arm (`--seed-lottery-scheduler`, `--seed-lottery-currency {equal,sqrt}`, `--seed-lottery-transfer F`) | Randomized lottery over compensated tickets (Fenwick tree); per-component ticket currencies; lineage-parent credit | U | arms `seed-lottery` vs `seed-stride-cost`, `seed-lottery-currency` vs `seed-lottery`, `seed-lottery-transfer` vs `seed-lottery-lineage`; first record the component-size distribution on fuzzgoat, png_read, ffmpeg (a giant component makes currencies a no-op) |
 | MCTS vs alpha-beta (`--mcts`, `--alphabeta`) | Lineage tree search | N | png null; ffmpeg set, then retire one |
+| Lineage exhaustion (`--lineage-exhaust`) | soksolv dead-end propagation feeds `--lineage-backtrack` | U | fuzzgoat, `--lineage --lineage-backtrack` with vs without; A/A control |
 | Preset ledger (`--preset-ledger`) | UCB1 over flag presets across campaigns | U | vs `baseline` via `benchmark.py replicated` |
 | Recurrence gate (`--recurrence`) | RQA TRAPPED read on the exec stream | U | does forcing the gate shorten plateaus |
 | `-M` default 1 | One op per mutant | N | jpeg, ffmpeg |
@@ -160,6 +161,7 @@ Off arm needs a tree without the op.
 | Cmplog record cap + campaign dedup (`--cmplog-site-cap 32 --cmplog-dedup-scope campaign`, arm `cmp-cap-dedup`) | Per-site record cap per drain; dedup table kept across drains | N | NULL on both: fuzzgoat_tcg ledger #138, FFmpeg 9.0.2 #139 (9/11, p=0.93; CPU −9% median, p=0.14). Owed only if CPU matters: a cpu_user rerun at ≥ 40 seeds on FFmpeg. |
 | Stack-depth novelty (`--stack-depth-max`, arm `stack-depth-max`) | Admit a clean run deeper than the campaign max (honggfuzz) | N | FFmpeg 9.0.2 NULL (ledger #148: 11/9, p=0.70; A/A clean); 7 admissions per 3k execs. Owed: a recursive-parser target (expression grammar, nested containers), fuzzgoat (Hard Rule 52) |
 | Edge clusters (`--edge-clusters`) | Class rarity + near-miss bonus | N | fuzzgoat null; FFmpeg/png |
+| Delta corpus store (`--delta-corpus`) | Children as delta records, keyframe every 20 hops | S | storage only: FFmpeg (large seeds) disk bytes + eps vs off, A/A control |
 | Inline sancov modes | `inline-8bit-counters`, `inline-bool-flag` | N | −23/−38 edges; fold buckets, 20×20k rerun |
 | Shim bit tricks | SWAR fold, masked probe, `bit_compress` | S | rebuild + fuzzgoat calibration |
 | Map size 2^16 vs 2^19 | Map size from observed edges | U | interleaved A/B + A/A on ffmpeg |

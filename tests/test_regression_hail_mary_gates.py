@@ -94,6 +94,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "byte_interaction",  # unmeasured: synthetic checks only
         "influence",  # unmeasured: synthetic checks only
         "field_hmm",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "lineage_exhaust",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "cmp_prune_const",  # unmeasured: no A/B yet (DEEP_DIVE "Constant-Compare Pruning")
         "arm_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
         "x86_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
@@ -111,6 +112,7 @@ _EXCLUDED_OPT_IN = frozenset(
         # Storage layout, not a strategy: would move corpus writes into
         # seeds.zip, which a later run without the flag does not load.
         "zip_seed_corpus",
+        "delta_corpus",  # storage layout (delta records), not a strategy
         # Scales -M, which --slopt (on under --hail-mary) replaces: a no-op there.
         "one_fifth",
         # Unmeasured: the Growing Tree 'newest' arm stays out until it wins

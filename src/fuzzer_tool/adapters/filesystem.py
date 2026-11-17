@@ -20,6 +20,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import numpy as np
+
 from fuzzer_tool.adapters import seed_tar, seed_zip
 from fuzzer_tool.adapters.libc_symbols import libc_symbol
 from fuzzer_tool.adapters.process import signal_number
@@ -109,6 +111,9 @@ def _bound_seen_hashes(seen_hashes: set[str]) -> None:
             seen_hashes.pop()
 
 
+_NP_DELTA_MIN = 192  # compute_delta: numpy wins from ~140 B (bench in DEEP_DIVE)
+
+
 def compute_delta(parent: bytes, child: bytes) -> list[list[int]] | None:
     """Compute a compact byte-level diff between parent and child.
 
@@ -124,6 +129,15 @@ def compute_delta(parent: bytes, child: bytes) -> list[list[int]] | None:
     """
     if len(parent) != len(child):
         return None
+
+    # numpy past the crossover (~140 B measured); the loop is faster below it.
+    if len(child) >= _NP_DELTA_MIN:
+        a = np.frombuffer(parent, np.uint8)
+        b = np.frombuffer(child, np.uint8)
+        idx = np.flatnonzero(a != b)
+        if len(idx) > len(child) // 4:
+            return None
+        return np.column_stack((idx, b[idx])).tolist()
 
     diff = []
     for i in range(len(parent)):
@@ -247,7 +261,11 @@ _REHYDRATE_FULL_ROOTS = (
     "seeds/crashing",
     "seeds/timeouts",
 )
-_REHYDRATE_DELTA_ROOTS = ("deltas", "deltas/pruned")
+_REHYDRATE_DELTA_ROOTS = (
+    "deltas",
+    "deltas/pruned",
+    "pruned/deltas",  # where `fuzzer-tool minimize` prunes a delta record
+)
 
 # Subtrees under seeds/ that carry a meaning beyond "a corpus entry", and so
 # are opted into rather than scanned by default.
@@ -374,12 +392,21 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
             diff = rec.get("diff")
             if parent is None or not isinstance(diff, list):
                 continue
-            if rec.get("v") == 2:
-                return apply_delta_v2(parent, diff)
-            return apply_delta(parent, diff)
+            data = _apply_rec(parent, diff, rec.get("v"))
+            # A record that rebuilds to other bytes is corrupt: never hand it out as *h*.
+            if hash_data(data) == h:
+                return data
+            log.warning("skipping delta %r: rebuilt bytes do not match its name", delta_file.name)
         except _BAD_DELTA as exc:
             log.warning("skipping corrupt delta %r: %s", delta_file.name, exc)
     return None
+
+
+def _apply_rec(parent: bytes, diff: list, version: object) -> bytes:
+    """Apply a v1 / v2 delta record's diff to *parent*."""
+    if version == 2:
+        return apply_delta_v2(parent, diff)
+    return apply_delta(parent, diff)
 
 
 def _zip_get(corpus_dir: Path, h: str) -> bytes | None:
@@ -504,7 +531,7 @@ _BAD_DELTA = (
 
 
 def _resolve_deltas(
-    full_files: dict[str, bytes], delta_files: list[tuple[str, Path]]
+    full_files: dict[str, bytes], delta_files: list[tuple[str, Path]], corpus_dir: Path
 ) -> dict[str, bytes]:
     """Resolve delta chains against full files; returns hash -> bytes.
 
@@ -521,18 +548,23 @@ def _resolve_deltas(
             try:
                 delta = json.loads(f.read_text())
                 parent_hash = delta["parent"]
-                if parent_hash in resolved:
-                    version = delta.get("v", 1)
-                    if version == 2:
-                        reconstructed = apply_delta_v2(resolved[parent_hash], delta["diff"])
-                    else:
-                        reconstructed = apply_delta(resolved[parent_hash], delta["diff"])
-                    resolved[h] = reconstructed
-                else:
+                if parent_hash not in resolved:
                     still_remaining[h] = f
+                    continue
+                data = _apply_rec(resolved[parent_hash], delta["diff"], delta.get("v", 1))
+                if hash_data(data) == h:
+                    resolved[h] = data
+                else:
+                    log.warning("skipping delta %r: rebuilt bytes do not match its name", f.name)
             except _BAD_DELTA as exc:
                 log.warning("skipping corrupt delta %r: %s", f.name, exc)
         remaining = still_remaining
+
+    # Parent outside the live roots (pruned/, crashing/...): rehydrate searches them.
+    for h in remaining:
+        data = rehydrate_by_hash(h, corpus_dir)
+        if data is not None:
+            resolved[h] = data
     return resolved
 
 
@@ -670,7 +702,7 @@ def load_corpus(
     # Reconstruct delta chains via topological resolution.
     # Each delta depends on its parent; resolve in order from full snapshots.
     if delta_files:
-        resolved = _resolve_deltas(full_files, delta_files)
+        resolved = _resolve_deltas(full_files, delta_files, corpus_dir)
         chained = ((h, resolved[h]) for h, _ in delta_files if h in resolved)
         _absorb(chained, seen, entropy_tracker, corpus)
 
@@ -766,10 +798,48 @@ def _iter_seeds(corpus_dir: Path) -> Iterator[bytes]:
         yield from (data for data, _ in store.live())
     yield from (data for data, _ in seed_tar.live(corpus_dir))
 
+    yield from (data for _, data in iter_delta_seeds(corpus_dir))
+
+
+def iter_delta_seeds(corpus_dir: Path) -> Iterator[tuple[str, bytes]]:
+    """``(hash, full bytes)`` of every live delta record, pruned/ skipped; read-only.
+
+    For readers that walk loose files and archives (discover_seed_files does
+    not return deltas): without this a delta-stored seed is invisible to them.
+    """
+    corpus_dir = Path(corpus_dir)
     for h in _delta_hashes(corpus_dir):
         data = rehydrate_by_hash(h, corpus_dir)
         if data is not None:
-            yield data
+            yield h, data
+
+
+def live_delta_files(corpus_dir: Path) -> list[Path]:
+    """Live ``delta_<h>.json`` record paths under ``deltas/``, pruned/ skipped, sorted."""
+    root = Path(corpus_dir) / "deltas"
+    if not root.is_dir() or root.is_symlink():
+        return []
+    return sorted(
+        f
+        for f in root.rglob("delta_*.json")
+        if f.is_file() and not f.is_symlink() and "pruned" not in f.relative_to(root).parts
+    )
+
+
+def read_seed(path: Path) -> bytes:
+    """Full seed bytes of *path*: a delta record is rehydrated, anything else read.
+
+    Raises:
+        OSError: a delta record that cannot be rebuilt (missing parent, corrupt).
+    """
+    if not (path.name.startswith("delta_") and path.suffix == ".json"):
+        return path.read_bytes()
+    root = next((p.parent for p in path.parents if p.name == "deltas"), None)
+    h = path.name[len("delta_") : -len(".json")]
+    data = rehydrate_by_hash(h, root) if root is not None else None
+    if data is None:
+        raise OSError(f"unresolvable delta record {path}")
+    return data
 
 
 def iter_archive_seeds(corpus_dir: Path) -> Iterator[bytes]:
@@ -877,25 +947,91 @@ def _put_seed(corpus_dir: Path, tree: SeedTree, h: str, dest: Path, data: bytes)
     dest.write_bytes(data)
 
 
+_V2_MAX_LEN = 512  # levenshtein_align is O(n*m): v2 deltas only for small inputs
+
+
+class DeltaStore:
+    """``--delta-corpus`` writer state (soksolv reverse/nodestore.go keyframes).
+
+    Tracks delta hops from each entry this process stored to its full
+    keyframe. A child is a delta only when its parent is a known entry less
+    than ``SNAPSHOT_INTERVAL - 1`` hops deep; otherwise (and on the depth
+    grid) it is a keyframe. An unknown parent -- a delta from an earlier
+    run, a pruned seed, an index entry forgotten past the memory bound --
+    forces a keyframe, so a chain never outgrows the interval::
+
+        K - d - d - ... - d   K - d - ...      (K full, d delta, <= 19 hops)
+    """
+
+    def __init__(self, corpus_dir: Path) -> None:
+        self._corpus_dir = Path(corpus_dir)
+        self._hops: dict[str, int] = {}
+
+    def encode(
+        self, data: bytes, parent: bytes | None, depth: int, parent_key: str | None = None
+    ) -> tuple[dict, int] | None:
+        """``(record, hops)`` to store *data* as a delta, or None for a keyframe.
+
+        *parent_key*: the caller's memoized ``hash_data(parent)``; hashing a
+        32 KiB parent in pure Python costs ~1 ms per admission.
+        """
+        if parent is None or depth % SNAPSHOT_INTERVAL == 0:
+            return None
+        parent_hash = parent_key or hash_data(parent)
+        hops = self._parent_hops(parent_hash)
+        if hops is None or hops + 1 >= SNAPSHOT_INTERVAL:
+            return None
+
+        # v1 for same-length mutations, v2 for length-changing ones.
+        diff = compute_delta(parent, data)
+        version = 1
+        if diff is None and len(data) <= _V2_MAX_LEN:
+            diff, version = compute_delta_v2(parent, data), 2
+        if diff is None:
+            return None
+        return {"parent": parent_hash, "diff": diff, "v": version}, hops + 1
+
+    def note(self, h: str, hops: int) -> None:
+        """Record that *h* is stored *hops* deltas from a keyframe; bounded."""
+        self._hops[h] = hops
+        if len(self._hops) <= SEEN_HASHES_MAX:
+            return
+        # Forget the oldest half: their children fall back to the disk check.
+        for k in list(self._hops)[: SEEN_HASHES_MAX // 2]:
+            del self._hops[k]
+
+    def _parent_hops(self, h: str) -> int | None:
+        hops = self._hops.get(h)
+        if hops is not None:
+            return hops
+        store = seed_zip.lookup(self._corpus_dir) or seed_zip.peek(self._corpus_dir)
+        dest = self._corpus_dir / "seeds" / h[:2] / f"id_{h}"
+        return 0 if _has_seed(store, SeedTree.MAIN, h, dest) else None
+
+
 def save_to_corpus(
     data: bytes,
     corpus_dir: Path,
     seen_hashes: set[str],
     parent: bytes | None = None,
     lineage_depth: int = 0,
+    delta_store: DeltaStore | None = None,
+    parent_key: str | None = None,
 ) -> bool:
     """Save input to corpus if not already seen.
 
-    When parent is provided and the diff is compact (< 25% of child size),
-    stores a delta file instead of the full input. Every SNAPSHOT_INTERVAL
-    generations, forces a full snapshot to cap chain depth.
+    With a *delta_store* (``--delta-corpus``), a parent and a compact diff
+    (< 25% of child size), stores a delta record instead of the full input;
+    see :class:`DeltaStore` for the keyframe rule. Without one, full only.
 
     Args:
         data: Input bytes to save.
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes.
         parent: Parent input bytes (for delta encoding).
-        lineage_depth: Number of delta hops from the nearest full snapshot.
+        lineage_depth: Parent's lineage depth; the child sits at +1.
+        delta_store: ``--delta-corpus`` writer state; None stores full seeds.
+        parent_key: ``hash_data(parent)`` when the caller has it memoized.
 
     Returns:
         True if saved (new), False if duplicate.
@@ -909,35 +1045,23 @@ def save_to_corpus(
     seeds_dir.mkdir(parents=True, exist_ok=True)
     deltas_dir = corpus_dir / "deltas"
 
-    # Force full snapshot at interval to cap chain depth.
-    # v1 delta handles same-length mutations; v2 handles length-changing ones.
-    # Delta encoding is permanently disabled: seeds are always stored in full.
-    # Delta readers (_resolve_deltas, rehydrate) stay for legacy corpora.
-    use_delta = False
-
-    delta = None
-    if use_delta:
-        diff = compute_delta(parent, data)
-        if diff is not None:
-            parent_hash = hash_data(parent)
-            delta = {"parent": parent_hash, "diff": diff, "v": 1}
-        elif len(data) <= 512:
-            # Try v2 for length-changing mutations on small inputs only.
-            # v2 uses levenshtein_align which is O(n*m) — skip for large inputs.
-            diff_v2 = compute_delta_v2(parent, data)
-            if diff_v2 is not None:
-                parent_hash = hash_data(parent)
-                delta = {"parent": parent_hash, "diff": diff_v2, "v": 2}
-
-    if delta is not None:
+    encoded = (
+        delta_store.encode(data, parent, lineage_depth + 1, parent_key) if delta_store else None
+    )
+    if encoded is not None:
+        delta, hops = encoded
         deltas_dir.mkdir(parents=True, exist_ok=True)
         delta_file = deltas_dir / f"delta_{h}.json"
         delta_file.write_text(json.dumps(delta, separators=(",", ":")))
-    else:
-        # Store seeds in two-digit hash subdirectories to avoid too many
-        # files in a single directory.
-        dest = seeds_dir / h[:2] / f"id_{h}"
-        _put_seed(corpus_dir, SeedTree.MAIN, h, dest, data)
+        delta_store.note(h, hops)
+        return True
+
+    # Store seeds in two-digit hash subdirectories to avoid too many
+    # files in a single directory.
+    dest = seeds_dir / h[:2] / f"id_{h}"
+    _put_seed(corpus_dir, SeedTree.MAIN, h, dest, data)
+    if delta_store is not None:
+        delta_store.note(h, 0)
     return True
 
 

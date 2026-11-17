@@ -10,6 +10,7 @@ a killed run keeps every written batch. Replay backends are minimize's.
 """
 
 import contextlib
+import itertools
 import os
 import pickle
 import shutil
@@ -29,6 +30,8 @@ from fuzzer_tool.adapters.filesystem import (
     free_slot,
     hash_data,
     iter_archive_seeds,
+    iter_delta_seeds,
+    live_delta_files,
 )
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import TOUCHED_SCAN_MIN_ENTRIES, ShmCoverage
@@ -163,7 +166,8 @@ class _CorpusSeeds:
         self.duplicates = 0
         self.twins = 0
         archived = count_archive_seeds(corpus_dir)
-        self.total = None if archived is None else len(self._files) + archived
+        deltas = len(live_delta_files(corpus_dir))
+        self.total = None if archived is None else len(self._files) + archived + deltas
 
     def __iter__(self) -> Iterator[bytes]:
         for fpath in self._files:
@@ -182,7 +186,10 @@ class _CorpusSeeds:
                     self.renamed += 1
             yield data
 
-        for data in iter_archive_seeds(self._corpus):
+        # Delta records (--delta-corpus) after the archives, rebuilt to full bytes.
+        archived = iter_archive_seeds(self._corpus)
+        deltas = (data for _, data in iter_delta_seeds(self._corpus))
+        for data in itertools.chain(archived, deltas):
             if self._max and len(data) > self._max:
                 self.oversized += 1
                 continue

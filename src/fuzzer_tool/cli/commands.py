@@ -1236,6 +1236,7 @@ def cmd_fuzz(args):
         elo_time_credit=getattr(args, "elo_time_credit", False),
         lineage=getattr(args, "lineage", False),
         lineage_backtrack=getattr(args, "lineage_backtrack", False),
+        lineage_exhaust=getattr(args, "lineage_exhaust", False),
         mds_select=getattr(args, "mds_select", False),
         minimax_select=getattr(args, "minimax_select", False),
         inverse_lottery_select=getattr(args, "inverse_lottery_select", False),
@@ -1366,6 +1367,7 @@ def cmd_fuzz(args):
         grimoire=getattr(args, "grimoire", False),
         grimoire_max_execs=getattr(args, "grimoire_max_execs", 512),
         zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
+        delta_corpus=getattr(args, "delta_corpus", False),
         zip_compact_ratio=getattr(args, "zip_compact_ratio", 0.0),
         negative_bloom=negative_bloom,
     )
@@ -3008,6 +3010,9 @@ def cmd_sweep(args):
 # field_hmm (--field-hmm) is excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md).
 #
+# lineage_exhaust (--lineage-exhaust) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md).
+#
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
 # RandPool.sample for k>=3. It explores nothing --hail-mary is not already
@@ -3055,6 +3060,9 @@ def cmd_sweep(args):
 # zip_seed_corpus (--zip-seed-corpus) is excluded: a storage layout, not a
 # strategy. Force-enabling it would move the user's corpus writes into
 # seeds.zip (a later run without the flag still reads it, but writes files).
+#
+# delta_corpus (--delta-corpus) is excluded for the same reason: a storage
+# layout (children as delta records), not a strategy.
 #
 # mds_select (--mds-select) is excluded for the same reason as gate_bonus's
 # second point: it is explicitly unvalidated. It swaps
@@ -4000,6 +4008,14 @@ def main() -> int:
         "seeds whose subtree has gained no edges are penalised by depth, "
         "shifting selection back toward shallow seeds with unexplored "
         "siblings (implies --lineage)",
+    )
+    fuzz_parser.add_argument(
+        "--lineage-exhaust",
+        action="store_true",
+        help="Backtrack on incremental exhaustion (soksolv dead ends): a seed is dead "
+        "once fuzzed --lineage-backtrack's min rounds without new coverage and every "
+        "child is dead; new coverage revives its ancestors. Replaces the per-weight "
+        "subtree DFS. Needs --lineage --lineage-backtrack.",
     )
     fuzz_parser.add_argument(
         "--mds-select",
@@ -6763,6 +6779,14 @@ def main() -> int:
             "in corpus/deltas/. Without this flag an existing seeds.zip is still "
             "loaded (read-only); new seeds go to corpus/seeds/"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--delta-corpus",
+        action="store_true",
+        default=False,
+        help="Store admitted children as delta records against their parent "
+        "(corpus/deltas/), a full keyframe every 20 lineage hops (soksolv node store). "
+        "Every corpus reader rebuilds full bytes; a run without the flag still reads them.",
     )
     fuzz_parser.add_argument(
         "--cuckoo-seed-filter",

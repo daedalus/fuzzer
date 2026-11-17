@@ -1367,12 +1367,15 @@ class CorpusManager:
         # so writing the flag at the gate would KeyError on a new seed (and,
         # for a re-admitted one, be clobbered by that literal anyway).
         is_near_duplicate = False
+        delta_store = getattr(f, "_delta_store", None)
         if save_to_corpus(
             data,
             f.corpus_dir,
             f.seen_hashes,
             parent=parent,
             lineage_depth=parent_depth,
+            delta_store=delta_store,
+            parent_key=self.seed_key(parent) if delta_store and parent is not None else None,
         ):
             # Purely observational bookkeeping for CorpusFlux (P4-T6); must
             # never be able to break a save.
