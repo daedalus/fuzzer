@@ -30,7 +30,7 @@ class _CountingKatz(_FakeKatz):
     def seed_energy(self, _key) -> float:
         return 0.5
 
-    def enable_branch(self) -> None:
+    def enable_branch(self, rank=None) -> None:
         pass
 
 

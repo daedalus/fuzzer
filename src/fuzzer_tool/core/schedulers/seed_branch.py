@@ -20,9 +20,15 @@ blocks out of a packed node mask (3.16M bits on ffmpeg), nearest hop
 level first, and stops at the first level the seed covers: 0.77 ms ->
 0.03 ms per seed (2.7M blocks, 155k hot). Refresh: 0.55 s, inside the
 Katz recompute budget.
+
+``--cut-damage`` (``FrontierRank.CUT_DAMAGE``) ranks by
+``hits / (1 + damage)`` instead: a frontier branch into a block whose
+removal strands a large region (``core/articulation.py``) is the only way
+in, so it outranks a slightly less-tried branch to a leaf.
 """
 
 import math
+from enum import Enum
 
 import numpy as np
 
@@ -39,15 +45,34 @@ MAX_HOPS = 16
 FRESH_FRAC = 0.25
 
 
+class FrontierRank(Enum):
+    """How refresh() orders frontier branches."""
+
+    HITS = "hits"  # least-tried tail first
+    CUT_DAMAGE = "cut_damage"  # hits / (1 + blocks the head guards)
+
+
 class BranchFrontier:
     """Per-block energy toward the least-tried frontier branches."""
 
-    def __init__(self, icfg: InterproceduralCFG):
+    def __init__(self, icfg: InterproceduralCFG, guard: np.ndarray | None = None):
+        """*guard*: per-block cut damage; None ranks by tail hits alone.
+
+        Raises:
+            ValueError: *guard* is not one value per block.
+        """
         self._lg = icfg.line_graph()
         self._src = icfg.src
         self._dst = icfg.dst
         self._n = icfg.n_nodes
         self.targets = np.zeros(0, dtype=np.int64)
+
+        # Rank key bound once (ifs up): divisor per edge, by its head block.
+        self._div = None
+        if guard is not None:
+            if len(guard) != self._n:
+                raise ValueError("guard needs one value per block")
+            self._div = 1.0 + np.asarray(guard, dtype=np.float64)[self._dst]
 
         # Blocks within MAX_HOPS of a target, sorted by hops; level i spans
         # _hot[_bounds[i]:_bounds[i + 1]] at _level_hops[i].
@@ -72,7 +97,10 @@ class BranchFrontier:
 
         # Least-tried tails first; stable, so ties go to the lower edge id.
         k = max(1, math.ceil(FRESH_FRAC * frontier.size))
-        order = np.argsort(hits[self._src[frontier]], kind="stable")
+        key = hits[self._src[frontier]]
+        if self._div is not None:
+            key = key / self._div[frontier]
+        order = np.argsort(key, kind="stable")
         self.targets = np.sort(frontier[order[:k]])
 
         # Block hops: its best out-edge (an edge leaves its tail).

@@ -34,6 +34,7 @@ import threading
 import time
 
 from fuzzer_tool.adapters.pipe_reader import PipeReader
+from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
 
 log = logging.getLogger(__name__)
 
@@ -450,6 +451,13 @@ class PersistentLoader:
         self._exec_window_size = 100  # track last N execs
         self._baseline_eps: float = 0.0  # calibrated execs/sec
         self._slow_restart_threshold = 0.10  # restart if below 10% of baseline
+        # --respawn-backoff pacing; the null object restarts at once.
+        self._backoff = NO_BACKOFF
+
+    def attach_backoff(self, backoff) -> None:
+        """Pace this loader's restarts (--respawn-backoff)."""
+        self._backoff = backoff
+        backoff.started()
 
     def start(self) -> bool:
         if self._proc and self._proc.poll() is None:
@@ -516,6 +524,7 @@ class PersistentLoader:
             return False
         if resp.strip() == b"READY":
             self._ready = True
+            self._backoff.started()
             log.info("Persistent loader started: %s", self.target)
             return True
 
@@ -611,6 +620,7 @@ class PersistentLoader:
 
         self._restarting = True
         try:
+            self._backoff.failed(Failure.DEATH)
             if self.start():
                 return self.run_one(data)
         finally:
@@ -635,6 +645,7 @@ class PersistentLoader:
         if not self._restarting:
             self._restarting = True
             try:
+                self._backoff.failed(Failure.DEATH)
                 self.start()
             finally:
                 self._restarting = False

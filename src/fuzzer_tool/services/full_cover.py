@@ -20,14 +20,14 @@ are read-only, so a corpus that lives in one needs ``-o``.
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 
 from fuzzer_tool.adapters import seed_tar, seed_zip
 from fuzzer_tool.adapters.edge_pickle import iter_edges_pickle
-from fuzzer_tool.adapters.filesystem import hash_data, is_regular
+from fuzzer_tool.adapters.filesystem import hash_data, is_regular, live_delta_files, read_seed
 from fuzzer_tool.core.set_cover import min_cover
 from fuzzer_tool.services.minimize import _commit_results, _discover_corpus_files
 
@@ -82,6 +82,7 @@ class _Corpus:
     zipped: bool
     tarred: bool
     seed_id_to_hh: dict[str, str]
+    deltas: dict[str, Path] = field(default_factory=dict)  # --delta-corpus records
 
     @property
     def archived(self) -> bool:
@@ -112,7 +113,18 @@ def load_corpus(corpus_dir: str | Path) -> _Corpus:
         sizes.setdefault(sid, size)
         seed_id_to_hh.setdefault(sid, hh)
 
-    return _Corpus(loose, sizes, zipped, tarred, seed_id_to_hh)
+    # Delta records: sized by their rebuilt bytes; an unresolvable one is not a seed.
+    deltas: dict[str, Path] = {}
+    for path in live_delta_files(corpus_path):
+        try:
+            size = len(read_seed(path))
+        except OSError:
+            continue
+        sid = path.name[len("delta_") : -len(".json")]
+        deltas.setdefault(sid, path)
+        sizes.setdefault(sid, size)
+
+    return _Corpus(loose, sizes, zipped, tarred, seed_id_to_hh, deltas)
 
 
 def _is_seed_file(path: Path, _corpus_path: Path) -> bool:
@@ -233,6 +245,16 @@ def _write_cover(
             if is_regular(meta):
                 shutil.copy2(meta, dest_dir / meta.name)
 
+    # A delta alone is not a seed outside its corpus: write full bytes.
+    for sid in kept:
+        path = corpus.deltas.get(sid)
+        if path is None or sid in written:
+            continue
+        written.add(sid)
+        dest_dir = out / "seeds" / sid[:2]
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / f"id_{sid}").write_bytes(read_seed(path))
+
     if corpus.tarred:
         for sid, data, hh in seed_tar.pick(corpus_path, kept):
             if sid in written:
@@ -328,7 +350,9 @@ def full_cover(
             "seeds live in an archive (read-only); pass -o DIR to write the cover"
         )
 
-    files = list(corpus.loose.values())
-    survivors = [str(corpus.loose[sid]) for sid in kept if sid in corpus.loose]
+    # Pruned delta records move to pruned/deltas/, still rehydratable.
+    paths = {**corpus.deltas, **corpus.loose}
+    files = list(paths.values())
+    survivors = [str(paths[sid]) for sid in kept if sid in paths]
     n_kept, n_removed = _commit_results(files, survivors, None, corpus_path)
     return replace(report, kept=n_kept, removed=n_removed)

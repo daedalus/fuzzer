@@ -570,6 +570,12 @@ class InProcessRunner:
         """Stop this target's timeout tick before another target runs."""
         self._shim_call("__afl_signals_release")
 
+    def attach_backoff(self, backoff) -> None:
+        """Pace restarts of the subprocess loader behind this runner, if any."""
+        for inner in (self._persistent, self._forkserver):
+            if inner is not None:
+                inner.attach_backoff(backoff)
+
     def _shim_call(self, name: str) -> None:
         fn = getattr(self._lib, name, None) if self._lib is not None else None
         if fn is not None:

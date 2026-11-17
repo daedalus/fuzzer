@@ -143,6 +143,7 @@ class FuzzRound:
         "_effective",
         "_surprisal_weight",
         "_distance",
+        "_stratum",
     )
 
     def __init__(self, fuzzer: "Fuzzer", data: bytes):
@@ -175,6 +176,8 @@ class FuzzRound:
         self._effective = None
         self._surprisal_weight = 0.0
         self._distance: float | None = None
+        # Deepest waypoint this exec reached (--waypoints only).
+        self._stratum: int | None = None
         # Round start, stamped only under --elo-time-credit.
         self._t_round: float | None = None
 
@@ -1113,6 +1116,9 @@ class FuzzRound:
         # The weight is bounded above by 1.0, so the F0 signal never inflates
         # a posterior beyond the default -- it only ever re-weights.
         f = self._f
+        if f._lineage_exhaust:
+            novelty = Novelty.NEW if self._has_new_coverage else Novelty.NONE
+            f._record_lineage_exhaust(self._data, novelty)
         if not (
             f._seed_quality
             or f._seed_canary
@@ -1146,6 +1152,12 @@ class FuzzRound:
         # For round-robin and DRR an Elo-compatibility signal only: their own
         # selection ignores it (deterministic cycling).
         f._record_seed_floor_arms(data, found, weight)
+        # --fess-cell-novelty: in-cell novelty needs this exec's edges, read
+        # before the record it credits. Timeouts earn no coverage.
+        fess_observe = getattr(f, "_fess_observe", None)
+        if fess_observe is not None:
+            edges = () if self._is_timeout else self._edges_now()
+            fess_observe(data, edges if isinstance(edges, set | frozenset) else ())
         f._record_seed_os_arms(data, found, weight)
 
     def _feed_models(self) -> None:
@@ -1530,6 +1542,12 @@ class FuzzRound:
         f = self._f
         if not f._distance:
             return
+        self._measure_distance()
+        if f._waypoints is not None:
+            self._note_waypoint()
+
+    def _measure_distance(self) -> None:
+        f = self._f
         runtime_avg = f._read_runtime_avg_distance()
         if runtime_avg is not None:
             self._distance = runtime_avg
@@ -1544,6 +1562,12 @@ class FuzzRound:
         if avg_dist < _NO_VALUE_DISTANCE:  # exclude the no-valued-blocks sentinel
             self._note_distance(avg_dist)
 
+    def _note_waypoint(self) -> None:
+        # --waypoints: every exec, so the bitmap never carries bits over.
+        f = self._f
+        self._stratum = f._waypoints.stratum_of(f._waypoint_bmp.read_and_clear())
+        f._waypoints.note(self._distance)
+
     def _tag_distance(self) -> None:
         # Admitted mutant inherits this round's measured distance; aflgo/go
         # rank it by that. A duplicate re-measures the same bytes: same value.
@@ -1553,6 +1577,9 @@ class FuzzRound:
         if meta is None:
             return
         meta["avg_distance"] = self._distance
+        if self._stratum is not None:
+            meta["waypoint"] = self._stratum
+            self._f._waypoints.admit(self._stratum)
 
     def _note_distance(self, value: float) -> None:
         f = self._f
@@ -2253,6 +2280,8 @@ class FuzzRound:
     def _on_boring(self) -> bool:
         f = self._f
         mutated = self._mutated
+        if f._plateau is not None:
+            self._join_plateau()
         # ── Metropolis acceptance for non-improving / non-crashing inputs ──
         if f._metropolis and f._anneal_budget > 0 and not self._is_timeout and self._metropolis():
             return True
@@ -2270,6 +2299,19 @@ class FuzzRound:
 
         f._record_fluctuation_observation("boring")
         return False
+
+    def _join_plateau(self) -> None:
+        # --plateau-groups: a boring mutant on another seed's exact path puts
+        # parent and that seed on one plateau. The shim's rolling path hash is
+        # this exec's (one word read); a timeout's path is truncated.
+        f = self._f
+        shm = f.shm_cov
+        if shm is None or self._is_timeout:
+            return
+        path_hash = shm.read_path_hash()
+        if path_hash == 0:
+            return
+        f._plateau.observe(f._seed_key(self._data), path_hash, f._edge_tracker.seed_path_hash)
 
     def _metropolis(self) -> bool:
         f = self._f

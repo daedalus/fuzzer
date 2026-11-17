@@ -41,6 +41,7 @@ from fuzzer_tool.core.run_mode import (
 )
 from fuzzer_tool.core.sanitizer import FUNC_HASH_TAG, STACK_HASH_TAG, STACK_HASH_VERSION
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
+from fuzzer_tool.core.schedulers.seed_fess import FESS_RANDOM_EVERY, FessMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
@@ -1019,6 +1020,9 @@ def cmd_fuzz(args):
         joint_liveness=getattr(args, "joint_liveness", False),
         byte_interaction=getattr(args, "byte_interaction", False),
         influence=getattr(args, "influence", False),
+        cut_damage=getattr(args, "cut_damage", False),
+        waypoints=getattr(args, "waypoints", False),
+        prove_dead=getattr(args, "prove_dead", False),
         field_hmm=getattr(args, "field_hmm", False),
         field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
@@ -1030,8 +1034,16 @@ def cmd_fuzz(args):
         pos_emeans_tau=getattr(args, "pos_emeans_tau", 0.0),
         pos_pca=getattr(args, "pos_pca", False),
         pos_learn=getattr(args, "pos_learn", False),
+        pos_hotspot=getattr(args, "pos_hotspot", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_fess_scheduler=getattr(args, "seed_fess_scheduler", False),
+        fess_inherit=Switch.ON if getattr(args, "fess_inherit", False) else Switch.OFF,
+        seed_fess_mode=FessMode(getattr(args, "seed_fess_mode", FessMode.LEAST_EFFORT.value)),
+        fess_cell_novelty=Switch.ON if getattr(args, "fess_cell_novelty", False) else Switch.OFF,
+        respawn_backoff=Switch.ON if getattr(args, "respawn_backoff", False) else Switch.OFF,
+        advisors=getattr(args, "advisors", False),
+        plateau_groups=getattr(args, "plateau_groups", False),
+        elo_stale_bench=Switch.ON if getattr(args, "elo_stale_bench", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -1224,6 +1236,7 @@ def cmd_fuzz(args):
         elo_time_credit=getattr(args, "elo_time_credit", False),
         lineage=getattr(args, "lineage", False),
         lineage_backtrack=getattr(args, "lineage_backtrack", False),
+        lineage_exhaust=getattr(args, "lineage_exhaust", False),
         mds_select=getattr(args, "mds_select", False),
         minimax_select=getattr(args, "minimax_select", False),
         inverse_lottery_select=getattr(args, "inverse_lottery_select", False),
@@ -1354,6 +1367,7 @@ def cmd_fuzz(args):
         grimoire=getattr(args, "grimoire", False),
         grimoire_max_execs=getattr(args, "grimoire_max_execs", 512),
         zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
+        delta_corpus=getattr(args, "delta_corpus", False),
         zip_compact_ratio=getattr(args, "zip_compact_ratio", 0.0),
         negative_bloom=negative_bloom,
     )
@@ -2940,6 +2954,10 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): LearnAFL's path
 # mask has unit tests only. Bench arm: pos-arena-learn.
 #
+# pos_hotspot (--pos-hotspot) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the soksolv
+# hotspot arm has unit tests only.
+#
 # joint_liveness (--joint-liveness) is excluded: it only has an effect together
 # with --region-profile (the dead-region down-weight is the thing it revokes)
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
@@ -2948,6 +2966,15 @@ def cmd_sweep(args):
 # seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md).
 #
+# prove_dead (--prove-dead) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md); inert without --target-functions.
+#
+# waypoints (--waypoints) is excluded as unmeasured: unit tests only, no paired run
+# (docs/AB_PENDING.md); inert without --target-functions.
+#
+# cut_damage (--cut-damage) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md); inert without --seed-branch-scheduler.
+#
 # seed_gram_scheduler (--seed-gram-scheduler) is excluded as unmeasured: unit tests
 # only, no paired run (docs/AB_PENDING.md).
 #
@@ -2955,8 +2982,23 @@ def cmd_sweep(args):
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
 #
-# seed_fess_scheduler (--seed-fess-scheduler) is excluded as unmeasured: unit
-# tests only, no paired run (docs/AB_PENDING.md).
+# seed_fess_scheduler (--seed-fess-scheduler), fess_inherit (--fess-inherit)
+# and fess_cell_novelty (--fess-cell-novelty) are excluded as unmeasured: unit
+# tests only, no paired run (docs/AB_PENDING.md). The last two are also inert
+# without the FESS arm.
+#
+# respawn_backoff (--respawn-backoff) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md). A runtime guard, not a strategy.
+#
+# advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
+# run (docs/AB_PENDING.md).
+#
+# plateau_groups (--plateau-groups) is excluded as unmeasured: unit tests only,
+# no paired run (docs/AB_PENDING.md). Inert without --seed-lottery-scheduler and
+# a --seed-lottery-currency other than off.
+#
+# elo_stale_bench (--elo-stale-bench) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md).
 #
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
@@ -2967,6 +3009,9 @@ def cmd_sweep(args):
 #
 # field_hmm (--field-hmm) is excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md).
+#
+# lineage_exhaust (--lineage-exhaust) is excluded as unmeasured: unit tests
+# only, no paired run (docs/AB_PENDING.md).
 #
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
@@ -3015,6 +3060,9 @@ def cmd_sweep(args):
 # zip_seed_corpus (--zip-seed-corpus) is excluded: a storage layout, not a
 # strategy. Force-enabling it would move the user's corpus writes into
 # seeds.zip (a later run without the flag still reads it, but writes files).
+#
+# delta_corpus (--delta-corpus) is excluded for the same reason: a storage
+# layout (children as delta records), not a strategy.
 #
 # mds_select (--mds-select) is excluded for the same reason as gate_bonus's
 # second point: it is explicitly unvalidated. It swaps
@@ -3939,6 +3987,14 @@ def main() -> int:
         "(autofz): a slow strategy must out-yield a fast one to draw. Needs --elo.",
     )
     fuzz_parser.add_argument(
+        "--elo-stale-bench",
+        action="store_true",
+        help="Bench the Elo strategy with the most rounds since its last gain once it passes "
+        "max(2000, 4x the pool median); revive it after 10000 rounds with a prior rating. "
+        "Never benches the last armed strategy (soksolv; core/elo_stale_bench.py). Needs --elo. "
+        "Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
         "--lineage",
         action="store_true",
         help="Track a weighted mutation lineage tree (parent/ops/sites/new-edge weight "
@@ -3952,6 +4008,14 @@ def main() -> int:
         "seeds whose subtree has gained no edges are penalised by depth, "
         "shifting selection back toward shallow seeds with unexplored "
         "siblings (implies --lineage)",
+    )
+    fuzz_parser.add_argument(
+        "--lineage-exhaust",
+        action="store_true",
+        help="Backtrack on incremental exhaustion (soksolv dead ends): a seed is dead "
+        "once fuzzed --lineage-backtrack's min rounds without new coverage and every "
+        "child is dead; new coverage revives its ancestors. Replaces the per-weight "
+        "subtree DFS. Needs --lineage --lineage-backtrack.",
     )
     fuzz_parser.add_argument(
         "--mds-select",
@@ -4204,6 +4268,13 @@ def main() -> int:
         "(core/schedulers/seed_branch.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
+        "--cut-damage",
+        action="store_true",
+        help="With --seed-branch-scheduler: rank frontier branches by tail hits / (1 + "
+        "blocks the head alone guards from main), articulation points of the undirected "
+        "ICFG (core/articulation.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
         "--seed-p2c-scheduler",
         action="store_true",
         help="Seed-arena arm 'p2c': power of two choices: two uniform draws, higher posterior mean"
@@ -4241,12 +4312,63 @@ def main() -> int:
         "until it wins its A/B.",
     )
     fuzz_parser.add_argument(
+        "--plateau-groups",
+        action="store_true",
+        help="Plateau groups (soksolv): a boring mutant taking another seed's exact path "
+        "unions its parent with that seed (core/plateau.py). The groups replace connected "
+        "components as --seed-lottery-scheduler's currency, so each plateau is backed "
+        "once. Needs --seed-lottery-currency equal|sqrt. Not in --hail-mary until it wins "
+        "its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--advisors",
+        action="store_true",
+        help="Advisors (soksolv): on each seed stage, i2s / token / cond advisors each "
+        "propose one move built from the seed's recorded cmplog data, run free of the "
+        "stage's energy and deduped (services/advisors.py). Not in --hail-mary until it "
+        "wins its A/B.",
+    )
+    fuzz_parser.add_argument(
         "--seed-fess-scheduler",
         action="store_true",
         help="Seed-arena arm 'fess': FESS feature-space search. Seeds map to a log2 grid of "
         "(edges, rare edges, lineage depth, size); the least-explored cell is fuzzed next, then "
         "its least-fuzzed seed. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_fess.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-fess-mode",
+        choices=tuple(m.value for m in FessMode),
+        default=FessMode.LEAST_EFFORT.value,
+        help="With --seed-fess-scheduler: cell schedule. least-effort: least-explored cell. "
+        f"triple: every {FESS_RANDOM_EVERY}th pick a random occupied cell, else even picks the "
+        "best cell (success rate over its seeds), odd picks round robin in creation order "
+        "(soksolv selectMove / pickCell).",
+    )
+    fuzz_parser.add_argument(
+        "--fess-cell-novelty",
+        action="store_true",
+        help="With --seed-fess-scheduler: per-cell scoped novelty. Each cell remembers the "
+        "edges its execs reached (bounded); an exec bringing edges new to its cell, even if "
+        "globally known, is credited, and picks prefer cells with recent in-cell novelty "
+        "(soksolv scoped novelty). No effect without the FESS arm. Not in --hail-mary until "
+        "it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--fess-inherit",
+        action="store_true",
+        help="With --seed-fess-scheduler: a child seed no better than its parent's cell (more "
+        "edges, then rare edges, smaller size, shallower) competes in the parent's cell, and a "
+        "cell occupied for the first time is picked next, once (soksolv project / "
+        "NewCellJump). No effect without the FESS arm. Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--respawn-backoff",
+        action="store_true",
+        help="Pace restarts of a persistent/forkserver target that dies within 250 ms of "
+        "starting: 20 ms doubling to 1 s per quick failure in a row; a longer run resets. "
+        "16 in a row abort the run with a clear error (adapters/respawn_backoff.py). "
+        "Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--frontier-bin",
@@ -4529,6 +4651,14 @@ def main() -> int:
         "changes, mutable ones (frozen restored) once stable; frozen runs feed the "
         "auto-dictionary (core/schedulers/pos_learn.py). Opt-in: NOT implied by "
         "--position-arena or --hail-mary (unmeasured).",
+    )
+    fuzz_parser.add_argument(
+        "--pos-hotspot",
+        action="store_true",
+        help="Enable the position-arena hotspot scheduler: offsets ranked by how many "
+        "unsolved cmplog comparisons their bytes block, hottest first; solved ones "
+        "drop out (soksolv hotspot table; core/schedulers/pos_hotspot.py). Needs "
+        "cmplog. Opt-in: NOT implied by --position-arena or --hail-mary (unmeasured).",
     )
     fuzz_parser.add_argument(
         "--saliency-targets",
@@ -5737,6 +5867,22 @@ def main() -> int:
         "positional 'targets' binary list).",
     )
     fuzz_parser.add_argument(
+        "--prove-dead",
+        action="store_true",
+        help="With --target-functions: drop targets statically proven unreachable "
+        "(no call/jump/address-reference path from entry, exports or address-taken "
+        "functions; core/deadness.py). Unknown keeps the target. Not in --hail-mary "
+        "until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--waypoints",
+        action="store_true",
+        help="With --target-functions: race the target's ICFG dominator chain from main; "
+        "seeds are stratified by the deepest waypoint reached, the active stratum's energy "
+        "doubles while the window's min distance sets records (core/waypoints.py). Not in "
+        "--hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
         "--gate-bonus",
         type=float,
         default=0.0,
@@ -6633,6 +6779,14 @@ def main() -> int:
             "in corpus/deltas/. Without this flag an existing seeds.zip is still "
             "loaded (read-only); new seeds go to corpus/seeds/"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--delta-corpus",
+        action="store_true",
+        default=False,
+        help="Store admitted children as delta records against their parent "
+        "(corpus/deltas/), a full keyframe every 20 lineage hops (soksolv node store). "
+        "Every corpus reader rebuilds full bytes; a run without the flag still reads them.",
     )
     fuzz_parser.add_argument(
         "--cuckoo-seed-filter",

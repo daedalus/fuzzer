@@ -1052,6 +1052,45 @@ class BayesianEloTracker(RoundRecorderMixin):
         # intra-iteration calls saves redundant list slicing + sum-of-squares.
         self._eff_k_cache: float | None = None
 
+        # --elo-stale-bench (core/elo_stale_bench.py): None = off. A saved
+        # section waits here when from_dict runs before enable_stale_bench.
+        self._stale_bench = None
+        self._bench_saved = None
+
+    def enable_stale_bench(self, bench) -> None:
+        """Bench stale strategies out of select_strategy (decided once).
+
+        Rebinds select_strategy / record_strategy_matches on this instance:
+        a tracker without the bench runs the class methods untouched.
+        """
+        self._stale_bench = bench
+        if self._bench_saved is not None:
+            bench.from_dict(self._bench_saved)
+        self.select_strategy = self._select_benched
+        self.record_strategy_matches = self._record_benched
+
+    def _select_benched(self, strategies: list[str], temperature: float | None = None) -> str:
+        if not strategies:
+            return ""
+        armed = self._stale_bench.armed(strategies, self._fresh_strategy)
+        return self.strategy_sampler(armed)()
+
+    def _record_benched(
+        self,
+        strategy_a: str,
+        opponents: Iterable[str],
+        score_a: float,
+        elapsed: float | None = None,
+    ) -> None:
+        BayesianEloTracker.record_strategy_matches(self, strategy_a, opponents, score_a, elapsed)
+        self._stale_bench.record(strategy_a, score_a)
+
+    def _fresh_strategy(self, name: str) -> None:
+        """Revival: the prior rating and no matches, so it plays as a cold arm."""
+        self._strategy_mu[name] = self.initial_mu
+        self._strategy_sigma_sq[name] = self.initial_sigma**2
+        self._strategy_match_count[name] = 0
+
     def _expected_score(self, mu_a: float, mu_b: float) -> float:
         """Expected score for player A given their rating posterior means."""
         return 1.0 / (1.0 + 10.0 ** ((mu_b - mu_a) / 400.0))
@@ -1494,7 +1533,7 @@ class BayesianEloTracker(RoundRecorderMixin):
 
     def to_dict(self) -> dict:
         """Serialize state to a dict (for StateStore pickle)."""
-        return {
+        out = {
             "initial_mu": self.initial_mu,
             "initial_sigma": self.initial_sigma,
             "beta": self.beta,
@@ -1518,9 +1557,15 @@ class BayesianEloTracker(RoundRecorderMixin):
                 a.value: list(h) for a, h in self._strategy_best_win_rate.items()
             },
         }
+        if self._stale_bench is not None:
+            out["stale_bench"] = self._stale_bench.to_dict()
+        return out
 
     def from_dict(self, data: dict) -> None:
         """Restore state from a serialized dict."""
+        self._bench_saved = data.get("stale_bench")
+        if self._stale_bench is not None and self._bench_saved is not None:
+            self._stale_bench.from_dict(self._bench_saved)
         self.initial_mu = data.get("initial_mu", self.initial_mu)
         self.initial_sigma = data.get("initial_sigma", self.initial_sigma)
         self.beta = data.get("beta", self.beta)

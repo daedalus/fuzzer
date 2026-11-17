@@ -75,7 +75,9 @@ from pathlib import Path
 
 from fuzzer_tool.core import cfg_cache
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
+from fuzzer_tool.core.deadness import DeadProver, Verdict, VerdictCache
 from fuzzer_tool.core.dominators import gate_blocks, predecessors
+from fuzzer_tool.core.run_mode import Switch
 
 log = logging.getLogger(__name__)
 
@@ -391,10 +393,17 @@ class TargetDistance:
         debug: bool = False,
         gate_bonus: float = 0.0,
         metric: DistanceMetric = DistanceMetric.HARMONIC,
+        prove_dead: Switch = Switch.OFF,
+        verdicts: VerdictCache | None = None,
     ):
         self.target = target
         self.target_names: list[str] = targets or []
         self.target_addrs: set[int] = set()
+        # --prove-dead: targets statically proven unreachable (core/deadness.py),
+        # dropped from target_addrs before any distance is computed.
+        self._prove_dead = prove_dead
+        self._verdicts = verdicts
+        self.dead_targets: set[int] = set()
         self._use_cfg_cache = use_cfg_cache
         self._debug = debug
         # Opt-in control-dependence discount (see core/dominators.py). 0.0
@@ -475,6 +484,8 @@ class TargetDistance:
             print(f"[dist] parse_symbols={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
         self._resolve_targets()
+        if self._prove_dead is Switch.ON:
+            self._drop_dead_targets()
         if self._debug:
             print(f"[dist] resolve_targets={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
@@ -662,6 +673,20 @@ class TargetDistance:
             for fname, (start, _end) in self.functions.items():
                 if name in fname:
                     self.target_addrs.add(start)
+
+    def _drop_dead_targets(self) -> None:
+        """Move proven-dead targets to ``dead_targets``; UNKNOWN keeps them."""
+        prover = None
+        for addr in sorted(self.target_addrs):
+            v = self._verdicts.get(addr) if self._verdicts is not None else None
+            if v is None:
+                prover = prover or DeadProver(self._elf_data)
+                v = prover.verdict(addr)
+                if v is not Verdict.UNKNOWN and self._verdicts is not None:
+                    self._verdicts.put(addr, v)
+            if v is Verdict.DEAD:
+                self.dead_targets.add(addr)
+        self.target_addrs -= self.dead_targets
 
     def _resolve_callee_name(self, addr: int) -> str | None:
         """Map a call target address to a function name (PLT-aware)."""
@@ -1062,10 +1087,25 @@ class TargetDistance:
         symbol. Empty dict for non-instrumented builds or when no site maps
         to a valued block.
         """
-        targets = self._trace_targets()
-        if not self._bb_value or not targets:
+        if not self._bb_value:
             return {}
         table: dict[int, float] = {}
+        for key, call in self._trace_sites():
+            dist = self._bb_value_of(call)
+            if dist is not None:
+                table[key] = dist
+        return table
+
+    def _trace_sites(self):
+        """Yield (probe key, call address) per sancov callback call site.
+
+        Key: return address after the call, relative to the object base.
+        Score the block holding the call: the CFG ends blocks at calls, so
+        the return address already opens the next block.
+        """
+        targets = self._trace_targets()
+        if not targets:
+            return
         base = self._base_addr or 0
         for start, end in self.functions.values():
             if end <= start or start < self._text_start or end > self._text_end:
@@ -1078,16 +1118,31 @@ class TargetDistance:
                 if offset + 5 > len(code):
                     continue
                 disp = struct.unpack_from("<i", code, offset + 1)[0]
-                call_target = start + offset + 5 + disp
-                if call_target not in targets:
+                if start + offset + 5 + disp not in targets:
                     continue
-                site = start + offset + 5  # return address after the call
-                # Score the block holding the call: the CFG ends blocks at
-                # calls, so *site* already opens the next block.
-                dist = self._bb_value_of(start + offset)
-                if dist is not None:
-                    table[site - base] = dist
+                yield start + offset + 5 - base, start + offset
+
+    def target_blocks(self) -> set[int]:
+        """Start addresses of every block containing a target."""
+        return set().union(*self._target_bbs().values())
+
+    def waypoint_node_table(self, stages: list[frozenset[int]]) -> dict[int, int]:
+        """Probe key -> stage index for call sites inside a waypoint block."""
+        stage_of = {b: i for i, blocks in enumerate(stages) for b in blocks}
+        table: dict[int, int] = {}
+        for key, call in self._trace_sites():
+            func = self._addr_to_function(call)
+            cfg = self._cfgs.get(func) if func else None
+            blk = cfg.block_containing(call) if cfg else None
+            if blk is not None and blk.start in stage_of:
+                table[key] = stage_of[blk.start]
         return table
+
+    def waypoint_sites(self, node_of: dict[int, int]):
+        """Yield (probe key, call address) for the keys in *node_of*."""
+        for key, call in self._trace_sites():
+            if key in node_of:
+                yield key, call
 
     def _build_np_index(self):
         """Build pre-sorted numpy arrays for vectorized distance lookup."""

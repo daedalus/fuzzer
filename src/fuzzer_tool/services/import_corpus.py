@@ -306,20 +306,26 @@ def build_autotoken_dictionary(
     Returns:
         Token byte strings, most-seeds-containing-it first.
     """
-    from fuzzer_tool.adapters.filesystem import discover_seed_files
-
     # Bounded: an exact Counter would hold one entry per junk token.
     # Sorted per seed so overflow drops do not depend on hash seeding.
     doc_freq = MisraGries(AUTOTOKEN_COUNTERS_PER_TOKEN * max_tokens)
-    for path in discover_seed_files(corpus_dir):
-        try:
-            data = path.read_bytes()
-        except OSError:
-            continue
+    for data in _corpus_bytes(corpus_dir):
         for tok in sorted(extract_tokens(data, min_len, max_len)):
             doc_freq.add(tok)
 
     return [tok for tok, _count in doc_freq.most_common(max_tokens)]
+
+
+def _corpus_bytes(corpus_dir: str):
+    """Every live seed's bytes: loose files, then delta records (--delta-corpus)."""
+    from fuzzer_tool.adapters.filesystem import discover_seed_files, iter_delta_seeds
+
+    for path in discover_seed_files(corpus_dir):
+        try:
+            yield path.read_bytes()
+        except OSError:
+            continue
+    yield from (data for _, data in iter_delta_seeds(Path(corpus_dir)))
 
 
 def _escape_token(token: bytes) -> str:

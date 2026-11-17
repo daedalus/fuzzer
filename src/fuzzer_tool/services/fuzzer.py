@@ -36,13 +36,14 @@ except ImportError:
     _HAS_NUMPY = False
 
 from fuzzer_tool.adapters import process, seed_zip
-from fuzzer_tool.adapters.filesystem import without_timeout_seeds
+from fuzzer_tool.adapters.filesystem import DeltaStore, without_timeout_seeds
 from fuzzer_tool.adapters.memfd_input import ALIAS_ENV, INPUT_PATH_ENV, MemfdInput
 from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
     reset_env_cache,
 )
+from fuzzer_tool.adapters.respawn_backoff import RespawnBackoff
 from fuzzer_tool.adapters.sancov_tables import SANCOV_ENV, SancovTables
 from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import (
@@ -56,6 +57,7 @@ from fuzzer_tool.adapters.shm import (
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
@@ -82,6 +84,7 @@ from fuzzer_tool.core.elf import (
     is_elf_executable,
     parse_sancov_guard_count,
 )
+from fuzzer_tool.core.elo_stale_bench import StaleBench
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
@@ -99,6 +102,7 @@ from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD, OrbitProbe, canonical
 from fuzzer_tool.core.percolation import CoverageRegime
+from fuzzer_tool.core.plateau import PlateauGroups
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check, structure_check
 from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, StateRestore, Switch
@@ -158,11 +162,12 @@ from fuzzer_tool.core.schedulers.op_swucb import SWUCB_PER_ARM
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
 from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
+from fuzzer_tool.core.schedulers.seed_branch import FrontierRank
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
-from fuzzer_tool.core.schedulers.seed_fess import SeedFessScheduler
+from fuzzer_tool.core.schedulers.seed_fess import FessMode, SeedFessScheduler
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_gram import SeedGramScheduler
 from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
@@ -200,6 +205,8 @@ from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.stack_depth import StackMax
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
+from fuzzer_tool.core.waypoints import NO_STRATUM
+from fuzzer_tool.services.advisors import AdvisorCtx, AdvisorStage, default_advisors
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
 from fuzzer_tool.services.c11_channel import C11Channel
@@ -976,6 +983,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
+    if getattr(f, "_pos_hotspot", None) is not None and getattr(f, "_cmplog", None) is not None:
+        names.append("hotspot")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
         names.append("lineage")
     if _pos_canary_live(f):
@@ -1064,6 +1073,17 @@ def _orbit_skip(f, repeat: bool, folded: bool) -> bool:
             return False
     f._orbit_folded += repeat and folded
     return repeat
+
+
+def _build_identity(target: str) -> bytes:
+    """GNU build id of *target*, else path + size + mtime: what a proof is about."""
+    from fuzzer_tool.core.elf import build_id
+
+    bid = build_id(target)
+    if bid:
+        return bid
+    st = os.stat(target)
+    return f"{os.path.abspath(target)}:{st.st_size}:{st.st_mtime_ns}".encode()
 
 
 class Fuzzer:
@@ -1770,6 +1790,7 @@ class Fuzzer:
         fractal_diversity_bonus=1.3,
         lineage=False,
         lineage_backtrack=False,
+        lineage_exhaust=False,
         mds_select=False,
         minimax_select=False,
         inverse_lottery_select=False,
@@ -2058,6 +2079,7 @@ class Fuzzer:
         ctx_sensitive=None,
         # --zip-seed-corpus (adapters/seed_zip.py). Appended: positional signature.
         zip_seed_corpus=False,
+        delta_corpus=False,
         # --zip-compact-ratio (seed_zip.compact_over). Appended: positional signature.
         zip_compact_ratio=0.0,
         # --op-good-turing (core/schedulers/op_good_turing.py), prior shared with
@@ -2172,6 +2194,39 @@ class Fuzzer:
         # --seed-fess-scheduler: FESS feature-grid seed arm
         # (core/schedulers/seed_fess.py). Off, out of --hail-mary. Appended.
         seed_fess_scheduler=False,
+        # --fess-inherit: FESS parent-cell inheritance + new-cell jump. Needs
+        # the FESS arm. Off, out of --hail-mary. Appended.
+        fess_inherit=Switch.OFF,
+        # --seed-fess-mode: FESS cell schedule (least-effort / triple). Appended.
+        seed_fess_mode=FessMode.LEAST_EFFORT,
+        # --fess-cell-novelty: FESS per-cell scoped novelty. Needs the FESS
+        # arm. Off, out of --hail-mary. Appended.
+        fess_cell_novelty=Switch.OFF,
+        # --respawn-backoff: pace restarts of a target that dies at once
+        # (adapters/respawn_backoff.py). Off, out of --hail-mary. Appended.
+        respawn_backoff=Switch.OFF,
+        # Position-arena hotspot arm (core/schedulers/pos_hotspot.py): offsets
+        # by unsolved-CondStmt count. Opt-in, not implied by position_arena or
+        # --hail-mary. Appended.
+        pos_hotspot=False,
+        # 'branch' arm ranks frontier branches by cut damage (core/articulation.py,
+        # --cut-damage); needs seed_branch_scheduler. Appended.
+        cut_damage=False,
+        # Waypoint race over the target's dominator chain (core/waypoints.py,
+        # --waypoints); directed mode only. Appended.
+        waypoints=False,
+        # Drop statically proven-dead targets from directed mode (core/deadness.py,
+        # --prove-dead). Appended.
+        prove_dead=False,
+        # --advisors: one free advised move per advisor per seed stage
+        # (services/advisors.py). Off, out of --hail-mary. Appended.
+        advisors=False,
+        # --plateau-groups: union seeds whose boring mutants take each other's
+        # path (core/plateau.py); lottery "group" signal. Off. Appended.
+        plateau_groups=False,
+        # --elo-stale-bench: bench stalest Elo strategies, revive fresh
+        # (core/elo_stale_bench.py). Off, out of --hail-mary. Appended.
+        elo_stale_bench=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2908,6 +2963,8 @@ class Fuzzer:
         if zip_seed_corpus:  # zip mode off never writes the archive
             seed_zip.uproot(self.corpus_dir)
         seed_zip.configure(self.corpus_dir, ZipMode.ON if zip_seed_corpus else ZipMode.OFF)
+        # --delta-corpus: children stored as delta records (keyframes bound chains).
+        self._delta_store = DeltaStore(self.corpus_dir) if delta_corpus else None
 
         # Single-file state store (replaces per-component JSON files).
         # Loaded eagerly so all components can fetch their section via get().
@@ -3307,6 +3364,9 @@ class Fuzzer:
         self._use_lineage_backtrack = bool(lineage_backtrack and lineage)
         self._lineage_backtrack_decay = 0.7
         self._lineage_backtrack_min_fuzz = 8
+        # --lineage-exhaust: backtrack reads an incremental exhausted flag
+        # (soksolv dead-end propagation) instead of a subtree DFS per weight.
+        self._lineage_exhaust = bool(lineage_exhaust and self._use_lineage_backtrack)
         # Weighted local-search Maximum Disjoint Set selection in
         # auto_minimize_corpus: replaces flat top-K-by-score with a
         # value-weighted packing over Jaccard-signature space (see
@@ -3381,11 +3441,15 @@ class Fuzzer:
 
         # The branch arm reads the Katz channel's ICFG and node masks.
         if seed_branch_scheduler and self._katz_channel is not None:
-            self._katz_channel.enable_branch()
+            self._katz_channel.enable_branch(
+                FrontierRank.CUT_DAMAGE if cut_damage else FrontierRank.HITS
+            )
         elif seed_branch_scheduler:
             log.warning(
                 "--seed-branch-scheduler needs the Katz node channel (trace-pc, undirected)"
             )
+        if cut_damage and not seed_branch_scheduler:
+            log.warning("--cut-damage needs --seed-branch-scheduler; ignored")
         self._bind_katz(schedule or "base", elo, seed_branch_scheduler)
 
         self._load_corpus()
@@ -3727,7 +3791,28 @@ class Fuzzer:
             if seed_lottery_scheduler
             else None
         )
-        self._seed_fess = SeedFessScheduler(rng=self._rng) if seed_fess_scheduler else None
+        if fess_inherit is Switch.ON and not seed_fess_scheduler:
+            log.warning("--fess-inherit has no effect without --seed-fess-scheduler")
+            fess_inherit = Switch.OFF
+        # Read by SeedPicker._fess_cells (parent-cell projection).
+        self._fess_inherit = fess_inherit
+        if fess_cell_novelty is Switch.ON and not seed_fess_scheduler:
+            log.warning("--fess-cell-novelty has no effect without --seed-fess-scheduler")
+            fess_cell_novelty = Switch.OFF
+        self._seed_fess = (
+            SeedFessScheduler(
+                rng=self._rng,
+                jump=fess_inherit,
+                mode=seed_fess_mode,
+                novelty=fess_cell_novelty,
+                seed_edges=self._fess_seed_edges,
+            )
+            if seed_fess_scheduler
+            else None
+        )
+        # Bound once (ifs up): FuzzRound._credit_seed feeds exec edges here.
+        self._fess_observe = self._fess_note_edges if fess_cell_novelty is Switch.ON else None
+        self._plateau = PlateauGroups() if plateau_groups else None
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:
@@ -3844,6 +3929,17 @@ class Fuzzer:
                 log.warning(
                     "--pos-cmplog needs cmplog, which is off: the arm stays out of the pool"
                 )
+        # Position-arena hotspot: offsets ranked by how many unsolved CondStmts
+        # they block (soksolv hotspot table). Opt-in only (unmeasured); gated
+        # on cmplog like the cmplog arm, reads condstmt_solve's CondStmt cache.
+        self._pos_hotspot = None
+        if pos_hotspot:
+            from fuzzer_tool.core.schedulers.pos_hotspot import PositionHotspotScheduler
+
+            self._pos_hotspot = PositionHotspotScheduler(
+                self._rng, conds_of=self._operators._get_cond_stmts
+            )
+            log.info("Position hotspot scheduling enabled")
         # Position-arena lineage: the mutation sites that produced a seed, as
         # its own landing prior (see core/schedulers/pos_lineage.py).
         # Tracker-style: the arena gates it on --lineage, the only mode that
@@ -4039,6 +4135,7 @@ class Fuzzer:
                 finch=self._pos_finch,
                 pca=self._pos_pca,
                 cmplog=self._pos_cmplog,
+                hotspot=self._pos_hotspot,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,
             )
@@ -4069,6 +4166,8 @@ class Fuzzer:
         self._i2s_fixpoint = (
             I2SFixpoint(self._i2s_probe, i2s_fixpoint_iters) if i2s_fixpoint else None
         )
+        # --advisors: zero-cost proposals per stage, drained by mutate().
+        self._advisors = AdvisorStage(default_advisors()) if advisors else None
         # --affine-mod: solve (a*x + b) % m == t compares on admitted inputs;
         # --derived-cmp adds GF(2), additive and byte-map operand maps.
         families = Families.DERIVED if derived_cmp else Families.MODULAR
@@ -4789,6 +4888,23 @@ class Fuzzer:
         self._use_cfg_cache = use_cfg_cache
         self._gate_bonus = gate_bonus
         self._distance_metric = distance_metric
+        # --waypoints: the distance spec builds the race (analyzer_registry).
+        self._waypoints_requested = bool(waypoints and targets)
+        self._waypoints = None
+        self._waypoint_bmp = None
+        if waypoints and not targets:
+            log.warning("--waypoints needs --target-functions; ignored")
+        # --prove-dead: verdict cache shared with the distance spec, keyed to
+        # this build so a rebuilt target never reuses old proofs.
+        self._dead_verdicts = None
+        if prove_dead and targets:
+            from fuzzer_tool.core.deadness import VerdictCache
+
+            self._dead_verdicts = VerdictCache(_build_identity(target))
+            if self.resume:
+                self._dead_verdicts.load_state_dict(self._state_store.get("dead_verdicts", {}))
+        elif prove_dead:
+            log.warning("--prove-dead needs --target-functions; ignored")
         self._trace_crashes_requested = trace_crashes
 
         # Crash MI tracker, length-edge tracker, transfer entropy, occupation,
@@ -4802,6 +4918,8 @@ class Fuzzer:
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
         _ANALYZER_REGISTRY.wire_all(self)
+        if elo_stale_bench is Switch.ON and self._elo:
+            self._elo.enable_stale_bench(StaleBench())
 
         # self._frameshift: constructed by analyzer_registry.wire_all() above.
         self._last_ops_used: list[str] = []
@@ -5522,6 +5640,9 @@ class Fuzzer:
         if forkserver:
             self._setup_forkserver()
 
+        self._respawn_backoff_on = respawn_backoff
+        self._attach_backoff()
+
     def _cov_env_id(self) -> str | None:
         """SHM id the in-process runner of ``self.target`` attaches to.
 
@@ -5531,6 +5652,16 @@ class Fuzzer:
         if self.multi_targets:
             shm = self._target_shm_covs.get(self.target, shm)
         return shm.env_id if shm else None
+
+    def _attach_backoff(self) -> None:
+        """--respawn-backoff: one pacer per respawning runner, decided once."""
+        if self._respawn_backoff_on is not Switch.ON:
+            return
+
+        inproc = tuple(self._target_runners.values()) or (self._inprocess_runner,)
+        for runner in (self._persistent_runner, self._forkserver, *inproc):
+            if runner is not None:
+                runner.attach_backoff(RespawnBackoff())
 
     def _init_target_runners(self) -> None:
         """Multi-target .so: one in-process runner per target.
@@ -5945,12 +6076,20 @@ class Fuzzer:
             self._state_store.set("dict_picker", self._dict_picker.to_dict())
         if self._gravity is not None:
             self._state_store.set("gravity", self._gravity.state_dict())
+        if self._waypoints is not None:
+            self._state_store.set("waypoints", self._waypoints.state_dict())
+        if self._dead_verdicts is not None:
+            self._state_store.set("dead_verdicts", self._dead_verdicts.state_dict())
         self._state_store.set("novelty_hist", self._novelty_hist.to_dict())
         self._state_store.set("crash_cov", self._crash_cov.to_dict())
         if self._ijon is not None:
             self._state_store.set("ijon", self._ijon.tracker.to_dict())
         if self._seed_fess is not None:
             self._state_store.set("seed_fess", self._seed_fess.to_dict())
+        if self._plateau is not None:
+            self._state_store.set("plateau", self._plateau.to_dict())
+        if self._lineage_exhaust:
+            self._state_store.set("lineage_exhaust", self._lineage.exhaust_state())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -5985,6 +6124,8 @@ class Fuzzer:
             self._dict_picker.from_dict(self._state_store.get("dict_picker", {}))
         if self._gravity is not None:
             self._gravity.load_state_dict(self._state_store.get("gravity", {}))
+        if self._waypoints is not None:
+            self._waypoints.load_state_dict(self._state_store.get("waypoints", {}))
         self._novelty_hist.from_dict(self._state_store.get("novelty_hist", {}))
         self._crash_cov.from_dict(self._state_store.get("crash_cov", {}))
         if self._ijon is not None:
@@ -5992,6 +6133,12 @@ class Fuzzer:
             self._ijon.tracker.from_dict(self._state_store.get("ijon", {}), by_key.get)
         if self._seed_fess is not None:
             self._seed_fess.from_dict(self._state_store.get("seed_fess", {}))
+        if self._plateau is not None:
+            self._plateau = PlateauGroups.from_dict(self._state_store.get("plateau", {}))
+        if self._lineage_exhaust:
+            self._lineage.load_exhaust(
+                self._state_store.get("lineage_exhaust", {}), self._lineage_backtrack_min_fuzz
+            )
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""
@@ -6043,6 +6190,10 @@ class Fuzzer:
         for arm in self._seed_os_arms:
             arm.record(key, success=success, weight=weight)
 
+    def _record_lineage_exhaust(self, parent: bytes, novelty: Novelty) -> None:
+        """Feed one round of *parent* to the lineage exhaustion counters (--lineage-exhaust)."""
+        self._lineage.record_fuzz(self._seed_key(parent), novelty, self._lineage_backtrack_min_fuzz)
+
     def _record_seed_floor_arms(self, parent: bytes, success: bool, weight: float) -> None:
         """Feed one corpus parent's outcome to the canary / round-robin / DRR seed arms.
 
@@ -6056,6 +6207,17 @@ class Fuzzer:
         key = self._seed_key(parent)
         for arm in arms:
             arm.record(key, success=success, weight=weight)
+
+    def _fess_note_edges(self, parent: bytes, edges) -> None:
+        """--fess-cell-novelty: this exec's edges to the FESS arm, before its record()."""
+        if not self._in_corpus(parent):
+            return
+        self._seed_fess.observe_edges(self._seed_key(parent), edges)
+
+    def _fess_seed_edges(self, key: str):
+        """A seed's own edges (absorbed uncredited into its FESS cell)."""
+        tracker = getattr(self, "_edge_tracker", None)
+        return tracker.attributed_edges(key) if tracker is not None else ()
 
     def _in_corpus(self, parent: bytes) -> bool:
         """Live-corpus membership of *parent*, memoized across its executions.
@@ -7803,6 +7965,23 @@ class Fuzzer:
         self._queue_skips = 0
         return self._fuzz_ungated(data)
 
+    def _advise(self, seed: bytes) -> None:
+        """--advisors: run each advisor's move for *seed*, off the stage's energy."""
+        stage = self._advisors
+        cmplog = self._cmplog
+        ops = self._operators
+        ctx = AdvisorCtx(
+            seed_meta=self.seed_meta,
+            dictionary=self.dictionary,
+            conds=lambda: ops._get_cond_stmts().unsolved_view() if cmplog else (),
+            fresh=stage.fresh,
+            max_len=self.max_len,
+        )
+
+        # One round per move; mutate() pops it, so the round is a normal one.
+        for name in stage.plan(seed, ctx):
+            stage.credit(name, self.fuzz_one(seed))
+
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
         mark = self._exec_timer.cycle_mark()
@@ -8560,6 +8739,10 @@ class Fuzzer:
         dist = self._exec_distance()
         if dist is not None:
             meta["avg_distance"] = dist
+        if self._waypoints is not None:
+            stratum = self._waypoints.stratum_of(self._waypoint_bmp.read_and_clear())
+            meta["waypoint"] = stratum
+            self._waypoints.admit(stratum)
 
     def _warn_no_dist_source(self) -> None:
         """Warn once: directed mode on, but nothing measures real blocks.
@@ -10307,6 +10490,8 @@ class Fuzzer:
             groups["Analysis"].append("lineage")
         if getattr(self, "_use_lineage_backtrack", False):
             groups["Analysis"].append("lineage-backtrack")
+        if getattr(self, "_lineage_exhaust", False):
+            groups["Analysis"].append("lineage-exhaust")
         if getattr(self, "_use_overlap_density", False):
             groups["Analysis"].append("overlap-density")
         if getattr(self, "_use_region_profile", False):
@@ -10782,11 +10967,19 @@ class Fuzzer:
                         # The picked seed's own counts, not the last execution's.
                         **self._edge_tracker.seed_hw(seed_key),
                     )
+                    if self._waypoints is not None:
+                        self._last_perf_score = min(
+                            self._last_perf_score
+                            * self._waypoints.multiplier(meta.get("waypoint", NO_STRATUM)),
+                            self._seed_scorer.max_mult * 100.0,
+                        )
                 elif staged is None:
                     # Markov-generated or synthetic seed: reset to neutral multiplier
                     self._last_perf_score = 100.0
                 if staged is None:
                     self._stage.begin(seed, self._last_perf_score)
+                    if self._advisors is not None:
+                        self._advise(seed)
                 if self._diff_tracker:
                     self._check_differential(seed)
                 # Deterministic-stage mutations are now drawn inline by

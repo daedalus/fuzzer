@@ -43,7 +43,7 @@ digraph fuzzer_tool {
         color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
         cli [label="cli/commands.py\lfuzz · rank · minimize · sweep · tmin\lroot-cause · crash-bisect · crash-cluster · replay · verify\lestimate · import · ppmd · genseed · compact-seeds\l",
              fillcolor="#e3e7ec", fontcolor="#242a31"];
-        profiler [label="core/target_profiler.py   +   cfg · icfg · dwarf\lELF strings · magic bytes · DIV constants\lcall graph · CFG · DWARF line tables\l",
+        profiler [label="core/target_profiler.py   +   cfg · icfg · dwarf\lELF strings · magic bytes · DIV constants\lcall graph · CFG · DWARF line tables\lwaypoints (dominators to target) · deadness (static dead proof)\larticulation (cut damage)\l",
                   fillcolor="#e3e7ec", fontcolor="#242a31"];
         cledger [label="services/ledger.py  +  core/campaign_ledger.py\l--preset-ledger: UCB1 preset · --stall prior\l~/fuzzing/<target>/ledger (across campaigns)\l",
                  fillcolor="#e3e7ec", fontcolor="#242a31"];
@@ -57,9 +57,9 @@ digraph fuzzer_tool {
     subgraph cluster_sched {
         label="1 · Scheduling   —   what to fuzz next";
         color="#bcd0c4"; fillcolor="#f2f8f4"; fontcolor="#33604a";
-        picker [label="services/seed_picker.py  +  core/schedules.py\lweights · Pareto front · crowding · saturation gate\lFAST COE RARE MOPT LIN QUAD GO AFLGO ENTROPIC KATZ DOPPLER\lKRUSKAL-COUNT (coupling walkers · recombination)\lENTROPIC seed arm (local rare-edge entropy)\l",
+        picker [label="services/seed_picker.py  +  core/schedules.py\lweights · Pareto front · crowding · saturation gate\lFAST COE RARE MOPT LIN QUAD GO AFLGO ENTROPIC KATZ DOPPLER\lKRUSKAL-COUNT (coupling walkers · recombination)\lENTROPIC seed arm (local rare-edge entropy)\lFESS cells (inherit · triple · cell novelty) · plateau groups\llineage exhaustion (--lineage-exhaust)\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
-        bandit [label="core/schedulers/op_* (54)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy consolidated katz …\l",
+        bandit [label="core/schedulers/op_* (54)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy consolidated katz …\lelo stale bench (core/elo_stale_bench.py)\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
         tarena [label="services/target_arena.py  (multi-target)\lElo over tgt_ arms: weighted round_robin wrr wfq phi\lgale_shapley (core/stable_matching.py)\lauction (core/assignment.py)\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
@@ -69,7 +69,7 @@ digraph fuzzer_tool {
     subgraph cluster_mut {
         label="2 · Mutation   —   250+ operators / 9 categories";
         color="#c3c6da"; fillcolor="#f4f4fa"; fontcolor="#454a75";
-        ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\ldet stage · effector map → core/auto_dict\l",
+        ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\ldet stage · effector map → core/auto_dict\ladvisors (services/advisors.py) · pos_hotspot arm\l",
              fillcolor="#c9cbe6", fontcolor="#2f3560"];
         lib [label="core/mutations/ (68 modules)  ·  core/operator_registry.py\lpng jpeg gif webp webm avif zip gzip zlib riff ogg flv asf mp3\ladts mpegts nal isobmff pgs sqlite der elf protobuf x86 arm\lgrammar · format_fsm · tree_mutator · frameshift · markov · field_hmm (Viterbi spans) · wfc · regularity\lchecksum_learner (Berlekamp-Massey · int checksums · linear via null_lattice)\l",
              fillcolor="#dedff0", fontcolor="#2f3560"];
@@ -79,7 +79,7 @@ digraph fuzzer_tool {
     subgraph cluster_exec {
         label="3 · Execution";
         color="#d9c2c2"; fillcolor="#fbf4f4"; fontcolor="#7a4a4a";
-        runner [label="services/runner.py  +  adapters/\lforkserver · process · inprocess\lpersistent_signal · ptrace\lglobal_snapshot (--snapshot-restore)\lmemfd_input (-F, --input-alias)\l",
+        runner [label="services/runner.py  +  adapters/\lforkserver · process · inprocess\lpersistent_signal · ptrace\lglobal_snapshot (--snapshot-restore)\lmemfd_input (-F, --input-alias)\lrespawn_backoff (--respawn-backoff)\l",
                 fillcolor="#f2dcdc", fontcolor="#5c3232"];
         shim [label="adapters/afl_shim.c\ledge map · forkserver\lcmplog interceptors (18 libc + 11 IR)\lpc-table / CFG -> $__AFL_SANCOV_OUT\lhealth counters (core/shim_health.py)\l__fuzz_event[_at] -> $__LTL_EVENTS_OUT (--ltl)\l",
               fillcolor="#e8c9c9", fontcolor="#5c3232"];
@@ -109,7 +109,7 @@ digraph fuzzer_tool {
     subgraph cluster_corpus {
         label="5 · Corpus lifecycle";
         color="#cfc6d8"; fillcolor="#f7f4fa"; fontcolor="#5a4a6b";
-        corpus [label="services/corpus_manager.py\ladmission · prune · sync\lga · qea · rate_distortion · hash dedup\lstate_store (resume) · parallel workers\l",
+        corpus [label="services/corpus_manager.py\ladmission · prune · sync\lga · qea · rate_distortion · hash dedup\lstate_store (resume) · parallel workers\ldelta store (--delta-corpus, adapters/filesystem.py)\l",
                 fillcolor="#e6dcee", fontcolor="#453454"];
     }
 

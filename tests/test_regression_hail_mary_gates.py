@@ -71,7 +71,16 @@ _EXCLUDED_OPT_IN = frozenset(
         "seed_stride_cost",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the stride arm
         "seed_lottery_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_fess_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "fess_inherit",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
+        "fess_cell_novelty",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
+        "respawn_backoff",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "advisors",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "plateau_groups",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "elo_stale_bench",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_branch_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "prove_dead",  # unmeasured: A/B pending (docs/AB_PENDING.md); directed mode only
+        "waypoints",  # unmeasured: A/B pending (docs/AB_PENDING.md); directed mode only
+        "cut_damage",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the branch arm
         "inverse_lottery_select",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "lightweight",  # the inverse preset; the two are mutually exclusive
         "trim_new_coverage",  # exec cost (~98% of an FFmpeg run), not a strategy
@@ -85,6 +94,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "byte_interaction",  # unmeasured: synthetic checks only
         "influence",  # unmeasured: synthetic checks only
         "field_hmm",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "lineage_exhaust",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "cmp_prune_const",  # unmeasured: no A/B yet (DEEP_DIVE "Constant-Compare Pruning")
         "arm_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
         "x86_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
@@ -102,6 +112,7 @@ _EXCLUDED_OPT_IN = frozenset(
         # Storage layout, not a strategy: would move corpus writes into
         # seeds.zip, which a later run without the flag does not load.
         "zip_seed_corpus",
+        "delta_corpus",  # storage layout (delta records), not a strategy
         # Scales -M, which --slopt (on under --hail-mary) replaces: a no-op there.
         "one_fifth",
         # Unmeasured: the Growing Tree 'newest' arm stays out until it wins
@@ -126,6 +137,9 @@ _EXCLUDED_OPT_IN = frozenset(
         # Unmeasured: the LearnAFL path-mask position arm (core/schedulers/pos_learn.py),
         # same criterion as pos_kadane above.
         "pos_learn",
+        # Unmeasured: the soksolv hotspot position arm (core/schedulers/pos_hotspot.py),
+        # same criterion as pos_kadane above.
+        "pos_hotspot",
         # Changes maintenance-tick cadence (crash/sanitizer replays and
         # gc.collect move off i % 500 onto the stats-interval cadence),
         # not a fuzzing strategy. --hail-mary force-enabling it would

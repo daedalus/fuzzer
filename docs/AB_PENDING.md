@@ -32,12 +32,20 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Prune cost tie (`--prune-cost`) | Evict the costliest of equally redundant tracked seeds first | U | needs > 1,000 tracked seeds (FFmpeg, or a long fuzzgoat run); vs default, A/A control |
 | Seed stage (`--stage-execs K`) | One pick serves up to K execs, sized by perf score | S | fuzzgoat exe K=8 vs 1, 8 paired reps: wall -5% (8/8, p=0.008; A/A 4/8), edges unchanged (p=0.73). Open: K in {4, 16}, FFmpeg, edges at fixed wall time; default flip |
 | Branch seed arm (`--seed-branch-scheduler`) | Seeds near least-tried frontier branches, line-graph hops over the Katz ICFG | N | `--set fuzzgoat_katz`, 20 seeds x 10k, vs `elo` (Katz on in both). Edges W14 L6, McNemar p=0.115 (Holm 0.23), med +124; eps W7 L13 p=0.26, med -2.8; unique W7 L8. A/A (`seed-branch-ctl`) W11 L9 p=0.82, med +38: clean. 9 of 60 campaigns ended early (< 50 s, rc 0; elo 5, branch 3, ctl 1), not reproducible solo or 3-parallel; without them W9 L3 p=0.15, A/A W7 L7. Leans positive, unresolved: `--reps 3` or 40+ seeds |
+| Cut damage (`--cut-damage`) | `branch` arm ranks frontier branches by tail hits / (1 + blocks the head alone guards) | U | `--set fuzzgoat_katz`, `--seed-branch-scheduler --cut-damage` vs `--seed-branch-scheduler`, A/A first |
+| Waypoint race (`--waypoints`) | Seeds stratified by deepest ICFG dominator of the target; active stratum's energy doubles while min distance sets records | U | `--set fuzzgoat_dir258`, `--waypoints` vs plain directed, time-to-target, A/A first |
+| Dead-target proofs (`--prove-dead`) | Drop directed targets proven unreachable over a byte-level relaxed call graph | U | `fuzzgoat_dir258` plus one dead target, `--prove-dead` vs off, time-to-target, A/A first |
 | Newest-seed picker (`--seed-newest-scheduler`) | Growing-tree pick: newest with prob p, else random | U | arms `seed-newest-p{0,30,60,100}`, `seed-round-robin` vs `baseline`; compare lineage shape |
 | Entropic seed (`--entropic-seed`) | libFuzzer Entropic energy | N | fuzzgoat null (9W/7L); png/grep, `--elo` vs weighted |
 | Good-Turing seed/op/pos (`--good-turing-seed`, `--op-good-turing`, `--pos-good-turing`, `--good-turing-estimator`) | Unseen-edge mass per seed / op / bin | U | `elo-good-turing-seed`, `elo-op-good-turing` vs `elo`, `pos-arena-good-turing`; prior sweep; add `elo-good-toulmin-seed` |
 | DPP seed arm (`--seed-dpp-scheduler`) | DPP over hashed edge sets | N | 5W/15L p=0.041 (Holm 0.083); `--reps 3`; as Elo arm vs `elo` |
 | Gram eigenvector seed arm (`--seed-gram-scheduler`, `--seed-gram-mode {peripheral,central}`) | Tickets from the top eigenvector of B = A Aᵀ (core-stripped incidence), matrix-free | N | `--set ffmpeg` (9.0.2 noasan, audio-only component set, 1 core), 10 seeds x 3 reps x 5k execs, sole arm vs `baseline`. peripheral W2 L8 (McNemar p=0.109), central W1 L9 (p=0.0215, Holm 0.043); med Δ edges -1043 / -983, noise 1216 / 1451. No A/A control, 10 cells; read as "no gain", not as a measured loss |
 | FESS seed arm (`--seed-fess-scheduler`) | Least-explored cell of a log2 (edges, rare, depth, size) grid, then its least-fuzzed seed | U | `seed-fess` vs `baseline`, `elo-seed-fess` vs `elo`; fuzzgoat (clang) 20 seeds x 10k + A/A; FFmpeg if not NULL |
+| FESS inherit + jump (`--fess-inherit`) | Non-improving child competes in parent's cell; first-occupied cell picked next, once | U | `seed-fess-inherit` vs `seed-fess`; fuzzgoat (clang) 20 seeds x 10k + A/A |
+| FESS triple schedule (`--seed-fess-mode triple`) | Every 8th pick random cell, else best cell (even) / round robin (odd) | U | `seed-fess-triple` vs `seed-fess`; fuzzgoat (clang) 20 seeds x 10k + A/A |
+| FESS cell novelty (`--fess-cell-novelty`) | Credit edges new to the seed's cell; prefer cells with recent in-cell novelty | U | `seed-fess-novelty` vs `seed-fess`; fuzzgoat (clang) 20 seeds x 10k + A/A |
+| Advisors (`--advisors`) | Per seed stage, i2s / token / cond advisors each run one free deduped move from recorded cmplog state | U | `advisors` vs `baseline`; fuzzgoat (clang) 20 seeds x 10k + A/A; FFmpeg if not NULL |
+| Plateau groups (`--plateau-groups`) | Seeds whose boring mutants take each other's exact path share one lottery currency | U | `plateau-groups` vs `seed-lottery-currency`; fuzzgoat (clang) 20 seeds x 10k + A/A; FFmpeg if not NULL |
 | Doppler energy (`--schedule doppler`) | Power-Doppler seed energy | U | vs `fast` |
 | Consolidated seed arm | Merged seed-arm features | U | vs `p2c`/`drr` |
 | OS/net ports (`mlfq`, `stride`, `eevdf`, `bfq`, `sfq`, `codel`, `aimd`, `p2c`, `op_stride`, `op_p2c`) | Kernel/network schedulers as seed/op arms | U | each vs `seed_round_robin`/`drr` |
@@ -53,6 +61,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
+| Elo stale bench (`--elo-stale-bench`) | Bench the stalest Elo strategy past max(2000, 4x median) rounds without a gain; revive fresh after 10k (soksolv) | U | `--elo all --elo-stale-bench` vs `--elo all`, fuzzgoat (clang) 20 seeds x 50k (bench needs > 2k stale rounds) + A/A; count benches/revives |
 | Elo time credit (`--elo-time-credit`) | Strategy matches judged per second (autofz) | U | `--elo all --elo-time-credit` vs `--elo all`, fuzzgoat clang, wall-clock budget (not exec budget: per-exec budgets hide the gain); A/A first |
 | Tempered Elo Thompson | Draw width `2 − favourite win rate` | S | `--elo` vs previous commit |
 | Elo miss scoring | Rate on Beta hit rates / played arms only | U | design, then fuzzgoat |
@@ -74,6 +83,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Lottery ports (`--seed-stride-cost`, `--inverse-lottery-select`) | Compensation tickets on the stride arm; inverse-lottery eviction in `auto_minimize_corpus` | U | arms `seed-stride-cost` vs `seed-stride`, `inverse-lottery-select` vs `minimize-2k`; judge stride-cost on edges at fixed wall time, `--set ffmpeg` (widest exec-cost spread) |
 | Lottery arm (`--seed-lottery-scheduler`, `--seed-lottery-currency {equal,sqrt}`, `--seed-lottery-transfer F`) | Randomized lottery over compensated tickets (Fenwick tree); per-component ticket currencies; lineage-parent credit | U | arms `seed-lottery` vs `seed-stride-cost`, `seed-lottery-currency` vs `seed-lottery`, `seed-lottery-transfer` vs `seed-lottery-lineage`; first record the component-size distribution on fuzzgoat, png_read, ffmpeg (a giant component makes currencies a no-op) |
 | MCTS vs alpha-beta (`--mcts`, `--alphabeta`) | Lineage tree search | N | png null; ffmpeg set, then retire one |
+| Lineage exhaustion (`--lineage-exhaust`) | soksolv dead-end propagation feeds `--lineage-backtrack` | U | fuzzgoat, `--lineage --lineage-backtrack` with vs without; A/A control |
 | Preset ledger (`--preset-ledger`) | UCB1 over flag presets across campaigns | U | vs `baseline` via `benchmark.py replicated` |
 | Recurrence gate (`--recurrence`) | RQA TRAPPED read on the exec stream | U | does forcing the gate shorten plateaus |
 | `-M` default 1 | One op per mutant | N | jpeg, ffmpeg |
@@ -87,6 +97,7 @@ All pair against `pos-arena-uniform`.
 |---|---|---|---|
 | Saliency (`--pos-saliency`) | NEUZZ gradient over a fitted MLP | U | `pos-arena-saliency`; read `stats()` |
 | PCA (`--pos-pca`) | Byte groups by edges their flip moved | U | `pos-arena-pca`; must beat `finch`/`effector` |
+| Hotspot (`--pos-hotspot`) | Offsets by unsolved-CondStmt count (soksolv) | U | `pos-arena-hotspot` on a cmplog target; must beat `cmplog` |
 | Kadane (`--pos-kadane`) | Max-excess window over bin rates | S | `pos-arena-kadane`; window hook rides with it |
 | effector / token / chunk / changed / rare_mask | Det-stage map, dict tokens, chunk kinds, path-hash credit, FairFuzz mask | U | `pos-arena-{…}` on png_read |
 | Consolidated (`--pos-consolidated`) | Merged learning arms | U | `pos-arena-consolidated` |
@@ -150,6 +161,7 @@ Off arm needs a tree without the op.
 | Cmplog record cap + campaign dedup (`--cmplog-site-cap 32 --cmplog-dedup-scope campaign`, arm `cmp-cap-dedup`) | Per-site record cap per drain; dedup table kept across drains | N | NULL on both: fuzzgoat_tcg ledger #138, FFmpeg 9.0.2 #139 (9/11, p=0.93; CPU −9% median, p=0.14). Owed only if CPU matters: a cpu_user rerun at ≥ 40 seeds on FFmpeg. |
 | Stack-depth novelty (`--stack-depth-max`, arm `stack-depth-max`) | Admit a clean run deeper than the campaign max (honggfuzz) | N | FFmpeg 9.0.2 NULL (ledger #148: 11/9, p=0.70; A/A clean); 7 admissions per 3k execs. Owed: a recursive-parser target (expression grammar, nested containers), fuzzgoat (Hard Rule 52) |
 | Edge clusters (`--edge-clusters`) | Class rarity + near-miss bonus | N | fuzzgoat null; FFmpeg/png |
+| Delta corpus store (`--delta-corpus`) | Children as delta records, keyframe every 20 hops | S | storage only: FFmpeg (large seeds) disk bytes + eps vs off, A/A control |
 | Inline sancov modes | `inline-8bit-counters`, `inline-bool-flag` | N | −23/−38 edges; fold buckets, 20×20k rerun |
 | Shim bit tricks | SWAR fold, masked probe, `bit_compress` | S | rebuild + fuzzgoat calibration |
 | Map size 2^16 vs 2^19 | Map size from observed edges | U | interleaved A/B + A/A on ffmpeg |
@@ -163,6 +175,7 @@ Off arm needs a tree without the op.
 | Resume SHM novelty | Skip seed rerun on `--resume` | U | start-to-first-round time, edges |
 | `reset_bitmap()` drop | Skip redundant memset | U | exec/s in direct mode |
 | Auto-dict + `--crash-explore` | Byteflip tokens; AFL `-C` | U | fuzzgoat |
+| Respawn backoff (`--respawn-backoff`) | Pace quick target deaths 20 ms..1 s; 16 in a row abort (soksolv) | U | healthy fuzzgoat (clang) exec/s vs baseline, 20 seeds + A/A; a dies-at-start target: breaker fires, CPU bounded |
 | Pool drift (`--pool-drift`) | `dH`/`JS` of the pool | U | calibrate against edge curve |
 | PLL (`--pll`) | Lock transitions vs stalls | U | ≥ 3 targets before a consumer |
 | Shm write guard (`--shm-write-guard pkey`) | PKU-protected SHM | U | needs PKU host |

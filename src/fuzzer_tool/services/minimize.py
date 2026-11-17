@@ -24,7 +24,13 @@ from pathlib import Path
 import numpy as np
 
 from fuzzer_tool.adapters import libc_mem, libc_shm
-from fuzzer_tool.adapters.filesystem import hash_data, is_regular, safe_subdir
+from fuzzer_tool.adapters.filesystem import (
+    hash_data,
+    is_regular,
+    live_delta_files,
+    read_seed,
+    safe_subdir,
+)
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.count_items import _TAG_BITS, CountItems
@@ -350,6 +356,23 @@ def _pick_seeds(files: list[Path], max_seeds: int, rng: RandPool) -> list[Path]:
     return [files[i] for i in sorted(rng.sample(n, max_seeds))]
 
 
+def _live_deltas(corpus_path: Path) -> list[Path]:
+    """Rebuildable delta records; an unresolvable one is reported and left untouched."""
+    ok = []
+    for f in live_delta_files(corpus_path):
+        try:
+            read_seed(f)
+        except OSError as exc:
+            print(f"[!] Skipping {exc}", file=sys.stderr)
+            continue
+        ok.append(f)
+    return ok
+
+
+def _is_delta(path: Path) -> bool:
+    return path.name.startswith("delta_") and path.suffix == ".json"
+
+
 def _split_oversized(files: list[Path], max_bytes: int) -> tuple[list[Path], list[Path]]:
     """(*files* to replay, *files* over *max_bytes*); cap 0 is off.
 
@@ -362,7 +385,7 @@ def _split_oversized(files: list[Path], max_bytes: int) -> tuple[list[Path], lis
     replay, oversized = [], []
     for f in files:
         try:
-            big = f.stat().st_size > max_bytes
+            big = len(read_seed(f)) > max_bytes if _is_delta(f) else f.stat().st_size > max_bytes
         except OSError:
             big = False
         (oversized if big else replay).append(f)
@@ -442,7 +465,8 @@ def minimize_corpus(
         print(f"[-] Corpus directory not found: {corpus_dir}", file=sys.stderr)
         return 0, 0
 
-    all_corpus_files = _discover_corpus_files(corpus_path)
+    # Delta records (--delta-corpus) are seeds too; read_seed rebuilds them.
+    all_corpus_files = _discover_corpus_files(corpus_path) + _live_deltas(corpus_path)
     state_file = corpus_path / ".minimize_batch_state.pkl.gz"
     processed_hashes = set()
     if batch_mode and state_file.exists():
@@ -452,7 +476,7 @@ def minimize_corpus(
         filtered = []
         for f in all_corpus_files:
             try:
-                if hash_data(f.read_bytes()) not in processed_hashes:
+                if hash_data(read_seed(f)) not in processed_hashes:
                     filtered.append(f)
             except Exception:
                 continue
@@ -627,7 +651,7 @@ def _minimize_with_coverage(
             if not fpath.exists():
                 print(f"[!] Skipping missing corpus file: {fpath}")
                 continue
-            data = fpath.read_bytes()
+            data = read_seed(fpath)
             shm.reset_edge_map()
             timeouts += replay(data)[0] == _TIMEOUT_RC
             ids, items = observe()
@@ -754,7 +778,7 @@ def _minimize_by_hash(
         if not fpath.exists():
             print(f"[!] Skipping missing corpus file: {fpath}")
             continue
-        data = fpath.read_bytes()
+        data = read_seed(fpath)
         h = hashlib.sha256(data).hexdigest()[:16]
         if h in seen_hashes:
             continue
@@ -812,6 +836,11 @@ def _commit_results(
             fpath = Path(fpath_str)
             if not fpath.exists():
                 continue
+            if _is_delta(fpath):
+                # A delta alone is not a seed outside its corpus: write full bytes.
+                data = read_seed(fpath)
+                (out_path / f"id_{hash_data(data)}").write_bytes(data)
+                continue
             shutil.copy2(fpath, out_path / fpath.name)
             meta = fpath.with_suffix(".txt")
             if is_regular(meta):
@@ -855,7 +884,7 @@ def _commit_results(
             if not fpath_p.exists():
                 continue
             try:
-                h = hash_data(fpath_p.read_bytes())
+                h = hash_data(read_seed(fpath_p))
             except Exception:
                 continue
             processed.add(h)
