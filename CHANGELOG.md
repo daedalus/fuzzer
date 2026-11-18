@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Snapshot restore on ASAN targets**: restore wrote over ASAN global redzones, 3 reports per exec (libbase64_read_asan 131 -> 553 eps). Spans now skip poisoned bytes. `tests/test_global_snapshot.py`.
 - **libbase64 target** (`targets/libbase64_read.c`): stream decode aborted on every payload ending in a partial quantum (one-shot fails it via `state.bytes`, the stream call returns 1); chunks capped at 128 bytes (4096 left ~99% of seeds unsplit), split within the first 512 bytes; payload decoded from an exact-size copy so ASAN sees over-reads. `compile_libbase64_objects()`: a probe-dropped codec kept `HAVE_<codec> 1` and failed the target. `base64_chunk_mutate`: sniffer skips the stream seed byte and ignores encode modes, pad op yields a valid quantum, generator batched. `tests/test_regression_libbase64_target.py`.
 - `SentLog.save()` (`--sent-bloom`) re-added already-saved records to `n_added` on a second save.
 - **`--tcp-mode direct`** (`services/tcp_ingest.py`): received TCP seeds skip the fuzz round; all queued seeds run unmutated before each iteration, edges recorded, admitted to the corpus only on new coverage (`--admit-all`: every clean seed). Every TCP seed now logs `Ran seed id_<h>`, is never re-rolled by the dedup gate, and the run ends with a received/ran/dropped/unrun line. `tests/test_tcp_ingest.py`.
