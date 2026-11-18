@@ -4948,6 +4948,20 @@ class OperatorEngine:
             mutated = self._lz4_mutator._generate_random_lz4(max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
+    def _op_base64_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.base64 import Base64Mutator, parse_base64
+
+        if not hasattr(self, "_base64_mutator"):
+            self._base64_mutator = Base64Mutator()
+        rng = self.ctx._rng
+        if parse_base64(bytes(buf)):
+            mutated = self._base64_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._base64_mutator._generate_random_base64(
+                max_len=self.ctx.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.ctx.max_len])
+
     def _op_rar_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.rar import RarMutator, parse_rar
 

@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from itertools import compress
 
 from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.mutations.base64 import _B64_PAD, _B64_SET, _MODE_OFFSET
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
@@ -261,6 +262,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "tlul_mutate",
         "recompress_lz4",
         "recompress_png_idat",
+        "base64_chunk_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -509,6 +511,11 @@ def _sniff_lz4_frame(d: bytes) -> bool:
     return len(d) >= 8 and not d[0] & 1 and d[1:5] == b"\x04\x22\x4d\x18"
 
 
+def _sniff_base64(d: bytes) -> bool:
+    """libbase64_read.c: byte 0 is the mode byte, the payload after it is base64."""
+    return len(d) >= _MODE_OFFSET and all(b in _B64_SET or b == _B64_PAD for b in d[_MODE_OFFSET:])
+
+
 # JSON documents open with an object or array after optional whitespace.
 _JSON_SNIFF_WINDOW = 64
 
@@ -701,6 +708,7 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # lz4_read.c spends byte 0 on a mode selector (even = frame decode), so
     # the frame magic sits at offset 1.
     "lz4_chunk_mutate": _sniff_lz4_frame,
+    "base64_chunk_mutate": _sniff_base64,
     "rar_chunk_mutate": _sniff_rar,
     "recompress_lz4": _sniff_lz4_frame,
     "recompress_png_idat": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",

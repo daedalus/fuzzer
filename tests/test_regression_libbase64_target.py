@@ -154,6 +154,38 @@ class TestBuildWiring:
         assert "tools/vendor_libbase64.sh ->" in build_src
 
 
+class TestBase64Mutator:
+    def test_registered_in_format_category(self):
+        from fuzzer_tool.core.operator_registry import REGISTRY
+
+        assert "base64_chunk_mutate" in REGISTRY.names()
+        assert REGISTRY.category_of("base64_chunk_mutate") == "format"
+
+    def test_sniffer_accepts_valid_base64(self):
+        from fuzzer_tool.core.operator_registry import _sniff_base64
+
+        assert _sniff_base64(b"\x00ABCD==")
+
+    def test_sniffer_rejects_binary(self):
+        from fuzzer_tool.core.operator_registry import _sniff_base64
+
+        assert not _sniff_base64(b"\x00\xff\xfe")
+
+    def test_mutator_keeps_valid_base64(self):
+        from fuzzer_tool.core.mutations.base64 import Base64Mutator, parse_base64
+
+        payload = b"\x00ABCD=="
+        assert parse_base64(payload) == b"ABCD=="
+        mutated = Base64Mutator(seed=7).mutate(payload)
+        assert parse_base64(mutated) is not None
+
+    def test_mutator_handles_garbage(self):
+        from fuzzer_tool.core.mutations.base64 import Base64Mutator, parse_base64
+
+        mutated = Base64Mutator(seed=7).mutate(b"\x00\xff\xfe")
+        assert parse_base64(mutated) is not None
+
+
 def _cpu_has(feature: str) -> bool:
     try:
         flags = Path("/proc/cpuinfo").read_text()
@@ -283,14 +315,6 @@ def _run(binary: Path, data: bytes) -> int:
     return subprocess.run([str(binary), str(payload)], capture_output=True).returncode
 
 
-@pytest.mark.skipif(
-    shutil.which("clang") is None or not (VENDOR_TREE / "lib" / "lib.c").is_file(),
-    reason="needs clang and tools/vendor_libbase64.sh (FUZZ_VENDOR_ROOT/libbase64)",
-)
-@pytest.mark.skipif(
-    shutil.which("clang") is None or not (VENDOR_TREE / "lib" / "lib.c").is_file(),
-    reason="needs clang and tools/vendor_libbase64.sh (FUZZ_VENDOR_ROOT/libbase64)",
-)
 class TestOracle:
     @pytest.fixture(scope="class")
     def control(self, tmp_path_factory) -> Path:
