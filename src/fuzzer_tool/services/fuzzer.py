@@ -78,6 +78,7 @@ from fuzzer_tool.core.coverage_noise import (
 from fuzzer_tool.core.crash_cov import CrashCoverage
 from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
+from fuzzer_tool.core.edge_density import bloat_factor
 from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK, EdgeStore, EvictTie
 from fuzzer_tool.core.elf import (
     SHM_LAYOUT_CURRENT,
@@ -212,7 +213,7 @@ from fuzzer_tool.services.advisors import AdvisorCtx, AdvisorStage, default_advi
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
 from fuzzer_tool.services.c11_channel import C11Channel
-from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.corpus_manager import TRACE_EDGES, CorpusManager
 from fuzzer_tool.services.crash_gdb import CrashGdbQueue
 from fuzzer_tool.services.crash_shrink import CrashShrinker
 from fuzzer_tool.services.favored_cover import favored_cover
@@ -2259,6 +2260,9 @@ class Fuzzer:
         # --trim-sparse: trim the least dense untried seed once per stats
         # interval (CorpusManager.trim_sparsest). Off, out of --hail-mary. Appended.
         trim_sparse=Switch.OFF,
+        # --bloat-reward: operator reward x child/parent edges per bit when a
+        # discovery grew the input (core/edge_density.py). Off. Appended.
+        bloat_reward=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -4770,6 +4774,13 @@ class Fuzzer:
         self._continuum_reward_factor_sum = 0.0
         if continuum_reward:
             log.info("continuum_reward enabled (op_rewards scaled by frontier pressure)")
+
+        # --bloat-reward: a discovery that grew the input pays by how much
+        # density it kept (Fuzzer._bloat_reward_shape). Composes like the two above.
+        self._bloat_reward = bloat_reward
+        self._bloat_reward_rounds = 0
+        self._bloat_reward_neutral = 0
+        self._bloat_reward_factor_sum = 0.0
 
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
@@ -7842,6 +7853,37 @@ class Fuzzer:
         self._continuum_reward_factor_sum += factor
         return factor
 
+    def _bloat_reward_shape(self, parent: bytes, child: bytes) -> float | None:
+        """--bloat-reward factor for this round, or None (leave the reward alone).
+
+        Child trace edges per bit over the parent's, when a discovery grew the
+        input: an operator that adds bytes but few edges earns less. Neutral
+        (counted) when the child did not grow or the parent's trace is unknown.
+        """
+        if self._bloat_reward is not Switch.ON or not self._last_new_edge_ids:
+            return None
+
+        parent_edges = self.seed_meta.get(parent, {}).get(TRACE_EDGES, 0)
+        child_edges = len(self._last_trace_edges)
+        factor = bloat_factor((parent_edges, len(parent)), (child_edges, len(child)))
+        if factor is None:
+            self._bloat_reward_neutral += 1
+            return None
+
+        self._bloat_reward_rounds += 1
+        self._bloat_reward_factor_sum += factor
+        return factor
+
+    def bloat_reward_stats(self) -> dict:
+        """Did --bloat-reward bite? Instrument for the A/B, not a decision."""
+        n = self._bloat_reward_rounds
+        return {
+            "bloat_reward": self._bloat_reward is Switch.ON,
+            "bloat_reward_rounds": n,
+            "bloat_reward_neutral_rounds": self._bloat_reward_neutral,
+            "bloat_reward_mean_factor": self._bloat_reward_factor_sum / n if n else None,
+        }
+
     def continuum_reward_stats(self) -> dict:
         """Did the shaping bite? Instrument for the paired A/B, not a decision."""
         n = self._continuum_reward_rounds
@@ -9968,6 +10010,11 @@ class Fuzzer:
             has_new, edge_ids = self._confirm_new_coverage(seed, self.shm_cov, has_new, edge_ids)
             if not edge_ids:
                 continue
+            # Own trace size: --bloat-reward's parent density for its mutants.
+            # getattr: partial Fuzzers (tests) calibrate without seed_meta.
+            meta = getattr(self, "seed_meta", {}).get(seed)
+            if meta is not None:
+                meta[TRACE_EDGES] = len(edge_ids)
             if len(edge_ids) > probe_width:
                 probe_seed, probe_width = seed, len(edge_ids)
             self._strata_observe(seed, edge_ids)
@@ -10491,6 +10538,8 @@ class Fuzzer:
             groups["Scheduling"].append(
                 "continuum-reward" if not floor else f"continuum-reward(floor={floor:g})"
             )
+        if getattr(self, "_bloat_reward", Switch.OFF) is Switch.ON:
+            groups["Scheduling"].append("bloat-reward")
         if ops:
             groups["Scheduling"].extend(ops)
 

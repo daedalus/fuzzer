@@ -1063,6 +1063,7 @@ def cmd_fuzz(args):
         density_weight=Switch.ON if getattr(args, "density_weight", False) else Switch.OFF,
         prune_density=Switch.ON if getattr(args, "prune_density", False) else Switch.OFF,
         trim_sparse=Switch.ON if getattr(args, "trim_sparse", False) else Switch.OFF,
+        bloat_reward=Switch.ON if getattr(args, "bloat_reward", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -3019,6 +3020,9 @@ def cmd_sweep(args):
 #
 # density_weight (--density-weight), prune_density (--prune-density) and
 # trim_sparse (--trim-sparse) are excluded as unmeasured: unit tests only, no
+# paired run (docs/AB_PENDING.md).
+#
+# bloat_reward (--bloat-reward) is excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md).
 #
 # advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
@@ -5437,6 +5441,13 @@ def main() -> int:
             "invasion operators instead) and of --shaped-reward/--op-credit (which "
             "price duplication, not location), so a paired run moves one variable"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--bloat-reward",
+        action="store_true",
+        help="Scale every scheduler's operator reward, on a discovery that grew the input, "
+        "by child/parent edges per bit (capped 1, floored 0.1; core/edge_density.py): "
+        "operators that add bytes but few edges earn less. Off; unmeasured.",
     )
     fuzz_parser.add_argument(
         "--continuum-reward-floor",

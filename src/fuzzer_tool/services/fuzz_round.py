@@ -49,6 +49,7 @@ from fuzzer_tool.core.run_mode import CrashReward, RunMode, Switch
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.secretary import SecretaryStopping
 from fuzzer_tool.core.validity import Validity
+from fuzzer_tool.services.corpus_manager import TRACE_EDGES
 from fuzzer_tool.services.ijon_channel import Exec
 from fuzzer_tool.services.runner import TargetRunner, ptrace_available
 
@@ -155,6 +156,7 @@ class FuzzRound:
         "_surprisal_weight",
         "_distance",
         "_stratum",
+        "_trace_n",
     )
 
     def __init__(self, fuzzer: "Fuzzer", data: bytes):
@@ -165,6 +167,7 @@ class FuzzRound:
         self._returncode = 0
         self._stderr = ""
         self._t_elapsed = 0.0
+        self._trace_n = 0
         self._collect_now = False
         self._cmplog_found = False
         self._smt_found = False
@@ -1329,6 +1332,7 @@ class FuzzRound:
         self._observe_occupation(hit_counts)
         if not hit_edges:
             return
+        self._trace_n = len(hit_edges)
         new = self._commit_edges(seed_key, hit_edges, hit_counts)
         f._strata_observe(self._data, hit_edges)
         if new:
@@ -1747,7 +1751,8 @@ class FuzzRound:
         # variable. Kept as a pure transform (`_apply_reward_shape`) so it can be
         # driven by a test without a live campaign.
         op_rewards = _apply_reward_shape(op_rewards, f._credit_reward_shape())
-        return _apply_reward_shape(op_rewards, f._continuum_reward_shape())
+        op_rewards = _apply_reward_shape(op_rewards, f._continuum_reward_shape())
+        return _apply_reward_shape(op_rewards, f._bloat_reward_shape(self._data, self._mutated))
 
     def _record_slopt(self, op_rewards) -> None:
         # SLOPT: credit the batch exponent drawn for this round's operator
@@ -2230,6 +2235,13 @@ class FuzzRound:
             or self._ltl_new
         )
 
+    def _note_trace(self, mutated: bytes) -> None:
+        # The child's own trace size (--bloat-reward parent density later),
+        # hit-count admissions included. No trace read: store nothing, not 0.
+        meta = self._f.seed_meta.get(mutated)
+        if meta is not None and self._trace_n:
+            meta[TRACE_EDGES] = self._trace_n
+
     def _admit(self) -> bool:
         f = self._f
         data = self._data
@@ -2237,6 +2249,7 @@ class FuzzRound:
         _corpus_len_before = len(f.corpus)
         f.save_to_corpus(mutated, parent=data)
         f._note_c11(mutated)
+        self._note_trace(mutated)
         self._tag_distance()
         # Validity is a property of this execution, so it is recorded
         # here rather than reconstructed later: the seed picker reads it
@@ -2357,6 +2370,7 @@ class FuzzRound:
         _corpus_len_before = len(f.corpus)
         f.save_to_corpus(mutated, parent=data)
         f._note_c11(mutated)
+        self._note_trace(mutated)
         self._tag_distance()
         f._record_lineage_insert(mutated, data, _corpus_len_before)
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)

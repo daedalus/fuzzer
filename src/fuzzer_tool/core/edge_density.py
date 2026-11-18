@@ -47,3 +47,26 @@ def density_factors(edges: np.ndarray, nbytes: np.ndarray) -> np.ndarray:
     t = mid[inv] / (m - 1)
     out[ranked] = np.exp2(DENSITY_LOG2_SPAN * (2 * t - 1))
     return out
+
+
+#: Lowest bloat factor: a discovery's reward is never cut below 10%.
+BLOAT_FLOOR = 0.1
+
+
+def bloat_factor(parent: tuple[int, int], child: tuple[int, int]) -> float | None:
+    """Reward scale for a discovery that grew the input; None = neutral.
+
+    *parent* and *child* are ``(trace edges, bytes)``. The scale is child
+    edges per bit over parent edges per bit, capped at 1 (a denser child is
+    not promoted) and floored at ``BLOAT_FLOOR``. Neutral unless the child is
+    longer and both traces are known.
+
+    Example: parent 40 edges / 10 B (0.5 e/bit), child 44 / 40 B
+    (0.1375 e/bit) -> 0.275.
+    """
+    (p_edges, p_bytes), (c_edges, c_bytes) = parent, child
+    if p_bytes <= 0 or c_bytes <= p_bytes or p_edges <= 0 or c_edges <= 0:
+        return None
+
+    ratio = edges_per_bit(c_edges, c_bytes) / edges_per_bit(p_edges, p_bytes)
+    return min(1.0, max(BLOAT_FLOOR, ratio))
