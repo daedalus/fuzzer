@@ -456,6 +456,20 @@ Already covered: #73 Poor Little Chunks (`heap_chunk.py`, `glibc_severity`), gli
 - [ ] **Taint-novelty feedback** (72/15 E0) — guard-page fault taint; new taint sinks count as novel. Large.
 - Skip: ELF PLT/GOT rewriting (63/9, 61/8; LD_PRELOAD shim covers), IOKit mapping (72/9, macOS), LLM reducer (73 Linenoise), static taint (64/8, 73 MOLE).
 
+## TheAlgorithms/Python port candidates (2026-11-18, TheAlgorithms/Python@30507bb)
+Survey of 1608 files; absence checked by grep over `src/`. Already covered: BWT/MTF/BPE ops (`structured.py`), Huffman, CRC/Adler/Fletcher, Aho-Corasick, Levenshtein/Myers, FWHT (`hadamard.py`), Gray code, Fenwick, Bloom/cuckoo, union-find, LRU, MLFQ/round-robin/stride seeds, k-means 1-D, Metropolis/SA, gradient descent, GA, simplex, set cover, stable matching, NN-descent kNN, L-system, Perlin, Feistel. Ranked by fit:
+- [ ] **Suffix automaton tokens** (`strings/suffix_automaton.py`) — corpus-wide longest repeated substrings in O(n) → dictionary tokens at zero execs; complements `auto_dict` (byteflip-only). Bound states (Hard Rule 54).
+- [ ] **Bitap near-miss repair** (`strings/bitap_string_match.py`) — find dictionary/cmplog tokens with ≤k byte errors in a seed, write the exact token over the match. Aho-Corasick is exact-only.
+- [ ] **Token-bucket stderr cap** (`other/token_bucket.py`) — throttles repeated ASAN recover-mode reports; closes open (b) of *ASAN snapshot-restore redzones*.
+- [ ] **Booth minimal rotation orbit** (`strings/booths_algorithm.py`) — `rot@OFF:SIZE` spec in `orbit_dedup.py`: ring buffers equal under cyclic shift dedup to one exec.
+- [ ] **Quine-McCluskey edge predicates** (`boolean_algebra/quine_mc_cluskey.py`) — minimize bitflip→edge truth tables to prime implicants; the literals are the bits gating the edge → focused mutation mask.
+- [ ] **DPLL fallback** (`other/davis_putnam_logemann_loveland.py`) — pure-Python SAT for small boolean path constraints when `z3_budget` is spent.
+- [ ] **FP-growth op itemsets** (`machine_learning/frequent_pattern_growth.py`) — frequent k-op sets in coverage-gaining mutation stacks; generalizes `op_chain2` pairs.
+- [ ] **DBSCAN crash clusters** (`machine_learning/dbscan.py`) — no-k density clustering as a second `crash-cluster` metric; noise points = singleton bugs.
+- [ ] **Check-digit fixers** (`hashes/luhn.py`, `ciphers/base58.py`, `hashes/hamming_code.py`) — Luhn digit, Base58Check (secp256k1 target), SECDED parity repair after mutation, like `rs_fix.py`.
+- [ ] **Damerau stack distance** (`strings/damerau_levenshtein_distance.py`) — counts adjacent-frame transpositions (inlining reorders) as one edit in `frame_sequence_similarity`.
+- Skip: more schedulers (HRRN, Q-learning, tabu, hill climbing: Reality Check rows NULL; Metropolis/SA exist), crypto ciphers/hashes (hashlib; no inversion value), RMQ/segment/wavelet trees/treap/skip list (Fenwick + numpy cover), kd-tree (NN-descent exists), Graham scan, MFCC, Karnaugh, Manacher, dancing links (set cover exists), quickselect (`np.partition`).
+
 ## Standing notes
 - [ ] **Master test debt (2026-11-16)**: `test_perf_group_read.py::test_real_software_counters_count_own_work` fails in this container; `test_regression_end_of_run_persistence.py` lets the probe's KeyboardInterrupt abort the pytest session (later files never run); 16 failures across `test_regression_cli_fuzzer_kwargs`/`elo_all`/`fuzzer`/`one_fifth`/… also red on master.
 - [ ] **`test_regression_novel_crash_reward.py`: 2 failures on master** — stub `SimpleNamespace` lacks `_is_hw_max` (2026-11-16).
