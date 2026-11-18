@@ -33,6 +33,7 @@ from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.ltl import violation_signature
 from fuzzer_tool.core.sanitizer import (
     SanitizerReport,
+    glibc_severity,
     is_runtime_module,
     signal_exploitability,
 )
@@ -1776,18 +1777,29 @@ def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, return
             metadata.rsp,
             metadata.raw_stderr,
         )
-        return
+    else:
+        metadata.sanitizer = report.sanitizer
+        metadata.error_type = report.error_type
+        metadata.fault_addr = report.fault_addr
+        metadata.frames = report.frames
+        metadata.access_type = report.access_type
+        metadata.access_size = report.access_size
+        metadata.shadow_info = report.shadow_info
+        metadata.alloc_frames = report.alloc_frames
+        metadata.dealloc_frames = report.dealloc_frames
+        metadata.exploitability = report.exploitability
 
-    metadata.sanitizer = report.sanitizer
-    metadata.error_type = report.error_type
-    metadata.fault_addr = report.fault_addr
-    metadata.frames = report.frames
-    metadata.access_type = report.access_type
-    metadata.access_size = report.access_size
-    metadata.shadow_info = report.shadow_info
-    metadata.alloc_frames = report.alloc_frames
-    metadata.dealloc_frames = report.dealloc_frames
-    metadata.exploitability = report.exploitability
+    # glibc heap-hardening regression multiplier (Phrack #73 "Poor Little
+    # Chunks"): a heap-metadata-corruption crash on a target built against
+    # glibc >= 2.41 is raised one tier. No-op unless --glibc-heap-severity
+    # populated metadata.glibc_version with a regressed version.
+    metadata.exploitability = glibc_severity(
+        metadata.exploitability,
+        metadata.sanitizer,
+        metadata.error_type,
+        metadata.raw_stderr,
+        metadata.glibc_version,
+    )
 
 
 # libc entry points whose abort means heap corruption (glibc malloc checks).

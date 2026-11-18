@@ -886,6 +886,135 @@ def build_id(target: str) -> bytes | None:
     return None
 
 
+# ── glibc build-version from .gnu.version_r (version-needed) ────────────────
+#
+# The dynamic linker records, per needed library, the symbol-version tokens
+# the binary actually imports ("GLIBC_2.41", ...). The highest GLIBC token is
+# a lower bound on the glibc the target was built against -- enough for the
+# crash-triage severity multiplier (Phrack #73 "Poor Little Chunks") to know
+# whether the target runs on a heap-hardening-regressed glibc.
+_SHT_GNU_VERNEED = 0x6FFFFFFE
+# Hostile vn_next / vna_next chains must terminate: bound the walk.
+_VERNEED_MAX_ENTRIES = 256
+
+
+def _read_cstr(elf: bytes, off: int, end: int) -> bytes:
+    """NUL-terminated string at *off*, clamped to [*off*, *end*)."""
+    if off < 0 or off >= end:
+        return b""
+    term = elf.find(b"\x00", off, end)
+    return elf[off:term] if term != -1 else elf[off:end]
+
+
+def _parse_glibc_token(token: bytes) -> tuple[int, int] | None:
+    """``b"GLIBC_2.41"`` -> ``(2, 41)``; None for GLIBC_PRIVATE / non-GLIBC."""
+    if not token.startswith(b"GLIBC_"):
+        return None
+    parts = token[6:].split(b".")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def _walk_vernaux(
+    elf: bytes, pos: int, end: int, s_off: int, s_end: int, best: tuple[int, int] | None
+) -> tuple[int, int] | None:
+    """Fold every GLIBC version token of one verneed's aux list into *best*."""
+    seen = 0
+    while pos + 16 <= end and seen < _VERNEED_MAX_ENTRIES:
+        seen += 1
+        vna_name = struct.unpack_from("<I", elf, pos + 8)[0]
+        vna_next = struct.unpack_from("<I", elf, pos + 12)[0]
+        ver = _parse_glibc_token(_read_cstr(elf, s_off + vna_name, s_end))
+        if ver is not None and (best is None or ver > best):
+            best = ver
+        if vna_next == 0 or pos + vna_next <= pos:
+            break
+        pos = pos + vna_next
+    return best
+
+
+def _walk_verneed(
+    elf: bytes, vpos: int, vend: int, s_off: int, s_end: int
+) -> tuple[int, int] | None:
+    """Highest GLIBC (major, minor) across every version-needed record."""
+    best: tuple[int, int] | None = None
+    seen = 0
+    pos = vpos
+    while pos + 16 <= vend and seen < _VERNEED_MAX_ENTRIES:
+        seen += 1
+        vn_aux = struct.unpack_from("<I", elf, pos + 8)[0]
+        vn_next = struct.unpack_from("<I", elf, pos + 12)[0]
+        best = _walk_vernaux(elf, pos + vn_aux, vend, s_off, s_end, best)
+        if vn_next == 0 or pos + vn_next <= pos:
+            break
+        pos = pos + vn_next
+    return best
+
+
+def _glibc_from_verneed(elf: bytes) -> tuple[int, int] | None:
+    """Scan section headers for SHT_GNU_verneed and reduce it to (major, minor)."""
+    n = len(elf)
+    if not _elf64_le(elf):
+        return None
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    if e_shnum == 0 or not _shdrs_in_bounds(n, e_shoff, e_shnum, e_shentsize):
+        return None
+
+    verneed = next(
+        (
+            sh
+            for i in range(e_shnum)
+            if struct.unpack_from("<I", elf, (sh := e_shoff + i * e_shentsize) + 4)[0]
+            == _SHT_GNU_VERNEED
+        ),
+        None,
+    )
+    if verneed is None:
+        return None
+
+    vn_off = struct.unpack_from("<Q", elf, verneed + 24)[0]
+    vn_size = struct.unpack_from("<Q", elf, verneed + 32)[0]
+    sh_link = struct.unpack_from("<I", elf, verneed + 40)[0]
+    if sh_link >= e_shnum:
+        return None
+    strtab = e_shoff + sh_link * e_shentsize
+    s_off = struct.unpack_from("<Q", elf, strtab + 24)[0]
+    s_size = struct.unpack_from("<Q", elf, strtab + 32)[0]
+
+    if vn_off == 0 or vn_off > n or vn_size > n - vn_off:
+        return None
+    if s_off > n or s_size > n - s_off:
+        return None
+    return _walk_verneed(elf, vn_off, vn_off + vn_size, s_off, s_off + s_size)
+
+
+def glibc_build_version(target: str) -> str:
+    """Lowest-bound glibc the target was built against, as ``"2.41"`` or ``""``.
+
+    Reads the ``.gnu.version_r`` records and returns the highest ``GLIBC_x.y``
+    token the binary imports -- "the glibc version the target was built
+    against" for triage purposes. Empty string when *target* is not an
+    ELF64-LE, is statically linked, links a non-glibc libc (musl), or the
+    records are absent / unparseable. Deliberately conservative: a binary that
+    references no recent symbol reports the lower version it actually needs, so
+    the severity multiplier never over-escalates on a guess.
+    """
+    try:
+        with open(target, "rb") as f:
+            elf = f.read()
+    except OSError as e:
+        log.debug("glibc_build_version read failed: %s", e)
+        return ""
+    version = _glibc_from_verneed(elf)
+    return f"{version[0]}.{version[1]}" if version is not None else ""
+
+
 def parse_sancov_offsets(target: str) -> tuple[int, int] | None:
     """Parse ELF to find __start/__stop___sancov_cntrs virtual addresses.
 

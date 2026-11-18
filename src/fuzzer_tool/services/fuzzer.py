@@ -1846,6 +1846,7 @@ class Fuzzer:
         isolate_crash_fields=False,
         crash_symbolize=False,
         scan_gadgets=False,
+        glibc_heap_severity=False,
         abort_is_crash=False,
         rss_limit_mb=0,
         multi_targets=None,
@@ -2432,6 +2433,11 @@ class Fuzzer:
         # feasibility in the crash sidecar. Scanned once per target (cached on
         # the corpus manager). Static triage only -- nothing is executed.
         self.scan_gadgets = scan_gadgets
+        # --glibc-heap-severity: read the target's build-time glibc from its
+        # .gnu.version_r records and raise a heap-metadata-corruption crash one
+        # exploitability tier on a hardening-regressed glibc (>= 2.41/2.43,
+        # Phrack #73). Detected once per target (cached on the corpus manager).
+        self.glibc_heap_severity = glibc_heap_severity
         # Shim crash record (PCs + backtrace per crash), always on: a signal
         # crash without a sanitizer report (plain target, or a fault the
         # shim's guard catches first) is named by its PCs. --crash-symbolize

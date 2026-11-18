@@ -295,6 +295,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "bitcast_float",
         "bitcast_int32",
         "size_field_overflow",
+        # glibc smallbin-range SIZE-field probes (Phrack #73 "Poor Little Chunks", Ax)
+        "smallbin_size",
+        "chunk_overlap",
         "bpe",
         "golomb",
         "naf_scalar_mutate",

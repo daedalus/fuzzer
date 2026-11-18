@@ -368,6 +368,88 @@ def signal_exploitability(signo: int, fault: int | None, rip: int, rsp: int, std
     return "MEDIUM"
 
 
+# ── glibc heap-hardening regression multiplier ───────────────────────────
+#
+# Phrack #73 "Poor Little Chunks" (Ax): across three commits glibc 2.41/2.43
+# removed the fastbin size / PROTECT_PTR checks and the unsorted-bin's five
+# integrity checks. A chunk whose SIZE lands in the 0x20-0x3F0 smallbin range
+# is no longer validated on the malloc fast path, so a corrupted-SIZE heap
+# crash that was inert before -- it would have tripped a clean abort -- can now
+# be an overlapping-chunk primitive. The exploitability of the *same* crash
+# therefore depends on the glibc the target was built against: raise a
+# heap-metadata-corruption crash one tier on a regressed-glibc target.
+GLIBC_HEAP_REGRESSION = (2, 41)
+
+# Exploitability tiers, low to high; the multiplier steps up one and caps here.
+_TIER_ORDER = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+# ASAN error types that corrupt or misread allocator chunk metadata (the SIZE
+# field, chunk headers, freelist pointers) -- the class whose ceiling the
+# regression raises. A plain stack-buffer-overflow is unaffected.
+_HEAP_SIZE_SENSITIVE_ASAN = frozenset((
+    "heap-buffer-overflow", "heap-buffer-overflow-", "heap-use-after-free",
+    "double-free", "heap-use-after-scope", "bad-free",
+    "attempting-free-on-non-deallocated-memory", "invalid-malloc-size",
+    "alloc-dealloc-mismatch",
+))  # fmt: skip
+
+
+def parse_glibc_version(version: str) -> tuple[int, int] | None:
+    """``"2.41"`` -> ``(2, 41)``; None for an empty or malformed string."""
+    if not version:
+        return None
+    parts = version.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def glibc_regressed(version: str) -> bool:
+    """True when *version* (``"2.41"``) is at or past the hardening regression."""
+    parsed = parse_glibc_version(version)
+    return parsed is not None and parsed >= GLIBC_HEAP_REGRESSION
+
+
+def heap_metadata_corruption(sanitizer: str, error_type: str, stderr: str) -> bool:
+    """Whether a crash corrupts or misreads allocator chunk metadata.
+
+    True for the ASAN heap-metadata error classes, and for a glibc allocator
+    abort (``free(): invalid pointer``, ``corrupted size vs. prev_size``, ...)
+    in a no-report signal crash.
+    """
+    if sanitizer == "AddressSanitizer" and error_type in _HEAP_SIZE_SENSITIVE_ASAN:
+        return True
+    return bool(_GLIBC_HEAP_RE.search(stderr))
+
+
+def _bump_tier(tier: str) -> str:
+    """One tier up, capped at CRITICAL; unrecognized tiers pass through."""
+    try:
+        idx = _TIER_ORDER.index(tier)
+    except ValueError:
+        return tier  # UNKNOWN and anything off the scale stay put
+    return _TIER_ORDER[min(idx + 1, len(_TIER_ORDER) - 1)]
+
+
+def glibc_severity(
+    base_tier: str, sanitizer: str, error_type: str, stderr: str, glibc_version: str
+) -> str:
+    """Apply the glibc-regression multiplier to *base_tier*.
+
+    Raises a heap-metadata-corruption crash one tier when the target's glibc
+    is at or past 2.41; otherwise returns *base_tier* unchanged (unknown or
+    pre-2.41 glibc, or a non-heap-metadata crash). CRITICAL is the ceiling.
+    """
+    if not glibc_regressed(glibc_version):
+        return base_tier
+    if not heap_metadata_corruption(sanitizer, error_type, stderr):
+        return base_tier
+    return _bump_tier(base_tier)
+
+
 def _crash_stack(text: str, start: int = 0) -> list[tuple[int, str]]:
     """``(pc, frame)`` of the first stack at or after *start*.
 

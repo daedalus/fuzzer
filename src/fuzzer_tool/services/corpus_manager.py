@@ -1220,6 +1220,9 @@ class CorpusManager:
                 f._target_sha256 = "unknown"
         meta.target_sha256 = f._target_sha256
 
+        if getattr(f, "glibc_heap_severity", False):
+            self._attach_glibc_version(meta)
+
         if f.corpus:
             label, sim, diffs, _ = find_nearest_corpus(data, f.corpus)
             meta.nearest_corpus_file = label
@@ -1305,6 +1308,26 @@ class CorpusManager:
 
         if f._gadget_report is not None:
             meta.gadgets = f._gadget_report.to_dict()
+
+    def _attach_glibc_version(self, meta) -> None:
+        """Record the target's build-time glibc on *meta* (--glibc-heap-severity).
+
+        Keys the heap-hardening severity multiplier (Phrack #73). Identical for
+        every crash on the same binary, so it is read once and cached on the
+        fuzzer. Best-effort: a parse failure leaves glibc_version empty (the
+        multiplier then no-ops) and never loses the crash.
+        """
+        f = self.f
+        if not hasattr(f, "_glibc_version"):
+            try:
+                from fuzzer_tool.core.elf import glibc_build_version
+
+                f._glibc_version = glibc_build_version(f.target)
+            except Exception:
+                log.warning("glibc version detection failed", exc_info=True)
+                f._glibc_version = ""
+
+        meta.glibc_version = f._glibc_version
 
     def _mail_crash(self, result, returncode: int, stderr: str) -> None:
         """Send the crash e-mail; a mail failure never kills the campaign."""
