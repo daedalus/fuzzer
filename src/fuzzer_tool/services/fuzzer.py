@@ -7178,6 +7178,12 @@ class Fuzzer:
     def _auto_minimize_corpus(self):
         return self._corpus_manager.auto_minimize_corpus()
 
+    def _snapshot_coverage(self) -> None:
+        """Timeline point: execs, edges and corpus bytes (edges-per-bit trend)."""
+        self._edge_tracker.record_coverage_snapshot(
+            self.exec_count, corpus_bytes=sum(map(len, self.corpus))
+        )
+
     def _maybe_trim_sparse(self) -> None:
         """--trim-sparse: one least-dense seed per stats interval; --no-auto-minimize wins."""
         if self._trim_sparse_on is not Switch.ON or self._auto_minimize is not Switch.ON:
@@ -11236,7 +11242,7 @@ class Fuzzer:
                     )
 
                     # Record coverage snapshot for temporal analysis
-                    self._edge_tracker.record_coverage_snapshot(self.exec_count)
+                    self._snapshot_coverage()
                     self._maybe_resize_on_drops()
                     self._stats_tick_report()
                     self._append_coverage_log()
@@ -11346,7 +11352,7 @@ class Fuzzer:
             self._aborted_by_error = True
 
         # Final coverage snapshot for temporal analysis
-        self._edge_tracker.record_coverage_snapshot(self.exec_count)
+        self._snapshot_coverage()
         self._dump_stats()
         self._dump_coverage_report()
         if self.markov.is_trained():

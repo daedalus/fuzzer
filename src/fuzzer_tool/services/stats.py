@@ -660,6 +660,12 @@ class StatsReporter:
             f"  Edges per bit:     {edges_per_bit(edges, nbytes):.4f} "
             f"({nbytes * BITS_PER_BYTE:,} corpus bits)"
         )
+        trend = f._edge_tracker.density_trend()
+        if trend is not None:
+            print(
+                f"  Edges/bit trend:   {trend.first:.4f} -> {trend.last:.4f} "
+                f"(edges {trend.edge_growth:+.0%}): {trend.verdict.value}"
+            )
         print(f"  Load factor:       {density:.2f}%")
         print(f"  Collision risk:    {collision_risk:.2f}% (zero for sparse entries)")
         rec = f._edge_tracker.recommended_map_size()

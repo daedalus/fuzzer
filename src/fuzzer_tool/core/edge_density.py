@@ -6,6 +6,10 @@ Normalizes edge counts by input size so a 40-byte seed reaching 300 edges
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import Enum
+
 import numpy as np
 
 BITS_PER_BYTE = 8
@@ -70,3 +74,49 @@ def bloat_factor(parent: tuple[int, int], child: tuple[int, int]) -> float | Non
 
     ratio = edges_per_bit(c_edges, c_bytes) / edges_per_bit(p_edges, p_bytes)
     return min(1.0, max(BLOAT_FLOOR, ratio))
+
+
+#: Density move (relative, first -> last) that counts as a trend.
+TREND_DENSITY_SHIFT = 0.25
+
+#: Edge growth at or below which a density drop reads as bloat.
+TREND_EDGE_GROWTH = 0.05
+
+
+class Trend(Enum):
+    """Corpus edges-per-bit direction over the coverage timeline."""
+
+    BLOAT = "bloat"  # density down, edges flat: bytes without coverage
+    COMPACT = "compacting"  # density up: trimming / pruning is working
+    STEADY = "steady"
+
+
+@dataclass(frozen=True)
+class DensityTrend:
+    first: float  # edges per bit at the first known snapshot
+    last: float  # edges per bit at the last snapshot
+    edge_growth: float  # relative edge growth between them
+    verdict: Trend
+
+
+def density_trend(edges: Sequence[int], nbytes: Sequence[int]) -> DensityTrend | None:
+    """First -> last corpus edges per bit over aligned snapshots; None under 2 known.
+
+    A snapshot is known when it has edges and bytes (0 bytes: legacy, unrecorded).
+    Example: edges 100 -> 102, bytes 1000 -> 4000: density -75%, edges +2% -> BLOAT.
+    """
+    known = [(e, b) for e, b in zip(edges, nbytes, strict=True) if e > 0 and b > 0]
+    if len(known) < 2:
+        return None
+
+    (e0, b0), (e1, b1) = known[0], known[-1]
+    first, last = edges_per_bit(e0, b0), edges_per_bit(e1, b1)
+    shift = last / first - 1
+    growth = e1 / e0 - 1
+
+    verdict = Trend.STEADY
+    if shift <= -TREND_DENSITY_SHIFT and growth <= TREND_EDGE_GROWTH:
+        verdict = Trend.BLOAT
+    elif shift >= TREND_DENSITY_SHIFT:
+        verdict = Trend.COMPACT
+    return DensityTrend(first, last, growth, verdict)

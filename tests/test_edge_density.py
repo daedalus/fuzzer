@@ -36,6 +36,7 @@ def _summary_fuzzer(corpus: list[bytes], edges: int) -> MagicMock:
     f._edge_tracker.good_turing_estimate.return_value = {"n": 0}
     f._edge_tracker.coverage_growth_model.return_value = {"confidence": 0.0}
     f._edge_tracker.bayesian_coverage_growth_model.return_value = {}
+    f._edge_tracker.density_trend.return_value = None
     return f
 
 
