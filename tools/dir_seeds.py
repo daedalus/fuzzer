@@ -85,26 +85,50 @@ def _dir_excluded(name: str, full: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(full, p) for p in patterns)
 
 
+def _is_hardlink(path: str) -> bool:
+    """True if *path* is a hard link (link count > 1)."""
+    try:
+        return os.stat(path).st_nlink > 1
+    except OSError:
+        return False
+
+
 def walk(
     paths: Iterable[Path],
     arrange: Callable[[list], None] = list.sort,
     exclude_dirs: list[str] | None = None,
+    exclude_links: bool = False,
+    no_cross_device: bool = False,
 ) -> Iterator[Path]:
     """Files under *paths*: per directory its files then subdirs, each list ordered by *arrange*.
 
     A file argument is yielded as is. Directory symlinks are listed by os.walk
-    but not entered, so a link back to an ancestor cannot loop.
-    Directories matching *exclude_dirs* glob patterns (on basename or full path)
-    are pruned and not descended into.
+    but not entered, so a link back to an ancestor cannot loop. Directories
+    matching *exclude_dirs* glob patterns (on basename or full path) are pruned
+    and not descended into; files that are symlinks or hardlinks are skipped
+    when *exclude_links* is set. When *no_cross_device* is set, subdirectories on
+    a different device (st_dev) than the walk root are not descended into.
     """
     patterns = list(exclude_dirs or [])
     for path in paths:
         if not path.is_dir():
             yield path
             continue
+        root_dev = path.lstat().st_dev if no_cross_device else None
         for top, dirs, files in os.walk(path, followlinks=False):
             if patterns:
                 dirs[:] = [d for d in dirs if not _dir_excluded(d, os.path.join(top, d), patterns)]
+            if no_cross_device:
+                dirs[:] = [d for d in dirs if os.lstat(os.path.join(top, d)).st_dev == root_dev]
+            if exclude_links:
+                files = [
+                    name
+                    for name in files
+                    if not (
+                        os.path.islink(os.path.join(top, name))
+                        or _is_hardlink(os.path.join(top, name))
+                    )
+                ]
             arrange(dirs)  # in place: os.walk descends in this order
             arrange(files)
             for name in files:
@@ -139,6 +163,8 @@ def iter_dir_seeds(
     arrange: Callable[[list], None] = list.sort,
     unpack_mode: Unpack = Unpack.OFF,
     exclude_dirs: list[str] | None = None,
+    exclude_links: bool = False,
+    no_cross_device: bool = False,
 ) -> Iterator[tuple[Media, bytes]]:
     """(media, bytes) of every non-empty file of the *wanted* types, in walk order.
 
@@ -146,10 +172,13 @@ def iter_dir_seeds(
     skipped and counted in stats.too_big. With Unpack.ON an archive or
     compressed file yields its members instead (tools/unpack.py).
     Directories matching *exclude_dirs* glob patterns are pruned before walking.
+    Files that are symlinks or hardlinks are skipped when *exclude_links* is set.
+    Subdirectories on a different device than the walk root are not descended
+    into when *no_cross_device* is set.
     """
     # Ifs up: the file -> payloads step is chosen once, not per file.
     payloads = _unpacked if unpack_mode is Unpack.ON else _as_is
-    for path in walk(paths, arrange, exclude_dirs):
+    for path in walk(paths, arrange, exclude_dirs, exclude_links, no_cross_device):
         if path.resolve() in skip:
             continue
         try:
@@ -223,6 +252,16 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
         metavar="GLOB",
         help="exclude directories matching glob pattern (can repeat, e.g. --exclude-dir '*/.git' --exclude-dir '*/__pycache__')",
     )
+    ap.add_argument(
+        "--exclude-links",
+        action="store_true",
+        help="skip files that are symlinks or hardlinks",
+    )
+    ap.add_argument(
+        "--no-cross-device",
+        action="store_true",
+        help="do not descend into subdirectories on a different device than the walk root",
+    )
     ccs.add_send_args(ap)
     args = ap.parse_args(argv)
     args.order = WalkOrder(args.order)
@@ -253,6 +292,10 @@ def main(argv: list[str] | None = None) -> int:
     unpack_mode = Unpack.ON if args.decompress else Unpack.OFF
     if args.exclude_dir:
         print(f"[*] excluding dirs matching: {', '.join(args.exclude_dir)}")
+    if args.exclude_links:
+        print("[*] excluding files that are symlinks or hardlinks")
+    if args.no_cross_device:
+        print("[*] skipping subdirs on a different device (no cross-device)")
     found = iter_dir_seeds(
         paths,
         args.types,
@@ -263,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
         arrange,
         unpack_mode,
         args.exclude_dir,
+        args.exclude_links,
+        args.no_cross_device,
     )
     return ccs.send_seeds(ccs.unique(found, stats), args, stats)
 
