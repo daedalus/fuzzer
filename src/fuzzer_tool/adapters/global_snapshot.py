@@ -9,8 +9,9 @@ those spans right after load and writes them back before every exec.
                             ▼
     exec: restore() -> call target -> restore() -> call target ...
 
-Not restored: heap, TLS, the shim's own sections. A global that points into
-heap freed by a later exec reads the freed pointer back after restore.
+Not restored: heap, TLS, the shim's own sections, ASAN global redzones. A
+global that points into heap freed by a later exec reads the freed pointer
+back after restore.
 """
 
 import ctypes
@@ -23,6 +24,60 @@ log = logging.getLogger(__name__)
 
 # Exported by every afl_shim.c build: its presence means shim globals exist.
 _SHIM_MARK = "__afl_area"
+
+_ASAN_GRANULE = 8  # app bytes per ASAN shadow byte
+
+
+class _AsanShadow:
+    """ASAN poison queries, to keep restore off global redzones.
+
+    ASAN pads each global with a poisoned redzone inside .data/.bss. A copy
+    over it goes through ASAN's memcpy interceptor and reports an overflow
+    (3 symbolized reports per exec on libbase64: 800 -> 130 eps).
+    """
+
+    def __init__(self, region, addr):
+        self._region = region  # __asan_region_is_poisoned: first bad byte or 0
+        self._addr = addr  # __asan_address_is_poisoned: bool
+
+    @classmethod
+    def load(cls) -> "_AsanShadow | None":
+        """Bind the process's ASAN runtime; None when ASAN is not loaded."""
+        proc = ctypes.CDLL(None)
+        region = getattr(proc, "__asan_region_is_poisoned", None)
+        addr = getattr(proc, "__asan_address_is_poisoned", None)
+        if region is None or addr is None:
+            return None
+
+        region.restype = ctypes.c_size_t
+        region.argtypes = [ctypes.c_size_t, ctypes.c_size_t]
+        addr.restype = ctypes.c_int
+        addr.argtypes = [ctypes.c_size_t]
+        return cls(region, addr)
+
+    def addressable(
+        self, base: int, spans: tuple[tuple[int, int], ...]
+    ) -> tuple[tuple[int, int], ...]:
+        """Split *spans* (relative to *base*) into their unpoisoned runs.
+
+        e.g. shadow [00 04 f9 f9 00] over 40 bytes -> (0, 12), (32, 8).
+        """
+        out = []
+        for rel, size in spans:
+            cur, end = base + rel, base + rel + size
+            while cur < end:
+                bad = self._region(cur, end - cur)
+                if not bad:
+                    out.append((cur - base, end - cur))
+                    break
+                if bad > cur:
+                    out.append((cur - base, bad - cur))
+
+                # Rest of bad's granule is poisoned; skip whole redzone granules.
+                cur = (bad | (_ASAN_GRANULE - 1)) + 1
+                while cur < end and self._addr(cur):
+                    cur += _ASAN_GRANULE
+        return tuple(out)
 
 
 class GlobalSnapshot:
@@ -59,7 +114,10 @@ class GlobalSnapshot:
                 path,
             )
             return None
-        return cls(base, ranges.spans)
+
+        shadow = _AsanShadow.load()
+        spans = shadow.addressable(base, ranges.spans) if shadow else ranges.spans
+        return cls(base, spans)
 
     def restore(self) -> None:
         """Write the captured bytes back over every span."""

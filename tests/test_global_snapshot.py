@@ -42,14 +42,14 @@ int fuzz_test(const unsigned char *buf, size_t len) {
 PRAGMA_RE = re.compile(r"^#pragma clang section.*$", re.MULTILINE)
 
 
-def _build(tmp: Path, name: str, shim: Path) -> Path:
+def _build(tmp: Path, name: str, shim: Path, extra: tuple[str, ...] = ()) -> Path:
     if shutil.which("clang") is None:
         pytest.skip("clang not available")
     src = tmp / f"{name}.c"
     src.write_text(PROBE_SRC)
     so = tmp / f"{name}.so"
     proc = subprocess.run(
-        ["clang", "-O1", "-fPIC", "-shared", "-o", str(so), str(src), str(shim)],
+        ["clang", "-O1", "-fPIC", "-shared", *extra, "-o", str(so), str(src), str(shim)],
         capture_output=True,
         text=True,
     )
@@ -92,13 +92,16 @@ _PROBE = textwrap.dedent(
 )
 
 
-def _probe(so: Path, restore: str, mode: str = "lite") -> tuple[list[int], str]:
+def _probe(
+    so: Path, restore: str, mode: str = "lite", env: dict | None = None
+) -> tuple[list[int], str]:
     proc = subprocess.run(
         [sys.executable, "-c", _PROBE, str(so), restore, mode],
         capture_output=True,
         text=True,
         timeout=60,
         cwd=REPO_ROOT,
+        env=env,
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     return ast.literal_eval(proc.stdout.strip().splitlines()[-1]), proc.stderr
@@ -221,6 +224,98 @@ class TestGlobalSnapshot:
 
         assert buf.raw[:8] == b"abcdXXgh"
         assert snap.size == 6
+
+
+_ASAN_FLAGS = ("-fsanitize=address", "-fsanitize-recover=address", "-lasan")
+_ASAN_REPORT = "ERROR: AddressSanitizer"
+
+
+@pytest.fixture(scope="module")
+def asan_run(tmp_path_factory) -> tuple[Path, dict]:
+    """ASAN probe + the env the fuzzer runs it under (libasan preloaded, recover on)."""
+    import os
+
+    so = _build(tmp_path_factory.mktemp("snap_asan"), "asan", SHIM, _ASAN_FLAGS)
+    ldd = subprocess.run(["ldd", str(so)], capture_output=True, text=True).stdout
+    m = re.search(r"(\S*libasan\.so\S*) => (\S+)", ldd)
+    if m is None:
+        pytest.skip("libasan runtime not found")
+    env = dict(os.environ)
+    env["LD_PRELOAD"] = m.group(2)
+    env["ASAN_OPTIONS"] = "halt_on_error=0:detect_leaks=0:verify_asan_link_order=0"
+    return so, env
+
+
+class TestAsanRedzones:
+    def test_control_off_no_reports(self, asan_run):
+        """Control: the probe itself is clean, so a report can only come from restore."""
+        so, env = asan_run
+        _, err = _probe(so, "off", env=env)
+
+        assert _ASAN_REPORT not in err
+
+    def test_regression_asan_restore_skips_redzones(self, asan_run):
+        """Restore wrote over ASAN global redzones: 3 reports per exec, 800 -> 130 eps on libbase64."""
+        so, env = asan_run
+        rcs, err = _probe(so, "globals", env=env)
+        fresh = 1 * 10 + 0
+
+        assert _ASAN_REPORT not in err
+        assert rcs == [fresh] * len(rcs)
+
+
+class _FakeShadow:
+    """Per-granule ASAN shadow model: 0 clean, 1..7 partial, 0xf9 redzone."""
+
+    def __init__(self, shadow: list[int]):
+        self.bad = [not (s == 0 or (s < 8 and i % 8 < s)) for s in shadow for i in range(8)]
+
+    def region(self, beg: int, size: int) -> int:
+        return next((a for a in range(beg, beg + size) if self.bad[a]), 0)
+
+    def addr(self, a: int) -> bool:
+        return self.bad[a]
+
+
+def _covered(spans) -> set[int]:
+    return {a for s, n in spans for a in range(s, s + n)}
+
+
+class TestAsanSplit:
+    @pytest.mark.parametrize(
+        "shadow",
+        [
+            [0, 0, 0, 0],
+            [0, 4, 0xF9, 0xF9, 0, 0],
+            [0xF9, 0xF9, 0, 0],
+            [0, 0, 0xF9, 0xF9],
+            [0xF9, 0xF9, 0xF9],
+            [1, 0xF9, 7, 0xF9, 0, 3],
+        ],
+    )
+    def test_keeps_exactly_addressable(self, shadow):
+        """Adversarial: partial granules, leading/trailing/all-redzone spans."""
+        from fuzzer_tool.adapters.global_snapshot import _AsanShadow
+
+        fake = _FakeShadow(shadow)
+        # Base 8 offsets relative spans; byte 0 of the model sits at absolute 8.
+        model = _FakeShadow([0] + shadow)
+        split = _AsanShadow(model.region, model.addr).addressable(8, ((0, len(fake.bad)),))
+        want = {a for a, bad in enumerate(fake.bad) if not bad}
+
+        assert _covered(split) == want
+        assert all(n > 0 for _, n in split)
+        for (a, n), (b, _) in zip(split, split[1:], strict=False):
+            assert a + n < b
+
+    def test_clean_spans_unchanged(self):
+        """Falsification: nothing poisoned -> the spans pass through as given."""
+        from fuzzer_tool.adapters.global_snapshot import _AsanShadow
+
+        model = _FakeShadow([0] * 8)
+        spans = ((0, 16), (24, 40))
+
+        assert _AsanShadow(model.region, model.addr).addressable(0, spans) == spans
 
 
 def _fuzz_kwargs(monkeypatch, tmp_path, extra: list[str]) -> dict:
