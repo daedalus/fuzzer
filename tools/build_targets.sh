@@ -1446,6 +1446,7 @@ build_fgrep_targets() {
 
     local out_suffix="_noasan"
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
+    [ "$WITH_CMPLOG" -eq 0 ] && out_suffix="${out_suffix}_nocmplog"
     # fgrep_read includes fgrep .c files directly and needs -mavx2 for AVX2 intrinsics
     build_target "${TARGETS_SRC:-$TARGETS}/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
@@ -1458,6 +1459,7 @@ build_fgrep_so_targets() {
 
     local out_suffix="_noasan"
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
+    [ "$WITH_CMPLOG" -eq 0 ] && out_suffix="${out_suffix}_nocmplog"
     # fgrep_read includes fgrep .c files directly — needs -mavx2 for AVX2 intrinsics
     build_so_target "${TARGETS_SRC:-$TARGETS}/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}.so" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
@@ -1468,6 +1470,7 @@ build_simple_targets() {
     echo "Building simple targets ($label)..."
     local out_suffix="_noasan"
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
+    [ "$WITH_CMPLOG" -eq 0 ] && out_suffix="${out_suffix}_nocmplog"
 
     local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
     local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"
@@ -1922,6 +1925,7 @@ build_simple_so_targets() {
     echo "Building simple .so targets ($label)..."
     local out_suffix="_noasan"
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
+    [ "$WITH_CMPLOG" -eq 0 ] && out_suffix="${out_suffix}_nocmplog"
 
     # No-ASAN .so targets link the vendored libpng/zlib/ffmpeg archives and
     # enable call-stack-sensitive edge hashing. The context walk reaches into
@@ -2002,6 +2006,7 @@ build_standalone_so_targets() {
     local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     local out_suffix="_noasan"
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
+    [ "$WITH_CMPLOG" -eq 0 ] && out_suffix="${out_suffix}_nocmplog"
 
     # tailslayer — C++ target (g++), header-only library
     if [ -f "$TARGETS/tailslayer_read.cpp" ] && [ -d "$TAILSLAYER/include" ]; then
@@ -2069,9 +2074,9 @@ build_standalone_so_targets() {
     elif [ "$suffix" = "_nosan" ]; then
         # Always compile fresh _nosan objects with coverage.
         if compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read_noasan.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read${out_suffix}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
         else
-            warn "secp256k1_read_noasan.so: compile failed, skipping"
+            warn "secp256k1_read${out_suffix}.so: compile failed, skipping"
         fi
     elif compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read${out_suffix}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
@@ -2090,9 +2095,9 @@ build_standalone_so_targets() {
         :  # target source absent — nothing to build
     elif [ "$suffix" = "_nosan" ]; then
         if compile_brainflayer_ec_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" "$TARGETS/ec_pubkey_diff_noasan.so" "$BF_EC_OBJS -Wl,--export-dynamic" "$flags $BF_EC_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" "$TARGETS/ec_pubkey_diff${out_suffix}.so" "$BF_EC_OBJS -Wl,--export-dynamic" "$flags $BF_EC_INC"
         else
-            warn "ec_pubkey_diff_noasan.so: compile failed, skipping"
+            warn "ec_pubkey_diff${out_suffix}.so: compile failed, skipping"
         fi
     elif compile_brainflayer_ec_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" "$TARGETS/ec_pubkey_diff${out_suffix}.so" "$BF_EC_OBJS -Wl,--export-dynamic" "$flags $BF_EC_INC"
@@ -2109,9 +2114,9 @@ build_standalone_so_targets() {
         :  # target source absent — nothing to build
     elif [ "$suffix" = "_nosan" ]; then
         if compile_brainflayer_hash_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" "$TARGETS/hash_simd_diff_noasan.so" "$BF_HASH_OBJS -lcrypto -Wl,--export-dynamic" "$flags $BF_HASH_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" "$TARGETS/hash_simd_diff${out_suffix}.so" "$BF_HASH_OBJS -lcrypto -Wl,--export-dynamic" "$flags $BF_HASH_INC"
         else
-            warn "hash_simd_diff_noasan.so: compile failed, skipping"
+            warn "hash_simd_diff${out_suffix}.so: compile failed, skipping"
         fi
     elif compile_brainflayer_hash_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" "$TARGETS/hash_simd_diff${out_suffix}.so" "$BF_HASH_OBJS -lcrypto -Wl,--export-dynamic" "$flags $BF_HASH_INC"
@@ -2127,9 +2132,9 @@ build_standalone_so_targets() {
         :  # target source absent — nothing to build
     elif [ "$suffix" = "_nosan" ]; then
         if compile_brainflayer_bloom_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" "$TARGETS/brainflayer_read_noasan.so" "$BF_BLOOM_OBJS -lm -Wl,--export-dynamic" "$flags $BF_BLOOM_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" "$TARGETS/brainflayer_read${out_suffix}.so" "$BF_BLOOM_OBJS -lm -Wl,--export-dynamic" "$flags $BF_BLOOM_INC"
         else
-            warn "brainflayer_read_noasan.so: compile failed, skipping"
+            warn "brainflayer_read${out_suffix}.so: compile failed, skipping"
         fi
     elif compile_brainflayer_bloom_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "${TARGETS_SRC:-$TARGETS}/brainflayer_read.c" "$TARGETS/brainflayer_read${out_suffix}.so" "$BF_BLOOM_OBJS -lm -Wl,--export-dynamic" "$flags $BF_BLOOM_INC"
@@ -2152,7 +2157,7 @@ build_standalone_so_targets() {
         warn "sqlite_read${out_suffix}.so: vendor/sqlite not found, skipping (run tools/vendor_sqlite.sh)"
     elif compile_sqlite_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         if [ "$suffix" = "_nosan" ]; then
-            build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read_noasan.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read${out_suffix}.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
         else
             build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read${out_suffix}.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
         fi
@@ -2210,6 +2215,7 @@ build_vendored_so_targets() {
     echo "Building vendored .so targets ($label)..."
     local out_suffix="_noasan"
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
+    [ "$WITH_CMPLOG" -eq 0 ] && out_suffix="${out_suffix}_nocmplog"
 
     local ZLIB_OBJS=""
     local ZLIB_INC=""
@@ -3170,13 +3176,15 @@ fi
 check_asan_runtime() {
     [ "$BUILD_ASAN" -eq 1 ] || return 0
     local cc="${ASAN_PROBE_CC:-$DEFAULT_CC}"
+    # Unquoted: $cc is "ccache clang" when ccache is present, and quoting it
+    # would make the shell look for a binary literally named "ccache clang".
     if echo 'int main(void){return 0;}' \
-        | "$cc" $ASAN_CFLAGS -x c - -o /dev/null 2>/dev/null; then
+        | $cc $ASAN_CFLAGS -x c - -o /dev/null 2>/dev/null; then
         return 0
     fi
     # The runtime package depends on which compiler probed.
     local pkg="libasan<N> for your gcc"
-    "$cc" --version 2>/dev/null | grep -qi clang && pkg="libclang-rt-<clang major>-dev"
+    $cc --version 2>/dev/null | grep -qi clang && pkg="libclang-rt-<clang major>-dev"
     warn "ASAN runtime missing for $cc -- skipping ASAN/UBSAN variants (Debian/Ubuntu: apt-get install $pkg)"
     BUILD_FAILURES=$((BUILD_FAILURES + 1))
     BUILD_ASAN=0
