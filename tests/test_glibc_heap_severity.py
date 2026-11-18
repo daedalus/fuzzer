@@ -23,8 +23,6 @@ from fuzzer_tool.core.elf import (
     glibc_build_version,
 )
 from fuzzer_tool.core.sanitizer import (
-    GLIBC_HEAP_REGRESSION,
-    glibc_regressed,
     glibc_severity,
     heap_metadata_corruption,
     parse_glibc_version,
@@ -180,27 +178,43 @@ def test_matches_readelf_on_real_binary():
 # ── version comparison ────────────────────────────────────────────────────
 
 
-def test_regression_threshold_is_2_41():
-    # Pins the constant to the Phrack #73 versions, not whatever the code says.
-    assert GLIBC_HEAP_REGRESSION == (2, 41)
+@pytest.mark.parametrize(
+    "runtime,bumped",
+    [
+        ("2.41", True),  # middle range exposed
+        ("2.43", True),  # both classes exposed
+        ("3.0", True),
+        ("2.40", False),  # pre-regression
+        ("2.38", False),
+        ("", False),  # unknown runtime glibc
+        ("garbage", False),
+    ],
+)
+def test_size_unaware_gate_follows_runtime_glibc(runtime, bumped):
+    # No chunk size known: a heap crash bumps iff the runtime glibc has dropped
+    # some little-chunk fence (>= 2.41).
+    out = glibc_severity("HIGH", "AddressSanitizer", "heap-use-after-free", "", runtime)
+    assert out == ("CRITICAL" if bumped else "HIGH")
 
 
 @pytest.mark.parametrize(
-    "version,regressed",
+    "runtime,chunk,bumped",
     [
-        ("2.41", True),
-        ("2.43", True),
-        ("3.0", True),
-        ("2.40", False),
-        ("2.38", False),
-        ("2.31", False),
-        ("", False),
-        ("garbage", False),
-        ("2", False),
+        ("2.41", 0x40, False),  # fastbin size still fenced on 2.41
+        ("2.42", 0x40, False),
+        ("2.43", 0x40, True),  # fastbin killed at 2.43
+        ("2.41", 0x200, True),  # middle range exposed at 2.41
+        ("2.40", 0x200, False),  # pre-regression
+        ("2.43", 0x800, False),  # large chunk: untouched by the regression
     ],
 )
-def test_glibc_regressed(version, regressed):
-    assert glibc_regressed(version) is regressed
+def test_size_exact_gate_uses_little_chunk_model(runtime, chunk, bumped):
+    # With a known chunksize the decision is size-exact (the whole point of the
+    # fastbin-vs-middle split): a 0x40 chunk is not exposed until 2.43.
+    out = glibc_severity(
+        "HIGH", "AddressSanitizer", "heap-use-after-free", "", runtime, chunk_size=chunk
+    )
+    assert out == ("CRITICAL" if bumped else "HIGH")
 
 
 @pytest.mark.parametrize(
@@ -298,7 +312,7 @@ def _uaf_meta(glibc: str):
     report = SanitizerReport.parse(_UAF_STDERR)
     meta = CrashMetadata()
     meta.raw_stderr = _UAF_STDERR
-    meta.glibc_version = glibc
+    meta.glibc_runtime = glibc  # the multiplier gates on the runtime host glibc
     _fill_report(meta, report, 0)
     return report, meta
 
@@ -318,6 +332,6 @@ def test_regression_fill_report_control_pre_regression_glibc():
 
 
 def test_regression_fill_report_no_glibc_is_noop():
-    # Default (feature off): glibc_version empty -> base tier preserved.
+    # Default (feature off): glibc_runtime empty -> base tier preserved.
     _report, meta = _uaf_meta("")
     assert meta.exploitability == "HIGH"

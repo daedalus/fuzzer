@@ -247,7 +247,7 @@ What the counters buy:
 - Blocklist/allowlist and smaller-crash replacement
 - **SARIF export** (`fuzzer-tool sarif`, `fuzz --sarif`): crashes as code-scanning alerts on the faulting source line
 - **Crash exploration** (`--crash-explore`, AFL `-C`): from crashing seeds, keep mutants that still crash on a new path
-- **glibc heap-hardening severity** (`--glibc-heap-severity`): read the target's build-time glibc and raise a heap-metadata-corruption crash one exploitability tier on a 2.41/2.43 fastbin/unsorted-bin-regressed glibc (Phrack #73 "Poor Little Chunks")
+- **glibc heap-hardening severity** (`--glibc-heap-severity`): raise a heap-metadata-corruption crash one exploitability tier when the runtime host glibc has dropped a little-chunk fence — unsorted-bin checks for 0x90–0x3F0 at 2.41, fastbin for 0x20–0x80 at 2.43 (Phrack #73 "Poor Little Chunks"); records host + target-build glibc and a size-class exposure note in the crash sidecar
 - **Uninitialized-memory probe** (`--uninit-probe`): new corpus entries re-run under two heap fill bytes; fill-dependent output is saved as a leak
 - **Root-cause isolation** (`root-cause` subcommand): binary-search the minimal byte diff
   between a passing input and the crashing one, with lineage-guided replay under `--lineage`

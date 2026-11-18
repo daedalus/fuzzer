@@ -1310,12 +1310,15 @@ class CorpusManager:
             meta.gadgets = f._gadget_report.to_dict()
 
     def _attach_glibc_version(self, meta) -> None:
-        """Record the target's build-time glibc on *meta* (--glibc-heap-severity).
+        """Record glibc heap-hardening context on *meta* (--glibc-heap-severity).
 
-        Keys the heap-hardening severity multiplier (Phrack #73). Identical for
-        every crash on the same binary, so it is read once and cached on the
-        fuzzer. Best-effort: a parse failure leaves glibc_version empty (the
-        multiplier then no-ops) and never loses the crash.
+        Two glibcs (Phrack #73): the target's build-time minimum from its
+        ``.gnu.version_r`` (context), and the **runtime host glibc** the crash
+        reproduced on, which is the allocator that actually ran the target and
+        the one the severity multiplier gates on. Both are process/binary
+        constants, so each is read once and cached on the fuzzer. Best-effort:
+        a failure leaves the fields empty (the multiplier then no-ops) and
+        never loses the crash.
         """
         f = self.f
         if not hasattr(f, "_glibc_version"):
@@ -1324,10 +1327,23 @@ class CorpusManager:
 
                 f._glibc_version = glibc_build_version(f.target)
             except Exception:
-                log.warning("glibc version detection failed", exc_info=True)
+                log.warning("glibc build-version detection failed", exc_info=True)
                 f._glibc_version = ""
 
+        if not hasattr(f, "_glibc_runtime"):
+            try:
+                from fuzzer_tool.core.glibc_version import detect, version_note
+
+                runtime = detect()
+                f._glibc_runtime = f"{runtime[0]}.{runtime[1]}" if runtime else ""
+                f._glibc_exposure = version_note(runtime)
+            except Exception:
+                log.warning("glibc runtime detection failed", exc_info=True)
+                f._glibc_runtime = f._glibc_exposure = ""
+
         meta.glibc_version = f._glibc_version
+        meta.glibc_runtime = f._glibc_runtime
+        meta.glibc_exposure = f._glibc_exposure
 
     def _mail_crash(self, result, returncode: int, stderr: str) -> None:
         """Send the crash e-mail; a mail failure never kills the campaign."""

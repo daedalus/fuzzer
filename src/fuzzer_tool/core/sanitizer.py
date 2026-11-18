@@ -4,6 +4,7 @@ import re
 from array import array
 from typing import NamedTuple
 
+from fuzzer_tool.core.glibc_version import little_chunk_exposure, version_note
 from fuzzer_tool.core.hashing import xxh64
 
 ASAN_ERROR_TYPES = (
@@ -370,16 +371,17 @@ def signal_exploitability(signo: int, fault: int | None, rip: int, rsp: int, std
 
 # ── glibc heap-hardening regression multiplier ───────────────────────────
 #
-# Phrack #73 "Poor Little Chunks" (Ax): across three commits glibc 2.41/2.43
-# removed the fastbin size / PROTECT_PTR checks and the unsorted-bin's five
-# integrity checks. A chunk whose SIZE lands in the 0x20-0x3F0 smallbin range
-# is no longer validated on the malloc fast path, so a corrupted-SIZE heap
-# crash that was inert before -- it would have tripped a clean abort -- can now
-# be an overlapping-chunk primitive. The exploitability of the *same* crash
-# therefore depends on the glibc the target was built against: raise a
-# heap-metadata-corruption crash one tier on a regressed-glibc target.
-GLIBC_HEAP_REGRESSION = (2, 41)
-
+# Phrack #73 "Poor Little Chunks" (Ax): glibc dropped the fences a "little
+# chunk" (0x20-0x3F0 chunksize) used to clear on its way into a bin, in two
+# steps -- the unsorted-bin's five integrity checks for the 0x90-0x3F0 range
+# at 2.41, then the whole fastbin (PROTECT_PTR + size-index check) for the
+# 0x20-0x80 range at 2.43. On an exposed glibc a corrupted SIZE survives into
+# smallbin unvalidated, so a heap-corruption crash that was an inert abort
+# before can now be an overlapping-chunk primitive. The exploitability of the
+# *same* crash therefore depends on the glibc it runs on. The size-class/
+# version model lives in core/glibc_version.py (its single source of truth);
+# this multiplier gates on the runtime host glibc the crash reproduced on.
+#
 # Exploitability tiers, low to high; the multiplier steps up one and caps here.
 _TIER_ORDER = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
@@ -407,12 +409,6 @@ def parse_glibc_version(version: str) -> tuple[int, int] | None:
         return None
 
 
-def glibc_regressed(version: str) -> bool:
-    """True when *version* (``"2.41"``) is at or past the hardening regression."""
-    parsed = parse_glibc_version(version)
-    return parsed is not None and parsed >= GLIBC_HEAP_REGRESSION
-
-
 def heap_metadata_corruption(sanitizer: str, error_type: str, stderr: str) -> bool:
     """Whether a crash corrupts or misreads allocator chunk metadata.
 
@@ -435,19 +431,37 @@ def _bump_tier(tier: str) -> str:
 
 
 def glibc_severity(
-    base_tier: str, sanitizer: str, error_type: str, stderr: str, glibc_version: str
+    base_tier: str,
+    sanitizer: str,
+    error_type: str,
+    stderr: str,
+    glibc_version: str,
+    chunk_size: int | None = None,
 ) -> str:
-    """Apply the glibc-regression multiplier to *base_tier*.
+    """Apply the glibc heap-hardening multiplier to *base_tier*.
 
-    Raises a heap-metadata-corruption crash one tier when the target's glibc
-    is at or past 2.41; otherwise returns *base_tier* unchanged (unknown or
-    pre-2.41 glibc, or a non-heap-metadata crash). CRITICAL is the ceiling.
+    *glibc_version* is the **runtime host glibc** string (``"2.41"``) the crash
+    reproduced on -- the allocator that actually runs the target, not its
+    build-time minimum. Raises a heap-metadata-corruption crash one tier when
+    that glibc has dropped the fence for the relevant little-chunk class, else
+    returns *base_tier* unchanged (unknown/pre-2.41 glibc, or a non-heap
+    crash). When *chunk_size* (the glibc chunksize of the corrupted chunk) is
+    known the decision is size-exact -- a 0x40 fastbin chunk is still fenced on
+    2.41/2.42; without it (the common triage case, where no reliable chunksize
+    is recoverable) any exposed little-chunk class on this glibc suffices.
+    CRITICAL is the ceiling.
     """
-    if not glibc_regressed(glibc_version):
+    version = parse_glibc_version(glibc_version)
+    if version is None:
         return base_tier
     if not heap_metadata_corruption(sanitizer, error_type, stderr):
         return base_tier
-    return _bump_tier(base_tier)
+
+    if chunk_size is not None:
+        exposed = little_chunk_exposure(chunk_size, version) is not None
+    else:
+        exposed = bool(version_note(version))
+    return _bump_tier(base_tier) if exposed else base_tier
 
 
 def _crash_stack(text: str, start: int = 0) -> list[tuple[int, str]]:

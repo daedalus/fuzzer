@@ -134,10 +134,15 @@ class CrashMetadata:
     parent_sites: list[int] = field(default_factory=list)
     target: str = ""
     target_sha256: str = ""
-    # glibc the target was built against ("2.41"), from .gnu.version_r. Empty
-    # unless --glibc-heap-severity detected one. Keys the heap-hardening
-    # severity multiplier (Phrack #73 "Poor Little Chunks").
+    # glibc the heap-hardening severity multiplier reports (--glibc-heap-severity;
+    # Phrack #73 "Poor Little Chunks"). Empty unless the flag detected one.
+    #   glibc_version: target's build-time minimum (.gnu.version_r) -- context.
+    #   glibc_runtime: the host glibc the crash reproduced on -- what the
+    #     multiplier actually gates on (the allocator that ran the target).
+    #   glibc_exposure: one-line size-class exposure summary of glibc_runtime.
     glibc_version: str = ""
+    glibc_runtime: str = ""
+    glibc_exposure: str = ""
     elapsed: str = ""
 
     # Input analysis
@@ -290,6 +295,15 @@ class CrashMetadata:
         m = _REPORT_PC_RE.search(self.raw_stderr)
         return f"0x{int(m.group(1), 16):x}" if m else ""
 
+    def _sidecar_glibc(self, lines: list[str]) -> None:
+        """glibc heap-hardening context (--glibc-heap-severity); omitted when off."""
+        if self.glibc_version:
+            lines.append(f"target_glibc:  {self.glibc_version}")
+        if self.glibc_runtime:
+            lines.append(f"host_glibc:    {self.glibc_runtime}")
+        if self.glibc_exposure:
+            lines.append(f"glibc_exposure: {self.glibc_exposure}")
+
     def _sidecar_fault(self, lines: list[str]) -> None:
         """Sanitizer diagnosis, or returncode/signal info for plain crashes."""
         if self.sanitizer:
@@ -301,8 +315,7 @@ class CrashMetadata:
             if self.shadow_info:
                 lines.append(f"shadow:        {self.shadow_info}")
             lines.append(f"exploitability: {self.exploitability}")
-            if self.glibc_version:
-                lines.append(f"target_glibc:  {self.glibc_version}")
+            self._sidecar_glibc(lines)
             lines.append(f"cluster_id:    {self.cluster_id}")
             if self.stack_hash:
                 lines.append(f"stack_hash:    {self.stack_hash}")
@@ -319,9 +332,9 @@ class CrashMetadata:
             lines.append(f"error_type:    {self.error_type}")
         if self.fault_addr:
             lines.append(f"fault_addr:    {self.fault_addr}")
-        if self.glibc_version:
+        if self.glibc_runtime or self.glibc_version:
             lines.append(f"exploitability: {self.exploitability}")
-            lines.append(f"target_glibc:  {self.glibc_version}")
+            self._sidecar_glibc(lines)
         lines.append("")
 
     def _sidecar_mutation(self, lines: list[str]) -> None:
@@ -484,6 +497,8 @@ class CrashMetadata:
             "target": self.target,
             "target_sha256": self.target_sha256,
             "glibc_version": self.glibc_version,
+            "glibc_runtime": self.glibc_runtime,
+            "glibc_exposure": self.glibc_exposure,
             "sanitizer": self.sanitizer,
             "error_type": self.error_type,
             "fault_addr": self.fault_addr,
