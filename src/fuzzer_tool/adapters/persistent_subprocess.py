@@ -61,8 +61,15 @@ def _close_streams(proc: subprocess.Popen) -> None:
     exiting anyway, so the OS reclaims the pipes; forcing anything here
     either deadlocks (close while frozen lock held) or leaves a wrapper
     whose dealloc raises EBADF over an fd we already gave away.
+
+    stdin is the exception: only the main thread writes it, so closing it
+    is safe even while finalizing, and it must be closed — a ``QUIT`` left
+    buffered by a dead loader would otherwise raise EPIPE from its dealloc.
     """
     if sys.is_finalizing():
+        if proc.stdin is not None:
+            with contextlib.suppress(OSError, ValueError):
+                proc.stdin.close()
         return
     for name in ("stdin", "stdout", "stderr"):
         stream = getattr(proc, name, None)

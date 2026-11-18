@@ -25,11 +25,11 @@ import contextlib
 import logging
 import os
 import subprocess
-import sys
 import threading
 import time
 
 from fuzzer_tool.adapters.memfd_input import MemfdInput
+from fuzzer_tool.adapters.persistent_subprocess import _close_streams
 from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
 from fuzzer_tool.adapters.process import _clean_env
 from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
@@ -71,34 +71,6 @@ def _drain_stream(stream, sink: list) -> None:
                     del sink[:50]
     except (ValueError, OSError):
         pass
-
-
-def _close_streams(proc: subprocess.Popen) -> None:
-    """Close the raw fds of *proc*, unblocking any thread stuck reading them.
-
-    The fd is closed first because a drain thread blocked inside
-    ``readline()`` holds the BufferedReader's own lock: calling
-    ``stream.close()`` directly would spin on that lock forever
-    (``_enter_buffered_busy``), while closing the fd underneath makes the
-    blocked read fail with EBADF and the thread exit on its own.  The
-    wrapper is then closed (so its destructor does not raise over the fd we
-    stole).  During interpreter finalization none of this runs: a frozen
-    daemon thread may never release the lock it holds, and the process is
-    exiting anyway, so the OS reclaims the pipes; forcing anything here
-    either deadlocks (close while frozen lock held) or leaves a wrapper
-    whose dealloc raises EBADF over an fd we already gave away.
-    """
-    if sys.is_finalizing():
-        return
-    for name in ("stdin", "stdout", "stderr"):
-        stream = getattr(proc, name, None)
-        fileno = getattr(stream, "fileno", None)
-        if fileno is None:
-            continue
-        with contextlib.suppress(OSError, ValueError):
-            os.close(fileno())
-        with contextlib.suppress(Exception):
-            stream.close()
 
 
 # ── Memory bounds ────────────────────────────────────────────────────
