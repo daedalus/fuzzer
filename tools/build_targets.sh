@@ -983,6 +983,15 @@ compile_libbase64_objects() {
     local inc="-I$cfg -I$LIBBASE64/lib -I$LIBBASE64/include"
     local cov_flag
     cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
+
+    # Add trace-cmp when cmplog is enabled: the vendored library objects
+    # carry the comparison instrumentation (edge coverage alone yields no
+    # operands, so cmplog reports 0t 0p on libbase64).
+    local cmplog_cflags=""
+    if [ "$WITH_CMPLOG" -eq 1 ]; then
+        cmplog_cflags="-fsanitize-coverage=trace-cmp"
+    fi
+
     mkdir -p "$cfg"
     local objlist="/tmp/b64_objs${suffix}.list"
     : > "$objlist"
@@ -995,7 +1004,7 @@ compile_libbase64_objects() {
         # Probe: this codec alone enabled, so codec.c compiles its intrinsics
         # path and the -m flags are actually exercised.
         write_b64_config "$cfg" "$macro"
-        if ! $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $mflags $inc \
+        if ! $cc $flags $cov_flag $cmplog_cflags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $mflags $inc \
             -c "$LIBBASE64/lib/arch/$name/codec.c" -o /dev/null 2>>"$BUILD_LOG"; then
             warn "libbase64: $name codec not buildable here, using the stub"
             disabled="$disabled $name"
@@ -1007,7 +1016,7 @@ compile_libbase64_objects() {
     local src
     for src in lib/lib lib/codec_choose lib/tables/tables lib/arch/generic/codec; do
         local obj="/tmp/b64_$(basename "$src")${suffix}.o"
-        $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $inc \
+        $cc $flags $cov_flag $cmplog_cflags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $inc \
             -c "$LIBBASE64/$src.c" -o "$obj" 2>>"$BUILD_LOG" || rc=$?
         echo "$obj" >> "$objlist"
     done
@@ -1021,13 +1030,13 @@ compile_libbase64_objects() {
             *)           mflags="${mflags//,/ }" ;;
         esac
         local obj="/tmp/b64_${name}${suffix}.o"
-        $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $mflags $inc \
+        $cc $flags $cov_flag $cmplog_cflags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $mflags $inc \
             -c "$LIBBASE64/lib/arch/$name/codec.c" -o "$obj" 2>>"$BUILD_LOG" || rc=$?
         echo "$obj" >> "$objlist"
     done
     for name in neon32 neon64; do
         local obj="/tmp/b64_${name}${suffix}.o"
-        $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $inc \
+        $cc $flags $cov_flag $cmplog_cflags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $inc \
             -c "$LIBBASE64/lib/arch/$name/codec.c" -o "$obj" 2>>"$BUILD_LOG" || rc=$?
         echo "$obj" >> "$objlist"
     done

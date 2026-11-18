@@ -2083,11 +2083,20 @@ Two build details are libbase64-specific:
 * **Every codec object is linked even when disabled**, including
   neon32/neon64, because `codec_choose_forced()` names all seven
   unconditionally. A missing object is an undefined reference at link time.
+* **`-fsanitize-coverage=trace-cmp` rides on every codec object when
+  cmplog is on** (`compile_libbase64_objects()` adds it alongside the edge
+  flag gated on `$WITH_CMPLOG`). Without it the library's comparisons are
+  invisible to the cmplog shim and the stats line reads `0t 0p` — edge
+  coverage alone never yields operand pairs. The `memcmp`s the wrapper
+  itself issues for the differential comparison are *not* a substitute:
+  they sit at PC granularity and emit no per-byte operands, so the corpus
+  gets no cmplog tokens.
 
-Base64 has no magic number, so there is no structure-aware mutator or
-sniffer to keep the mode byte away from, and no dictionary to add: Redqueen
-already carries a `b64_std` encoder, which converts a decode comparison back
-into the input prefix it came from.
+Base64 has a structure-aware mutator and sniffer now: `base64_chunk_mutate`
+in the `format` band (`core/operator_registry.py`, `_sniff_base64`) gates on
+byte 0 being the mode byte and every payload byte in the standard alphabet
+plus `=`. Redqueen's `b64_std` encoder still converts a decode comparison
+back into the input prefix it came from.
 
 `tests/test_regression_libbase64_target.py` pins the wiring and the oracle:
 a clean tree passes on a zero payload and on the wrapper's edge inputs, a
