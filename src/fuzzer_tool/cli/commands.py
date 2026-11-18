@@ -56,6 +56,7 @@ from fuzzer_tool.services.ijon_channel import DEFAULT_SCHEDULE_MAXMAP
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.operators import StallMode
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
+from fuzzer_tool.services.registry_catalog import RegistryKind, categories, query
 from fuzzer_tool.services.tcp_ingest import Admission, TcpMode
 from fuzzer_tool.services.value_profile import ValueProfile
 
@@ -2842,6 +2843,29 @@ def _sweep_crash_name(h: str, sig: str) -> str:
     from fuzzer_tool.adapters.filesystem import safe_component
 
     return f"crash_{h[:12]}_{safe_component(sig)}"
+
+
+def cmd_registry(args) -> int:
+    """List/query ops, analyzers or schedulers; exit 1 when nothing matches."""
+    kind = RegistryKind(args.kind)
+    if args.categories:
+        for cat, n in categories(kind).items():
+            print(f"{cat}\t{n}")
+        return 0
+
+    hits = query(kind, args.pattern, args.category)
+    if not hits:
+        print(f"no {kind.value} match", file=sys.stderr)
+        return 1
+
+    # Aligned columns: name, category[, key=value details].
+    width = max(len(e.name) for e in hits)
+    for e in hits:
+        line = f"{e.name:<{width}}  {e.category}"
+        if args.verbose and e.details:
+            line += "  " + " ".join(f"{k}={v}" for k, v in e.details)
+        print(line)
+    return 0
 
 
 def cmd_sweep(args):
@@ -8579,6 +8603,22 @@ def main() -> int:
         help=f"Seeds read per batch (default: {NEG_BLOOM_BATCH}); 0 loads the whole corpus at once",
     )
     neg_parser.set_defaults(func=cmd_negative_bloom)
+
+    # --- registry ---
+    reg_parser = subparsers.add_parser(
+        "registry",
+        help="List/query registered ops, analyzers and schedulers",
+        description="Examples: registry ops 'png*' | registry schedulers -c seed "
+        "| registry analyzers -v | registry ops --categories",
+    )
+    reg_parser.add_argument("kind", choices=[k.value for k in RegistryKind])
+    reg_parser.add_argument("pattern", nargs="?", help="Name glob (*?[) or substring; '-' == '_'")
+    reg_parser.add_argument("-c", "--category", help="Only this category/family")
+    reg_parser.add_argument("-v", "--verbose", action="store_true", help="Show details")
+    reg_parser.add_argument(
+        "--categories", action="store_true", help="Print category counts instead"
+    )
+    reg_parser.set_defaults(func=cmd_registry)
 
     args = parser.parse_args()
 

@@ -1271,6 +1271,10 @@ class OperatorRegistry:
         """All registered operator names, in registration order."""
         return list(self._ops)
 
+    def specs(self) -> list[OperatorSpec]:
+        """All registered specs, in registration order."""
+        return list(self._ops.values())
+
     def dispatch(self, engine) -> dict[str, Callable]:
         """Map every registered operator name to its handler on *engine*.
 

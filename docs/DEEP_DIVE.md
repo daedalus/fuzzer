@@ -1062,6 +1062,26 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `import` | Import corpus from AFL/libFuzzer/honggfuzz/packet captures |
 | `mutants-build` | Build a cached mutant set (ASAN binaries per IR mutation site) for the mutant-kill metric |
 | `mutants-score` | Score a corpus by the mutants it kills; prints `kills= mutants= hangs= flaky= inputs= clean_inputs=` |
+| `registry` | List/query registered ops, analyzers, schedulers |
+
+### Registry
+
+List or query the op, analyzer and scheduler registries (`services/registry_catalog.py`).
+
+```bash
+fuzzer-tool registry ops 'png*' -v        # glob; -v adds handler, gated
+fuzzer-tool registry schedulers kl-ducb   # substring; '-' == '_'
+fuzzer-tool registry schedulers -c seed   # family: op|seed|position|target
+fuzzer-tool registry analyzers --categories
+```
+
+| Kind | Source | Category |
+|------|--------|----------|
+| `ops` | `operator_registry.REGISTRY` | op band |
+| `analyzers` | `analyzer_registry.REGISTRY` | analyzer category; `-v`: phase, gated, swallow_errors |
+| `schedulers` | `_OPERATOR_STRATEGY_NAMES`, `_SEED_STRATEGY_NAMES`, `POSITION_STRATEGY_NAMES`, `TARGET_STRATEGY_NAMES` | family |
+
+Exit 1 when nothing matches.
 
 ### Rank Seeds
 
