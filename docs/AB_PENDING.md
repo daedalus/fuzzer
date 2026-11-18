@@ -106,6 +106,7 @@ All pair against `pos-arena-uniform`.
 | effector / token / chunk / changed / rare_mask | Det-stage map, dict tokens, chunk kinds, path-hash credit, FairFuzz mask | U | `pos-arena-{…}` on png_read |
 | Consolidated (`--pos-consolidated`) | Merged learning arms | U | `pos-arena-consolidated` |
 | Centroid (`pos_centroid`, `--cluster-jaccard`) | Cluster medoid offsets | N | inside control; seeded corpus needed |
+| e-means (`--pos-emeans`, `--pos-emeans-tau`) | 1-D e-means codebook of gain offsets | S | `pos-arena-emeans`; then `pos-arena-emeans-revive` at tau 0.1 and 0.3 vs tau 0 (SuperEMeans post: 0.3 beat 0.1 at d >= 1024; faiss: revival hurts at d <= 2). Must beat `changed`/`kadane` |
 | Fibonacci vs round robin | Bin visit order | N | `--reps >= 3` on png_read |
 | Phase lock | Record-stride extrapolation of TE map | U | lock rate by stride; 64-byte TE cap cost |
 
