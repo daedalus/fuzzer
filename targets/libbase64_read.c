@@ -34,9 +34,11 @@
  *   - encode output length or bytes differ from plain
  *   - decode(encode(x)) != x
  *   - chunked streaming differs from the one-shot result
- * Output buffers are heap-allocated at the exact maximum output size
- * (B64_FUZZ_SLACK extra bytes, default 0) so ASAN reports any codec that
- * stores past the documented bound.
+ * Input is copied, and output buffers are heap-allocated, at the exact
+ * size (outputs: documented maximum + B64_FUZZ_SLACK, default 0), so ASAN
+ * reports reads past the input and stores past the bound in C code. The
+ * x86-64 default SSSE3/AVX/AVX2 encoders are inline asm, which ASAN does not
+ * instrument: there the differential is the only oracle.
  *
  * Vendor the sources first (extracts to vendor/libbase64/):
  *   tools/vendor_libbase64.sh
@@ -62,7 +64,16 @@ extern void __afl_map_edge(unsigned int cur_loc);
 /* Bound the per-exec work: direct_lite runs in-process, so an adversarial
  * length must not stall the campaign. */
 #define B64_FUZZ_MAX_IN   (1u * 1024u * 1024u)
-#define B64_FUZZ_MAX_CHUNK 4096u
+/* Stream chunk cap. Small enough that most splits land inside a 4-char
+ * quantum (3 of 4 offsets), large enough to enter every SIMD main loop
+ * (largest entry threshold: AVX-512 encode, 64 bytes). 4096 left a typical
+ * payload unsplit ~95% of the time. */
+#define B64_FUZZ_MAX_CHUNK 128u
+
+/* Splits only within the first SPAN bytes; the rest goes in one call. A
+ * deeper split runs the same resume path, so this bounds the per-exec cost
+ * (~9 ns per extra call per codec) without losing split shapes. */
+#define B64_FUZZ_SPLIT_SPAN 512u
 
 #ifndef B64_FUZZ_SLACK
 #define B64_FUZZ_SLACK 0u
@@ -225,7 +236,8 @@ static int fuzz_encode(const unsigned char *buf, size_t size) {
 /* Next chunk length: 1..B64_FUZZ_MAX_CHUNK, driven by the seed byte so the
  * fuzzer controls where the stream is split (a split inside a 4-char quantum
  * or a SIMD block is the interesting case). */
-static size_t b64_next_chunk(unsigned *state, size_t left) {
+static size_t b64_next_chunk(unsigned *state, size_t pos, size_t left) {
+    if (pos >= B64_FUZZ_SPLIT_SPAN) { return left; }
     *state = *state * 1103515245u + 12345u;
     size_t n = 1u + ((*state >> 16) % B64_FUZZ_MAX_CHUNK);
     return n < left ? n : left;
@@ -252,13 +264,17 @@ static int fuzz_stream_decode(const unsigned char *buf, size_t size, unsigned se
         int rc = 1;
 
         while (pos < size && rc == 1) {
-            size_t n = b64_next_chunk(&lcg, size - pos);
+            size_t n = b64_next_chunk(&lcg, pos, size - pos);
             size_t part = 0;
             rc = base64_stream_decode(&st, (const char *)buf + pos, n, (char *)got + got_len, &part);
             got_len += part;
             pos += n;
             __afl_map_edge(0xA310 + (unsigned)(n & 0xF));
         }
+
+        /* Mirror base64_decode(): a trailing partial quantum is an error once
+         * the stream ends, e.g. "QUJ". The stream call alone returns 1. */
+        if (rc == 1 && st.bytes != 0) { rc = 0; }
 
         __afl_map_edge(0xA320 + (unsigned)i);
         if (rc != ref_rc) { b64_mismatch(0xA330); }
@@ -291,7 +307,7 @@ static int fuzz_stream_encode(const unsigned char *buf, size_t size, unsigned se
         size_t pos = 0, got_len = 0;
 
         while (pos < size) {
-            size_t n = b64_next_chunk(&lcg, size - pos);
+            size_t n = b64_next_chunk(&lcg, pos, size - pos);
             size_t part = 0;
             base64_stream_encode(&st, (const char *)buf + pos, n, (char *)got + got_len, &part);
             got_len += part;
@@ -311,6 +327,25 @@ static int fuzz_stream_encode(const unsigned char *buf, size_t size, unsigned se
     return 0;
 }
 
+/* Run one mode on an exact-size heap copy of the payload. The runner's
+ * buffer can extend past the payload (or not be heap at all), so a codec
+ * reading src[len] stayed invisible to ASAN; the copy puts a redzone there. */
+static int b64_run(unsigned mode, const unsigned char *payload, size_t plen, unsigned seed) {
+    unsigned char *in = b64_alloc(plen);
+    if (!in) { return 0; }
+    memcpy(in, payload, plen);
+
+    int rc;
+    switch (mode) {
+    case B64_MODE_DECODE:        rc = fuzz_decode(in, plen); break;
+    case B64_MODE_ENCODE:        rc = fuzz_encode(in, plen); break;
+    case B64_MODE_STREAM_DECODE: rc = fuzz_stream_decode(in, plen, seed); break;
+    default:                     rc = fuzz_stream_encode(in, plen, seed); break;
+    }
+    free(in);
+    return rc;
+}
+
 __attribute__((visibility("default")))
 int fuzz_libbase64(const unsigned char *buf, size_t size) {
     b64_probe();
@@ -325,8 +360,7 @@ int fuzz_libbase64(const unsigned char *buf, size_t size) {
 
     if (mode == B64_MODE_DECODE || mode == B64_MODE_ENCODE) {
         if (plen > B64_FUZZ_MAX_IN) { plen = B64_FUZZ_MAX_IN; }
-        return mode == B64_MODE_DECODE ? fuzz_decode(payload, plen)
-                                       : fuzz_encode(payload, plen);
+        return b64_run(mode, payload, plen, 0);
     }
 
     /* Stream modes spend one more byte on the chunk-size seed. */
@@ -336,8 +370,7 @@ int fuzz_libbase64(const unsigned char *buf, size_t size) {
     plen--;
     if (plen > B64_FUZZ_MAX_IN) { plen = B64_FUZZ_MAX_IN; }
 
-    return mode == B64_MODE_STREAM_DECODE ? fuzz_stream_decode(payload, plen, seed)
-                                          : fuzz_stream_encode(payload, plen, seed);
+    return b64_run(mode, payload, plen, seed);
 }
 
 /* Standard in-process entry point for fuzzer-tool .so mode */

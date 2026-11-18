@@ -1012,8 +1012,8 @@ compile_libbase64_objects() {
         fi
     done
 
-    # Final config.h, plus the core TUs.
-    write_b64_config "$cfg"
+    # Final config.h, plus the core TUs. Probe-dropped codecs stay off.
+    write_b64_config "$cfg" "" "$disabled"
     local src
     for src in lib/lib lib/codec_choose lib/tables/tables lib/arch/generic/codec; do
         local obj="/tmp/b64_$(basename "$src")${suffix}.o"
@@ -1051,14 +1051,18 @@ compile_libbase64_objects() {
 }
 
 # config.h selector for one codec (every other codec off), or all codecs on
-# when no name is given. lib/*.c include it by quoted name, so it must live on
-# their -I path rather than in the tree.
+# when no name is given, minus the space-separated names in $3 (e.g.
+# " avx512"). lib/*.c include it by quoted name, so it must live on their -I
+# path rather than in the tree.
 write_b64_config() {
-    local cfg="$1" only="${2:-}"
+    local cfg="$1" only="${2:-}" disabled="${3:-}"
     local spec name _mflags macro
     : > "$cfg/config.h"
     for spec in $LIBBASE64_CODECS; do
         IFS=: read -r name _mflags macro <<< "$spec"
+        case " $disabled " in
+            *" $name "*) echo "#define HAVE_$macro 0" >> "$cfg/config.h"; continue ;;
+        esac
         if [ -z "$only" ] || [ "$only" = "$macro" ]; then
             echo "#define HAVE_$macro 1" >> "$cfg/config.h"
         else
