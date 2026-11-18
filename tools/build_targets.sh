@@ -386,6 +386,7 @@ SANCOV_MODES="trace-pc-guard"  # --sancov=MODES; comma list for -fsanitize-cover
 # Parse flags (can appear anywhere)
 for arg in "$@"; do
     [ "$arg" = "--cmplog" ] && WITH_CMPLOG=1
+    [ "$arg" = "--nocmplog" ] && WITH_CMPLOG=0
     # --tracecmp implies --cmplog (the unified shim covers both layers)
     [ "$arg" = "--tracecmp" ] && WITH_CMPLOG=1 && WITH_TRACECMP=1
     [ "$arg" = "--no-tracecmp" ] && WITH_TRACECMP=0
