@@ -479,6 +479,7 @@ verify the link before tuning schedulers or dictionaries. See
 | `estimate` | Crash ETA via Chao2 incidence richness + calibration (`good_turing_estimate()` keeps its name and its old keys for compatibility; the estimator underneath is Chao2) |
 | `import` | Import corpus from AFL/libFuzzer/honggfuzz/pcap (`--format pcap`: packets as length-prefixed message seeds; `--autotokens FILE` also tokenizes the corpus into an AFL-format dictionary) |
 | `ppmd` | Analyze corpus compressibility with PPMD |
+| `registry` | List/query registered ops, analyzers, schedulers |
 
 ---
 

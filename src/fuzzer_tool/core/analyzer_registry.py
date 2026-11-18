@@ -121,6 +121,10 @@ class AnalyzerRegistry:
         """All registered analyzer names, in registration order."""
         return list(self._specs)
 
+    def specs(self) -> list[AnalyzerSpec]:
+        """All registered specs, in registration order."""
+        return list(self._specs.values())
+
     def categories(self) -> dict[str, set[str]]:
         cats: dict[str, set[str]] = {}
         for spec in self._specs.values():
