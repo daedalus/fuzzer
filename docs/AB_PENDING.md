@@ -125,7 +125,6 @@ Off arm needs a tree without the op.
 | Pattern tables, `seq_mutate`, `hash_len_ext` (`--hlx-algo`) | Extended tables; framed sequences; length extension | N | 8-seed run p=0.29; needs targets |
 | `rev_circuit`, `bit_swap_*` | Reversible-circuit / fixed-width swaps | S | vs previous commit; check `Declin` |
 | `bit_set`, `bit_clear`, `or_mask` | zzuf set/unset: monotone 0->1 / 1->0 / multi-bit OR | S | fuzzgoat + a flag/permission-field target; check `Declin` and per-arm share |
-| `ratio_flip_e2..e5` | zzuf `-r` density, one arm per decade | S | fuzzgoat; does the scheduler converge on one decade? |
 | Ten format ops (`json_mutate` … `recompress_png_idat`) | Text/format-aware | S | each masked vs live |
 | `parity_lock` / `parity_break` | Parity-preserving flips | S | needs a 7E1 / DES-key target |
 | Line codes (`--op-line-code`) | Manchester/HDLC/COBS re-encode | S | needs a line-code target |
