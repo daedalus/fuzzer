@@ -2044,6 +2044,58 @@ progress-handler opcode budget, and `sqlite3_hard_heap_limit64`. A corrupt
 file returning `SQLITE_CORRUPT`/`SQLITE_NOTADB` is the expected outcome and
 not a finding; a segfault or an assertion failure is.
 
+### Vendored libbase64 differential target (libbase64_read)
+
+`targets/libbase64_read.so` wraps aklomp/base64 v0.5.3
+(`tools/vendor_libbase64.sh` → `$FUZZ_VENDOR_ROOT/libbase64/`), the same
+`.so`-only shape as lz4_read and secp256k1_read. It is a *differential*
+target: libbase64 ships one portable codec plus up to six x86 SIMD codecs
+whose lane-wise shuffles handle 12-48 bytes per iteration with a scalar
+tail, and `base64_encode`/`base64_decode` take a `flags` argument that forces
+one. So a single exec runs the same input through every codec this CPU
+supports and compares each against the plain codec, aborting on the first
+disagreement.
+
+Lanes:
+
+| byte 0 (mode) | path |
+|---|---|
+| 0 | decode, every codec vs plain (return code, then length and bytes) |
+| 1 | encode, every codec vs plain, then `decode(encode(x)) == x` per codec |
+| 2 | chunked `base64_stream_decode` vs one-shot (`byte 1` seeds the split) |
+| 3 | chunked `base64_stream_encode` vs one-shot (`byte 1` seeds the split) |
+
+The chunk seed matters: a split inside a 4-character quantum or on a SIMD
+block boundary is the interesting case, and the LCG in the target walks it
+deterministically per codec. Output buffers are allocated at the documented
+maximum (plus `-DB64_FUZZ_SLACK`), so ASAN reports a codec that stores past
+its bound; input is capped at 1 MiB because `direct_lite` runs in-process.
+
+Two build details are libbase64-specific:
+
+* **`lib/config.h` is generated, not shipped.** Upstream's Makefile writes it
+  to select codecs; `compile_libbase64_objects()` writes it to
+  `/tmp/b64_cfg$suffix` (one per sanitizer variant) and puts that first on the
+  `-I` path, so the vendored tree stays pristine and config.h cannot drift
+  from the objects built against it. Each codec's `-m` flags are probed
+  first: a toolchain that cannot assemble AVX-512VBMI gets that codec
+  compiled as upstream's stub instead of failing the target.
+* **Every codec object is linked even when disabled**, including
+  neon32/neon64, because `codec_choose_forced()` names all seven
+  unconditionally. A missing object is an undefined reference at link time.
+
+Base64 has no magic number, so there is no structure-aware mutator or
+sniffer to keep the mode byte away from, and no dictionary to add: Redqueen
+already carries a `b64_std` encoder, which converts a decode comparison back
+into the input prefix it came from.
+
+`tests/test_regression_libbase64_target.py` pins the wiring and the oracle:
+a clean tree passes on a zero payload and on the wrapper's edge inputs, a
+copy with one AVX2 translate-LUT entry changed must abort (control first,
+Hard Rule 46). The codec the CPU lacks is never forced
+(`__builtin_cpu_supports` gate), since forcing one is SIGILL rather than a
+mismatch.
+
 ### Cmplog record table (`--cmplog-records shm`)
 
 CMP records as binary operands in a SysV segment (`$_CMPLOG_RECORDS_SHM`, `adapters/cmplog_rec_shm.py`; afl_shim.c "Record table") instead of hex lines on the FIFO. Removes shim formatting, `write(2)`, FIFO `EAGAIN` drops and the Python text parse; DIV/GEP records stay on text, and a shim without the table keeps writing text, which is still read.

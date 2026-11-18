@@ -262,6 +262,7 @@ What the counters buy:
 | `ffmpeg_read` | FFmpeg (default 9.0.1) | built only as `ffmpeg_read_<ver>_<opts>`; full demux→decode chain; link libraries derived from `ffbuild/config.mak` rather than hardcoded |
 | `sqlite_read` | SQLite amalgamation | `deserialize` + `integrity_check` + full table scan, sandboxed to `:memory:` with an authorizer and a hard heap limit; **no mode byte**, so the 16-byte magic stays at offset 0 for the mutator sniffer |
 | `lz4_read` | LZ4 | block and frame APIs |
+| `libbase64_read` | libbase64 | differential: every SIMD codec (SSSE3→AVX-512 VBMI) vs the plain codec, encode/decode/stream |
 | `secp256k1_read` | libsecp256k1 | |
 | `brainflayer_read` | brainflayer `bloom.c` | differential: sliced bloom filter slicing vs reference, scalar vs AVX2 lookups |
 | `grep_read`, `fgrep_read` | GNU grep, fgrep | |

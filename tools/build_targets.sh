@@ -24,6 +24,7 @@
 # Some targets need vendored sources fetched first (all are optional — the
 # build warns and skips when the tree is absent):
 #   tools/vendor_lz4.sh       -> $FUZZ_VENDOR_ROOT/lz4        (lz4_read / lz4_read.so)
+#   tools/vendor_libbase64.sh -> $FUZZ_VENDOR_ROOT/libbase64  (libbase64_read / libbase64_read.so)
 #   tools/vendor_grep.sh      -> $FUZZ_VENDOR_ROOT/grep
 #   tools/vendor_ffmpeg.sh    -> $FUZZ_VENDOR_ROOT/ffmpeg
 #   tools/vendor_ffmpeg.sh --top=3 -> $FUZZ_VENDOR_ROOT/ffmpeg-<ver>  (ffmpeg_read_<ver>_{asan,noasan,ubsan,ng2,ng3}{,.so})
@@ -226,6 +227,7 @@ CMPLOG_CFLAGS="-D__AFL_CMPLOG=1"
 CMPLOG_LIBS="-ldl"
 PERF_SHIM="src/fuzzer_tool/adapters/perf_shim.c"
 LZ4="${LZ4_DIR:-$VENDOR/lz4}"
+LIBBASE64="${LIBBASE64_DIR:-$VENDOR/libbase64}"
 GREP_SRC="${GREP_DIR:-$VENDOR/grep}"
 GREP_INC="-I$GREP_SRC -I$GREP_SRC/lib -I$GREP_SRC/src"
 grep_objs() { echo "/tmp/grep_dfa$1.o /tmp/grep_localeinfo$1.o /tmp/grep_kwset$1.o"; }
@@ -946,7 +948,125 @@ compile_lz4_objects() {
     fi
 }
 
-# ── Compile GNU Grep engine objects ────────────────────────────────
+# ── Compile libbase64 library objects ──────────────────────────────
+# Vendored via tools/vendor_libbase64.sh (extracts to vendor/libbase64/).
+#
+# Compiled WITHOUT `-include $SHIM` (same discipline as the lz4 objects,
+# Hard Rule 9). Three things differ from lz4:
+#
+#  * each x86 SIMD codec is its own TU with its own -m flag, so there is one
+#    object per codec. The flags are probed first: a toolchain that cannot
+#    assemble AVX-512VBMI gets that codec compiled as upstream's stub
+#    (HAVE_<codec> 0) instead of failing the target. targets/libbase64_read.c
+#    probes cpuid (and -1 from the stub) regardless, so a codec the CPU lacks
+#    is never forced.
+#  * every codec object is linked even when disabled: codec_choose_forced()
+#    names all seven unconditionally, so a missing object is an undefined
+#    reference at link time (this includes neon32/neon64, which compile to
+#    stubs off ARM).
+#  * lib/config.h is generated, not shipped: upstream's Makefile writes it to
+#    select the codecs. It goes to /tmp/b64_cfg$suffix so the vendored tree
+#    stays pristine and config.h cannot drift from the objects built against
+#    it. lib/*.c's `#include "config.h"` resolves here because the tree has
+#    no lib/config.h of its own.
+#
+# The object list is written to /tmp/b64_objs$suffix.list and read back by
+# libbase64_objs(), so the link line always matches what was built.
+LIBBASE64_CODECS="ssse3:-mssse3:SSSE3 sse41:-msse4.1:SSE41 sse42:-msse4.2:SSE42 avx:-mavx:AVX avx2:-mavx2:AVX2 avx512:-mavx512vl,-mavx512vbmi:AVX512"
+COMPILE_B64_CFG="/tmp/b64_cfg"
+compile_libbase64_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -d "$LIBBASE64/lib" ] || return 1
+    echo "Compiling libbase64 objects${suffix:+ ($suffix)}..."
+
+    local cfg="$COMPILE_B64_CFG$suffix"
+    local inc="-I$cfg -I$LIBBASE64/lib -I$LIBBASE64/include"
+    local cov_flag
+    cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
+    mkdir -p "$cfg"
+    local objlist="/tmp/b64_objs${suffix}.list"
+    : > "$objlist"
+
+    local disabled="" spec name mflags macro rc=0
+    for spec in $LIBBASE64_CODECS; do
+        IFS=: read -r name mflags macro <<< "$spec"
+        mflags="${mflags//,/ }"
+
+        # Probe: this codec alone enabled, so codec.c compiles its intrinsics
+        # path and the -m flags are actually exercised.
+        write_b64_config "$cfg" "$macro"
+        if ! $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $mflags $inc \
+            -c "$LIBBASE64/lib/arch/$name/codec.c" -o /dev/null 2>>"$BUILD_LOG"; then
+            warn "libbase64: $name codec not buildable here, using the stub"
+            disabled="$disabled $name"
+        fi
+    done
+
+    # Final config.h, plus the core TUs.
+    write_b64_config "$cfg"
+    local src
+    for src in lib/lib lib/codec_choose lib/tables/tables lib/arch/generic/codec; do
+        local obj="/tmp/b64_$(basename "$src")${suffix}.o"
+        $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $inc \
+            -c "$LIBBASE64/$src.c" -o "$obj" 2>>"$BUILD_LOG" || rc=$?
+        echo "$obj" >> "$objlist"
+    done
+
+    # One object per codec, always. A disabled codec compiles with no -m flag:
+    # HAVE_<codec> 0 selects the stub body, which needs no intrinsics.
+    for spec in $LIBBASE64_CODECS; do
+        IFS=: read -r name mflags _macro <<< "$spec"
+        case " $disabled " in
+            *" $name "*) mflags="" ;;
+            *)           mflags="${mflags//,/ }" ;;
+        esac
+        local obj="/tmp/b64_${name}${suffix}.o"
+        $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $mflags $inc \
+            -c "$LIBBASE64/lib/arch/$name/codec.c" -o "$obj" 2>>"$BUILD_LOG" || rc=$?
+        echo "$obj" >> "$objlist"
+    done
+    for name in neon32 neon64; do
+        local obj="/tmp/b64_${name}${suffix}.o"
+        $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $inc \
+            -c "$LIBBASE64/lib/arch/$name/codec.c" -o "$obj" 2>>"$BUILD_LOG" || rc=$?
+        echo "$obj" >> "$objlist"
+    done
+
+    if [ $rc -eq 0 ]; then
+        ok "libbase64 objects${suffix:+ ($suffix)}"
+    else
+        warn "libbase64 objects${suffix:+ ($suffix)} failed"
+        return 1
+    fi
+}
+
+# config.h selector for one codec (every other codec off), or all codecs on
+# when no name is given. lib/*.c include it by quoted name, so it must live on
+# their -I path rather than in the tree.
+write_b64_config() {
+    local cfg="$1" only="${2:-}"
+    local spec name _mflags macro
+    : > "$cfg/config.h"
+    for spec in $LIBBASE64_CODECS; do
+        IFS=: read -r name _mflags macro <<< "$spec"
+        if [ -z "$only" ] || [ "$only" = "$macro" ]; then
+            echo "#define HAVE_$macro 1" >> "$cfg/config.h"
+        else
+            echo "#define HAVE_$macro 0" >> "$cfg/config.h"
+        fi
+    done
+    echo "#define HAVE_NEON32 0" >> "$cfg/config.h"
+    echo "#define HAVE_NEON64 0" >> "$cfg/config.h"
+}
+
+# Object list written by compile_libbase64_objects() — one source of truth, so
+# a codec the probe dropped is not named on a link line that then fails with a
+# missing symbol far from the cause.
+libbase64_objs() {
+    cat "/tmp/b64_objs$1.list" 2>/dev/null | tr '\n' ' '
+}
+
+
 # Vendored via tools/vendor_grep.sh (extracts to vendor/grep/).
 #
 # targets/grep_read.c drives grep's matcher engines in-process. Only the
@@ -1911,6 +2031,21 @@ build_standalone_so_targets() {
         build_so_target "${TARGETS_SRC:-$TARGETS}/lz4_read.c" "$TARGETS/lz4_read${out_suffix}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "$flags $LZ4_INC"
     else
         warn "lz4_read${out_suffix}.so: vendor/lz4 not found, skipping (run tools/vendor_lz4.sh)"
+    fi
+
+    # libbase64_read — vendored libbase64 (tools/vendor_libbase64.sh extracts
+    # to vendor/libbase64). Differential: every SIMD codec this CPU supports
+    # against the plain codec, so a bug in the lane-wise shuffle code shows up
+    # as a mismatch, not only as a segfault. Same object discipline as
+    # lz4_read: library objects compiled separately, without -include $SHIM,
+    # one object per codec with its own -m flag and a generated config.h.
+    local LIBBASE64_INC="-I$LIBBASE64/include"
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/libbase64_read.c" ]; then
+        :  # target source absent — nothing to build
+    elif compile_libbase64_objects "$suffix" "$flags" "$DEFAULT_CC" "$extra_cflags"; then
+        build_so_target "${TARGETS_SRC:-$TARGETS}/libbase64_read.c" "$TARGETS/libbase64_read${out_suffix}.so" "$(libbase64_objs "$suffix") -Wl,--export-dynamic" "$flags $LIBBASE64_INC -DBASE64_STATIC_DEFINE"
+    else
+        warn "libbase64_read${out_suffix}.so: vendor/libbase64 not found, skipping (run tools/vendor_libbase64.sh)"
     fi
 
     # secp256k1_read — vendored libsecp256k1 (tools/vendor_secp256k1.sh
@@ -2989,6 +3124,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "tailslayer_read" "$state" "$([ -d "$TAILSLAYER/include" ] && echo "found at $TAILSLAYER" || echo "headers not found at $TAILSLAYER/include")"
     state=$([ -d "$LZ4/lib" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "lz4_read" "$state" "$([ -d "$LZ4/lib" ] && echo "found at $LZ4" || echo "not vendored — run tools/vendor_lz4.sh")"
+    state=$([ -f "$LIBBASE64/lib/lib.c" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "libbase64_read" "$state" "$([ -f "$LIBBASE64/lib/lib.c" ] && echo "found at $LIBBASE64" || echo "not vendored — run tools/vendor_libbase64.sh")"
     state=$([ "$HAS_FUZZGOAT" -eq 1 ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "fuzzgoat_read" "$state" "$([ "$HAS_FUZZGOAT" -eq 1 ] && echo "found at $VENDOR/fuzzgoat" || echo "not vendored — run tools/vendor_fuzzgoat.sh")"
     state=$([ -d "$SECP256K1/src" ] && echo "BUILD" || echo "SKIP")
