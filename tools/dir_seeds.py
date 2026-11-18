@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import enum
+import fnmatch
 import os
 import stat
 import sys
@@ -79,17 +80,31 @@ def arranger(order: WalkOrder, seed: int) -> Callable[[list], None]:
     return shuffled
 
 
-def walk(paths: Iterable[Path], arrange: Callable[[list], None] = list.sort) -> Iterator[Path]:
+def _dir_excluded(name: str, full: str, patterns: list[str]) -> bool:
+    """True when *name* or *full* path matches any glob in *patterns*."""
+    return any(fnmatch.fnmatch(name, p) or fnmatch.fnmatch(full, p) for p in patterns)
+
+
+def walk(
+    paths: Iterable[Path],
+    arrange: Callable[[list], None] = list.sort,
+    exclude_dirs: list[str] | None = None,
+) -> Iterator[Path]:
     """Files under *paths*: per directory its files then subdirs, each list ordered by *arrange*.
 
     A file argument is yielded as is. Directory symlinks are listed by os.walk
     but not entered, so a link back to an ancestor cannot loop.
+    Directories matching *exclude_dirs* glob patterns (on basename or full path)
+    are pruned and not descended into.
     """
+    patterns = list(exclude_dirs or [])
     for path in paths:
         if not path.is_dir():
             yield path
             continue
         for top, dirs, files in os.walk(path, followlinks=False):
+            if patterns:
+                dirs[:] = [d for d in dirs if not _dir_excluded(d, os.path.join(top, d), patterns)]
             arrange(dirs)  # in place: os.walk descends in this order
             arrange(files)
             for name in files:
@@ -123,16 +138,18 @@ def iter_dir_seeds(
     max_size: int = ccs.NO_LIMIT,
     arrange: Callable[[list], None] = list.sort,
     unpack_mode: Unpack = Unpack.OFF,
+    exclude_dirs: list[str] | None = None,
 ) -> Iterator[tuple[Media, bytes]]:
     """(media, bytes) of every non-empty file of the *wanted* types, in walk order.
 
     A wanted file over *max_size* bytes (file size, before *max_bytes*) is
     skipped and counted in stats.too_big. With Unpack.ON an archive or
     compressed file yields its members instead (tools/unpack.py).
+    Directories matching *exclude_dirs* glob patterns are pruned before walking.
     """
     # Ifs up: the file -> payloads step is chosen once, not per file.
     payloads = _unpacked if unpack_mode is Unpack.ON else _as_is
-    for path in walk(paths, arrange):
+    for path in walk(paths, arrange, exclude_dirs):
         if path.resolve() in skip:
             continue
         try:
@@ -199,6 +216,13 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="send the members of zip / tar(.gz/.bz2/.xz) / gzip / bzip2 / xz files, one level deep",
     )
+    ap.add_argument(
+        "--exclude-dir",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="exclude directories matching glob pattern (can repeat, e.g. --exclude-dir '*/.git' --exclude-dir '*/__pycache__')",
+    )
     ccs.add_send_args(ap)
     args = ap.parse_args(argv)
     args.order = WalkOrder(args.order)
@@ -227,8 +251,18 @@ def main(argv: list[str] | None = None) -> int:
     stats = ccs.ScanStats()
     skip = frozenset({args.sent_bloom.resolve()}) if args.sent_bloom else frozenset()
     unpack_mode = Unpack.ON if args.decompress else Unpack.OFF
+    if args.exclude_dir:
+        print(f"[*] excluding dirs matching: {', '.join(args.exclude_dir)}")
     found = iter_dir_seeds(
-        paths, args.types, args.max_bytes, stats, skip, args.max_size, arrange, unpack_mode
+        paths,
+        args.types,
+        args.max_bytes,
+        stats,
+        skip,
+        args.max_size,
+        arrange,
+        unpack_mode,
+        args.exclude_dir,
     )
     return ccs.send_seeds(ccs.unique(found, stats), args, stats)
 
