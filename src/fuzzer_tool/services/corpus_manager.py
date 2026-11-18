@@ -88,6 +88,10 @@ _TRIM_EXEC_SHARE = 0.25
 #: seed_meta flag: --trim-sparse already tried this seed (persisted).
 TRIM_TRIED = "trim_tried"
 
+#: seed_meta: edges in the seed's own trace, from its admission or load
+#: replay (persisted). --bloat-reward's parent density.
+TRACE_EDGES = "trace_edges"
+
 #: Seeds at or below this size are never trimmed (as on admission).
 _TRIM_MIN_LEN = 16
 
@@ -709,6 +713,7 @@ class CorpusManager:
                 "record_stride": meta.get("record_stride", None),
                 "c11": meta.get("c11", 0),
                 TRIM_TRIED: meta.get(TRIM_TRIED, False),
+                TRACE_EDGES: meta.get(TRACE_EDGES, 0),
             }
             # Weizz tags: only when collected, so untagged seeds stay unarmed.
             state["seed_meta"][key].update({k: meta[k] for k in _WEIZZ_TAG_KEYS if k in meta})
@@ -877,6 +882,7 @@ class CorpusManager:
                         # --c11 locals; 0 = unmeasured (older state, flag off).
                         "c11": sm.get("c11", 0),
                         TRIM_TRIED: sm.get(TRIM_TRIED, False),
+                        TRACE_EDGES: sm.get(TRACE_EDGES, 0),
                     }
                 )
                 f.seed_meta[seed].update({k: sm[k] for k in _WEIZZ_TAG_KEYS if k in sm})
