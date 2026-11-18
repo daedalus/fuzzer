@@ -134,6 +134,10 @@ class CrashMetadata:
     parent_sites: list[int] = field(default_factory=list)
     target: str = ""
     target_sha256: str = ""
+    # glibc the target was built against ("2.41"), from .gnu.version_r. Empty
+    # unless --glibc-heap-severity detected one. Keys the heap-hardening
+    # severity multiplier (Phrack #73 "Poor Little Chunks").
+    glibc_version: str = ""
     elapsed: str = ""
 
     # Input analysis
@@ -297,6 +301,8 @@ class CrashMetadata:
             if self.shadow_info:
                 lines.append(f"shadow:        {self.shadow_info}")
             lines.append(f"exploitability: {self.exploitability}")
+            if self.glibc_version:
+                lines.append(f"target_glibc:  {self.glibc_version}")
             lines.append(f"cluster_id:    {self.cluster_id}")
             if self.stack_hash:
                 lines.append(f"stack_hash:    {self.stack_hash}")
@@ -313,6 +319,9 @@ class CrashMetadata:
             lines.append(f"error_type:    {self.error_type}")
         if self.fault_addr:
             lines.append(f"fault_addr:    {self.fault_addr}")
+        if self.glibc_version:
+            lines.append(f"exploitability: {self.exploitability}")
+            lines.append(f"target_glibc:  {self.glibc_version}")
         lines.append("")
 
     def _sidecar_mutation(self, lines: list[str]) -> None:
@@ -474,6 +483,7 @@ class CrashMetadata:
             "elapsed": self.elapsed,
             "target": self.target,
             "target_sha256": self.target_sha256,
+            "glibc_version": self.glibc_version,
             "sanitizer": self.sanitizer,
             "error_type": self.error_type,
             "fault_addr": self.fault_addr,

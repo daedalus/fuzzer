@@ -326,6 +326,8 @@ class TestRegularityOperators:
             "bitcast_float",
             "bitcast_int32",
             "size_field_overflow",
+            "smallbin_size",
+            "chunk_overlap",
             "bpe",
             "golomb",
             "naf_scalar_mutate",

@@ -1306,6 +1306,7 @@ def cmd_fuzz(args):
         isolate_crash_fields=getattr(args, "isolate_crash_fields", False),
         crash_symbolize=getattr(args, "crash_symbolize", False),
         scan_gadgets=getattr(args, "rop_gadgets", False),
+        glibc_heap_severity=getattr(args, "glibc_heap_severity", False),
         abort_is_crash=getattr(args, "abort_is_crash", False),
         rss_limit_mb=getattr(args, "rss_limit_mb", 0),
         calibrate=getattr(args, "calibrate", 0),
@@ -3151,6 +3152,7 @@ _HAIL_MARY_FLAGS = (
     "isolate_crash_fields",
     "crash_symbolize",
     "rop_gadgets",
+    "glibc_heap_severity",
     "deep_coverage",
     "ptrace",
     "adaptive_timeout",
@@ -3680,6 +3682,16 @@ def main() -> int:
         "ROP gadgets (pop-reg, syscall, stack-pivot, ...) and record the inventory "
         "plus syscall-chain feasibility in the crash sidecar as `gadgets`. Scanned "
         "once per target; nothing is executed. Exploitability triage aid. "
+        "Enabled by --hail-mary.",
+    )
+    fuzz_parser.add_argument(
+        "--glibc-heap-severity",
+        action="store_true",
+        help="Read the target's build-time glibc from its .gnu.version_r records "
+        "and, for a heap-metadata-corruption crash on glibc >= 2.41/2.43 (the "
+        "Phrack #73 'Poor Little Chunks' fastbin/unsorted-bin hardening "
+        "regression), raise its exploitability tier one step. Detected once per "
+        "target; recorded in the crash sidecar as `glibc_version`. "
         "Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(

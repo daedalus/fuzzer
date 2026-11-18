@@ -5652,6 +5652,16 @@ class OperatorEngine:
 
         return self._regularity(size_field_overflow, buf)
 
+    def _op_smallbin_size(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.heap_chunk import smallbin_size
+
+        return self._regularity(smallbin_size, buf)
+
+    def _op_chunk_overlap(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.heap_chunk import chunk_overlap
+
+        return self._regularity(chunk_overlap, buf)
+
     def _op_bpe(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import bpe
 
