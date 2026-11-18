@@ -875,7 +875,8 @@ _FALLBACK_PRECEDENCE = (
     "las_vegas",
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
-    # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, gradient, reactive, whittle, corral, softmax, topk,
+    # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, op_hrrn, op_qlearn,
+    # op_tabu, op_hill_climb, gradient, reactive, whittle, corral, softmax, topk,
     # tsallis, kalman_ts, gamma_poisson, ids, phe, exp3_ix, regret_matching, automaton,
     # ant_colony are deliberately absent
     # here: they are unproven exploratory arms
@@ -961,6 +962,10 @@ _PLAIN_STRATEGIES = {
     "op_strata": "_op_strata",
     "op_stride": "_op_stride",
     "op_p2c": "_op_p2c",
+    "op_hrrn": "_op_hrrn",
+    "op_qlearn": "_op_qlearn",
+    "op_tabu": "_op_tabu",
+    "op_hill_climb": "_op_hill_climb",
     "op_good_turing": "_op_good_turing",
     "softmax": "_softmax",
     "topk": "_topk",
@@ -1102,6 +1107,14 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_stride")
     if f._use_op_p2c and f._op_p2c:
         available.append("op_p2c")
+    if f._use_op_hrrn and f._op_hrrn:
+        available.append("op_hrrn")
+    if f._use_op_qlearn and f._op_qlearn:
+        available.append("op_qlearn")
+    if f._use_op_tabu and f._op_tabu:
+        available.append("op_tabu")
+    if f._use_op_hill_climb and f._op_hill_climb:
+        available.append("op_hill_climb")
     if f._use_op_good_turing and f._op_good_turing:
         available.append("op_good_turing")
     if f._use_softmax and f._softmax:

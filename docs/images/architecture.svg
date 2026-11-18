@@ -178,7 +178,7 @@
 <g id="node6" class="node">
 <title>bandit</title>
 <path fill="#d8eade" stroke="transparent" stroke-width="0" d="M915,-1018C915,-1018 455,-1018 455,-1018 449,-1018 443,-1012 443,-1006 443,-1006 443,-970 443,-970 443,-964 449,-958 455,-958 455,-958 915,-958 915,-958 921,-958 927,-964 927,-970 927,-970 927,-1006 927,-1006 927,-1012 921,-1018 915,-1018"/>
-<text text-anchor="start" x="455" y="-1002" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">core/schedulers/op_* (54) &#160;+ &#160;elo · shapley</text>
+<text text-anchor="start" x="455" y="-1002" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">core/schedulers/op_* (59) &#160;+ &#160;elo · shapley</text>
 <text text-anchor="start" x="455" y="-991" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">monte_carlo mopt exp3 gp_ucb cmaes contextual</text>
 <text text-anchor="start" x="455" y="-980" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">ducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy consolidated katz …</text>
 <text text-anchor="start" x="455" y="-969" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">elo stale bench (core/elo_stale_bench.py)</text>
