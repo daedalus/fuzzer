@@ -123,7 +123,11 @@ except ImportError:
 from fuzzer_tool.core import edge_stats  # noqa: E402
 from fuzzer_tool.core.count_class import classify_counts  # noqa: E402
 from fuzzer_tool.core.edge_clusters import count_distinct  # noqa: E402
-from fuzzer_tool.core.edge_density import edges_per_bit  # noqa: E402
+from fuzzer_tool.core.edge_density import (  # noqa: E402
+    DensityTrend,
+    density_trend,
+    edges_per_bit,
+)
 from fuzzer_tool.core.edge_set import EdgeSet  # noqa: E402
 from fuzzer_tool.core.elf import (  # noqa: E402
     MAP_SIZE_DEFAULT,
@@ -1109,6 +1113,8 @@ class EdgeTracker:
         self._coverage_execs: array = array("Q")  # exec_count per coverage snapshot
         self._coverage_edges: array = array("Q")  # cumulative edges per snapshot
         self._coverage_timestamps: array = array("d")  # wall-clock timestamp per snapshot
+        # Corpus bytes per snapshot (0 = unrecorded): edges-per-bit trend.
+        self._coverage_bytes: array = array("Q")
         # Branch correlation matrix: {(edge_a, edge_b): co_occurrence_count}
         self._correlation_matrix: dict[tuple[int, int], int] = {}
         self._correlation_total: int = 0
@@ -1975,11 +1981,12 @@ class EdgeTracker:
         for key, clock in self._clocks.items():
             self.fold_tags(*clock.entry_tags(), key=key)
 
-    def record_coverage_snapshot(self, exec_count: int):
+    def record_coverage_snapshot(self, exec_count: int, corpus_bytes: int = 0):
         """Record a point-in-time snapshot of cumulative edge count.
 
         Args:
             exec_count: Current execution count.
+            corpus_bytes: Corpus size in bytes now; 0 = unrecorded.
         """
         # A legacy timeline restores without clock readings (see
         # _restore_timeline). Stamping only the new points would leave the
@@ -1987,11 +1994,13 @@ class EdgeTracker:
         timed = len(self._coverage_timestamps) == len(self._coverage_execs)
         self._coverage_execs.append(exec_count)
         self._coverage_edges.append(len(self.cumulative_edges))
+        self._coverage_bytes.append(max(corpus_bytes, 0))
         if timed:
             self._coverage_timestamps.append(time.time())
         if len(self._coverage_execs) > COVERAGE_TIMELINE_MAX:
             del self._coverage_execs[:250]
             del self._coverage_edges[:250]
+            del self._coverage_bytes[:250]
             # The timestamps array is trimmed with its siblings. It used to be
             # left alone, so it kept growing while the other two were cut, and
             # report._temporal_correlation reads all three at the same index i:
@@ -4010,6 +4019,7 @@ class EdgeTracker:
             "edge_first_exec": {str(e): c for e, c in self._edge_first_exec.items()},
             "edge_last_seen": {str(e): c for e, c in self._edge_last_seen.items()},
             "coverage_timeline": self._timeline_rows(),
+            "coverage_bytes": list(self._coverage_bytes),
             "correlation_matrix": {f"{a},{b}": c for (a, b), c in self._correlation_matrix.items()},
             "correlation_total": self._correlation_total,
             "seed_stack_depth": self.seed_stack_depth,
@@ -4047,6 +4057,7 @@ class EdgeTracker:
         self._zipf_cache = None
         self._edge_last_seen = _int_keyed(data.get("edge_last_seen", {}))
         self._restore_timeline(data.get("coverage_timeline", []))
+        self._restore_coverage_bytes(data.get("coverage_bytes", []))
         corr_data = data.get("correlation_matrix", {})
         self._correlation_matrix = {
             (int(k.split(",")[0]), int(k.split(",")[1])): v for k, v in corr_data.items()
@@ -4115,6 +4126,22 @@ class EdgeTracker:
             self._coverage_timestamps = array("d", (float(t[2]) for t in tl))
         else:
             self._coverage_timestamps = array("d")
+
+    def _restore_coverage_bytes(self, saved: list) -> None:
+        """Bytes column back in step with the timeline; unrecorded (0) when it is not.
+
+        A state written before the column, or one whose column length does
+        not match the timeline, cannot be paired by index: every point reads
+        unknown rather than mis-paired.
+        """
+        n = len(self._coverage_execs)
+        if len(saved) != n:
+            saved = [0] * n
+        self._coverage_bytes = array("Q", (max(int(b), 0) for b in saved))
+
+    def density_trend(self) -> DensityTrend | None:
+        """Corpus edges-per-bit trend over the coverage timeline (core/edge_density.py)."""
+        return density_trend(self._coverage_edges, self._coverage_bytes)
 
     def _restore_minhash(self, saved_sigs: dict) -> None:
         """Restore MinHash signatures, or recompute them, and rebuild the LSH index."""
