@@ -2067,9 +2067,15 @@ Lanes:
 
 The chunk seed matters: a split inside a 4-character quantum or on a SIMD
 block boundary is the interesting case, and the LCG in the target walks it
-deterministically per codec. Output buffers are allocated at the documented
-maximum (plus `-DB64_FUZZ_SLACK`), so ASAN reports a codec that stores past
-its bound; input is capped at 1 MiB because `direct_lite` runs in-process.
+deterministically per codec. Chunks are 1..128 bytes (≥ every SIMD loop
+entry, AVX-512 encode at 64), split only within the first 512 bytes; the rest
+goes in one call. Stream decode fails a trailing partial quantum, as
+one-shot `base64_decode` does (`state.bytes != 0`). The payload is copied to
+an exact-size heap buffer and outputs are allocated at the documented maximum
+(plus `-DB64_FUZZ_SLACK`), so ASAN reports input over-reads and output
+over-writes in C code. The x86-64 default SSSE3/AVX/AVX2 encoders are inline
+asm, which ASAN does not see: there the differential is the only oracle.
+Input is capped at 1 MiB because `direct_lite` runs in-process.
 
 Two build details are libbase64-specific:
 
@@ -2079,7 +2085,8 @@ Two build details are libbase64-specific:
   `-I` path, so the vendored tree stays pristine and config.h cannot drift
   from the objects built against it. Each codec's `-m` flags are probed
   first: a toolchain that cannot assemble AVX-512VBMI gets that codec
-  compiled as upstream's stub instead of failing the target.
+  compiled as upstream's stub (`HAVE_<codec> 0` in the final config.h)
+  instead of failing the target.
 * **Every codec object is linked even when disabled**, including
   neon32/neon64, because `codec_choose_forced()` names all seven
   unconditionally. A missing object is an undefined reference at link time.
@@ -2093,15 +2100,20 @@ Two build details are libbase64-specific:
   gets no cmplog tokens.
 
 Base64 has a structure-aware mutator and sniffer now: `base64_chunk_mutate`
-in the `format` band (`core/operator_registry.py`, `_sniff_base64`) gates on
-byte 0 being the mode byte and every payload byte in the standard alphabet
-plus `=`. Redqueen's `b64_std` encoder still converts a decode comparison
+in the `format` band (`core/operator_registry.py`, `_sniff_base64` →
+`parse_base64`) fires on decode modes (0, 2) only, skips the stream seed byte,
+and requires every payload byte in the standard alphabet plus `=`. Encode
+payloads are raw bytes, left to byte-level operators. The pad op re-pads to a
+whole quantum; generated inputs are padded base64 (decode) or raw bytes
+(encode), drawn in one `randbytes` call. Redqueen's `b64_std` encoder still converts a decode comparison
 back into the input prefix it came from.
 
 `tests/test_regression_libbase64_target.py` pins the wiring and the oracle:
 a clean tree passes on a zero payload and on the wrapper's edge inputs, a
-copy with one AVX2 translate-LUT entry changed must abort (control first,
-Hard Rule 46). The codec the CPU lacks is never forced
+copy with one AVX2 translate-LUT entry changed must abort on both the C and
+the asm encoder, a carry fault on mid-quantum resume must be reached by ≥ half
+of the 256 stream seeds, and a one-byte input over-read must be an ASAN
+report (control first each time, Hard Rule 46). The codec the CPU lacks is never forced
 (`__builtin_cpu_supports` gate), since forcing one is SIGILL rather than a
 mismatch.
 

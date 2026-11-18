@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from itertools import compress
 
 from fuzzer_tool.core.hashing import hash64
-from fuzzer_tool.core.mutations.base64 import _B64_PAD, _B64_SET, _MODE_OFFSET
+from fuzzer_tool.core.mutations.base64 import parse_base64
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
@@ -512,8 +512,8 @@ def _sniff_lz4_frame(d: bytes) -> bool:
 
 
 def _sniff_base64(d: bytes) -> bool:
-    """libbase64_read.c: byte 0 is the mode byte, the payload after it is base64."""
-    return len(d) >= _MODE_OFFSET and all(b in _B64_SET or b == _B64_PAD for b in d[_MODE_OFFSET:])
+    """libbase64_read.c: decode-mode header (mode byte, stream seed) + base64 payload."""
+    return parse_base64(d) is not None
 
 
 # JSON documents open with an object or array after optional whitespace.
