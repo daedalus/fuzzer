@@ -443,6 +443,19 @@ Already covered: 64 KiB signal altstack (`afl_shim.c` `__AFL_ALTSTACK_SIZE`), si
 - [ ] **Guard-page input placement** (2026-10-25) — shipped as `--input-placement guard` (DEEP_DIVE §Guard-page input placement; micro-benchmark only). Open: (a) underreads need a second guard before the input (input start then unaligned); (b) end-to-end exec/s and fuzzgoat calibration on a clang `*_nosan` build (Hard Rule 52; no build root in this container); (c) rebuild targets for `__afl_last_fault_addr` (Hard Rule 56); (d) persistent/forkserver loaders keep exact placement; (e) `minimize` does not take the flag.
 - Skip: tunnel search (length-change byte deepening; effector maps in `position_arena.py` supersede), instruction-length probing and opcode blacklists (CPU fuzzing, out of scope).
 
+## Phrack port candidates (2026-11-18, issues 60–73)
+Already covered: #73 Poor Little Chunks (`heap_chunk.py`, `glibc_severity`), glibc abort regex (`sanitizer.py`), NCD (`path_novelty.py`), differential mode (`services/differential.py`), `MALLOC_PERTURB_` (`uninit_probe.py`), deferred fork server.
+- [ ] **NAL emulation-prevention** (71/6 MPEG-CENC) — `nal.py` ignores `00 00 03`: unescape → mutate → re-escape, resync MP4 sample sizes; I_PCM injection op.
+- [ ] **PC/fault-address control triage** (70/4 Shellphish PovFuzzer, 67/10 BSDaemon) — flip crash bytes, record which offsets move rip/si_addr; feeds exploitability and focused mutation.
+- [ ] **FORTIFY abort parsing** (73 fortify-headers, 67/9) — classify `*** buffer overflow detected ***`, `%n in writable segment`; enables `_FORTIFY_SOURCE=3` no-ASAN build as cheap oracle.
+- [ ] **Format-string sink pre-pass** (71/16) — ELF scan for printf-family calls with non-constant fmt → arm `%n %s %x %*` dict.
+- [ ] **Big-loop oracle** (60/9) — shim loop trip-count threshold; split attacker-driven huge loops from hangs.
+- [ ] **Per-class integer values** (60/10) — truncation/wrap/signedness boundaries keyed on field width from cmplog.
+- [ ] **Allocator poison triage** (68/10, 69/14) — `e5e5…`/`a5a5…`/perturb byte in fault addr or regs → UAF/uninit label.
+- [ ] **Bucket on first in-target frame** (71/10) — ASAN top frame in library (Skia) mis-bucketed CVE-2024-1283.
+- [ ] **Taint-novelty feedback** (72/15 E0) — guard-page fault taint; new taint sinks count as novel. Large.
+- Skip: ELF PLT/GOT rewriting (63/9, 61/8; LD_PRELOAD shim covers), IOKit mapping (72/9, macOS), LLM reducer (73 Linenoise), static taint (64/8, 73 MOLE).
+
 ## Standing notes
 - [ ] **Master test debt (2026-11-16)**: `test_perf_group_read.py::test_real_software_counters_count_own_work` fails in this container; `test_regression_end_of_run_persistence.py` lets the probe's KeyboardInterrupt abort the pytest session (later files never run); 16 failures across `test_regression_cli_fuzzer_kwargs`/`elo_all`/`fuzzer`/`one_fifth`/… also red on master.
 - [ ] **`test_regression_novel_crash_reward.py`: 2 failures on master** — stub `SimpleNamespace` lacks `_is_hw_max` (2026-11-16).
