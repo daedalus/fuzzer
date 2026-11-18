@@ -3687,11 +3687,12 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--glibc-heap-severity",
         action="store_true",
-        help="Read the target's build-time glibc from its .gnu.version_r records "
-        "and, for a heap-metadata-corruption crash on glibc >= 2.41/2.43 (the "
-        "Phrack #73 'Poor Little Chunks' fastbin/unsorted-bin hardening "
-        "regression), raise its exploitability tier one step. Detected once per "
-        "target; recorded in the crash sidecar as `glibc_version`. "
+        help="For a heap-metadata-corruption crash, raise its exploitability tier "
+        "one step when the runtime host glibc has dropped a little-chunk fence "
+        "(Phrack #73 'Poor Little Chunks': unsorted-bin checks for 0x90-0x3F0 at "
+        "2.41, fastbin for 0x20-0x80 at 2.43). Records both the host glibc (the "
+        "gate) and the target's build-time minimum in the crash sidecar "
+        "(`glibc_runtime`/`glibc_version`), with a size-class exposure note. "
         "Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(

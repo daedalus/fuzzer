@@ -1790,15 +1790,16 @@ def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, return
         metadata.exploitability = report.exploitability
 
     # glibc heap-hardening regression multiplier (Phrack #73 "Poor Little
-    # Chunks"): a heap-metadata-corruption crash on a target built against
-    # glibc >= 2.41 is raised one tier. No-op unless --glibc-heap-severity
-    # populated metadata.glibc_version with a regressed version.
+    # Chunks"): a heap-metadata-corruption crash is raised one tier when the
+    # runtime host glibc has dropped the little-chunk fence. Gated on the
+    # runtime glibc (the allocator that ran the target), not the build-time
+    # minimum. No-op unless --glibc-heap-severity populated glibc_runtime.
     metadata.exploitability = glibc_severity(
         metadata.exploitability,
         metadata.sanitizer,
         metadata.error_type,
         metadata.raw_stderr,
-        metadata.glibc_version,
+        metadata.glibc_runtime,
     )
 
 
