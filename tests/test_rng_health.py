@@ -7,7 +7,7 @@ import pytest
 
 from fuzzer_tool.core import rand_pool as rp
 from fuzzer_tool.core.rand_pool import _POOL_ENTRIES, RandPool
-from fuzzer_tool.core.rng_health import quick_health_check, structure_check
+from fuzzer_tool.core.rng_health import _REDUNDANT, quick_health_check, structure_check
 
 
 class _ConstRng:
@@ -93,6 +93,36 @@ def test_never_raises_on_broken_rng():
         quick_health_check(_BrokenRng())
 
 
+class _CompressibleRng:
+    """Uniform marginals, but deterministic walk -> highly compressible."""
+
+    def randint_list(self, a, b, count):
+        return [(i % 256) for i in range(count)]
+
+
+def test_compress_ratio_reported_on_healthy_pool():
+    result = quick_health_check(RandPool(seed=1))
+    assert "compress_ratio" in result.pvalues
+    # Random 4 KiB is incompressible: zlib emits a stored block -> ~1.0027.
+    assert result.pvalues["compress_ratio"] >= 0.99
+
+
+def test_compress_ratio_flags_compressible_stream():
+    result = quick_health_check(_CompressibleRng())
+    assert not result.ok
+    assert any("compress" in w.lower() for w in result.warnings)
+    assert result.pvalues["compress_ratio"] < 0.99
+
+
+def test_compress_ratio_no_false_alarm_on_randpool():
+    for seed in range(1000):
+        result = quick_health_check(RandPool(seed=seed))
+        assert result.pvalues["compress_ratio"] >= 0.99, (
+            f"seed={seed} ratio={result.pvalues['compress_ratio']}"
+        )
+        assert not any("compress" in w.lower() for w in result.warnings)
+
+
 def test_summary_format_ok_and_suspect():
     ok_result = quick_health_check(RandPool(seed=7))
     assert ok_result.summary().startswith("OK")
@@ -158,7 +188,7 @@ def test_regression_entropy_not_combined():
     from fuzzer_tool.core.randomness import fishers_method
 
     r = quick_health_check(RandPool(seed=3))
-    independent = [p for name, p in r.pvalues.items() if name != "entropy"]
+    independent = [p for name, p in r.pvalues.items() if name not in _REDUNDANT]
     assert r.combined_p == pytest.approx(fishers_method(independent))
     assert "entropy" in r.pvalues  # still reported
 

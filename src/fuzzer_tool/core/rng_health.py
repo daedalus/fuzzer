@@ -46,6 +46,7 @@ import numpy as np
 from fuzzer_tool.core.rand_pool import _NO_SEED_FALLBACK, _POOL_ENTRIES, RandPool
 from fuzzer_tool.core.randomness import (
     byte_chisq,
+    compressed_ratio,
     fishers_method,
     monobit,
     repeat_test,
@@ -55,7 +56,7 @@ from fuzzer_tool.core.randomness import (
 
 _DEFAULT_N_BYTES = 4096
 _P_THRESHOLD = 0.01  # standard NIST SP 800-22 significance level
-_REDUNDANT = frozenset({"entropy"})  # same histogram as byte_chisq
+_REDUNDANT = frozenset({"entropy", "compress_ratio"})  # same histogram / point-mass null
 
 # structure_check: exact 32-bit word checks on a cloned stream.
 _WINDOW = 1 << 16  # words drawn per stream: 16 refills
@@ -121,8 +122,18 @@ def quick_health_check(rng, n_bytes: int = _DEFAULT_N_BYTES) -> RngHealthResult:
         "runs": runs_test(data),
         "entropy": shannon_entropy_test(data),
         "repeat": repeat_test(values, alphabet=256),
+        "compress_ratio": compressed_ratio(data),
     }
     combined_p = fishers_method([p for name, p in pvalues.items() if name not in _REDUNDANT])
+
+    # warn if the pool is significantly compressible: a symptom of low
+    # true entropy that passes byte-level tests by accident.
+    ratio = pvalues["compress_ratio"]
+    if ratio < 0.99:
+        warnings.append(
+            f"pool is significantly compressible (ratio={ratio:.3f}; "
+            "likely structured or low-entropy, per 4 KiB zlib compressibility)"
+        )
 
     return RngHealthResult(
         n_bytes=len(data),

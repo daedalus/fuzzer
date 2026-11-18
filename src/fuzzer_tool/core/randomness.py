@@ -24,6 +24,7 @@ Two consumers:
 from __future__ import annotations
 
 import math
+import zlib
 from dataclasses import dataclass, field
 from functools import cache
 
@@ -48,6 +49,7 @@ __all__ = [
     "non_overlapping_template_matching",
     "overlapping_template_matching",
     "maurers_universal",
+    "compressed_ratio",
     "random_excursions",
     "random_excursions_variant",
     "ks_uniform",
@@ -337,6 +339,26 @@ def maurers_universal(data: bytes, length: int = 6) -> float:
     if sigma <= 0:
         return 1.0
     return _erfc(abs((fn - expected) / (_SQRT2 * sigma)))
+
+
+def compressed_ratio(data: bytes, level: int = 9) -> float:
+    """Zlib compression ratio of *data*: ``len(zlib.compress(data, level)) / len(data)``.
+
+    A direct, distribution-free measure of how much the buffer carries
+    structure rather than noise. It is deliberately *not* a p-value: on a
+    4 KiB sample of genuine randomness zlib always emits a stored block, so
+    the null is a point mass at ~1.0027 (4096 + 2-byte header + 5-byte
+    stored-block header + 4-byte adler32) with zero variance -- there is no
+    distribution to KS-test against. Use it as a binary flag (ratio below a
+    threshold) rather than a term in Fisher's method.
+
+    A counter walk (0,1,2,...,255 repeated) compresses to ~0.08 while every
+    marginal test passes; a lag-1 AR(1) stream at moderate correlation
+    drops to ~0.96. Both are caught here and not by monobit/byte_chisq.
+    """
+    if not data:
+        return 1.0
+    return len(zlib.compress(data, level)) / len(data)
 
 
 def _excursion_cycles(data: bytes) -> tuple[list[np.ndarray], int]:
