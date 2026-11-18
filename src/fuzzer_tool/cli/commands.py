@@ -1203,6 +1203,10 @@ def cmd_fuzz(args):
         op_strata=getattr(args, "op_strata", False),
         op_stride=getattr(args, "op_stride", False),
         op_p2c=getattr(args, "op_p2c", False),
+        op_hrrn=getattr(args, "op_hrrn", False),
+        op_qlearn=getattr(args, "op_qlearn", False),
+        op_tabu=getattr(args, "op_tabu", False),
+        op_hill_climb=getattr(args, "op_hill_climb", False),
         op_good_turing=getattr(args, "op_good_turing", False),
         strata=getattr(args, "strata", False),
         shaped_reward=getattr(args, "shaped_reward", False),
@@ -3034,6 +3038,9 @@ def cmd_sweep(args):
 # seed_lottery_scheduler (--seed-lottery-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
+#
+# op_hrrn, op_qlearn, op_tabu, op_hill_climb (--op-hrrn ...) are excluded as
+# unmeasured: unit tests only, no paired run (docs/AB_PENDING.md).
 #
 # seed_fess_scheduler (--seed-fess-scheduler), fess_inherit (--fess-inherit)
 # and fess_cell_novelty (--fess-cell-novelty) are excluded as unmeasured: unit
@@ -6224,6 +6231,30 @@ def main() -> int:
         default=False,
         help="Power-of-two-choices operator arm: two uniform draws, higher posterior mean "
         "wins (experimental, Elo-only -- see core/schedulers/op_p2c.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-hrrn",
+        action="store_true",
+        default=False,
+        help="Highest-response-ratio-next operator arm: picks max 1 + wait x posterior mean, so low-yield operators age instead of starving (experimental, Elo-only -- see core/schedulers/op_hrrn.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-qlearn",
+        action="store_true",
+        default=False,
+        help="Q-learning operator arm: learns which operator pays after the last one (state = last op), epsilon-greedy (experimental, Elo-only -- see core/schedulers/op_qlearn.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-tabu",
+        action="store_true",
+        default=False,
+        help="Tabu-search operator arm: best posterior mean among operators not picked in the last few selections (experimental, Elo-only -- see core/schedulers/op_tabu.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-hill-climb",
+        action="store_true",
+        default=False,
+        help="Hill-climbing operator arm: holds one operator, moves to a random neighbour when its posterior mean is higher or on a random restart (experimental, Elo-only -- see core/schedulers/op_hill_climb.py).",
     )
     fuzz_parser.add_argument(
         "--op-good-turing",

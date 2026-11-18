@@ -53,6 +53,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Doppler energy (`--schedule doppler`) | Power-Doppler seed energy | U | vs `fast` |
 | Consolidated seed arm | Merged seed-arm features | U | vs `p2c`/`drr` |
 | OS/net ports (`mlfq`, `stride`, `eevdf`, `bfq`, `sfq`, `codel`, `aimd`, `p2c`, `op_stride`, `op_p2c`) | Kernel/network schedulers as seed/op arms | U | each vs `seed_round_robin`/`drr` |
+| Classic op arms (`op_hrrn`, `op_qlearn`, `op_tabu`, `op_hill_climb`) | HRRN, Q-learning, tabu search, hill climbing as op arms | U | each vs `op_p2c`/`eps_greedy` under `--elo`; fuzzgoat (clang) 20 seeds x 10k + A/A |
 | LST revisit (`--lst-revisit`) | Revisit seeds overdue by cost deadline D | U | `tools/cost_dispersion.py` first; sweep D |
 | Kruskal count (`--kruskal-count`) | Coupling-chain seed score | U | vs default and a `1/len` control |
 | Entropy LOO (`--entropy-loo`) | Leave-one-out entropy seed value | U | LOO vs Shapley rank disagreement first |

@@ -159,9 +159,13 @@ from fuzzer_tool.core.schedulers import (
 )
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.op_ducb import DUCB_PER_ARM
+from fuzzer_tool.core.schedulers.op_hill_climb import OpHillClimbScheduler
+from fuzzer_tool.core.schedulers.op_hrrn import OpHRRNScheduler
 from fuzzer_tool.core.schedulers.op_p2c import OpP2CScheduler
+from fuzzer_tool.core.schedulers.op_qlearn import OpQLearnScheduler
 from fuzzer_tool.core.schedulers.op_stride import OpStrideScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCB_PER_ARM
+from fuzzer_tool.core.schedulers.op_tabu import OpTabuScheduler
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
 from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
@@ -2264,6 +2268,12 @@ class Fuzzer:
         # --bloat-reward: operator reward x child/parent edges per bit when a
         # discovery grew the input (core/edge_density.py). Off. Appended.
         bloat_reward=Switch.OFF,
+        # --op-hrrn / --op-qlearn / --op-tabu / --op-hill-climb: classic
+        # scheduling and search ports as operator arms. Off, Elo-only. Appended.
+        op_hrrn=False,
+        op_qlearn=False,
+        op_tabu=False,
+        op_hill_climb=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -4713,6 +4723,17 @@ class Fuzzer:
         self._use_op_p2c = op_p2c
         self._op_p2c = OpP2CScheduler(rng=self._rng) if op_p2c else None
 
+        # Classic ports: HRRN, Q-learning, tabu search, hill climbing. Off by
+        # default, Elo-only; see core/schedulers/op_hrrn.py and siblings.
+        self._use_op_hrrn = op_hrrn
+        self._op_hrrn = OpHRRNScheduler() if op_hrrn else None
+        self._use_op_qlearn = op_qlearn
+        self._op_qlearn = OpQLearnScheduler(rng=self._rng) if op_qlearn else None
+        self._use_op_tabu = op_tabu
+        self._op_tabu = OpTabuScheduler() if op_tabu else None
+        self._use_op_hill_climb = op_hill_climb
+        self._op_hill_climb = OpHillClimbScheduler(rng=self._rng) if op_hill_climb else None
+
         # Per-operator Good-Turing discovery probability. Off by default,
         # Elo-only; see core/schedulers/op_good_turing.py.
         self._use_op_good_turing = op_good_turing
@@ -5375,6 +5396,14 @@ class Fuzzer:
             _register_arms(self._op_stride)
         if self._op_p2c:
             _register_arms(self._op_p2c)
+        if self._op_hrrn:
+            _register_arms(self._op_hrrn)
+        if self._op_qlearn:
+            _register_arms(self._op_qlearn)
+        if self._op_tabu:
+            _register_arms(self._op_tabu)
+        if self._op_hill_climb:
+            _register_arms(self._op_hill_climb)
         if self._op_good_turing:
             _register_arms(self._op_good_turing)
         if self._elo:
