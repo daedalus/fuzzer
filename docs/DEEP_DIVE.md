@@ -2699,7 +2699,7 @@ FFmpeg harnesses bind each decoder's API from `codec->type` (`fuzz_decode_api` i
 
 ## License
 
-MIT
+GPL-3.0-or-later (`LICENSE`). Copyright (C) 2025 Dario Clavijo. Releases before 2026-11-19 were MIT.
 
 
 ### Window influence (2026-11-10)

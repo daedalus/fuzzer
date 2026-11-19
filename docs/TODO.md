@@ -471,6 +471,17 @@ Survey of 1608 files; absence checked by grep over `src/`. Already covered: BWT/
 - [ ] **Damerau stack distance** (`strings/damerau_levenshtein_distance.py`) — counts adjacent-frame transpositions (inlining reorders) as one edit in `frame_sequence_similarity`.
 - Skip: more schedulers (HRRN, Q-learning, tabu, hill climbing: Reality Check rows NULL; Metropolis/SA exist), crypto ciphers/hashes (hashlib; no inversion value), RMQ/segment/wavelet trees/treap/skip list (Fenwick + numpy cover), kd-tree (NN-descent exists), Graham scan, MFCC, Karnaugh, Manacher, dancing links (set cover exists), quickselect (`np.partition`).
 
+## TheAlgorithms/C port candidates (2026-11-19, TheAlgorithms/C@e5dad3f)
+Upstream is GPL-3.0; repo relicensed GPL-3.0-or-later (2026-11-19), so verbatim ports are allowed. Algorithms add nothing over `core/`; value is upstream bugs as known-bug fuzz targets. Vendor via `tools/vendor_thealgorithms.sh`, one `targets/talgo_<name>_read.c` per function (`-Dmain=talgo_orig_main`, `fuzz_shm_run`), wire into `tools/build_targets.sh`. Bugs verified at the quoted lines:
+- [ ] **Regex→NFA** (`misc/mcnaughton_yamada_thompson.c`) — leading `*` → NULL `left` deref (284); fixed pools (466/477/660) overflow on many `|`/nested `*`.
+- [ ] **Infix→postfix** (`conversions/infix_to_postfix.c:157`) — unmatched `)` loops, unbounded `postfix[j]` heap write.
+- [ ] **RLE** (`misc/run_length_encoding.c:32,58`) — `malloc(2*strlen)` + NUL write 1 past end.
+- [ ] **Linked list** (`data_structures/list/list.c:14,22,60`) — `malloc(sizeof(L))`, L a pointer: every node overflows.
+- [ ] **Boyer-Moore** (`searching/pattern_search/boyer_moore_search.c:14`) — signed-char index, negative stack write.
+- [ ] **Radix sort** (`sorting/radix_sort.c:16`) — `bucket[10][10]` stack overflow; differential vs `qsort`.
+- [ ] Unverified (agent survey): `rabin_karp_search.c`, `infix_to_postfix2.c`, `hash_set`, `dynamic_array`, `developer_tools/min_printf.h`, `sudoku_solver.c`, `postfix_evaluation.c` (needs `-Dexit` + longjmp, global `st.top` reset); differential: adler32/crc32 vs zlib, blake2b, `c_atoi` vs `strtol`.
+- Skip: interactive `scanf` mains (`binary_trees/*`, `heap/*`, `linked_list/*`), pure arithmetic conversions, `bogo_sort`/`stooge_sort`, `client_server/` (sockets; UDP server `system()`s input by design).
+
 ## Standing notes
 - [ ] **Master test debt (2026-11-16)**: `test_perf_group_read.py::test_real_software_counters_count_own_work` fails in this container; `test_regression_end_of_run_persistence.py` lets the probe's KeyboardInterrupt abort the pytest session (later files never run); 16 failures across `test_regression_cli_fuzzer_kwargs`/`elo_all`/`fuzzer`/`one_fifth`/… also red on master.
 - [ ] **`test_regression_novel_crash_reward.py`: 2 failures on master** — stub `SimpleNamespace` lacks `_is_hw_max` (2026-11-16).
