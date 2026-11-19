@@ -225,6 +225,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "isobmff_chunk_mutate",
         "nal_chunk_mutate",
         "mpegts_chunk_mutate",
+        "mpegps_chunk_mutate",
         "adts_chunk_mutate",
         "mp3_chunk_mutate",
         "ogg_chunk_mutate",
@@ -670,6 +671,8 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # and offset 188 (not just one sync byte) so a coincidental 0x47 in
     # otherwise-random data doesn't falsely sniff as TS.
     "mpegts_chunk_mutate": lambda d: len(d) >= 376 and d[0] == 0x47 and d[188] == 0x47,
+    # MPEG-PS: pack header start code (disjoint from nal: 0xBA has bit 7 set).
+    "mpegps_chunk_mutate": lambda d: d[:4] == b"\x00\x00\x01\xba",
     # ADTS / MP3 frames, after an optional ID3v2 tag.
     "adts_chunk_mutate": lambda d: _is_adts(d, id3v2_len(d)),
     "mp3_chunk_mutate": lambda d: _is_mp3(d, id3v2_len(d)),

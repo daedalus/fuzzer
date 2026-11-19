@@ -179,6 +179,14 @@ def _asf() -> bytes:
     return header_obj + data_obj
 
 
+def _mpegps() -> bytes:
+    """MPEG-PS: generated pack + system header + video and private PES + end."""
+    from fuzzer_tool.core.mutations.mpegps import MpegpsMutator
+    from fuzzer_tool.core.rand_pool import RandPool
+
+    return MpegpsMutator()._generate_random_ps(rng=RandPool(seed=1))
+
+
 def _adts() -> bytes:
     """Two minimal ADTS AAC frames (7-byte header + 8-byte payload each).
 
@@ -424,6 +432,7 @@ def _battery() -> list[bytes]:
         _pgs(),
         _h264_annexb(),
         _mpegts(),
+        _mpegps(),
         _ogg(),
         _flv(),
         _asf(),

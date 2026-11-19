@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mpegps_chunk_mutate`** (`core/mutations/mpegps.py`): MPEG Program Stream unit mutator (PES/pack/system header fields, DVD substream ids). `tests/test_mpegps_mutator.py`.
 - **ISOBMFF sample-table op** (`IsobmffMutator._mutate_sample_table`): edge values into `stts`/`stsc`/`stsz`/`stco`/`co64`/`elst` counts and entry fields (elst v0/v1 layouts); entries indexed by bytes present. `tests/test_isobmff_sample_tables.py`.
 - **`--corpus-tokens`** (`core/suffix_automaton.py`): repeated substrings across the corpus join the dictionary before the first exec. Off; unmeasured. `tests/test_suffix_automaton.py`.
 - **`token_repair` op** (`core/bitap.py`): a token found with 1..k byte substitutions is overwritten with the exact token. `tests/test_bitap.py`.

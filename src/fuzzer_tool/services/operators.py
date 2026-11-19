@@ -4693,6 +4693,17 @@ class OperatorEngine:
             mutated = self._mpegts_mutator._generate_random_ts(max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
+    def _op_mpegps_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.mpegps import MpegpsMutator
+
+        if not hasattr(self, "_mpegps_mutator"):
+            self._mpegps_mutator = MpegpsMutator()
+        # mutate() generates a fresh stream when no pack header parses.
+        mutated = self._mpegps_mutator.mutate(
+            bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng
+        )
+        return bytearray(mutated[: self.ctx.max_len])
+
     def _op_adts_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.adts import AdtsMutator
 
