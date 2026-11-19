@@ -2385,6 +2385,10 @@ OptimizerLastEP, after the vectorizers, and adds a call ahead of each vector
 - Not covered: assembly (`.S`, NASM, FFmpeg x86asm) and glibc's SIMD string
   routines (the libc layer already intercepts those).
 
+Cost: a call per vector compare executed, in trace-cmp builds only.
+`fuzzgoat_read_tcg.so`, `cmplog_exercise_tcg` and `tracecmp_target_tcg` have
+0 vector-compare sites (objdump, 2026-11-19), so their exec path is unchanged.
+
 Tests: `tests/test_cmplog_simd_vcmp.py`.
 
 #### Vendored trace-cmp targets (libpng + zlib)
