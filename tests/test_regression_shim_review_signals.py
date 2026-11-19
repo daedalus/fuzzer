@@ -86,7 +86,8 @@ static int mask_blocks_tick(void) {
     int bad = 0;
     for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++) {
         struct sigaction cur;
-        sigaction(__afl_guard_signals[i], NULL, &cur);
+        /* Real disposition: the interposer reports the saved previous owner. */
+        __afl_real_sigaction(__afl_guard_signals[i], NULL, &cur);
         bad += !sigismember(&cur.sa_mask, __AFL_TIMEOUT_SIG);
     }
     printf("unmasked=%d\n", bad);

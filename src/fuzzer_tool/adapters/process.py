@@ -258,6 +258,11 @@ def _limited_argv(argv: list[str]) -> list[str]:
     """
     if not _rss_limit_bytes:
         return argv
+
+    # Unexecutable target: spawn it bare so it fails as a spawn (-2), not as sh's exit 127/126.
+    if not os.access(argv[0], os.X_OK):
+        return argv
+
     script = _LIMIT_SCRIPT.format(kib=_rss_limit_bytes >> 10)
     return [_SH, "-c", script, *argv]
 

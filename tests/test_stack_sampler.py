@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import signal
 import sys
 import threading
@@ -10,6 +11,7 @@ import time
 import pytest
 
 from fuzzer_tool.adapters.stack_sampler import OVERFLOW, StackSampler
+from fuzzer_tool.core.cmplog import _FifoDrain
 
 
 def _frames() -> dict:
@@ -214,6 +216,18 @@ def _burn(seconds: float) -> None:
         pass
 
 
+@pytest.fixture
+def _no_leaked_drains():
+    """Close cmplog drain threads leaked by earlier tests' unclosed Fuzzers.
+
+    They wake every 0.2 s, burn CPU and get sampled (docs/TODO.md).
+    """
+    for obj in gc.get_objects():
+        if type(obj) is _FifoDrain and obj._thread.is_alive():
+            obj.close()
+
+
+@pytest.mark.usefixtures("_no_leaked_drains")
 class TestTick:
     def test_regression_handler_frame_not_leaf(self):
         """The interrupted frame is the leaf, not the SIGPROF handler itself."""

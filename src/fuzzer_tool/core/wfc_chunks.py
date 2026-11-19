@@ -509,15 +509,19 @@ def wfc_reorder_chunks(
         return finish(_mt_repair(fmt, order, work_table, frozen_positions(order), rng))
 
     best: tuple[list[Any], int] | None = None
+    best_key: tuple[int, bool] = (0, False)
     for _ in range(_COLLAPSE_ATTEMPTS):
         cells = _collapse_cells(fmt, chunks, kinds_present, work_table, violated_pair, rng)
         if cells is None:
             break
         order = _map_cells(fmt, chunks, cells, work_table, rng)
         illegal = _illegal_adjacencies(fmt, order, work_table)
-        if best is None or illegal < best[1]:
-            best = (order, illegal)
-        if illegal == 0:
+
+        # Parent order ranks below any legal change: a no-op reorder wastes the exec.
+        key = (illegal, order == chunks)
+        if best is None or key < best_key:
+            best, best_key = (order, illegal), key
+        if key == (0, False):
             break
     if best is None:
         if resample == "hybrid":

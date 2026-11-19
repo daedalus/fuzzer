@@ -60,11 +60,11 @@ def _run_new(chunks, cap, monkeypatch):
     c = CmplogCollector()
     c._fifo = _Fifo(chunks)
     seen = []
-    c._parse_lines = lambda lines: seen.append(lines) or []
+    c._parse_lines = lambda lines, table=(): seen.append(lines) or []
     out = []
     for _ in chunks:
         before = len(seen)
-        c._collect_tokens_fifo()
+        c._collect_tokens_fifo([])
         out.append((seen[-1] if len(seen) > before else [], c._fifo_partial))
     return out
 
@@ -114,12 +114,12 @@ def test_dropped_tail_not_copied(monkeypatch):
     big = b"".join(b"line %d\n" % i for i in range(20_000))
     c = CmplogCollector()
     c._fifo = _Fifo([b"head-", big])
-    c._parse_lines = lambda lines: []
-    c._collect_tokens_fifo()  # carries b"head-"
+    c._parse_lines = lambda lines, table=(): []
+    c._collect_tokens_fifo([])  # carries b"head-"
 
     tracemalloc.start()
     try:
-        c._collect_tokens_fifo()
+        c._collect_tokens_fifo([])
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()

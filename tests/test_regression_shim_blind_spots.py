@@ -238,7 +238,7 @@ def test_midcall_handler_still_gets_strays(so):
 
 @requires_clang
 def test_install_outside_guard_is_real(so):
-    """Falsification: unguarded, sigaction() reaches the kernel."""
-    out = _calls(so, "lib.install_counting(); print(lib.kernel_runs_counting())")
+    """Unguarded, the target handler really runs: chained from the shim, first in the kernel (7bd2d7d)."""
+    out = _calls(so, "lib.install_counting(); print(lib.kernel_runs_counting(), lib.raise_bus())")
 
-    assert out == ["1"]
+    assert out == ["0", "1"]

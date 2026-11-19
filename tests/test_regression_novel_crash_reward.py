@@ -23,6 +23,9 @@ _QUIET = dict(
     _has_new_coverage=False,
     _is_slow=False,
     _is_new_max=False,
+    _is_hw_max=False,
+    _is_ijon_max=False,
+    _is_stack_max=False,
     _is_cmp_progress=False,
     _is_new_valid_coverage=False,
 )

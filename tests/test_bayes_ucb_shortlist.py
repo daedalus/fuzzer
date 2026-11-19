@@ -238,14 +238,17 @@ class TestShortlistMechanics:
 
         rng = random.Random(41)
         scheds = [_loaded_scheduler(150, 0.0, rng) for _ in range(12)]
-        t0 = time.perf_counter()
-        for sched, ops in scheds:
-            _exact_pick(sched, ops)
-        exact = time.perf_counter() - t0
-        t0 = time.perf_counter()
-        for sched, ops in scheds:
-            sched.select_op(ops)
-        shortlisted = time.perf_counter() - t0
+
+        def _timed(pick) -> float:
+            t0 = time.perf_counter()
+            for sched, ops in scheds:
+                pick(sched, ops)
+            return time.perf_counter() - t0
+
+        # Interleaved min-of-5: one preemption under suite load flipped a single shot.
+        runs = [(_timed(_exact_pick), _timed(lambda s, o: s.select_op(o))) for _ in range(5)]
+        exact = min(r[0] for r in runs)
+        shortlisted = min(r[1] for r in runs)
         # Measured ~7x; assert a loose 2x so the test is not a
         # machine-speed flake while still catching a reverted shortlist.
         assert shortlisted * 2 < exact, (shortlisted, exact)
