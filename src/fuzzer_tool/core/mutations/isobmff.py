@@ -169,6 +169,45 @@ def _find_types(boxes: list[Box], types: frozenset[bytes]) -> list[Box]:
     return found
 
 
+# AVCC/HVCC: NAL units in mdat carry a big-endian length prefix whose width
+# is lengthSizeMinusOne + 1 (ISO/IEC 14496-15 5.3.3.1 / 8.3.3.1).
+DEFAULT_NAL_LENGTH_SIZE = 4
+_NAL_CONFIG_SIZE_AT = {b"avcC": 4, b"hvcC": 21}  # config byte holding the field
+_LENGTH_SIZE_MASK = 0x03
+FOURCC_LEN = 4
+
+
+def avcc_length_size(boxes: list[Box]) -> int:
+    """NAL length-prefix width from the first avcC/hvcC in any stsd, default 4.
+
+    stsd payloads aren't parsed into boxes, so the config is found by fourcc.
+    """
+    for stsd in _find_types(boxes, frozenset({b"stsd"})):
+        for tag, at in _NAL_CONFIG_SIZE_AT.items():
+            i = stsd.data.find(tag)
+            j = i + FOURCC_LEN + at
+            if i != -1 and j < len(stsd.data):
+                return (stsd.data[j] & _LENGTH_SIZE_MASK) + 1
+    return DEFAULT_NAL_LENGTH_SIZE
+
+
+def _nal_length_sites(data: bytes, width: int) -> list[tuple[int, int]]:
+    """(offset, length) of each consistent length prefix from the start of *data*.
+
+    Stops at the first zero or overrunning length: past it the bytes are
+    not (or no longer) a length-prefixed NAL run (e.g. interleaved audio).
+    """
+    sites: list[tuple[int, int]] = []
+    pos, n = 0, len(data)
+    while pos + width <= n:
+        length = int.from_bytes(data[pos : pos + width], "big")
+        if length == 0 or pos + width + length > n:
+            break
+        sites.append((pos, length))
+        pos += width + length
+    return sites
+
+
 @dataclass
 class Box:
     """A single ISO-BMFF box.
@@ -393,7 +432,7 @@ class IsobmffMutator:
         if boxes is None or not boxes:
             return self._generate_random_isobmff(max_len=max_len, rng=self._rng)
 
-        op = self._rng.randint(0, 14)
+        op = self._rng.randint(0, 15)
         mutators = [
             self._mutate_box_type,
             self._mutate_box_size,
@@ -410,6 +449,7 @@ class IsobmffMutator:
             self._mutate_free_hoov_confusion,
             self._generate_random_isobmff,
             self._mutate_sample_table,
+            self._mutate_nal_length,
         ]
         result = mutators[op](boxes, max_len)
         if isinstance(result, list):
@@ -606,6 +646,29 @@ class IsobmffMutator:
             return boxes
         data[off : off + width] = value.to_bytes(width, "big")
         box.data = bytes(data)
+        return boxes
+
+    def _mutate_nal_length(self, boxes: list[Box], max_len: int) -> list[Box]:
+        """Set an AVCC/HVCC NAL length prefix inside mdat to an edge value.
+
+        FFmpeg's h264/hevc parsers split mdat samples on these prefixes
+        (`ff_h2645_packet_split`, `is_nalff`); a length past the sample, a
+        zero, or one byte off desyncs the split. Width comes from avcC/hvcC.
+        """
+        width = avcc_length_size(boxes)
+        mdats = [
+            (b, sites)
+            for b in _find_types(boxes, frozenset({b"mdat"}))
+            if (sites := _nal_length_sites(b.data, width))
+        ]
+        if not mdats:
+            return boxes
+
+        box, sites = self._rng.choice(mdats)
+        off, actual = self._rng.choice(sites)
+        mask = (1 << (8 * width)) - 1
+        value = self._rng.choice((0, 1, actual - 1, actual + 1, *EDGE_U32[-1:])) & mask
+        box.data = box.data[:off] + value.to_bytes(width, "big") + box.data[off + width :]
         return boxes
 
     def _swap_boxes(self, boxes: list[Box], max_len: int) -> list[Box]:
