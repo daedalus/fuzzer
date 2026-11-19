@@ -473,6 +473,15 @@ Survey of 1608 files; absence checked by grep over `src/`. Already covered: BWT/
 - Shipped anyway on request: HRRN, Q-learning, tabu, hill climbing op arms (see *A/B the classic op arms*).
 - Skip: crypto ciphers/hashes (hashlib; no inversion value), RMQ/segment/wavelet trees/treap/skip list (Fenwick + numpy cover), kd-tree (NN-descent exists), Graham scan, MFCC, Karnaugh, Manacher, dancing links (set cover exists), quickselect (`np.partition`).
 
+## TheAlgorithms/C port candidates (2026-11-19, TheAlgorithms/C)
+Handover: `docs/handover/handover_thealgorithms_c_survey_2026-11-19.md`. Overlap with the Python survey above folded in.
+- [ ] **Union-find consolidation** — 7 local `find`/`union` copies → one `core/dsu.py` (Hard Rule 1).
+- [ ] **Regex dictionary tokens** (Thompson NFA) — sample matching and near-miss strings; grep pattern inputs.
+- [ ] **Euler-walk seed** (Hierholzer + Chinese postman) — one seed covering every `format_fsm` transition.
+- [ ] **Likelihood-weighted directed distance** (Dijkstra, `−log p` edges) — replaces hop-count BFS in `analyzer_distance`; A/B owed.
+- [ ] **A-law/µ-law PCM mutator** — FFmpeg; mutate in linear domain.
+- [ ] **Kohonen SOM seed map** — report only.
+
 ## Standing notes
 - [ ] **Master test debt (2026-11-16)**: `test_perf_group_read.py::test_real_software_counters_count_own_work` fails in this container; `test_regression_end_of_run_persistence.py` lets the probe's KeyboardInterrupt abort the pytest session (later files never run); 16 failures across `test_regression_cli_fuzzer_kwargs`/`elo_all`/`fuzzer`/`one_fifth`/… also red on master.
 - [ ] **`test_regression_novel_crash_reward.py`: 2 failures on master** — stub `SimpleNamespace` lacks `_is_hw_max` (2026-11-16).
