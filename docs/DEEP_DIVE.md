@@ -2351,6 +2351,41 @@ The trace-cmp shim intercepts:
 - `__sanitizer_cov_trace_cmp{1,2,4,8}` — typed comparison callbacks
 - `__sanitizer_cov_trace_const_cmp{1,2,4,8}` — constant-operand variants
 - `__sanitizer_cov_trace_switch` — switch statement tracing
+- `__afl_trace_vcmp{,_splat}` — vector compares (below)
+
+#### SIMD trace-cmp (vector icmp)
+
+trace-cmp instruments only scalar `icmp`. A SIMD magic check is invisible:
+
+```
+_mm_cmpeq_epi8(v, "ABCD...P")  ->  icmp ne <16 x i8> %v, <65,...,80>
+plain trace-cmp logs:              cmp2(0, movemask)   -- no magic
+```
+
+`tools/llvm/vcmp_pass.cpp` (LLVM pass plugin, `-fpass-plugin=`) runs at
+OptimizerLastEP, after the vectorizers, and adds a call ahead of each vector
+`icmp` on whole-byte integer lanes:
+
+| IR | callback | record |
+|----|----------|--------|
+| `icmp eq <16 x i8> %v, splat(0x42)` | `__afl_trace_vcmp_splat(&v, 0x42, 16, 1)` | one Layer-2 record per lane (`CMP 42 61 1 1 0x<pc>`), lanes capped at 64 |
+| any other vector icmp | `__afl_trace_vcmp(&k, &v, 16, 1)` | one Layer-1 byte record, 64-byte cap; solved (equal) dropped |
+
+- Counted under the lane-width `trace_cmp*` / `trace_const_cmp*` name, so the
+  `cmp_shm.py` segment layout is unchanged.
+- `no_sanitize("coverage")` functions (`__AFL_NO_COV`, the shim) are skipped.
+- Each module gets weak hidden no-op callbacks; the shim's strong ones win.
+  A TU linked without `-D__AFL_CMPLOG=1` (`zlib_read_tracecmp.so`) still runs.
+- `build_vcmp_pass` (`tools/build_targets.sh`) builds the plugin into
+  `$TARGETS/vcmp_pass.so` and appends it to `sancov_trace_flags`, so both
+  `--tracecmp` and `--vendor-tracecmp` builds get it. Needs `llvm-config`
+  matching clang's major and the LLVM dev headers (`llvm-18-dev`); otherwise
+  falls back to `-fno-vectorize -fno-slp-vectorize` (loops scalarized and
+  traced, intrinsics stay dark).
+- Not covered: assembly (`.S`, NASM, FFmpeg x86asm) and glibc's SIMD string
+  routines (the libc layer already intercepts those).
+
+Tests: `tests/test_cmplog_simd_vcmp.py`.
 
 #### Vendored trace-cmp targets (libpng + zlib)
 

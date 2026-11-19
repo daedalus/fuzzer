@@ -6314,6 +6314,68 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
         __afl_cmplog_ints(val, ref[2 + i], width, pc);
 }
 
+/* ── SIMD trace-cmp (tools/llvm/vcmp_pass.cpp) ────────────────────────
+ *
+ * trace-cmp skips vector icmp; the pass spills both operands and calls:
+ *
+ *   splat constant  icmp eq <16 x i8> %v, splat(0x42)
+ *                   -> __afl_trace_vcmp_splat(&v, 0x42, 16, 1)
+ *                   -> one Layer-2 record per lane: CMP 42 61 ... 1 0x<pc>
+ *   anything else   icmp ne <16 x i8> %v, "ABCD...P"
+ *                   -> __afl_trace_vcmp(&k, &v, 16, 1)
+ *                   -> one Layer-1 record: CMP 4142..50 6162..70 -1 16
+ *
+ * Counted under the lane-width trace-cmp name: a new name would resize
+ * the cmp_shm.py segment (same trade as trace_cmpf). Lane widths outside
+ * {1,2,4,8} log but do not count. */
+__AFL_NO_COV static inline int __afl_vcmp_id(uint32_t lane, int base) {
+    switch (lane) {
+    case 1: return base;
+    case 2: return base + 1;
+    case 4: return base + 2;
+    case 8: return base + 3;
+    default: return -1;
+    }
+}
+
+/* memcmp sign without calling memcmp: the shim interposes it. */
+__AFL_NO_COV static inline int __afl_vcmp_sign(const unsigned char *a, const unsigned char *b,
+                                               size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+__AFL_CMP_VIS void __afl_trace_vcmp(const void *a, const void *b, uint32_t n, uint32_t lane) {
+    __AFL_CMP_GATE();
+    int r = __afl_vcmp_sign((const unsigned char *)a, (const unsigned char *)b, n);
+    int id = __afl_vcmp_id(lane, __AFL_CMP_TRACE_CMP1);
+    if (id >= 0) __AFL_CMP_COUNT(id, r == 0);
+
+    __afl_cmplog_bytes(a, b, n, r);
+}
+
+__AFL_CMP_VIS void __afl_trace_vcmp_splat(const void *v, uint64_t c, uint32_t lanes,
+                                          uint32_t lane) {
+    __AFL_CMP_GATE();
+    int id = __afl_vcmp_id(lane, __AFL_CMP_TRACE_CONST_CMP1);
+    if (id < 0) return;
+
+    /* One lane per record, capped like a byte record: <128 x i8> logs 64. */
+    void *pc = __builtin_return_address(0);
+    if (lanes > CMPLOG_MAX_OPERAND) lanes = CMPLOG_MAX_OPERAND;
+    int pruned = __afl_const_pruned(c, lane);
+    int matched = 0;
+    for (uint32_t i = 0; i < lanes; i++) {
+        uint64_t x = 0;
+        memcpy(&x, (const unsigned char *)v + (size_t)i * lane, lane);
+        matched |= x == c;
+        if (!pruned) __afl_cmplog_ints(c, x, lane, pc);
+    }
+
+    __AFL_CMP_COUNT(id, matched);
+}
+
 /* ── Layer 3: single operands (-fsanitize-coverage=trace-div,trace-gep) ─
  *
  * trace-div hands us the runtime divisor of every non-constant division;
