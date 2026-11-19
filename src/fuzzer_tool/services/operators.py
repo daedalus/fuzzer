@@ -4352,6 +4352,21 @@ class OperatorEngine:
             return self._op_declined("token_repair", buf)
         return bytearray(out)
 
+    def _op_token_tile(self, buf, byte_idx, _data):
+        """Tile into dictionary/cmplog tokens; replace/duplicate/delete/swap one tile."""
+        from fuzzer_tool.core.token_tile import token_tile  # noqa: PLC0415
+
+        rng = self.ctx._rng
+        words, cmp_tokens = self.ctx.dictionary, self.ctx.cmplog_tokens
+        tokens = words or cmp_tokens
+        if words and cmp_tokens:
+            tokens = (words, cmp_tokens)[rng.randint(0, 1)]
+        if not tokens:
+            return self._op_declined("token_tile", buf)
+
+        out = token_tile(bytes(buf), tokens, byte_idx, rng, self._max_len())
+        return self._or_declined("token_tile", out, buf)
+
     def _op_punctuation_insert(self, buf, _byte_idx, _data):
         """Insert 1-4 random punctuation characters at a random position.
 
@@ -5069,6 +5084,15 @@ class OperatorEngine:
                 return bytearray(out[: self.ctx.max_len])
         return self._op_declined("tlv_nest_mutate", buf)
 
+    def _op_tlv_reshape(self, buf, _byte_idx, _data):
+        """Regroup sibling TLV frames into a uniform random nesting tree."""
+        from fuzzer_tool.core.mutations.tlv_reshape import tlv_reshape
+
+        out = tlv_reshape(bytes(buf), rng=self.ctx._rng)
+        if out is None:
+            return self._op_declined("tlv_reshape", buf)
+        return bytearray(out[: self.ctx.max_len])
+
     def _op_seq_mutate(self, buf, _byte_idx, data):
         """Reorder, duplicate, drop or splice whole messages (length-framed or delimited)."""
         from fuzzer_tool.core.mutations.seq_mutate import seq_mutate
@@ -5350,6 +5374,13 @@ class OperatorEngine:
 
         out = ascii_float(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
         return self._or_declined("ascii_float", out, buf)
+
+    def _op_inet_forms(self, buf, byte_idx, _data):
+        """Rewrite a dotted-quad IPv4 literal to another inet_aton(3) spelling."""
+        from fuzzer_tool.core.mutations.inet_forms import inet_forms  # noqa: PLC0415
+
+        out = inet_forms(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("inet_forms", out, buf)
 
     def _op_utf16_transcode(self, buf, byte_idx, _data):
         from fuzzer_tool.core.mutations.text_codec import utf16_transcode  # noqa: PLC0415

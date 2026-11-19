@@ -42,6 +42,7 @@ from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cmplog import CmplogRecords, CountsDrain
 from fuzzer_tool.core.crash_cov import SigNovelty
+from fuzzer_tool.core.nb_gate import Outcome as NBOutcome
 from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
 from fuzzer_tool.core.orbit_dedup import run_probe
 from fuzzer_tool.core.ro_rd import classify_operator_name
@@ -222,6 +223,7 @@ class FuzzRound:
         self._classify()
         self._ltl_observe()
         self._scan_coverage()
+        self._note_path()
         self._observe()
         self._gate_explore()
         self._credit_seed()
@@ -232,6 +234,7 @@ class FuzzRound:
         self._judge()
         self._credit_ops()
         self._push_recurrence()
+        self._feed_nb_gate()
 
         if self._is_crash:
             self._queue_variant()
@@ -905,6 +908,23 @@ class FuzzRound:
         path = shm.read_path_hash() if shm is not None else 0
         novelty = Novelty.NEW if self._has_new_coverage else Novelty.NONE
         rec.push(hash((self._data, path)), novelty)
+
+    def _note_path(self) -> None:
+        # --path-freq cms: count this exec against its path (AFLFast n_fuzz).
+        paths = getattr(self._f, "_path_freq", None)
+        if paths is None:
+            return
+        shm = self._scanned_shm
+        if shm is not None:
+            paths.note(shm.read_path_hash())
+
+    def _feed_nb_gate(self) -> None:
+        # --exec-gate nb: learn the outcome of the features this mutant ran with.
+        f = self._f
+        if getattr(f, "_nb_gate", None) is None or f._nb_feats is None:
+            return
+        novel = NBOutcome.NOVEL if self._has_new_coverage else NBOutcome.BORING
+        f._nb_gate.record(f._nb_feats, novel)
 
     def _scan_coverage(self) -> None:
         f = self._f
@@ -2399,6 +2419,7 @@ class FuzzRound:
         self._periodic()
         self._classify()
         self._lite_scan()
+        self._note_path()
         self._observe_ijon()
         self._record_edges()
 

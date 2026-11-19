@@ -24,12 +24,14 @@ from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.cmplog import DedupScope, RecordChannel
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.count_items import CountItems
+from fuzzer_tool.core.count_min import PathCount
 from fuzzer_tool.core.crash_graph import Linkage
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
 from fuzzer_tool.core.edge_density import edges_per_bit
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
+from fuzzer_tool.core.nb_gate import DEFAULT_EPS, DEFAULT_LIFT, GateMode
 from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD
@@ -1094,6 +1096,10 @@ def cmd_fuzz(args):
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
         recurrence=getattr(args, "recurrence", False),
+        path_freq=PathCount(getattr(args, "path_freq", PathCount.FUZZ.value)),
+        exec_gate=GateMode(getattr(args, "exec_gate", GateMode.OFF.value)),
+        exec_gate_lift=getattr(args, "exec_gate_lift", DEFAULT_LIFT),
+        exec_gate_eps=getattr(args, "exec_gate_eps", DEFAULT_EPS),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
         exp4_gamma=getattr(args, "exp4_gamma", 0.1),
         eps_greedy=getattr(args, "eps_greedy", False),
@@ -1570,6 +1576,7 @@ def cmd_import(args):
 
 def _tmin_run(args):
     """Load the grammar (if any) and minimize; None when the crash does not reproduce."""
+    from fuzzer_tool.core.reducer import Prefix
     from fuzzer_tool.services.tmin import tmin
 
     grammar = None
@@ -1614,6 +1621,7 @@ def _tmin_run(args):
         lineage=getattr(args, "lineage", False),
         corpus_dir=getattr(args, "corpus_dir", None),
         also_dir=getattr(args, "also_interesting", None),
+        prefix=Prefix.GALLOP if getattr(args, "gallop_prefix", False) else Prefix.KEEP,
     )
 
 
@@ -2404,6 +2412,71 @@ def cmd_replay(args):
     if stderr.strip():
         print(f"    stderr: {stderr[:200]}")
     return 1
+
+
+# probe-size defaults: repeat range, allowed failing execs, input memory cap.
+PROBE_MAX_REPEAT = 1024
+PROBE_FAILURES = 2
+PROBE_MAX_BYTES = 256 << 20
+
+
+def _probe_failed(returncode: int, stderr: str) -> bool:
+    """Timeout, signal or sanitizer report — same verdicts as ``replay``."""
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    if returncode < 0 or returncode in SIGNAL_CRASH_CODES:
+        return True
+    report = SanitizerReport.parse(stderr)
+    return bool(report and report.is_valid())
+
+
+def cmd_probe_size(args):
+    """Find the seed repeat count at which the target first fails.
+
+    Each failing exec costs a timeout or OOM, so the search is the egg-drop
+    schedule (``core/egg_drop.py``): at most ``--failures`` failing execs,
+    minimal worst-case exec count. Assumes failure is monotone in size.
+    """
+    _validate_target(args.target)
+    if args.failures < 1 or args.max_repeat < 1:
+        print("[-] --failures and --max-repeat must be >= 1", file=sys.stderr)
+        return 1
+
+    seed_path = Path(args.seed)
+    if not seed_path.is_file():
+        print(f"[-] Seed file not found: {args.seed}", file=sys.stderr)
+        return 1
+    seed = seed_path.read_bytes()
+    if not seed:
+        print("[-] Seed is empty: repeating it cannot grow the input", file=sys.stderr)
+        return 1
+    if len(seed) * args.max_repeat > PROBE_MAX_BYTES:
+        print(f"[-] {len(seed)} x {args.max_repeat} exceeds {PROBE_MAX_BYTES} bytes")
+        return 1
+
+    from fuzzer_tool.core.egg_drop import find_threshold
+
+    if _is_shared_object(args.target):
+        run, stop = _so_exec(args.target, args.timeout)
+    else:
+        env = os.environ.copy()
+        run, stop = (lambda data: _replay_exec(args, data, env)), (lambda: None)
+
+    def fails(reps: int) -> bool:
+        return _probe_failed(*run(seed * reps))
+
+    try:
+        res = find_threshold(fails, 1, args.max_repeat, args.failures)
+    finally:
+        stop()
+
+    print(f"[*] {res.probes} execs, {res.failures} failing")
+    if res.threshold is None:
+        print(f"[*] no failure up to {args.max_repeat} repeats")
+        return 1
+    print(f"[+] threshold: {res.threshold} repeats ({res.threshold * len(seed)} bytes)")
+    return 0
 
 
 def _rank_saved_meta(saved, corpus, now, seed_key_for):
@@ -4249,6 +4322,34 @@ def main() -> int:
         help="Recurrence analysis of the (seed, path) exec stream; a limit cycle "
         "without finds forces the saturation gate off "
         "(see core/analyzers/analyzer_recurrence.py).",
+    )
+    fuzz_parser.add_argument(
+        "--path-freq",
+        choices=[m.value for m in PathCount],
+        default=PathCount.FUZZ.value,
+        help="What power schedules read as n_fuzz: the seed's fuzz count (fuzz, default) "
+        "or execs on its path in a fixed 512 KiB count-min sketch (cms, AFLFast).",
+    )
+    fuzz_parser.add_argument(
+        "--exec-gate",
+        choices=[m.value for m in GateMode],
+        default=GateMode.OFF.value,
+        help="Pre-exec mutant gate: nb re-rolls mutants a naive Bayes model over "
+        "(op, position, seed size) scores unlikely to find coverage (see core/nb_gate.py).",
+    )
+    fuzz_parser.add_argument(
+        "--exec-gate-lift",
+        type=float,
+        default=DEFAULT_LIFT,
+        help="--exec-gate nb: skip below this multiple of the base novelty rate "
+        f"(default {DEFAULT_LIFT}).",
+    )
+    fuzz_parser.add_argument(
+        "--exec-gate-eps",
+        type=float,
+        default=DEFAULT_EPS,
+        help="--exec-gate nb: probability of running a mutant the gate would skip "
+        f"(default {DEFAULT_EPS}).",
     )
     fuzz_parser.add_argument(
         "--continuum",
@@ -7908,12 +8009,13 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--hlx-algo",
-        choices=("md5", "sha1", "sha256"),
+        choices=("md5", "sha1", "sha256", "auto"),
         default=None,
         help=(
             "Enable hash_len_ext: seeds are msg plus a valid H(key||msg) digest; "
             "append padding and a suffix and extend the digest (Merkle-Damgard "
-            "length extension). Needs the key length (--hlx-key-len)."
+            "length extension). Needs the key length (--hlx-key-len). 'auto' "
+            "picks the hash whose constants the target binary carries."
         ),
     )
     fuzz_parser.add_argument(
@@ -8068,6 +8170,12 @@ def main() -> int:
         metavar="DIR",
         help="Save other-signature crashes met during reduction here "
         "(default: the crash file's directory)",
+    )
+    tmin_parser.add_argument(
+        "--gallop-prefix",
+        action="store_true",
+        help="Find the shortest crashing prefix first (gallop + bisect, O(log n) runs); "
+        "pays off when the crash needs a short prefix of a long input",
     )
     tmin_parser.set_defaults(func=cmd_tmin)
 
@@ -8475,6 +8583,38 @@ def main() -> int:
         help="Target arguments ({file} placeholder)",
     )
     replay_parser.set_defaults(func=cmd_replay)
+
+    # --- probe-size ---
+    probe_parser = subparsers.add_parser(
+        "probe-size",
+        help="Find the seed repeat count where the target times out/crashes (egg-drop)",
+    )
+    probe_parser.add_argument("target", help="Path to target binary")
+    probe_parser.add_argument("seed", help="Input file repeated to grow the input")
+    probe_parser.add_argument(
+        "--max-repeat",
+        type=int,
+        default=PROBE_MAX_REPEAT,
+        help=f"Largest repeat count probed (default: {PROBE_MAX_REPEAT})",
+    )
+    probe_parser.add_argument(
+        "-k",
+        "--failures",
+        type=int,
+        default=PROBE_FAILURES,
+        help=f"Failing execs (timeouts/OOMs) allowed (default: {PROBE_FAILURES})",
+    )
+    probe_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
+    probe_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    probe_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    probe_parser.set_defaults(func=cmd_probe_size)
 
     # --- verify ---
     verify_parser = subparsers.add_parser(

@@ -56,6 +56,8 @@ _FLAG_GATED = {
     "grimoire",
     "byte_interaction",
     "field_hmm",
+    "path_freq",
+    "nb_gate",
 }
 _ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner", "prng_state_learner"}
 

@@ -68,6 +68,7 @@ from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
 from fuzzer_tool.core.cmplog import CmplogRecords, DedupScope, RecordChannel
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
+from fuzzer_tool.core.count_min import PathCount
 from fuzzer_tool.core.coverage_noise import (
     NOISE_PROBE_VARIANTS,
     AdmissionMonitor,
@@ -98,6 +99,13 @@ from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.metropolis import accept_prob, path_energy
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
+from fuzzer_tool.core.nb_gate import (
+    DEFAULT_EPS,
+    DEFAULT_LIFT,
+    GateMode,
+    pos_bucket,
+    size_bucket,
+)
 from fuzzer_tool.core.novelty_confirm import confirm
 from fuzzer_tool.core.novelty_hist import NoveltyHist
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
@@ -1690,6 +1698,10 @@ class Fuzzer:
         continuum=False,
         pll=False,
         recurrence=False,
+        path_freq=PathCount.FUZZ,
+        exec_gate=GateMode.OFF,
+        exec_gate_lift=DEFAULT_LIFT,
+        exec_gate_eps=DEFAULT_EPS,
         temp_control=False,
         temp_setpoint_fraction=0.5,
         temp_reference_rate=None,
@@ -2766,6 +2778,9 @@ class Fuzzer:
         # token tables). Channel order is stable so corpus discovery does not
         # depend on hash iteration order.
         self._merge_profile_dictionary()
+
+        # Crypto tables in the target's data sections; resolves --hlx-algo auto.
+        self._sniff_crypto()
 
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
@@ -4966,6 +4981,12 @@ class Fuzzer:
         self._use_continuum = continuum
         self._use_pll = pll
         self._use_recurrence = recurrence
+        # --path-freq / --exec-gate: read by the analyzer registry's
+        # path_freq / nb_gate specs.
+        self._path_freq_mode = path_freq
+        self._exec_gate_mode = exec_gate
+        self._exec_gate_lift = exec_gate_lift
+        self._exec_gate_eps = exec_gate_eps
         # Closed-loop temperature control (--temperature-control). Read by
         # the analyzer registry's temperature_control spec, which builds
         # self._temp_controller. Off by default: the sign and magnitude of
@@ -6182,6 +6203,11 @@ class Fuzzer:
         pll = getattr(self, "_pll", None)
         if pll is not None:
             self._state_store.set("pll", pll.save())
+        if getattr(self, "_path_freq", None) is not None:
+            self._state_store.set("path_freq", self._path_freq.to_dict())
+        if getattr(self, "_nb_gate", None) is not None:
+            nb_state = {"gate": self._nb_gate.to_dict(), "ops": self._nb_ops.names()}
+            self._state_store.set("nb_gate", nb_state)
         if self._wfc_enabled:
             self._state_store.set("wfc_tables", WFC_MUTATOR.store.to_dict())
         if self._dict_picker is not None:
@@ -6786,6 +6812,35 @@ class Fuzzer:
         if _is_tcp_seed(self, mutated):
             return mutated
         return self._avoid_pruned(mutated, data)
+
+    def _gated_mutate(self, data: bytes) -> bytes:
+        """--exec-gate nb: ``_dedup_mutate``, re-rolling mutants the gate scores dead.
+
+        Bound over ``_dedup_mutate`` at activation. Same budget as the exec
+        dedup: after ``EXEC_DEDUP_RETRIES`` skips the next mutant runs anyway.
+        """
+        gate = self._nb_gate
+        for _ in range(EXEC_DEDUP_RETRIES):
+            mutated = self._dedup_raw(data)
+            feats = self._nb_feats = self._nb_features(data)
+            if feats is None or gate.admit(feats):
+                return mutated
+
+        mutated = self._dedup_raw(data)
+        self._nb_feats = self._nb_features(data)
+        return mutated
+
+    def _nb_features(self, data: bytes) -> tuple[int, int, int] | None:
+        """(last op, position bucket, size bucket); None when no op drew the mutant."""
+        ops = self._last_ops_used
+        if not ops:
+            return None
+        size = len(data)
+        return (
+            self._nb_ops.of(ops[-1]),
+            pos_bucket(self._last_mutation_offset, size),
+            size_bucket(size),
+        )
 
     def _unmutated_coverage(self, data: bytes) -> tuple[bool, list]:
         """(has new coverage, edge ids) of the run that just executed *data*.
@@ -7619,9 +7674,23 @@ class Fuzzer:
         self._cached_total_fuzz = sum(m.get("fuzz_count", 1) for m in self.seed_meta.values())
         self._cached_cost_samples = sum(cost_samples(m) for m in self.seed_meta.values())
         self._cached_total_edges = sum(m.get("coverage_edges", 0) for m in self.seed_meta.values())
-        n_fuzz_vals = [m.get("fuzz_count", 0) for m in self.seed_meta.values()]
-        self._cached_mean_log_n_fuzz = compute_mean_log_n_fuzz(n_fuzz_vals)
+        self._cached_mean_log_n_fuzz = compute_mean_log_n_fuzz(self._n_fuzz_values())
         self._agg_cache_valid = True
+
+    def _path_n_fuzz(self, seed_key: str, fuzz_level: int) -> int:
+        """AFLFast n_fuzz: execs on the seed's path (--path-freq cms), else fuzz_count."""
+        paths = getattr(self, "_path_freq", None)
+        if paths is None:
+            return fuzz_level
+        path_hash = self._edge_tracker.get_seed_path_hash(seed_key)
+        return paths.count(path_hash) if path_hash else fuzz_level
+
+    def _n_fuzz_values(self):
+        """n_fuzz of every queue entry, for COE's mean log (one batch estimate)."""
+        paths = getattr(self, "_path_freq", None)
+        if paths is None:
+            return [m.get("fuzz_count", 0) for m in self.seed_meta.values()]
+        return paths.counts(self._edge_tracker.seed_path_hash.values()).tolist()
 
     def mean_exec_time(self) -> float:
         """Corpus-wide mean target time per execution, in seconds.
@@ -10470,6 +10539,29 @@ class Fuzzer:
                 "(and -strcmp, -strncmp) to recover them."
             )
 
+    def _sniff_crypto(self) -> None:
+        """Detect hash/cipher constants once; arm hash_len_ext for ``--hlx-algo auto``.
+
+        Runs before the dispatch table is built, so a resolved ``hlx_algo``
+        gates ``hash_len_ext`` like an explicit flag. Example: a target with
+        SHA-256's K table turns ``auto`` into ``sha256``.
+        """
+        from fuzzer_tool.core.crypto_consts import (  # noqa: PLC0415
+            HLX_AUTO,
+            describe,
+            resolve_hlx,
+            sniff_target,
+        )
+
+        self.crypto_algos = sniff_target(self.target)
+        if self.crypto_algos:
+            print(f"[*] Crypto constants: {describe(self.crypto_algos)}")
+
+        if self.hlx_algo != HLX_AUTO:
+            return
+        self.hlx_algo = resolve_hlx(self.hlx_algo, self.crypto_algos)
+        print(f"[*] --hlx-algo auto -> {self.hlx_algo or 'off (no MD5/SHA-1/SHA-256 tables)'}")
+
     def _merge_profile_dictionary(self) -> None:
         """Fold the target profile's token channels into ``self.dictionary``.
 
@@ -11090,8 +11182,8 @@ class Fuzzer:
                     )
                     depth = meta.get("lineage_depth", 0)
                     fuzz_level = meta.get("fuzz_count", 0)
-                    n_fuzz = fuzz_level
                     seed_key = self._seed_key(seed)
+                    n_fuzz = self._path_n_fuzz(seed_key, fuzz_level)
 
                     # Honggfuzz power factors (only when --honggfuzz enabled)
                     hf_kwargs: dict = {}
