@@ -46,8 +46,11 @@ from dataclasses import dataclass, field
 from fuzzer_tool.core.misra_gries import MisraGries
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import RunningMoments
+from fuzzer_tool.core.state_store import restore_atomic
 
 log = logging.getLogger(__name__)
+
+LEARNER_SECTION = "learner_state"  # name in restore errors
 
 BACKTEST_INTERVAL = 500  # run backtest every N recorded transitions
 DEFAULT_SIG_LEN = 2  # bytes of prefix used to cluster inputs into format hypotheses
@@ -302,6 +305,13 @@ class FormatCluster:
         # to attribute, so skip field-hypothesis updates rather than crashing.
         if offset is None:
             return
+
+        # Bytes past the input are no evidence, and indexing them grows the
+        # coverage tree to the span's end (offset 1<<40 -> MemoryError).
+        if input_bytes is not None:
+            if offset >= len(input_bytes):
+                return
+            width = min(width, len(input_bytes) - offset)
 
         existing = self._covering(offset)
 
@@ -1147,6 +1157,10 @@ class FormatLearner:
         return base
 
     def load_state(self, state: dict):
+        """Restore from persistence, or raise ValueError and keep the current model."""
+        restore_atomic(LEARNER_SECTION, state, self._apply_state, self.get_state)
+
+    def _apply_state(self, state: dict):
         """Restore from persistence.
 
         Accepts both the current multi-cluster shape (a `clusters` key)
@@ -1155,7 +1169,8 @@ class FormatLearner:
         """
         self.clusters = {}
         clusters_state = state.get("clusters")
-        if clusters_state:
+        # Key presence, not truthiness: an empty model saves `clusters: {}`.
+        if clusters_state is not None:
             self.sig_len = state.get("sig_len", self.sig_len)
             self.max_formats = state.get("max_formats", self.max_formats)
             for sig, cstate in clusters_state.items():

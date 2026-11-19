@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import gzip
+import pickle
 import tempfile
 import time
 from dataclasses import dataclass
@@ -74,14 +75,6 @@ def _decode(data: bytes) -> Any:
         raise _Skip(corpus.err(exc)) from exc
 
 
-def _decode_dict(data: bytes) -> dict:
-    """Sections are restored from dicts only; other shapes are not inputs."""
-    obj = _decode(data)
-    if not isinstance(obj, dict):
-        raise _Skip("not a dict")
-    return obj
-
-
 def _typed(row: Any) -> bool:
     """Whether *row* matches the ``record_transition`` argument types."""
     if not isinstance(row, tuple) or len(row) != len(_TRANSITION_TYPES):
@@ -136,16 +129,30 @@ def _run_state(data: bytes) -> None:
         StateStore(tmp).load()
 
 
+def _restore_contract(restore: Callable, snapshot: Callable, data: bytes) -> None:
+    """Restore applies fully, or raises ValueError leaving the object unchanged."""
+    obj = _decode(data)
+    before = pickle.dumps(snapshot())
+    try:
+        restore(obj)
+    except ValueError as exc:
+        if pickle.dumps(snapshot()) != before:
+            raise OracleError(f"rejected restore modified the object: {exc}") from exc
+
+
 def _run_markov(data: bytes) -> None:
-    MarkovEnsemble(rng=RandPool(1)).from_dict(_decode_dict(data))
+    m = MarkovEnsemble(rng=RandPool(1))
+    _restore_contract(m.from_dict, m.to_dict, data)
 
 
 def _run_edge_tracker(data: bytes) -> None:
-    EdgeTracker(map_size=TRACKER_MAP_SIZE).from_dict(_decode_dict(data))
+    et = EdgeTracker(map_size=TRACKER_MAP_SIZE)
+    _restore_contract(et.from_dict, et.to_dict, data)
 
 
 def _run_learner_state(data: bytes) -> None:
-    FormatLearner(rng=RandPool(1)).load_state(_decode_dict(data))
+    fl = FormatLearner(rng=RandPool(1))
+    _restore_contract(fl.load_state, fl.get_state, data)
 
 
 def _run_learner(data: bytes) -> None:

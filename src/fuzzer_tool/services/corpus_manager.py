@@ -895,9 +895,9 @@ class CorpusManager:
     def _restore_subsystems(self, state: dict) -> None:
         """Restore edge tracker, regime, checksum/PRNG learners and sensitivity."""
         f = self.f
-        et_data = f._state_store.get("edge_tracker")
-        if et_data is not None:
-            f._edge_tracker.from_dict(et_data)
+        from fuzzer_tool.core.edge_tracker import EDGE_TRACKER_SECTION
+
+        f._state_store.restore(EDGE_TRACKER_SECTION, f._edge_tracker)
         # Restore coverage regime detector state
         regime_data = f._state_store.get("regime")
         if regime_data is not None and hasattr(f, "_regime"):

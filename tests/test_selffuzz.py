@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import pickle
 import struct
 import sys
@@ -192,6 +193,11 @@ class TestCampaign:
 # ── regress ──────────────────────────────────────────────────────────────────
 
 SEED_MAX = (1 << 32) - 1
+# Published test vectors (xxHash spec, MurmurHash3_x86_32 SMHasher).
+XXH32_ABC = 0x32D153FF
+XXH64_TEXT = b"Nobody inspects the spammish repetition"
+XXH64_TEXT_DIGEST = 0xFBCEA83C8A378BF1
+MURMUR3_HELLO = 0x248BFA47
 REGRESS_CASE_BUDGET_S = 2.0
 
 
@@ -225,6 +231,40 @@ _BREAKERS = {
         regress.LineageTree, "subtree_keys", lambda s, k: [k] * (len(s) + 1)
     ),
     "vu64_roundtrip": lambda mp: mp.setattr(regress, "vu64_decode_bytes", lambda _d: (0, 0)),
+    "chi2_sparse": lambda mp: mp.setattr(
+        regress, "drop_sparse_rows", lambda t, min_expected=5.0: list(t)
+    ),
+    "elf_load_segment": lambda mp: mp.setattr(regress, "find_load_segment", _raise(OverflowError)),
+    "grammar_escapes": lambda mp: mp.setattr(regress, "decode_quoted_literal", str.encode),
+    "gf2n_modulus": lambda mp: mp.setattr(
+        regress.gf2_common, "is_irreducible", lambda _p, _q: True
+    ),
+    "bwt_mtf": lambda mp: mp.setattr(regress.structured, "_bwt_inverse", lambda _d, _p: b""),
+    "huffman_decode": lambda mp: mp.setattr(
+        regress.structured, "_huff_decode", lambda _b, _c, _l, n: (bytearray(n), 0)
+    ),
+    "entropy_codes": lambda mp: mp.setattr(
+        regress.structured, "_gamma_decode", lambda _b, n: (bytearray(n), 0)
+    ),
+    "cmp_parse": lambda mp: mp.setattr(
+        regress, "cond_tuples_from_cmplog_text", lambda _lines, cache=None: []
+    ),
+    "parser_truncation": lambda mp: mp.setattr(
+        regress, "_parsers", lambda: [("planted", _raise(IndexError), ())]
+    ),
+    "minhash_lsh": lambda mp: mp.setattr(regress.MinHashLSH, "_unlink", lambda *_a: None),
+    "murmur3_chain": lambda mp: mp.setattr(regress.murmur3, "_FMIX1", regress.murmur3._FMIX1 ^ 1),
+    "xxhash": lambda mp: mp.setattr(regress.hashing, "_P3", regress.hashing._P3 ^ 2),
+    "lz_tokenize": lambda mp: mp.setattr(regress.structured, "_LZ_WINDOW", 0),
+    "modal_value": lambda mp: mp.setattr(regress, "_modal_value", lambda v: v[-1]),
+    "fold_bits": lambda mp: mp.setattr(regress, "_fold_bits", lambda _e, _m: -1),
+    "log_gamma": lambda mp: mp.setattr(regress, "_log_gamma", lambda x: math.lgamma(x) + 2.426),
+    "snoob": lambda mp: mp.setattr(regress, "snoob", lambda x: x),
+    "set_cover": lambda mp: mp.setattr(regress, "min_cover", lambda _s, _z: []),
+    "grammar_cap": lambda mp: mp.setattr(
+        regress.grammar, "GENERATION_EXPANSION_CAP", regress.EXPANSION_CAP + 64
+    ),
+    "sanitizer_stack": lambda mp: mp.setattr(regress.sanitizer, "_PAGE_OFFSET_MASK", 0x1FFF),
 }
 
 
@@ -273,6 +313,13 @@ class TestRegress:
 
         assert regress.run_regression(name, RandPool(SEED_MAX), tmp_path) is None
         assert time.monotonic() - started < REGRESS_CASE_BUDGET_S
+
+    def test_control_hash_references_match_spec_vectors(self):
+        # Hard Rule 46: the oracles' own reference hashes must hit known answers.
+        assert regress._ref_xxh32(b"abc") == XXH32_ABC
+        assert regress._ref_xxh64(XXH64_TEXT) == XXH64_TEXT_DIGEST
+        assert regress._ref_murmur3(b"", 0) == 0
+        assert regress._ref_murmur3(b"hello", 0) == MURMUR3_HELLO
 
 
 # ── driver ───────────────────────────────────────────────────────────────────

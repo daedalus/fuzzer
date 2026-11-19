@@ -686,7 +686,8 @@ Off by default (loading is not: see below). New full seeds (`seeds/`, `irreplace
 ### Self-Fuzzer (`tools/fuzz.py`, `tools/lib/fuzzkit/`)
 - **What**: robustness fuzzer for fuzzer-tool's own parsers, ported from impactguard `tools/fuzz.py`. Finding = uncaught exception, broken output contract, or call > `SLOW_SECONDS` (5 s).
 - **Suites**: `elf` (bytes + path ELF parsers, AFL dictionaries), `state` (corrupt `state.pkl.gz`, mutated markov / edge-tracker / format-learner sections), `learner` (type-valid extreme transition streams), `ops` (every armed op on degenerate buffers via a mock fuzzer; mock `AttributeError`s are skipped as harness gaps), `mutate` (seeded campaign over all of them).
-- **`regress` kind**: 13 past bugs regenerated with random parameters + oracles (table in `regress.py`): format learner (`none_offset`, `mg_flood`, `wide_length`), RandPool (`rp_batch`, `weighted_choice`), diffs (`delta_roundtrip`, `myers_script`), parsers (`dict_quotes`, `tiff_ifd`, `vu64_roundtrip`), state (`bloom_roundtrip`, `edge_prune`, `lineage_cycle`). Each has a breaker test that reintroduces the bug. Add one per fixed bug.
+- **`regress` kind**: 33 past bugs regenerated with random parameters + oracles (table in `regress.py`): format learner (`none_offset`, `mg_flood`, `wide_length`), RandPool (`rp_batch`, `weighted_choice`), diffs (`delta_roundtrip`, `myers_script`), parsers (`dict_quotes`, `tiff_ifd`, `vu64_roundtrip`, `elf_load_segment`, `grammar_escapes`, `cmp_parse`, `parser_truncation`), codecs (`bwt_mtf`, `huffman_decode`, `entropy_codes`), math (`chi2_sparse`, `gf2n_modulus`), state (`bloom_roundtrip`, `edge_prune`, `lineage_cycle`, `minhash_lsh`, `fold_bits`, `set_cover`), hashes vs spec (`murmur3_chain`, `xxhash`), `lz_tokenize`, `modal_value`, `log_gamma`, `snoob`, `grammar_cap`, `sanitizer_stack`. Each has a breaker test that reintroduces the bug. Add one per fixed bug.
+- **Restore contract**: section targets (`markov`, `edge_tracker`, `learner_state`) accept `ValueError` only if the object is unchanged (`restore_atomic`, `core/state_store.py`).
 - **Repro**: every case has its own sub-seed; the campaign seed is printed. Crashes: `~/fuzzing/selffuzz-crashes/<target>__<hash>.<ext>`, re-run with `--replay FILE`. Section inputs decode through the allowlisted state unpickler.
 
 ### Performance
@@ -1346,6 +1347,7 @@ fuzzer-tool fuzz ./target --resume --max-execs 10000
 
 State files:
 - `state.pkl.gz` — **single compressed pickle** via `core/state_store.py:StateStore`; all sections below are stored as named sections inside this one file. Replaces the eleven per-component JSON files. Legacy JSON files are auto-migrated on first `--resume` and cleaned up via `cleanup_legacy()`.
+- **Corrupt state**: an unreadable or malformed file loads as empty. A malformed section (markov, edge tracker) is dropped with a warning via `StateStore.restore`; its object keeps fresh state (`restore_atomic` rolls back). Cost: one extra `to_dict` per restore (~270 ms on a 980-seed tracker, once per resume).
 
   Sections:
   - `corpus` — exec counts, crash sigs, op stats, seed metadata, lineage depths

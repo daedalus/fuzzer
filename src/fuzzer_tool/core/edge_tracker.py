@@ -29,6 +29,7 @@ from itertools import repeat
 from fuzzer_tool.core import fast_json as json
 from fuzzer_tool.core.crc32 import crc32_ieee
 from fuzzer_tool.core.rand_pool import get_default_rand_pool
+from fuzzer_tool.core.state_store import restore_atomic
 
 # SHM generation tags are 8 bits: one wrap window spans 256 resets.
 _GEN_SPAN = 256
@@ -295,6 +296,8 @@ def _sig_matches(sig_a, sig_b) -> int:
 
 
 log = logging.getLogger(__name__)
+
+EDGE_TRACKER_SECTION = "edge_tracker"  # StateStore section name
 
 MORRIS_A = 30
 
@@ -4032,6 +4035,10 @@ class EdgeTracker:
         }
 
     def from_dict(self, data: dict) -> None:
+        """Restore tracker state, or raise ValueError and keep the current one."""
+        restore_atomic(EDGE_TRACKER_SECTION, data, self._apply_dict, self.to_dict)
+
+    def _apply_dict(self, data: dict) -> None:
         """Restore tracker state from a serialized dict."""
         self.map_size = data.get("map_size", self.map_size)
         self._morris_mode = data.get("morris_mode", self._morris_mode)

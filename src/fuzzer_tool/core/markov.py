@@ -14,8 +14,11 @@ from array import array
 
 from fuzzer_tool.core.dirichlet import AlphaMode, dm_alpha
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.state_store import restore_atomic
 
 log = logging.getLogger(__name__)
+
+MARKOV_SECTION = "markov"  # StateStore section name
 
 # Safety cap on number of unique context→counter entries per chain.
 # Prevents unbounded memory growth from high-order ensembles or very
@@ -454,6 +457,10 @@ class MarkovChain:
         }
 
     def from_dict(self, data: dict) -> None:
+        """Restore chain state, or raise ValueError and keep the current one."""
+        restore_atomic(MARKOV_SECTION, data, self._apply_dict, self.to_dict)
+
+    def _apply_dict(self, data: dict) -> None:
         """Restore chain state from a serialized dict."""
         self.order = data.get("order", self.order)
         self.smoothing = data.get("smoothing", self.smoothing)
@@ -739,6 +746,10 @@ class MarkovEnsemble:
         return data
 
     def from_dict(self, data: dict) -> None:
+        """Restore ensemble state, or raise ValueError and keep the current one."""
+        restore_atomic(MARKOV_SECTION, data, self._apply_dict, self.to_dict)
+
+    def _apply_dict(self, data: dict) -> None:
         """Restore ensemble state from a serialized dict.
 
         Handles both legacy single-chain format and ensemble format.

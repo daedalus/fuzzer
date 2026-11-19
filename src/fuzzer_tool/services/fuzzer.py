@@ -95,7 +95,7 @@ from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
 from fuzzer_tool.core.fox_newton import SecantLog
 from fuzzer_tool.core.gravity import GravityModel, SpliceDonor
 from fuzzer_tool.core.hashing import key16
-from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
+from fuzzer_tool.core.markov import MARKOV_SECTION, MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.metropolis import accept_prob, path_energy
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
@@ -3590,12 +3590,8 @@ class Fuzzer:
         # Load persisted Markov state from state store; skip retrain if loaded.
         # --no-markov: neither, so markov_trained stays False and markov_bytes unarmed.
         markov_on = self._markov_switch is Switch.ON
-        markov_data = self._state_store.get("markov") if markov_on else None
-        if markov_data is not None:
-            loaded = True
-            self.markov.from_dict(markov_data)
-        else:
-            loaded = False
+        # A malformed section is dropped with a warning: retrain instead.
+        loaded = markov_on and self._state_store.restore(MARKOV_SECTION, self.markov)
         if self.corpus and not loaded and markov_on:
             self.markov.train_corpus(self.corpus)
         self.markov_trained = self.markov.is_trained()

@@ -31,6 +31,7 @@ import io
 import logging
 import pickle
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -44,6 +45,43 @@ STATE_FILENAME = "state.pkl.gz"
 # Decompressed state cap. Real states are tens of MiB; a few-KiB gzip of
 # zeros inflates to GiBs, so read() without a cap is unbounded memory.
 _MAX_STATE_BYTES = 1 << 30
+
+# What a structurally valid but wrong-shaped payload raises while being built
+# (pickle opcodes on the wrong type) or restored (int("zz"), None.items()).
+MALFORMED_STATE = (
+    TypeError,
+    ValueError,
+    KeyError,
+    AttributeError,
+    IndexError,
+    OverflowError,
+    RecursionError,
+)
+
+
+def restore_atomic(
+    section: str,
+    data: Any,
+    apply: Callable[[dict], None],
+    snapshot: Callable[[], dict],
+) -> None:
+    """Apply *data*, or leave the object unchanged and raise ValueError.
+
+    *snapshot* re-serializes the object: taken first as the rollback point,
+    and again after *apply*, since a restore that cannot be saved back is
+    malformed too. Example: {"seed_edges": None} -> ValueError, tracker intact.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{section} state is {type(data).__name__}, not dict")
+
+    before = snapshot()
+    try:
+        apply(data)
+        snapshot()
+    except MALFORMED_STATE as exc:
+        apply(before)
+        raise ValueError(f"malformed {section} state: {exc}") from exc
+
 
 # Legacy per-component JSON files, kept so an existing corpus directory can
 # be migrated on first load and then cleaned up.
@@ -231,7 +269,14 @@ class StateStore:
                 # was tampered with or written by something else entirely.
                 log.error("refusing to load untrusted state file %s", self.path)
             # MemoryError: an allowlisted bytearray(n) with a hostile n.
-            except (OSError, EOFError, pickle.UnpicklingError, ValueError, MemoryError) as exc:
+            # MALFORMED_STATE: valid opcodes on the wrong type (APPEND on a str).
+            except (
+                OSError,
+                EOFError,
+                pickle.UnpicklingError,
+                MemoryError,
+                *MALFORMED_STATE,
+            ) as exc:
                 log.warning("could not read state file %s: %s", self.path, exc)
             self._data = {}
             return self._data
@@ -279,6 +324,23 @@ class StateStore:
         if not self._loaded:
             self.load()
         return self._data.get(section, default)
+
+    def restore(self, section: str, target: Any) -> bool:
+        """``target.from_dict`` the saved *section*; log and drop it if malformed.
+
+        One corrupt section must not abort a --resume: the target keeps its
+        fresh state and the next save overwrites the bad payload.
+        """
+        data = self.get(section)
+        if data is None:
+            return False
+
+        try:
+            target.from_dict(data)
+        except ValueError as exc:
+            log.warning("dropping %s state from %s: %s", section, self.path, exc)
+            return False
+        return True
 
     # ── writing ──────────────────────────────────────────────────────
 
