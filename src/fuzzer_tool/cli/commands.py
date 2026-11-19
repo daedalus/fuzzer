@@ -2545,7 +2545,7 @@ def cmd_rank(args):
     import time
 
     from fuzzer_tool.adapters.filesystem import load_corpus
-    from fuzzer_tool.core.edge_tracker import EdgeTracker
+    from fuzzer_tool.core.edge_tracker import EDGE_TRACKER_SECTION, EdgeTracker
     from fuzzer_tool.core.elf import estimate_map_size
     from fuzzer_tool.core.state_store import StateStore
 
@@ -2565,9 +2565,7 @@ def cmd_rank(args):
 
     map_size = estimate_map_size(args.target)
     et = EdgeTracker(map_size=map_size)
-    et_data = store.get("edge_tracker")
-    if et_data is not None:
-        et.from_dict(et_data)
+    store.restore(EDGE_TRACKER_SECTION, et)
 
     # Load seed metadata from state store
     from fuzzer_tool.services.corpus_manager import seed_key as seed_key_for
