@@ -133,3 +133,34 @@ class TestIsobmffSniffer:
         # Falsification: arbitrary ASCII at offset 4 is not a box head.
         assert not format_gate_matches("isobmff_chunk_mutate", _box(b"abcd", bytes(8)))
         assert not format_gate_matches("isobmff_chunk_mutate", b"\x00\x00\x00\x10moo")
+
+
+def _engine(rng):
+    """OperatorEngine with only the ctx the format handlers read."""
+    from types import SimpleNamespace
+
+    from fuzzer_tool.services.operators import OperatorEngine
+
+    engine = object.__new__(OperatorEngine)
+    engine._ctx_cache = SimpleNamespace(_rng=rng, max_len=1 << 16)
+    return engine
+
+
+class TestId3Handlers:
+    """The `_op_*` handlers pre-parsed the whole buffer, so an ID3-prefixed
+    seed fell through to the generator and was replaced."""
+
+    def test_regression_mp3_handler_keeps_id3_seed(self):
+        tag, audio = _id3(64), _mp3()
+        channel_op, mode = 4, 2
+        rng = ScriptedRng(randints=[channel_op, mode], choice_idxs=[0])
+        out = _engine(rng)._op_mp3_chunk_mutate(bytearray(tag + audio), 0, b"")
+
+        expected = bytearray(audio)
+        expected[3] = (expected[3] & 0x3F) | (mode << 6)
+        assert bytes(out) == tag + bytes(expected)
+
+    def test_regression_adts_handler_keeps_id3_seed(self):
+        tag, audio = _id3(64), _adts()
+        out = _engine(random.Random(4))._op_adts_chunk_mutate(bytearray(tag + audio), 0, b"")
+        assert bytes(out[: len(tag)]) == tag
