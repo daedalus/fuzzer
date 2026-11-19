@@ -225,6 +225,28 @@ _BREAKERS = {
         regress.LineageTree, "subtree_keys", lambda s, k: [k] * (len(s) + 1)
     ),
     "vu64_roundtrip": lambda mp: mp.setattr(regress, "vu64_decode_bytes", lambda _d: (0, 0)),
+    "chi2_sparse": lambda mp: mp.setattr(
+        regress, "drop_sparse_rows", lambda t, min_expected=5.0: list(t)
+    ),
+    "elf_load_segment": lambda mp: mp.setattr(regress, "find_load_segment", _raise(OverflowError)),
+    "grammar_escapes": lambda mp: mp.setattr(regress, "decode_quoted_literal", str.encode),
+    "gf2n_modulus": lambda mp: mp.setattr(
+        regress.gf2_common, "is_irreducible", lambda _p, _q: True
+    ),
+    "bwt_mtf": lambda mp: mp.setattr(regress.structured, "_bwt_inverse", lambda _d, _p: b""),
+    "huffman_decode": lambda mp: mp.setattr(
+        regress.structured, "_huff_decode", lambda _b, _c, _l, n: (bytearray(n), 0)
+    ),
+    "entropy_codes": lambda mp: mp.setattr(
+        regress.structured, "_gamma_decode", lambda _b, n: (bytearray(n), 0)
+    ),
+    "cmp_parse": lambda mp: mp.setattr(
+        regress, "cond_tuples_from_cmplog_text", lambda _lines, cache=None: []
+    ),
+    "parser_truncation": lambda mp: mp.setattr(
+        regress, "_parsers", lambda: [("planted", _raise(IndexError), ())]
+    ),
+    "minhash_lsh": lambda mp: mp.setattr(regress.MinHashLSH, "_unlink", lambda *_a: None),
 }
 
 

@@ -28,6 +28,7 @@ Example (HTTP request):
 import hashlib
 import logging
 import re
+import string
 from pathlib import Path
 
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
@@ -35,6 +36,7 @@ from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 log = logging.getLogger(__name__)
 
 _SIMPLE_ESCAPES = {"t": 9, "r": 13, "n": 10, "0": 0}
+_HEX_DIGITS = frozenset(string.hexdigits)
 
 
 def decode_quoted_literal(text: str) -> bytes:
@@ -72,13 +74,13 @@ def decode_quoted_literal(text: str) -> bytes:
             out.append(0x5C)
             break
         nxt = text[i + 1]
-        if nxt == "x" and i + 3 < n:
-            try:
-                out.append(int(text[i + 2 : i + 4], 16))
-                i += 4
-                continue
-            except ValueError:
-                pass
+        # Two ASCII hex digits only: int(.., 16) alone also takes "+1", " 1"
+        # and Unicode digits.
+        digits = text[i + 2 : i + 4]
+        if nxt == "x" and len(digits) == 2 and set(digits) <= _HEX_DIGITS:
+            out.append(int(digits, 16))
+            i += 4
+            continue
         if nxt in _SIMPLE_ESCAPES:
             out.append(_SIMPLE_ESCAPES[nxt])
             i += 2
