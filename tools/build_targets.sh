@@ -447,9 +447,41 @@ add_indir_mode() {
 # every library object was compiled.
 sancov_cmp_modes() { echo "trace-cmp trace-div trace-gep"; }
 
-# The -fsanitize-coverage= flag the --tracecmp / --vendor-tracecmp builds use.
+# The -fsanitize-coverage= flag the --tracecmp / --vendor-tracecmp builds use,
+# plus the SIMD trace-cmp flags build_vcmp_pass picked.
 sancov_trace_flags() {
-    echo "-fsanitize-coverage=$(sancov_cmp_modes | tr ' ' ','),trace-pc-guard${NO_JUMP_TABLES:+ $NO_JUMP_TABLES}"
+    echo "-fsanitize-coverage=$(sancov_cmp_modes | tr ' ' ','),trace-pc-guard${NO_JUMP_TABLES:+ $NO_JUMP_TABLES}${VCMP_FLAGS:+ $VCMP_FLAGS}"
+}
+
+# SIMD trace-cmp. trace-cmp skips vector icmp, so `_mm_cmpeq_epi8(v, magic)`
+# never reaches cmplog. tools/llvm/vcmp_pass.cpp logs it (see its header).
+# Without LLVM dev headers, fall back to scalarizing loops so trace-cmp sees
+# them; intrinsics stay dark. The plugin must match clang's LLVM major.
+VCMP_PASS_SRC="tools/llvm/vcmp_pass.cpp"
+VCMP_FALLBACK="-fno-vectorize -fno-slp-vectorize"
+VCMP_FLAGS=""
+
+build_vcmp_pass() {
+    [ -n "$VCMP_FLAGS" ] && return 0
+    VCMP_FLAGS="$VCMP_FALLBACK"
+
+    local major cfg so="$TARGETS/vcmp_pass.so"
+    major=$(clang -dumpversion 2>/dev/null | cut -d. -f1)
+    cfg=$(command -v "llvm-config-$major" || command -v llvm-config) || {
+        warn "llvm-config not found — SIMD trace-cmp falls back to $VCMP_FALLBACK"
+        return 0
+    }
+    if [ "$("$cfg" --version | cut -d. -f1)" != "$major" ]; then
+        warn "$cfg is not LLVM $major — SIMD trace-cmp falls back to $VCMP_FALLBACK"
+        return 0
+    fi
+
+    if ! clang++ $("$cfg" --cxxflags) -shared -fPIC "$VCMP_PASS_SRC" -o "$so" 2>>"$BUILD_LOG"; then
+        warn "vcmp_pass.so build failed (LLVM dev headers?) — falling back to $VCMP_FALLBACK"
+        return 0
+    fi
+    VCMP_FLAGS="-fpass-plugin=$so"
+    ok "vcmp_pass.so (SIMD trace-cmp)"
 }
 
 # True when any mode in the comma list needs the shim's cmplog layer.
@@ -2796,6 +2828,7 @@ build_vendored_tracecmp_targets() {
     # (divisors, GEP indices). They are modifiers, not levels: alone in a
     # -fsanitize-coverage= flag clang emits no call sites for them, so they
     # ride along with trace-pc-guard rather than standing on their own.
+    build_vcmp_pass
     local TRACE_FLAGS
     TRACE_FLAGS=$(sancov_trace_flags)
     # Caller-context edge hashing is default-on inside afl_shim.c, which only
@@ -2994,6 +3027,7 @@ build_tracecmp_targets() {
     # (divisors, GEP indices). They are modifiers, not levels: alone in a
     # -fsanitize-coverage= flag clang emits no call sites for them, so they
     # ride along with trace-pc-guard rather than standing on their own.
+    build_vcmp_pass
     local TRACE_FLAGS
     TRACE_FLAGS=$(sancov_trace_flags)
 
@@ -3111,6 +3145,7 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "cmplog" "$state" "comparison tracing linked into .so targets"
     state=$([ "$WITH_TRACECMP" -eq 1 ] && echo "ON (default)" || echo "OFF")
     printf "  %-20s %-12s %s\n" "tracecmp" "$state" "compiler-IR tracing + no-builtin cmp (clang)"
+    printf '  %-20s %-12s %s\n' "simd-tracecmp" "$state" "vector icmp via tools/llvm/vcmp_pass.cpp (llvm-dev; else -fno-vectorize)"
     state=$([ "$WITH_CLANG_SCOV" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "clang-scov" "$state" "compiler-inserted edge coverage (clang)"
     state=$([ "$WITH_GCC_SCOV" -eq 1 ] && echo "ON" || echo "OFF")
