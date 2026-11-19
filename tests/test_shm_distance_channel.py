@@ -454,3 +454,75 @@ class TestCapacityHeader:
         count, refused = self._run_with_header(distance_so, lambda cap: cap // 4)
         assert refused == 0
         assert count >= 0
+
+
+class TestSiteHits:
+    """Per-slot hit counters (``__AFL_DIST_HITS_ID``) for the likelihood
+    metric: the shim bumps ``counts[slot]`` on every table hit; Python maps
+    slots back to keys and accumulates u32 deltas, so a wrap is not lost."""
+
+    def _hits_env(self, table_shm):
+        from fuzzer_tool.adapters.shm import DistHitsShm
+
+        hits = DistHitsShm(table_shm)
+        os.environ["__AFL_DIST_HITS_ID"] = hits.env_id
+        return hits
+
+    def test_rewrite_changes_only_dist(self):
+        t = DistanceTableShm({0x100: 1.0, 0x200: 2.0})
+        try:
+            before = TestDistanceTableLayout()._read_slots(t)
+            t.rewrite({0x100: 3.5, 0x999: 9.0})  # unknown key ignored
+            after = TestDistanceTableLayout()._read_slots(t)
+            changed = [(a, b) for a, b in zip(before, after, strict=True) if a != b]
+            assert changed == [((0x100, 100, 0xFFFFFFFF), (0x100, 350, 0xFFFFFFFF))]
+        finally:
+            t.cleanup()
+
+    def test_hits_accumulate_across_wrap(self):
+        t = DistanceTableShm({0x100: 1.0})
+        hits = self._hits_env(t)
+        try:
+            slot = t.slot_of(0x100)
+            cell = ctypes.c_uint32.from_address(hits._ptr + 4 + 4 * slot)
+            cell.value = 0xFFFFFFF0
+            assert hits.site_hits() == {0x100: 0xFFFFFFF0}
+            cell.value = 5  # wrapped: +21
+            assert hits.site_hits() == {0x100: 0xFFFFFFF0 + 21}
+        finally:
+            hits.cleanup()
+            t.cleanup()
+            os.environ.pop("__AFL_DIST_HITS_ID", None)
+
+    def _run_twice(self, target, data, tmp_path, header_of=lambda cap: cap):
+        shm, table_shm, td = _setup_channel(target, "target_fn")
+        hits = self._hits_env(table_shm)
+        hdr = ctypes.c_uint32.from_address(hits._ptr)
+        hdr.value = header_of(hdr.value)
+        try:
+            _run_input(target, data, tmp_path)
+            _run_input(target, data, tmp_path)
+            return hits.site_hits(), td.pc_distance_table(), shm.read_distance_tail()[1]
+        finally:
+            hits.cleanup()
+            shm.cleanup()
+            table_shm.cleanup()
+            os.environ.pop("__AFL_DIST_HITS_ID", None)
+
+    def test_shim_counts_every_probe_hit(self, distance_target, tmp_path):
+        site, table, count = self._run_twice(distance_target, b"T\x05", tmp_path)
+        # Two runs; the tail holds the last run's probe hits only.
+        assert sum(site.values()) == 2 * count
+        assert set(site) <= set(table)
+
+    def test_falsification_unreached_sites_stay_zero(self, distance_target, tmp_path):
+        site, _, count = self._run_twice(distance_target, b"X\x05", tmp_path)
+        assert count == 0
+        assert sum(site.values()) == 0
+
+    def test_adversarial_slot_mismatch_refused(self, distance_target, tmp_path):
+        site, _, count = self._run_twice(
+            distance_target, b"T\x05", tmp_path, header_of=lambda cap: cap // 2
+        )
+        assert count >= 1  # distance channel unaffected
+        assert sum(site.values()) == 0

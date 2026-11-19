@@ -130,3 +130,82 @@ def test_adversarial_target_with_successors_stays_zero():
     vals = _values({0: [1], 1: [0, 2], 2: []}, {1})
     assert vals[1] == 0.0 and vals[0] == _h(0.0)
     assert 2 not in vals
+
+
+# ── observed branch counts ──────────────────────────────────────────────
+#
+# p(v|u) = (c(v) + 1) / (sum_{w in succ(u)} c(w) + outdeg(u)), c = observed
+# hits of the successor block (0 when unseen or out of function).
+#
+#   0 -> {1, 2};  1 -> {3*, 5};  2 -> {4*, 6}      (* reaches T via 3/4 -> 7)
+TWIN = {0: [1, 2], 1: [3, 5], 2: [4, 6], 3: [7], 4: [7], 5: [], 6: [], 7: []}
+RARE_1 = {3: 1, 5: 99, 4: 99, 6: 1}
+
+
+def _reweighted(edges, targets, hits) -> dict:
+    td = TargetDistance("/nonexistent", targets=[FUNC_NAME], metric=DistanceMetric.LIKELIHOOD)
+    cfg = _cfg(edges)
+    td.functions = {FUNC_NAME: (cfg.start, cfg.end)}
+    td._func_addrs_sorted = [(cfg.start, FUNC_NAME)]
+    td.target_addrs = set(targets)
+    td._cfgs = {FUNC_NAME: cfg}
+    td._compute_bb_values()
+    td.reweight(hits)
+    return td._bb_value
+
+
+def _bits(c_v: int, c_succ: list[int]) -> float:
+    return -math.log2((c_v + 1) / (sum(c_succ) + len(c_succ)))
+
+
+def test_counts_control_empty_equals_prior():
+    assert _reweighted(TWIN, {7}, {}) == _values(TWIN, {7})
+
+
+def test_counts_falsification_rare_branch_costs_more():
+    prior = _values(TWIN, {7})
+    lk = _reweighted(TWIN, {7}, RARE_1)
+    assert prior[1] == prior[2]
+    assert lk[1] == pytest.approx(_h(_bits(1, [1, 99])))
+    assert lk[2] == pytest.approx(_h(_bits(99, [99, 1])))
+    assert lk[2] < lk[1]
+
+
+def test_counts_unseen_successor_laplace():
+    # Only 1 observed; 2 never: p(1|0) = 11/12, p(2|0) = 1/12.
+    lk = _reweighted(TWIN, {7}, {1: 10})
+    via1 = _bits(10, [10, 0]) + _bits(0, [0, 0])
+    via2 = _bits(0, [10, 0]) + _bits(0, [0, 0])
+    assert lk[0] == pytest.approx(_h(min(via1, via2)))
+
+
+def test_counts_adversarial_single_successor_free():
+    # Counts never price a forced edge.
+    lk = _reweighted(TWIN, {7}, {7: 0, 3: 10**12})
+    assert lk[3] == _h(0.0)
+
+
+def test_counts_adversarial_out_of_function_counts_zero():
+    lk = _reweighted({0: [1, 0x999], 1: []}, {1}, {0x999: 10**6, 1: 0})
+    assert lk[0] == pytest.approx(_h(1.0))
+
+
+def test_counts_clear_cached_lookups():
+    td = TargetDistance("/nonexistent", targets=[FUNC_NAME], metric=DistanceMetric.LIKELIHOOD)
+    cfg = _cfg(TWIN)
+    td.functions = {FUNC_NAME: (cfg.start, cfg.end)}
+    td._func_addrs_sorted = [(cfg.start, FUNC_NAME)]
+    td.target_addrs = {7}
+    td._cfgs = {FUNC_NAME: cfg}
+    td._compute_bb_values()
+    td._build_np_index()
+    before = td.bb_distance(1)
+    td.reweight(RARE_1)
+    assert td.bb_distance(1) != before
+    assert td.seed_distance({(1, 1)}) == pytest.approx(td._bb_value[1])
+
+
+def test_counts_rejected_for_other_metrics():
+    td = TargetDistance("/nonexistent", metric=DistanceMetric.HARMONIC)
+    with pytest.raises(ValueError):
+        td.reweight({})

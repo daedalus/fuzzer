@@ -479,7 +479,7 @@ Handover: `docs/handover/handover_thealgorithms_c_survey_2026-11-19.md`. Overlap
 - [ ] **Regex dictionary tokens** (Thompson NFA) — sample matching and near-miss strings; grep pattern inputs.
 - [x] **Euler-walk seed** (Hierholzer + Chinese postman) — `core/euler_walk.py`, `genseed --fsm F --euler-seed` (2026-11-19).
 - [x] **Likelihood-weighted directed distance** — `--distance-metric likelihood` (2026-11-19); A/B in ledger.
-- [ ] **Likelihood metric: observed branch counts** — p is `1/outdeg` today. Needs per-static-edge hit counts (guard index → block map, counts in the shim) to weight rare branches by data.
+- [x] **Likelihood metric: observed branch counts** — shim per-slot counters (`DistHitsShm`) → `services/branch_counts.py` → `reweight` every 5k execs (2026-11-19). Block hits, not edge hits: p(v|u) uses c(v), exact when v has one predecessor.
 - [ ] **A-law/µ-law PCM mutator** — FFmpeg; mutate in linear domain.
 - [ ] **Kohonen SOM seed map** — report only.
 

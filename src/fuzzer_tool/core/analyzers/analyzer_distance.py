@@ -63,12 +63,15 @@ SelectFuzz, IEEE S&P '23) replaces the in-function CFG distance::
 Optional likelihood metric (``DistanceMetric.LIKELIHOOD``): the harmonic
 CFG distance with each edge ``u -> v`` costing ``-log2 p(v|u)`` bits instead
 of one hop, via reverse Dijkstra. p is the Laplace prior ``1/outdeg(u)``
-(no runtime branch counts reach the static CFG yet). Unlike REACH_PROB
-(all paths averaged) this scores the single most probable path.
+until hits arrive: ``reweight`` takes observed block hits (the shim's
+per-site counters, ``services/branch_counts.py``) and uses
+``(c(v) + 1) / (sum c(w) + outdeg(u))``. Unlike REACH_PROB (all paths
+averaged) this scores the single most probable path.
 """
 
 import bisect
 import enum
+import functools
 import heapq
 import logging
 import math
@@ -370,23 +373,30 @@ def _reach_values(cfg: FunctionCFG, tbbs: set[int]) -> dict[int, float]:
     return {b: max(0.0, -math.log2(pb)) for b, pb in _reach_probs(cfg, tbbs).items() if pb > 0.0}
 
 
-def _branch_bits(cfg: FunctionCFG) -> dict[int, float]:
-    """Cost in bits of leaving each block: -log2 p, p = 1/outdeg (Laplace prior).
+def _branch_bits(cfg: FunctionCFG, hits: dict[int, int]) -> dict[tuple[int, int], float]:
+    """Cost in bits of each in-function edge: -log2 p(v|u).
 
-    Distinct successors only; out-of-function ones count. A fall-through
-    costs 0, a 4-way switch 2.
+    p(v|u) = (c(v) + 1) / (sum c(w) + outdeg(u)) over u's distinct
+    successors w; c = observed hits of the successor block, 0 when unseen
+    or out of function. No hits: p = 1/outdeg (a fall-through costs 0, a
+    4-way switch 2).
     """
-    return {
-        b: math.log2(len(set(blk.successors))) if blk.successors else 0.0
-        for b, blk in cfg.blocks.items()
-    }
+    blocks = cfg.blocks
+    bits: dict[tuple[int, int], float] = {}
+    for u, blk in blocks.items():
+        succ = set(blk.successors)
+        counts = {v: hits.get(v, 0) if v in blocks else 0 for v in succ}
+        total = sum(counts.values()) + len(succ)
+        for v, c in counts.items():
+            bits[(u, v)] = math.log2(total / (c + 1))
+    return bits
 
 
-def _harmonic_dijkstra(preds: dict, tbbs: set[int], bits: dict[int, float]):
+def _harmonic_dijkstra(preds: dict, tbbs: set[int], bits: dict[tuple[int, int], float]):
     """Reverse Dijkstra per target: per block, sum of 1/(1+d) and target count.
 
-    Edge pred -> cur costs ``bits[pred]``, so d(b, t) is the cheapest forward
-    path in bits. Same aggregation as ``_harmonic_bfs``.
+    Edge pred -> cur costs ``bits[(pred, cur)]``, so d(b, t) is the cheapest
+    forward path in bits. Same aggregation as ``_harmonic_bfs``.
     """
     sum_inv: dict[int, float] = {}
     count: dict[int, int] = {}
@@ -402,17 +412,21 @@ def _harmonic_dijkstra(preds: dict, tbbs: set[int], bits: dict[int, float]):
             count[cur] = count.get(cur, 0) + 1
             for pred in preds.get(cur, ()):
                 if pred not in done:
-                    heapq.heappush(heap, (d + bits[pred], pred))
+                    heapq.heappush(heap, (d + bits[(pred, cur)], pred))
     return sum_inv, count
 
 
-def _likelihood_values(cfg: FunctionCFG, tbbs: set[int]) -> dict[int, float]:
+def _likelihood_values(
+    cfg: FunctionCFG, tbbs: set[int], hits: dict[int, int] | None = None
+) -> dict[int, float]:
     """AFLGo harmonic value with edges weighted by -log2 p instead of 1 hop.
 
     Shortest path = most probable path: a rare branch one hop away costs
-    more than a long straight line.
+    more than a long straight line. *hits*: observed block hits (see
+    ``TargetDistance.reweight``).
     """
-    sum_inv, count = _harmonic_dijkstra(predecessors(cfg), tbbs, _branch_bits(cfg))
+    bits = _branch_bits(cfg, hits or {})
+    sum_inv, count = _harmonic_dijkstra(predecessors(cfg), tbbs, bits)
     return {b: count[b] / sum_inv[b] for b in count}
 
 
@@ -1085,6 +1099,41 @@ class TargetDistance:
             if bs in self._bb_value and bs not in tbbs:
                 self._bb_value[bs] *= 1.0 - self._gate_bonus
         self._bb_gate.update(gates)
+
+    def reweight(self, block_hits: dict[int, int]) -> None:
+        """Recompute LIKELIHOOD block values from observed block hits.
+
+        *block_hits*: block start -> hits. Clears every derived lookup
+        (per-address cache, numpy index) so seed distances follow.
+
+        Raises:
+            ValueError: the metric is not LIKELIHOOD (counts mean nothing
+                to the other valuers).
+        """
+        if self._metric is not DistanceMetric.LIKELIHOOD:
+            raise ValueError(f"reweight needs metric likelihood, not {self._metric.value}")
+
+        self._block_values = functools.partial(_likelihood_values, hits=block_hits)
+        self._bb_value.clear()
+        self._target_bb_ranges.clear()
+        self._bb_gate.clear()
+        self._compute_bb_values()
+
+        self._bb_distances.clear()
+        self._bb_starts_np = self._bb_ends_np = self._bb_dists_np = None
+        if self._func_starts_np is not None:
+            self._build_np_index()
+
+    def site_blocks(self) -> dict[int, int]:
+        """Probe key -> start of the CFG block holding that sancov call."""
+        out: dict[int, int] = {}
+        for key, call in self._trace_sites():
+            func = self._addr_to_function(call)
+            cfg = self._cfgs.get(func) if func else None
+            blk = cfg.block_containing(call) if cfg else None
+            if blk is not None:
+                out[key] = blk.start
+        return out
 
     def bb_distance(self, bb_addr: int) -> float:
         """Get the distance of an address to the nearest target.

@@ -639,6 +639,7 @@ def _activate_distance(f: FuzzerLike) -> None:
         verdicts=getattr(f, "_dead_verdicts", None),
     )
     f._dist_table_shm = None
+    f._branch_counts = None
     if f._distance.load():
         for addr in sorted(f._distance.dead_targets):
             print(f"[!] --prove-dead: target {addr:#x} is statically unreachable; dropped")
@@ -672,6 +673,7 @@ def _activate_distance(f: FuzzerLike) -> None:
                     )
                     if plan is not None:
                         _attach_waypoints(f, plan)
+                    _attach_branch_counts(f)
             except OSError as e:
                 log.warning("Distance table upload failed: %s", e)
     else:
@@ -708,9 +710,30 @@ def _attach_waypoints(f: FuzzerLike, plan) -> None:
     print(f"[*] Waypoints: {plan.n_stages} stages, {len(plan.node_of)} probe sites")
 
 
+def _attach_branch_counts(f: FuzzerLike) -> None:
+    """--distance-metric likelihood: per-slot hit counters re-weight p(v|u)."""
+    import os
+
+    from fuzzer_tool.adapters.shm import DistHitsShm
+    from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric
+    from fuzzer_tool.services.branch_counts import BranchCounts
+
+    if getattr(f, "_distance_metric", None) is not DistanceMetric.LIKELIHOOD:
+        return
+    try:
+        hits = DistHitsShm(f._dist_table_shm)
+    except OSError as e:
+        log.warning("likelihood: site counter upload failed: %s", e)
+        return
+    os.environ["__AFL_DIST_HITS_ID"] = hits.env_id
+    f._branch_counts = BranchCounts(f._distance, f._dist_table_shm, hits)
+    print("[*] Likelihood metric: observed branch counts on")
+
+
 def _deactivate_distance(f: FuzzerLike) -> None:
     f._distance = None
     f._dist_table_shm = None
+    f._branch_counts = None
     f._waypoints = None
     f._waypoint_bmp = None
 
