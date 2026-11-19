@@ -7854,7 +7854,8 @@ def main() -> int:
         action="store_true",
         help=(
             "Enable line_code mutation operator (Manchester, BMC, NRZI, Gray, "
-            "HDLC/USB bit stuffing, 4B5B, PPP/SLIP/COBS). Off by default."
+            "HDLC/USB bit stuffing, 4B5B, PPP/SLIP/COBS, FM/MFM, RLL(2,7), 8b/10b). "
+            "Off by default."
         ),
     )
     fuzz_parser.add_argument(

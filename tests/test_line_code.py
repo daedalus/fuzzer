@@ -5,6 +5,8 @@ each code's definition -- never from the module's lookup tables. Draws are
 scripted (Hard Rule 39).
 """
 
+import re
+
 import pytest
 
 from fuzzer_tool.core.mutations.line_code import CODECS, LINE_MODES, line_code
@@ -109,6 +111,70 @@ def _ref_cobs(data: bytes) -> bytes:
     return bytes(out)
 
 
+def _ref_fm(data: bytes) -> bytes:
+    """FM: clock 1 before every data bit."""
+    return _pack([h for b in _bits(data) for h in (1, b)])
+
+
+def _ref_mfm(data: bytes) -> bytes:
+    """MFM: clock 1 only between two data 0s; prior bit starts at 0."""
+    prev, out = 0, []
+    for b in _bits(data):
+        out += [int(not (prev or b)), b]
+        prev = b
+    return _pack(out)
+
+
+# IBM RLL(2,7) (US 4,115,768 table), data word -> code word.
+_RLL27 = {
+    "10": "0100", "11": "1000", "000": "000100", "010": "100100",
+    "011": "001000", "0010": "00100100", "0011": "00001000",
+}  # fmt: skip
+
+
+def _ref_rll27(data: bytes) -> bytes:
+    """Greedy word parse; the tail word is completed with data zeros."""
+    bits, word, out = "".join(map(str, _bits(data))), "", ""
+    for c in bits + "00":
+        word += c
+        if word in _RLL27:
+            out += _RLL27[word]
+            word = ""
+    return _pack([int(c) for c in out])
+
+
+# 8b/10b (Widmer-Franaszek), (RD-, RD+) per sub-block, abcdei / fghj.
+_5B6B = (
+    ("100111", "011000"), ("011101", "100010"), ("101101", "010010"), ("110001",) * 2,
+    ("110101", "001010"), ("101001",) * 2, ("011001",) * 2, ("111000", "000111"),
+    ("111001", "000110"), ("100101",) * 2, ("010101",) * 2, ("110100",) * 2,
+    ("001101",) * 2, ("101100",) * 2, ("011100",) * 2, ("010111", "101000"),
+    ("011011", "100100"), ("100011",) * 2, ("010011",) * 2, ("110010",) * 2,
+    ("001011",) * 2, ("101010",) * 2, ("011010",) * 2, ("111010", "000101"),
+    ("110011", "001100"), ("100110",) * 2, ("010110",) * 2, ("110110", "001001"),
+    ("001110",) * 2, ("101110", "010001"), ("011110", "100001"), ("101011", "010100"),
+)  # fmt: skip
+_3B4B = (
+    ("1011", "0100"), ("1001",) * 2, ("0101",) * 2, ("1100", "0011"),
+    ("1101", "0010"), ("1010",) * 2, ("0110",) * 2, ("1110", "0001"),
+)  # fmt: skip
+_A7 = ("0111", "1000")
+
+
+def _ref_8b10b(data: bytes) -> bytes:
+    """RD starts negative; it flips after every unbalanced sub-block."""
+    rd, out = 0, ""
+    for b in data:
+        x, y = b & 0x1F, b >> 5
+        six = _5B6B[x][rd]
+        rd ^= six.count("1") != 3
+        alt = y == 7 and ((rd == 0 and x in (17, 18, 20)) or (rd == 1 and x in (11, 13, 14)))
+        four = _A7[rd] if alt else _3B4B[y][rd]
+        rd ^= four.count("1") != 2
+        out += six + four
+    return _pack([int(c) for c in out])
+
+
 _REFS = {
     "man_ieee": lambda d: _ref_man(d, (0, 1)),
     "man_thomas": lambda d: _ref_man(d, (1, 0)),
@@ -122,6 +188,10 @@ _REFS = {
     "ppp": _ref_ppp,
     "slip": _ref_slip,
     "cobs": _ref_cobs,
+    "fm": _ref_fm,
+    "mfm": _ref_mfm,
+    "rll27": _ref_rll27,
+    "8b10b": _ref_8b10b,
 }
 
 _SPANS = (b"", b"\x00", b"\xff", b"\x7e\x7d\xc0\xdb", bytes(range(64)), b"\xff" * 300)
@@ -198,6 +268,42 @@ def test_bad_symbols_break_decoding(name):
     for bad in _CODEC[name].bad:
         out, _ = _CODEC[name].dec(coded + bad + coded)
         assert len(out) < 2 * len(span), bad
+
+
+# Control (Hard Rule 46): the 8b/10b oracle must hold the code's own
+# invariants -- run length <= 5, every symbol 4-6 ones, RD swings +-1.
+def test_control_8b10b_reference_invariants():
+    span = bytes(range(256)) * 2
+    bits = "".join(map(str, _bits(_ref_8b10b(span))))
+    assert max(len(r) for r in re.findall("0+|1+", bits)) <= 5
+
+    rd = -1
+    for i in range(0, len(bits), 10):
+        rd += 2 * bits[i : i + 10].count("1") - 10
+        assert rd in (-1, 1)
+
+
+@pytest.mark.parametrize("name", ["rll27", "mfm"])
+def test_rll_constraints_hold(name):
+    """(d, k): MFM is RLL(1,3), IBM RLL(2,7); padding tail excluded."""
+    d, k = {"mfm": (1, 3), "rll27": (2, 7)}[name]
+    span = bytes(range(256))
+    bits = "".join(map(str, _bits(_CODEC[name].enc(span)))).rstrip("0")
+    gaps = [len(g) for g in bits.strip("0").split("1")[1:-1]]
+    assert d <= min(gaps)
+    assert max(gaps) <= k
+
+
+def test_mfm_decode_stops_at_sync_mark():
+    # 0x4489: the A1 sync mark, MFM with one clock bit missing.
+    coded = _REFS["mfm"](b"hi")
+    assert _CODEC["mfm"].dec(coded + b"\x44\x89" + coded) == (b"hi", len(coded))
+
+
+def test_8b10b_decode_rejects_wrong_disparity():
+    """D.0.0 at RD+ is valid code but invalid at the starting RD-."""
+    rd_plus = _pack([int(c) for c in _5B6B[0][1] + _3B4B[0][0]])
+    assert _CODEC["8b10b"].dec(rd_plus) == (b"", 0)
 
 
 @pytest.mark.parametrize("name", ["nrzi", "gray"])
