@@ -52,12 +52,34 @@ pinned unit-test case, is caught.
 |              |   (test_regression_parser_truncation.py)                      |
 | minhash_lsh  | stale band entries after re-add / remove                      |
 |              |   (test_regression_minhash_stale_buckets.py)                  |
+| murmur3_chain | inlined mix/finalizer must stay bit-exact (scalar + numpy)   |
+|              |   (test_regression_murmur3_inlined.py)                        |
+| xxhash       | XXH32 / XXH64 inlining must match the spec digests            |
+|              |   (test_regression_xxh32_iter_unpack.py, _xxh64_inlined.py)   |
+| lz_tokenize  | hash-chain LZ parse must equal the naive greedy parse         |
+|              |   (test_regression_lz_tokenize_speed.py)                      |
+| modal_value  | first-seen pair adopted instead of the plurality              |
+|              |   (test_regression_modal_value_plurality.py)                  |
+| fold_bits    | numpy edge fold must equal the per-edge OR                    |
+|              |   (test_regression_liveness_fold_bits.py)                     |
+| log_gamma    | spurious log(2**3.5) term in the Lanczos fallback             |
+|              |   (test_regression_log_gamma_constant.py)                     |
+| snoob        | snoob_prev ran ~2^63 iterations on a high bit                 |
+|              |   (test_regression_hackers_delight.py)                        |
+| set_cover    | bitset rewrite must stay an exact, irredundant cover          |
+|              |   (test_regression_set_cover_bitset.py)                       |
+| grammar_cap  | empty-literal repeat chains grew as R^depth                   |
+|              |   (test_regression_grammar_zero_byte_budget.py)               |
+| sanitizer_stack | echoed text parsed; alloc stack in frames; XOR hash        |
+|              |   (test_regression_sanitizer_parse.py)                        |
 """
 
 from __future__ import annotations
 
 import functools
 import inspect
+import logging
+import math
 import pkgutil
 import struct
 from importlib import import_module
@@ -66,7 +88,7 @@ from typing import TYPE_CHECKING
 import fuzzer_tool.core.mutations as mutations_pkg
 from fuzzer_tool.adapters.filesystem import apply_delta_v2, compute_delta_v2
 from fuzzer_tool.adapters.track_parser import cond_tuples_from_cmplog_text
-from fuzzer_tool.core import gf2_common, similarity
+from fuzzer_tool.core import gf2_common, grammar, hashing, sanitizer, similarity
 from fuzzer_tool.core.analyzers import analyzer_format_learner as afl
 from fuzzer_tool.core.analyzers.analyzer_format_learner import (
     FieldHypothesis,
@@ -75,15 +97,17 @@ from fuzzer_tool.core.analyzers.analyzer_format_learner import (
     TimelineEntry,
 )
 from fuzzer_tool.core.bloom import BloomFilter
-from fuzzer_tool.core.chi_squared import COCHRAN_MIN_EXPECTED, drop_sparse_rows
+from fuzzer_tool.core.chi_squared import COCHRAN_MIN_EXPECTED, _log_gamma, drop_sparse_rows
 from fuzzer_tool.core.edge_tracker import EdgeTracker, MinHashLSH
 from fuzzer_tool.core.elf import find_load_segment
 from fuzzer_tool.core.format_seed_generator import generate_seeds
 from fuzzer_tool.core.grammar import _SIMPLE_ESCAPES as GRAMMAR_SIMPLE
 from fuzzer_tool.core.grammar import decode_quoted_literal
+from fuzzer_tool.core.int_checksum_solver import _modal_value
 from fuzzer_tool.core.lineage import LineageTree
-from fuzzer_tool.core.mutations import structured
+from fuzzer_tool.core.mutations import lz4, murmur3, structured
 from fuzzer_tool.core.mutations.generic import parse_dict_line
+from fuzzer_tool.core.mutations.hackers_delight import snoob, snoob_prev
 from fuzzer_tool.core.mutations.tiff import TiffMutator, parse_tiff
 from fuzzer_tool.core.mutations.vu64 import (
     vu64_decode_bytes,
@@ -91,11 +115,13 @@ from fuzzer_tool.core.mutations.vu64 import (
     vu64_encoded_len,
 )
 from fuzzer_tool.core.rand_pool import _POOL_ENTRIES, RandPool
+from fuzzer_tool.core.set_cover import min_cover
 from fuzzer_tool.core.similarity import (
     _levenshtein_align_numpy,
     configure_diff_limits,
     levenshtein_align,
 )
+from fuzzer_tool.services.operators import _fold_bits
 
 from .corpus import err
 
@@ -180,6 +206,39 @@ LSH_BANDS = 2
 LSH_STEPS = 40
 LSH_KEYS = 12
 LSH_VALUES = 3
+M32 = (1 << 32) - 1
+M64 = (1 << 64) - 1
+# murmur3_chain switches to numpy at 64 blocks (256 B); cross it.
+MURMUR_PREFIX_MAX = 40
+MURMUR_LEN_MAX = 400
+XXH_DATA_MAX = 300
+# LZ: naive parse is O(n^2 * max_match); keep blocks short.
+LZ_WINDOW = 32768
+LZ_MATCH_MAX = 32
+LZ_BLOCK_MAX = 120
+MODAL_TOP_MAX = 12
+MODAL_RANGE = 50
+FOLD_ID_BITS = 63
+FOLD_EDGES_MAX = 50
+FOLD_MAP_SIZES = (1, 7, 64, 65536)
+LGAMMA_X_MIN = 1e-3
+LGAMMA_X_MAX = 1000.0
+LGAMMA_N_MAX = 170
+LGAMMA_TOL = 1e-9
+SNOOB_BITS = 80
+SNOOB_SCAN_MAX = 4096
+COVER_EDGES_MAX = 80
+COVER_SEED_EDGES = 10
+COVER_SEEDS_MAX = 40
+# Grammar: captured at import so a patched cap is caught, not followed.
+EXPANSION_CAP = grammar.GENERATION_EXPANSION_CAP
+GRAMMAR_REPEAT_MIN = 8
+GRAMMAR_REPEAT_MAX = 32
+GRAMMAR_MAX_LENS = (0, 1, 16, 64)
+ASAN_DEPTH_MAX = 8
+ASAN_PC_BITS = 47
+ASAN_SHIFT_PAGES = 1 << 16
+ASAN_ECHO = "log: 'AddressSanitizer: heap-buffer-overflow'\n"
 
 
 def _flood_cap() -> int:
@@ -978,6 +1037,358 @@ def _reg_minhash_lsh(rng: RandPool, _workdir: Path) -> str | None:
     return None
 
 
+# ── hashes vs spec references ────────────────────────────────────────────────
+
+
+def _rotl(x: int, r: int, bits: int) -> int:
+    mask = (1 << bits) - 1
+    return ((x << r) | (x >> (bits - r))) & mask
+
+
+def _ref_murmur3(data: bytes, seed: int) -> int:
+    """MurmurHash3_x86_32, straight from the reference algorithm."""
+    c1, c2, m = 0xCC9E2D51, 0x1B873593, M32
+    h = seed & m
+    n = len(data)
+    tail_at = n - n % 4
+    for i in range(0, tail_at, 4):
+        k = (int.from_bytes(data[i : i + 4], "little") * c1) & m
+        h ^= (_rotl(k, 15, 32) * c2) & m
+        h = (_rotl(h, 13, 32) * 5 + 0xE6546B64) & m
+
+    tail = data[tail_at:]
+    if tail:
+        k = int.from_bytes(tail, "little")
+        h ^= (_rotl((k * c1) & m, 15, 32) * c2) & m
+
+    h ^= n
+    h ^= h >> 16
+    h = (h * 0x85EBCA6B) & m
+    h ^= h >> 13
+    h = (h * 0xC2B2AE35) & m
+    return h ^ (h >> 16)
+
+
+def _ref_xxh32(data: bytes, seed: int = 0) -> int:
+    """XXH32 per the xxHash spec."""
+    p1, p2, p3, p4, p5 = 2654435761, 2246822519, 3266489917, 668265263, 374761393
+    m, n, i = M32, len(data), 0
+    if n >= 16:
+        v = [(seed + p1 + p2) & m, (seed + p2) & m, seed & m, (seed - p1) & m]
+        while i + 16 <= n:
+            for j in range(4):
+                lane = int.from_bytes(data[i + 4 * j : i + 4 * j + 4], "little")
+                v[j] = (_rotl((v[j] + lane * p2) & m, 13, 32) * p1) & m
+            i += 16
+        h = sum(_rotl(x, r, 32) for x, r in zip(v, (1, 7, 12, 18), strict=True)) & m
+    else:
+        h = (seed + p5) & m
+
+    h = (h + n) & m
+    while i + 4 <= n:
+        h = (h + int.from_bytes(data[i : i + 4], "little") * p3) & m
+        h = (_rotl(h, 17, 32) * p4) & m
+        i += 4
+    for b in data[i:]:
+        h = (_rotl((h + b * p5) & m, 11, 32) * p1) & m
+
+    h = ((h ^ (h >> 15)) * p2) & m
+    h = ((h ^ (h >> 13)) * p3) & m
+    return h ^ (h >> 16)
+
+
+_X64 = (
+    0x9E3779B185EBCA87,
+    0xC2B2AE3D27D4EB4F,
+    0x165667B19E3779F9,
+    0x85EBCA77C2B2AE63,
+    0x27D4EB2F165667C5,
+)
+
+
+def _x64_round(acc: int, lane: int) -> int:
+    p1, p2 = _X64[0], _X64[1]
+    return (_rotl((acc + lane * p2) & M64, 31, 64) * p1) & M64
+
+
+def _ref_xxh64(data: bytes, seed: int = 0) -> int:
+    """XXH64 per the xxHash spec."""
+    p1, p2, p3, p4, p5 = _X64
+    m, n, i = M64, len(data), 0
+    if n >= 32:
+        v = [(seed + p1 + p2) & m, (seed + p2) & m, seed & m, (seed - p1) & m]
+        while i + 32 <= n:
+            for j in range(4):
+                v[j] = _x64_round(v[j], int.from_bytes(data[i + 8 * j : i + 8 * j + 8], "little"))
+            i += 32
+        h = sum(_rotl(x, r, 64) for x, r in zip(v, (1, 7, 12, 18), strict=True)) & m
+        for x in v:
+            h = ((h ^ _x64_round(0, x)) * p1 + p4) & m
+    else:
+        h = (seed + p5) & m
+
+    h = (h + n) & m
+    while i + 8 <= n:
+        h ^= _x64_round(0, int.from_bytes(data[i : i + 8], "little"))
+        h = (_rotl(h, 27, 64) * p1 + p4) & m
+        i += 8
+    if i + 4 <= n:
+        h ^= (int.from_bytes(data[i : i + 4], "little") * p1) & m
+        h = (_rotl(h, 23, 64) * p2 + p3) & m
+        i += 4
+    for b in data[i:]:
+        h = (_rotl(h ^ ((b * p5) & m), 11, 64) * p1) & m
+
+    h = ((h ^ (h >> 33)) * p2) & m
+    h = ((h ^ (h >> 29)) * p3) & m
+    return h ^ (h >> 32)
+
+
+def _reg_murmur3_chain(rng: RandPool, _workdir: Path) -> str | None:
+    """Chained blocks (scalar and numpy paths) match the docstring definition."""
+    prefix = rng.randbytes(rng.randint(0, MURMUR_PREFIX_MAX))
+    length = rng.randint(1, MURMUR_LEN_MAX)
+    seed = rng.randrange(U32_SPAN)
+
+    # b0 = H(prefix, seed); bt = H(b0..b(t-1) packed, seed ^ 4t).
+    blocks = [_ref_murmur3(prefix, seed)]
+    for t in range(1, -(-length // 4)):
+        blocks.append(_ref_murmur3(struct.pack(f"<{t}I", *blocks), seed ^ (4 * t)))
+    want = struct.pack(f"<{len(blocks)}I", *blocks)[:length]
+
+    got = murmur3.murmur3_chain(prefix, length, seed)
+    if got != want:
+        return f"murmur3_chain(len={length}, seed={seed:#x}) differs from reference"
+    return None
+
+
+def _reg_xxhash(rng: RandPool, _workdir: Path) -> str | None:
+    """XXH32 (LZ4 checksums) and XXH64 (corpus names) match the spec."""
+    data = rng.randbytes(rng.randint(0, XXH_DATA_MAX))
+    s32 = rng.choice((0, M32, rng.randrange(U32_SPAN)))
+    s64 = rng.choice((0, M64, rng.randrange(U64_SPAN)))
+
+    if lz4._xxh32_py(data, s32) != _ref_xxh32(data, s32):
+        return f"xxh32 of {len(data)} B, seed {s32:#x} differs from spec"
+    if hashing.xxh64(data, s64) != _ref_xxh64(data, s64):
+        return f"xxh64 of {len(data)} B, seed {s64:#x} differs from spec"
+    return None
+
+
+# ── LZ, statistics, bit tricks ───────────────────────────────────────────────
+
+
+def _naive_lz(block: bytes, min_match: int, max_match: int) -> list[tuple]:
+    """Greedy earliest-longest parse (the pre-speedup parser, verbatim)."""
+    tokens: list[tuple] = []
+    i, n = 0, len(block)
+    while i < n:
+        best_dist, best_len = 0, 0
+        for j in range(max(0, i - LZ_WINDOW), i):
+            k = 0
+            while k < max_match and i + k < n and block[j + k] == block[i + k]:
+                k += 1
+            if k > best_len:
+                best_dist, best_len = i - j, k
+        if best_len >= min_match:
+            tokens.append(("ref", best_dist, best_len))
+            i += best_len
+        else:
+            tokens.append(("lit", block[i]))
+            i += 1
+    return tokens
+
+
+def _lz_rebuild(tokens: list[tuple]) -> bytes:
+    out = bytearray()
+    for tok in tokens:
+        if tok[0] == "lit":
+            out.append(tok[1])
+            continue
+        _, dist, length = tok
+        for _ in range(length):
+            out.append(out[-dist])
+    return bytes(out)
+
+
+def _reg_lz_tokenize(rng: RandPool, _workdir: Path) -> str | None:
+    """Hash-chain parse == naive greedy parse; refs in bounds; tokens rebuild."""
+    mn = rng.randint(2, 4)
+    mx = rng.randint(mn, LZ_MATCH_MAX)
+    alphabet = rng.randbytes(rng.randint(1, ALPHABET_MAX))
+    block = bytearray(rng.choice(alphabet) for _ in range(rng.randint(mx, LZ_BLOCK_MAX)))
+    block += block[: mx + 1]  # a guaranteed back-reference
+
+    tokens = structured._lz_tokenize(bytearray(block), mn, mx)
+    if _lz_rebuild(tokens) != block:
+        return "tokens do not rebuild the block"
+    if any(t[0] == "ref" and not (mn <= t[2] <= mx and t[1] >= 1) for t in tokens):
+        return f"ref outside [{mn}, {mx}] or dist < 1"
+    if tokens != _naive_lz(block, mn, mx):
+        return f"parse differs from naive greedy (min={mn}, max={mx}, {len(block)} B)"
+    return None
+
+
+def _reg_modal_value(rng: RandPool, _workdir: Path) -> str | None:
+    """Plurality, not first-seen: the result's count is the maximum count."""
+    top = rng.randint(2, MODAL_TOP_MAX)
+    values = [rng.randrange(MODAL_RANGE)] * top
+    values += [rng.randrange(MODAL_RANGE) for _ in range(rng.randint(0, top - 1))]
+    rng.shuffle(values)
+    values.append(MODAL_RANGE + 1)  # unique tail: never the mode
+
+    counts: dict[int, int] = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    got = _modal_value(values)
+    if counts.get(got, 0) != max(counts.values()):
+        return f"modal {got} seen {counts.get(got, 0)}x, max is {max(counts.values())}"
+    return None
+
+
+def _reg_fold_bits(rng: RandPool, _workdir: Path) -> str | None:
+    """numpy fold == OR of 1 << (e % map_size)."""
+    bits = rng.randint(1, FOLD_ID_BITS)
+    edges = {rng.randrange(1 << bits) for _ in range(rng.randint(0, FOLD_EDGES_MAX))}
+    map_size = rng.choice(FOLD_MAP_SIZES)
+
+    want = 0
+    for e in edges:
+        want |= 1 << (e % map_size)
+    got = _fold_bits(edges, map_size)
+    if got != want:
+        return f"fold of {len(edges)} edges into {map_size} differs"
+    return None
+
+
+def _reg_log_gamma(rng: RandPool, _workdir: Path) -> str | None:
+    """Lanczos fallback == lgamma; (n-1)! identity; x <= 0 -> inf."""
+    x = rng.random() * LGAMMA_X_MAX + LGAMMA_X_MIN
+    want = math.lgamma(x)
+    if abs(_log_gamma(x) - want) > LGAMMA_TOL * max(1.0, abs(want)):
+        return f"_log_gamma({x}) = {_log_gamma(x)}, lgamma {want}"
+
+    n = rng.randint(1, LGAMMA_N_MAX)
+    fact = math.log(math.factorial(n - 1))
+    if abs(_log_gamma(n) - fact) > LGAMMA_TOL * max(1.0, fact):
+        return f"_log_gamma({n}) != log({n - 1}!)"
+    if _log_gamma(-rng.random()) != math.inf:
+        return "_log_gamma(x <= 0) is not inf"
+    return None
+
+
+def _reg_snoob(rng: RandPool, _workdir: Path) -> str | None:
+    """Next/previous same-popcount: monotone, inverse, closed form (no 2^63 loop)."""
+    x = rng.choice((rng.randint(1, (1 << rng.randint(1, SNOOB_BITS)) - 1), 1 << rng.randint(0, 79)))
+    pop = x.bit_count()
+
+    y = snoob(x)
+    if not (y > x and y.bit_count() == pop and snoob_prev(y) == x):
+        return f"snoob({x:#x}) = {y:#x}: not the next same-popcount value"
+    p = snoob_prev(x)
+    if p and not (p < x and p.bit_count() == pop and snoob(p) == x):
+        return f"snoob_prev({x:#x}) = {p:#x}: not the previous same-popcount value"
+    if x < SNOOB_SCAN_MAX and any(v.bit_count() == pop for v in range(x + 1, y)):
+        return f"snoob({x:#x}) skipped a same-popcount value"
+    return None
+
+
+def _reg_set_cover(rng: RandPool, _workdir: Path) -> str | None:
+    """Exact, irredundant, duplicate-free, deterministic cover."""
+    universe = rng.randint(1, COVER_EDGES_MAX)
+    seeds = {
+        f"s{i}": {rng.randrange(universe) for _ in range(rng.randint(0, COVER_SEED_EDGES))}
+        for i in range(rng.randint(1, COVER_SEEDS_MAX))
+    }
+    seeds["s0"].add(0)  # at least one non-empty seed
+    sizes = {k: rng.randint(1, 100) for k in seeds}
+
+    got = min_cover(seeds, sizes)
+    union = set().union(*seeds.values())
+    if set().union(*(seeds[k] for k in got)) != union:
+        return "chosen seeds do not cover every edge"
+    if len(set(got)) != len(got) or any(not seeds[k] for k in got):
+        return "duplicate or empty seed in the cover"
+    for k in got:
+        rest = set().union(*(seeds[o] for o in got if o != k))
+        if rest == union:
+            return f"cover is redundant: {k} can be dropped"
+    if min_cover(seeds, sizes) != got:
+        return "min_cover is not deterministic"
+    return None
+
+
+# ── grammar budget, sanitizer reports ────────────────────────────────────────
+
+
+def _reg_grammar_cap(rng: RandPool, _workdir: Path) -> str | None:
+    """Repeat chains over empty literals stop at the expansion cap."""
+    r = rng.randint(GRAMMAR_REPEAT_MIN, GRAMMAR_REPEAT_MAX)
+    levels = math.ceil(math.log(2 * EXPANSION_CAP) / math.log(r)) + 1
+    leaf = rng.choice(('""', '"" | ""'))
+    rules = [f"start = r0{{{r}}}"]
+    rules += [f"r{i} = r{i + 1}{{{r}}}" for i in range(levels - 1)]
+    rules.append(f"r{levels - 1} = {leaf}")
+
+    g = grammar.Grammar()
+    g.parse("\n".join(rules))
+    calls = [0]
+    expand = g._expand_rule
+
+    def counted(name, depth):
+        calls[0] += 1
+        return expand(name, depth)
+
+    g._expand_rule = counted  # instance attribute: nothing global to restore
+    max_len = rng.choice(GRAMMAR_MAX_LENS)
+    logger = logging.getLogger(grammar.__name__)
+    level = logger.level
+    logger.setLevel(logging.CRITICAL)  # the cap logs a warning per case
+    try:
+        out = g.generate("start", max_len=max_len)
+    finally:
+        logger.setLevel(level)
+
+    if calls[0] > EXPANSION_CAP + 1:
+        return f"{calls[0]} expansions > cap {EXPANSION_CAP} (R={r}, L={levels})"
+    if max_len and len(out) > max_len:
+        return f"{len(out)} bytes > max_len {max_len}"
+    return None
+
+
+def _asan(pcs: list[int], names: list[str], alloc: list[int]) -> str:
+    """ASAN report: crash stack, blank line, allocation stack."""
+    lines = ["==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"]
+    lines += [
+        f"    #{i} {pc:#x} in {nm}\n" for i, (pc, nm) in enumerate(zip(pcs, names, strict=True))
+    ]
+    lines += ["\n", "freed by thread T0 here:\n"]
+    lines += [f"    #{i} {pc:#x} in free_{i}\n" for i, pc in enumerate(alloc)]
+    return "".join(lines)
+
+
+def _reg_sanitizer_stack(rng: RandPool, _workdir: Path) -> str | None:
+    """Frames = crash stack only; hash is ASLR-blind; echoed text is no report."""
+    depth = rng.randint(1, ASAN_DEPTH_MAX)
+    pcs = [rng.randrange(1 << ASAN_PC_BITS) for _ in range(depth)]
+    names = [f"fn_{rng.randrange(U32_SPAN):x}" for _ in range(depth)]
+    alloc = [rng.randrange(1 << ASAN_PC_BITS) for _ in range(rng.randint(0, ASAN_DEPTH_MAX))]
+
+    rep = sanitizer.SanitizerReport.parse(_asan(pcs, names, alloc))
+    if rep is None or rep.frames != names:
+        return f"frames {rep and rep.frames} != crash stack {names}"
+
+    shift = (2 * rng.randint(0, ASAN_SHIFT_PAGES) + 1) * PAGE  # odd pages: ASLR slide
+    moved = [pc + shift for pc in pcs]
+    other_alloc = [rng.randrange(1 << ASAN_PC_BITS) for _ in alloc]
+    moved_rep = sanitizer.SanitizerReport.parse(_asan(moved, names, other_alloc))
+    if moved_rep is None or moved_rep.stack_hash() != rep.stack_hash():
+        return "stack_hash changed under an ASLR slide or a new alloc stack"
+    if sanitizer.SanitizerReport.parse(ASAN_ECHO) is not None:
+        return "echoed sanitizer text parsed as a report"
+    return None
+
+
 REGRESSION_MUTATORS: dict[str, Callable[[RandPool, Path], str | None]] = {
     "none_offset": _reg_none_offset,
     "mg_flood": _reg_mg_flood,
@@ -1002,6 +1413,16 @@ REGRESSION_MUTATORS: dict[str, Callable[[RandPool, Path], str | None]] = {
     "cmp_parse": _reg_cmp_parse,
     "parser_truncation": _reg_parser_truncation,
     "minhash_lsh": _reg_minhash_lsh,
+    "murmur3_chain": _reg_murmur3_chain,
+    "xxhash": _reg_xxhash,
+    "lz_tokenize": _reg_lz_tokenize,
+    "modal_value": _reg_modal_value,
+    "fold_bits": _reg_fold_bits,
+    "log_gamma": _reg_log_gamma,
+    "snoob": _reg_snoob,
+    "set_cover": _reg_set_cover,
+    "grammar_cap": _reg_grammar_cap,
+    "sanitizer_stack": _reg_sanitizer_stack,
 }
 
 
