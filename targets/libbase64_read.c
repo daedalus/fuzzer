@@ -79,6 +79,28 @@ extern void __afl_map_edge(unsigned int cur_loc);
 #define B64_FUZZ_SLACK 0u
 #endif
 
+/* IJON (--ijon): SIMD codecs validate a block branch-free, so edges cannot
+ * see where the first bad char sits in it, nor whether an input of a given
+ * tail residue was long enough to enter every main loop. Max slots, one
+ * band per signal and mode (no hashing, no aliasing in 512 slots):
+ *
+ *   [0, 128)    first bad char, decode modes:  (mode >> 1) * 64 + pos % 64
+ *   [128, 384)  payload length, every mode:    128 + mode * 64 + len % 64
+ *
+ * Value min(x, CAP) + 1: bounded (no reward for growth past 4 AVX-512
+ * blocks), and pos 0 still registers. Inert without --ijon; compiled out
+ * without the shim. */
+#define B64_IJON_LANES   64u
+#define B64_IJON_LEN_BASE (2u * B64_IJON_LANES)
+#define B64_IJON_CAP     (4u * B64_IJON_LANES)
+#if defined(__AFL_EDGE) && __AFL_EDGE
+#define FUZZ_IJON_LANE(base, x) \
+    ijon_max((base) + (uint32_t)((x) % B64_IJON_LANES), \
+             (uint64_t)((x) < B64_IJON_CAP ? (x) : B64_IJON_CAP) + 1u)
+#else
+#define FUZZ_IJON_LANE(base, x) ((void)0)
+#endif
+
 enum b64_mode {
     B64_MODE_DECODE = 0,
     B64_MODE_ENCODE = 1,
@@ -158,6 +180,26 @@ static size_t b64_enc_cap(size_t n) { return 4u * ((n + 2u) / 3u) + B64_FUZZ_SLA
 /* malloc(0) may return NULL; every buffer here is at least one byte. */
 static unsigned char *b64_alloc(size_t n) { return malloc(n ? n : 1u); }
 
+#if defined(__AFL_EDGE) && __AFL_EDGE
+/* Base64 alphabet plus pad; anything else is a bad char. */
+static const unsigned char b64_alpha[256] = {
+    ['A' ... 'Z'] = 1, ['a' ... 'z'] = 1, ['0' ... '9'] = 1,
+    ['+'] = 1, ['/'] = 1, ['='] = 1,
+};
+
+/* IJON: lane of the first bad char of a rejected decode. All chars valid
+ * (bad length or pad) -> pos = size. */
+static void b64_ijon_bad(unsigned mode, const unsigned char *buf, size_t size, int rc) {
+    if (rc) { return; }
+
+    size_t pos = 0;
+    while (pos < size && b64_alpha[buf[pos]]) { pos++; }
+    FUZZ_IJON_LANE((mode >> 1) * B64_IJON_LANES, pos);
+}
+#else
+#define b64_ijon_bad(mode, buf, size, rc) ((void)0)
+#endif
+
 static void b64_mismatch(unsigned edge) {
     __afl_map_edge(edge);
     abort();
@@ -174,6 +216,7 @@ static int fuzz_decode(const unsigned char *buf, size_t size) {
     size_t ref_len = 0;
     int ref_rc = base64_decode((const char *)buf, size, (char *)ref, &ref_len, BASE64_FORCE_PLAIN);
     __afl_map_edge(ref_rc ? 0xA101 : 0xA102);
+    b64_ijon_bad(B64_MODE_DECODE, buf, size, ref_rc);
 
     for (size_t i = 1; i < B64_NCODECS; i++) {
         if (!codecs[i].usable) { continue; }
@@ -253,6 +296,7 @@ static int fuzz_stream_decode(const unsigned char *buf, size_t size, unsigned se
 
     size_t ref_len = 0;
     int ref_rc = base64_decode((const char *)buf, size, (char *)ref, &ref_len, BASE64_FORCE_PLAIN);
+    b64_ijon_bad(B64_MODE_STREAM_DECODE, buf, size, ref_rc);
 
     for (size_t i = 0; i < B64_NCODECS; i++) {
         if (!codecs[i].usable) { continue; }
@@ -334,6 +378,7 @@ static int b64_run(unsigned mode, const unsigned char *payload, size_t plen, uns
     unsigned char *in = b64_alloc(plen);
     if (!in) { return 0; }
     memcpy(in, payload, plen);
+    FUZZ_IJON_LANE(B64_IJON_LEN_BASE + mode * B64_IJON_LANES, plen);
 
     int rc;
     switch (mode) {
