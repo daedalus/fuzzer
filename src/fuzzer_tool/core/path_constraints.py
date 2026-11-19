@@ -38,9 +38,21 @@ from __future__ import annotations
 
 import logging
 from bisect import bisect_left
+from typing import NamedTuple
 
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.lru import LRUCache
+from fuzzer_tool.core.two_sat import (
+    MAX_2SAT_WIDTH,
+    Clause,
+    eq_clauses,
+    ge_clauses,
+    gt_clauses,
+    le_clauses,
+    lt_clauses,
+    ne_clause,
+    solve_one_wide,
+)
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +126,37 @@ class BranchRecord:
 Located = tuple[BranchRecord, int, int]
 """``(record, offset, other_value)``: a record mapped to its input window."""
 
+_BYTE_BITS = 8
+_BYTE_MASK = 0xFF
+
+
+def _sign(x: int) -> int:
+    return (x > 0) - (x < 0)
+
+
+# Predicate per observed result (-1, 0, 1). FLIP inverts it, KEEP preserves it.
+_FLIP = {-1: ge_clauses, 1: le_clauses, 0: lambda bits, c: [ne_clause(bits, c)]}
+_KEEP = {-1: lt_clauses, 1: gt_clauses, 0: eq_clauses}
+
+
+class _BitCnf(NamedTuple):
+    """A query as CNF over input bits ``[lo, hi)``: var ``8 * (pos - lo) + bit + 1``.
+
+    ``narrow`` is 2-CNF; ``wide`` is the one longer clause (``x != original``).
+    """
+
+    lo: int
+    n_vars: int
+    narrow: list[Clause]
+    wide: Clause
+    used: set[int]
+
+
+def _bits(start: int, width: int) -> range:
+    """Var ids of a little-endian window ``start`` bytes past ``lo``, LSB first."""
+    first = start * _BYTE_BITS + 1
+    return range(first, first + width * _BYTE_BITS)
+
 
 class _Windows:
     """Located records plus a start-sorted index for overlap queries.
@@ -165,6 +208,7 @@ class PathConstraintSolver:
         self.skipped_unmapped = 0
         self.direct_solves = 0
         self.z3_solves = 0
+        self.two_sat_solves = 0
 
     # ── frontier ───────────────────────────────────────────────────────
 
@@ -334,7 +378,73 @@ class PathConstraintSolver:
             self.direct_solves += 1
             return bytes(out)
 
-        return self._solve_z3(input_data, offset, width, observed, original, other, overlaps)
+        # 2-CNF over input bits (e.g. x >= 0x80 keeping x > 0x3f): linear
+        # 2-SAT, ~40x cheaper than z3 and outside its budget. Else z3.
+        query = (offset, width, observed, original, other, overlaps)
+        cnf = self._bit_cnf(input_data, *query)
+        if cnf is None:
+            return self._solve_z3(input_data, *query)
+        return self._solve_2sat(input_data, cnf)
+
+    def _bit_cnf(
+        self,
+        input_data: bytes,
+        offset: int,
+        width: int,
+        observed: int,
+        original: int,
+        other: int,
+        overlaps: list[Located],
+    ) -> _BitCnf | None:
+        """The query as bit CNF, or None unless it is 2-CNF plus one wide clause.
+
+        Example: flip ``x < 0x80`` keeping ``x > 0x3f`` on one byte:
+        ``(x7) (x6 | x7) (x != original)``.
+        """
+        lo = min([offset] + [s for _, s, _ in overlaps])
+        hi = max([offset + width] + [s + r.width for r, s, _ in overlaps])
+        hi = min(hi, len(input_data))
+
+        target = _bits(offset - lo, width)
+        clauses = _FLIP[_sign(observed)](target, other) + [ne_clause(target, original)]
+        for rec_o, start_o, value_o in overlaps:
+            if start_o + rec_o.width > hi:
+                continue  # mirrors _solve_z3: a window past the input is dropped
+            keep = _KEEP[_sign(self._effective_result(rec_o, input_data))]
+            clauses += keep(_bits(start_o - lo, rec_o.width), value_o)
+
+        narrow: list[Clause] = []
+        wide: set[Clause] = set()
+        for clause in clauses:
+            if len(clause) <= MAX_2SAT_WIDTH:
+                narrow.append(clause)
+                continue
+            wide.add(clause)
+            if len(wide) > 1:
+                return None
+
+        used = {abs(lit) for clause in clauses for lit in clause}
+        return _BitCnf(lo, (hi - lo) * _BYTE_BITS, narrow, wide.pop() if wide else (), used)
+
+    def _solve_2sat(self, input_data: bytes, cnf: _BitCnf) -> bytes | None:
+        """Linear-time solve of a query that is 2-CNF over its input bits."""
+        model = solve_one_wide(cnf.n_vars, cnf.narrow, cnf.wide)
+        if model is None:
+            self.unsat += 1
+            return None
+
+        # Only bits a clause mentions move; the rest keep their input value.
+        out = bytearray(input_data)
+        for var in cnf.used:
+            pos, bit = divmod(var - 1, _BYTE_BITS)
+            pos += cnf.lo
+            if model[var - 1]:
+                out[pos] |= 1 << bit
+                continue
+            out[pos] &= ~(1 << bit) & _BYTE_MASK
+        self.solved += 1
+        self.two_sat_solves += 1
+        return bytes(out)
 
     def _solve_z3(
         self,
@@ -444,6 +554,7 @@ class PathConstraintSolver:
             "skipped_unmapped": self.skipped_unmapped,
             "direct_solves": self.direct_solves,
             "z3_solves": self.z3_solves,
+            "two_sat_solves": self.two_sat_solves,
             "attempted_branches": len(self._attempted),
             "solve_rate": (self.solved / self.queries) if self.queries else 0.0,
         }

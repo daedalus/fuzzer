@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.core.local_align import local_align, span_text
 from fuzzer_tool.core.root_cause import (
     apply_edit_subset,
     build_edit_script,
@@ -168,7 +169,8 @@ def root_cause(
 
     Returns a dict with keys ``baseline_name``, ``baseline``, ``crash``,
     ``script``, ``minimal_indices``, ``minimal_bytes``, ``signature``,
-    ``report`` (plus ``field_schema`` when *isolate_png_ihdr* is set: the
+    ``report``, ``mutated_spans`` (``core.local_align`` crash edit spans)
+    (plus ``field_schema`` when *isolate_png_ihdr* is set: the
     IHDR fields that cause the crash, as ``{name: value}``, or ``None``;
     ``custom_field_schema`` likewise when *isolate_fields* (a
     ``core/field_spec`` spec string) is set) -- or ``None`` if the crash couldn't be reproduced or no
@@ -294,6 +296,12 @@ def root_cause(
         print(f"[+] Isolated {len(minimal_indices)}/{len(changes)} edit(s) as root cause")
         print(report)
 
+        # Where the crash differs from the baseline, indel-robust (SW-Gotoh).
+        located = local_align(baseline, crash_data)
+        section = f"[*] Mutated region: {span_text(located)}"
+        print(section)
+        report += "\n" + section
+
         field_schema = None
         if isolate_png_ihdr:
             field_schema, section = _png_ihdr_section(crash_data, _interesting)
@@ -317,6 +325,7 @@ def root_cause(
             "minimal_bytes": minimal_bytes,
             "signature": original_sig,
             "report": report,
+            "mutated_spans": located.edits,
         }
         if isolate_png_ihdr:
             result["field_schema"] = field_schema

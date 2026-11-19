@@ -138,6 +138,7 @@ def _recorder(solver: PathConstraintSolver, queries: list) -> None:
         return bytes(out)
 
     solver._solve_z3 = solve
+    solver._bit_cnf = lambda *_args: None  # 2-SAT fast path off: every overlap hits the stand-in
 
 
 def _trace(solver: PathConstraintSolver, data: bytes, recs: list) -> tuple[list, list, dict]:

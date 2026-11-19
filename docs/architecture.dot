@@ -43,7 +43,7 @@ digraph fuzzer_tool {
         color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
         cli [label="cli/commands.py\lfuzz · rank · minimize · sweep · tmin\lroot-cause · crash-bisect · crash-cluster · replay · verify\lestimate · import · ppmd · genseed · compact-seeds\l",
              fillcolor="#e3e7ec", fontcolor="#242a31"];
-        profiler [label="core/target_profiler.py   +   cfg · icfg · dwarf\lELF strings · magic bytes · DIV constants\lcall graph · CFG · DWARF line tables\lwaypoints (dominators to target) · deadness (static dead proof)\larticulation (cut damage)\l",
+        profiler [label="core/target_profiler.py   +   cfg · icfg · dwarf\lELF strings · magic bytes · DIV constants\lcall graph · CFG · DWARF line tables\lwaypoints (dominators to target) · deadness (static dead proof)\larticulation (cut damage)\lcore/crypto_consts (rodata crypto tables → --hlx-algo auto)\l",
                   fillcolor="#e3e7ec", fontcolor="#242a31"];
         cledger [label="services/ledger.py  +  core/campaign_ledger.py\l--preset-ledger: UCB1 preset · --stall prior\l~/fuzzing/<target>/ledger (across campaigns)\l",
                  fillcolor="#e3e7ec", fontcolor="#242a31"];
@@ -69,7 +69,7 @@ digraph fuzzer_tool {
     subgraph cluster_mut {
         label="2 · Mutation   —   250+ operators / 9 categories";
         color="#c3c6da"; fillcolor="#f4f4fa"; fontcolor="#454a75";
-        ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\ldet stage · effector map → core/auto_dict\l--corpus-tokens → core/suffix_automaton · token_repair → core/bitap\ladvisors (services/advisors.py) · pos_hotspot arm\lTCP seed inbox (adapters/tcp_seed.py, --tcp-listen-port)\l",
+        ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\ldet stage · effector map → core/auto_dict\l--corpus-tokens → core/suffix_automaton · token_repair → core/bitap · token_tile · inet_forms · tlv_reshape → core/prufer\ladvisors (services/advisors.py) · pos_hotspot arm\lTCP seed inbox (adapters/tcp_seed.py, --tcp-listen-port)\l",
              fillcolor="#c9cbe6", fontcolor="#2f3560"];
         lib [label="core/mutations/ (68 modules)  ·  core/operator_registry.py\lpng jpeg gif webp webm avif zip gzip zlib riff ogg flv asf mp3\ladts mpegts nal isobmff pgs sqlite der elf protobuf x86 arm\lgrammar · format_fsm (+ euler_walk seeds) · tree_mutator · frameshift · markov · field_hmm (Viterbi spans) · wfc · regularity\lchecksum_learner (Berlekamp-Massey · int checksums · linear via null_lattice)\l",
              fillcolor="#dedff0", fontcolor="#2f3560"];
@@ -91,7 +91,7 @@ digraph fuzzer_tool {
     subgraph cluster_fb {
         label="4 · Feedback   —   what came back";
         color="#b9cbd8"; fillcolor="#f2f7fa"; fontcolor="#37596e";
-        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM edge hash table · hit buckets · per-edge max counts (PerfFuzz)\ladapters/native_scan.c (ctypes): live gather · virgin/max fold · cmplog drains\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\lcore/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap\lcore/edge_clusters.py: incidence classes · clusters · medoids · gaps (--edge-clusters, --pos-centroid)\lcore/seed_som.py: Kohonen map of seed coverage (--report only)\l",
+        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM edge hash table · hit buckets · per-edge max counts (PerfFuzz)\ladapters/native_scan.c (ctypes): live gather · virgin/max fold · cmplog drains\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\lcore/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap\lcore/edge_clusters.py: incidence classes · clusters · medoids · gaps (--edge-clusters, --pos-centroid)\lcore/seed_som.py: Kohonen map of seed coverage (--report only)\lcore/count_min.py: per-path n_fuzz (--path-freq cms) · core/nb_gate.py (--exec-gate nb)\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];
         ltl [label="core/ltl.py  (--ltl)\lBuchi monitor over event trace\lltl:trap / ltl:lasso crash · frontier prefix\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];
@@ -116,7 +116,7 @@ digraph fuzzer_tool {
     subgraph cluster_crash {
         label="Crash pipeline";
         color="#d8c4b0"; fillcolor="#fbf6f1"; fontcolor="#7a5638";
-        crash [label="core/sanitizer.py → crash_metadata.py\lASAN MSAN TSAN LSAN UBSAN · dedup · tiers\lcore/crash_symbols · pc_resolver (shim PCs → DWARF names)\lservices/tmin · minimize · root_cause · differential\lcore/reducer (C-Reduce passes · fixpoint · cache)\lcore/crash_explore (--crash-explore, AFL -C)\lservices/uninit_probe (--uninit-probe, heap fill diff)\lcore/sarif · services/sarif_export (sarif, --sarif)\lcore/gadgets (--rop-gadgets, static ROP triage)\lservices/crash_cluster · core/crash_graph (Igor WL clustering)\l",
+        crash [label="core/sanitizer.py → crash_metadata.py\lASAN MSAN TSAN LSAN UBSAN · dedup · tiers\lcore/crash_symbols · pc_resolver (shim PCs → DWARF names)\lservices/tmin · minimize · root_cause · differential\lcore/reducer (C-Reduce passes · fixpoint · cache · --gallop-prefix)\lcore/local_align (SW-Gotoh mutated region) · core/egg_drop (probe-size)\lcore/crash_explore (--crash-explore, AFL -C)\lservices/uninit_probe (--uninit-probe, heap fill diff)\lcore/sarif · services/sarif_export (sarif, --sarif)\lcore/gadgets (--rop-gadgets, static ROP triage)\lservices/crash_cluster · core/crash_graph (Igor WL clustering)\l",
                fillcolor="#f0dfcd", fontcolor="#5c4227"];
     }
 

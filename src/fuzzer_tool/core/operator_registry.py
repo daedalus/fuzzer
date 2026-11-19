@@ -28,6 +28,7 @@ from itertools import compress
 from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.mutations.base64 import parse_base64
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
+from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
@@ -124,6 +125,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "dict_compound",
         "literal_mismatch",
         "token_repair",
+        "token_tile",
     },
     "structural": {
         "seq_mutate",
@@ -183,6 +185,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "encoding_wrap",
         "escape_mutate",
         "ascii_float",
+        # inet_aton(3) IPv4 spellings: short forms, octal/hex parts, wrap skews
+        "inet_forms",
         # Line codes (--op-line-code): Manchester, NRZI, bit/byte stuffing
         "line_code",
         # Grimoire (--grimoire): token recombination from generalized inputs
@@ -241,6 +245,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "deflate_struct_mutate",
         "field_repair",
         "tlv_nest_mutate",
+        "tlv_reshape",
         "der_len_mutate",
         "der_tag_mutate",
         "der_tlv_reorder",
@@ -963,8 +968,14 @@ def _has_msgs(_f, d) -> bool:
     return _split_msgs(d) is not None
 
 
+def _has_quad(_f, d) -> bool:
+    """inet_forms: a canonical dotted-quad IPv4 literal."""
+    return _inet_has_quad(d)
+
+
 # Input-only gates: available() caches them per input content.
 _has_delims.availability = Availability.INPUT
+_has_quad.availability = Availability.INPUT
 _has_msgs.availability = Availability.INPUT
 _region_sized.availability = Availability.INPUT
 
@@ -988,6 +999,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "dict_compound": _has_dictionary,
     "literal_mismatch": _has_literals,
     "token_repair": _has_literals,
+    "token_tile": _has_literals,
+    "inet_forms": _has_quad,
     # model / engine-gated ops
     # bit_cross and arith_mid use parent_key only to skip ancestors/descendants
     # as donors (recorded under --lineage). Without it the ancestor test is a

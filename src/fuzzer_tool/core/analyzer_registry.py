@@ -69,6 +69,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from fuzzer_tool.core.cadence import phase_of
+from fuzzer_tool.core.count_min import PathCount
+from fuzzer_tool.core.nb_gate import GateMode
 
 log = logging.getLogger(__name__)
 
@@ -1095,5 +1097,65 @@ REGISTRY.register(
         available=lambda f: bool(getattr(f, "_use_recurrence", False)),
         activate=_activate_recurrence,
         deactivate=_deactivate_recurrence,
+    )
+)
+
+
+def _activate_path_freq(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.count_min import CountMin, PathFreq
+
+    saved = f._state_store.get("path_freq")
+    f._path_freq = PathFreq.from_dict(saved) if saved else PathFreq(CountMin())
+
+
+def _deactivate_path_freq(f: FuzzerLike) -> None:
+    f._path_freq = None
+
+
+# AFLFast n_fuzz as execs per path, in a fixed 512 KiB count-min sketch.
+# --path-freq cms only: one buffered append per exec.
+REGISTRY.register(
+    AnalyzerSpec(
+        name="path_freq",
+        category="scheduling",
+        available=lambda f: getattr(f, "_path_freq_mode", None) is PathCount.CMS,
+        activate=_activate_path_freq,
+        deactivate=_deactivate_path_freq,
+    )
+)
+
+
+def _activate_nb_gate(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.nb_gate import CARDS, NBGate, OpIds
+
+    saved = f._state_store.get("nb_gate")
+    if saved:
+        f._nb_gate = NBGate.from_dict(saved["gate"], f._rng)
+        f._nb_ops = OpIds.from_names(saved["ops"])
+    else:
+        f._nb_gate = NBGate(CARDS, f._rng)
+        f._nb_ops = OpIds()
+    # Flags win over the saved thresholds; the counts carry over.
+    f._nb_gate.retune(f._exec_gate_lift, f._exec_gate_eps)
+    f._nb_feats = None
+    # Ifs up: bind the gated re-roll once; off, _dedup_mutate stays the
+    # plain class method and the exec loop pays nothing.
+    f._dedup_raw = f._dedup_mutate
+    f._dedup_mutate = f._gated_mutate
+
+
+def _deactivate_nb_gate(f: FuzzerLike) -> None:
+    f._nb_gate = None
+
+
+# Naive Bayes pre-exec gate: re-rolls mutants unlikely to find coverage.
+# --exec-gate nb only.
+REGISTRY.register(
+    AnalyzerSpec(
+        name="nb_gate",
+        category="scheduling",
+        available=lambda f: getattr(f, "_exec_gate_mode", None) is GateMode.NB,
+        activate=_activate_nb_gate,
+        deactivate=_deactivate_nb_gate,
     )
 )

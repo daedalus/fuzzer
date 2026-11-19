@@ -1497,6 +1497,28 @@ def _word_is_noise(value: int, width: int) -> bool:
     return value == 0 or _is_noise_immediate(value, width)
 
 
+def _is_word_section(name: bytes) -> bool:
+    """True for the data sections the word scans read (rodata, data, relro)."""
+    if name in _SECT_WORD_EXACT:
+        return True
+    return any(name.startswith(p) for p in _SECT_WORD_PREFIXES)
+
+
+def word_section_spans(elf: bytes) -> list[tuple[int, int]]:
+    """File ``[start, end)`` of each word-scan section, clamped to the image.
+
+    Spans, not slices: callers search ``elf`` in place (``elf.find(x, lo, hi)``)
+    without copying a multi-MB ``.rodata``.
+    """
+    n = len(elf)
+    spans = []
+    for name, _t, _addr, offset, size in _iter_sections(elf):
+        if not size or offset >= n or not _is_word_section(name):
+            continue
+        spans.append((offset, min(offset + size, n)))
+    return spans
+
+
 def _collect_words(section: bytes, size: int, words: set[int]) -> None:
     """Add every aligned non-noise u64 then u32 of *section* to *words* (capped)."""
     # The declared sh_size can exceed the bytes actually in the file.
@@ -1531,14 +1553,9 @@ def extract_data_word_constants(target: str) -> list[bytes]:
     if elf is None:
         return []
 
-    def _is_interesting(name: bytes) -> bool:
-        if name in _SECT_WORD_EXACT:
-            return True
-        return any(name.startswith(p) for p in _SECT_WORD_PREFIXES)
-
     words: set[int] = set()
     for _name, _t, _addr, offset, size in _iter_sections(elf):
-        if not _is_interesting(_name):
+        if not _is_word_section(_name):
             continue
         if size <= 0 or offset > len(elf):
             continue

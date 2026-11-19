@@ -2698,6 +2698,40 @@ Fuzzification (Jung et al., USENIX Security '19) adds two more:
 
 `fmix32_*`/`lowbias32_*`/`xxh32_aval_*` (`MixerEncoder`, `core/hash_inverse.py`) cover `mix32(input[0:4]) == C` for the bijective 32-bit finalizers of Murmur3, lowbias32 and xxh32. Each step (`x ^= x >> s`, odd-constant multiply) inverts exactly, so there is one preimage and no search; only the constant is inverted (`value_only`). 4-byte fields only: 8-byte pairs with at most 2 matching bytes are screened out as hash-like by cmplog (`_HASH_MIN_BYTES`) before any encoder runs, so 64-bit mixers (fmix64, splitmix64) would be unreachable until that filter is revisited.
 
+## TheAlgorithms/Rust ports (2026-11-19)
+
+Survey: `docs/TODO.md` §TheAlgorithms/Rust. All opt-in or registry-gated; defaults unchanged except the three new ops.
+
+### inet_aton literal forms (op `inet_forms`)
+`core/mutations/inet_forms.py`, structural band, gated on a canonical dotted quad. Rewrites it to another inet_aton(3) spelling: 1–4 parts (`127.1`, `2130706433`), decimal/octal/hex parts, zero padding; these parse back to the same address. One in four (`SKEW_ONE_IN`) is a skew strict and lax parsers disagree on: part + k·256, zero-padded decimal (`010`), integer + 2^32. `parse_aton` is the oracle, checked against libc `inet_aton`. Large inputs: regex on the first 256 bytes, then a numpy `digit.digit` prefilter.
+
+### Word-break token tiling (op `token_tile`)
+`core/token_tile.py`, dict band, gated like `token_repair`. `TokenScanner` finds all dictionary/cmplog matches; weighted interval scheduling picks the tiling covering most bytes. One tile at/after the site is replaced, duplicated, deleted or swapped. Caps: 4096 bytes tiled, 128 tokens, 16384 matches, 32 cached scanners.
+
+### Prüfer tree shapes (op `tlv_reshape`)
+`core/prufer.py`: O(n) Prüfer decode/encode, `random_tree` uniform over the n^(n-2) labeled trees (no recursive-generator depth bias). `core/mutations/tlv_reshape.py` regroups up to 32 sibling TLV frames into one random container tree; internal frames keep their tag, all lengths including enclosing ones are recomputed. Ungated, `format` band.
+
+### Count-min path frequency (`--path-freq cms`)
+AFLFast n_fuzz was the seed's own `fuzz_count`, not per-path exec count. `--path-freq cms` counts every exec's shim path hash in a fixed 512 KiB count-min sketch (`core/count_min.py`, 4×16384), buffered and added 1024 at a time. The power schedule and COE mean-log read its estimates (never undercount; overcount ≤ e·N/width w.p. ≥ 1−e⁻⁴). SHM backends only. Default `fuzz` keeps the old behavior.
+
+### Naive Bayes exec gate (`--exec-gate nb`)
+`core/nb_gate.py`: online Laplace-smoothed P(new coverage | last op, position eighth, log2 seed size) in fixed int64 arrays; counts halve at 2²⁴. After 1024 observations, `_dedup_mutate` re-rolls a mutant whose posterior is below `--exec-gate-lift` (0.25) × base rate, unless a RandPool draw < `--exec-gate-eps` (0.05) explores. Off: nothing bound.
+
+### Crash localization (`core/local_align.py`)
+`root-cause` reports where the crash differs from its baseline, robust to indels (Levenshtein/Myers give a global distance only). Common prefix/suffix trimmed with numpy; the middle is Smith-Waterman-Gotoh aligned (+2/−3, gap −5 open, −1 extend), row-wise numpy DP. Adds a "Mutated region" line and `result["mutated_spans"]`. Over `MAX_CELLS` (4 MiB traceback): one coarse span.
+
+### Galloping prefix truncation (`tmin --gallop-prefix`)
+Optional reducer pre-pass: cut 1, 2, 4, … bytes off the end until a probe fails, then bisect. ≤ 2·(⌈log2 n⌉+1) execs, 1 when the last byte is needed. Off by default: over 42 synthetic cases it cost a median +13% execs vs ChunkPass alone (wins only when the crash needs a short prefix of a long input; ledger #176).
+
+### Egg-drop size probe (`fuzzer-tool probe-size`)
+`core/egg_drop.py`. Finds the smallest repeat count of SEED at which the target times out, crashes or reports, spending at most K failing execs (`-k`). With K failures and m probes it covers f(K, m) = Σ_{i≤K} C(m, i) values; probing at f(K−1, m−1) is worst-case optimal (~√(2n) execs for K=2). Input capped at 256 MiB.
+
+### Crypto-constant sniffer (`core/crypto_consts.py`)
+At startup scans rodata/data/relro (same filter as the data-word dictionary, `elf.word_section_spans`) for TEA delta, ChaCha/Salsa sigma/tau, MD5 T/IV, SHA-1 IV, SHA-256/512 K/IV, Keccak RC, BLAKE2 IV+sigma, CRC-32 table, AES S-box, both byte orders; tables need 4 consecutive words. Prints `[*] Crypto constants: ...`, stores `Fuzzer.crypto_algos`. `--hlx-algo auto` arms `hash_len_ext` with the strongest detected hash.
+
+### 2-SAT path negation (`core/two_sat.py`)
+`--path-negation` queries with overlapping windows are encoded as CNF over input bits. When all clauses are ≤ 2 literals besides the one `x != original`, they are solved by linear-time 2-SAT (iterative Tarjan) with a case split on that clause: ~40 µs vs 1.4–1.9 ms in z3, not charged to `--smt-round-budget`. Others go to z3 unchanged. `stats()["two_sat_solves"]`.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)
