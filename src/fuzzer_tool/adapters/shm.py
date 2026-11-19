@@ -1927,6 +1927,8 @@ class DistanceTableShm:
             self.env_id = "0"
             return
 
+        # Key -> slot index: rewrite() and DistHitsShm address slots directly.
+        self._slot_of: dict[int, int] = {}
         self.capacity = 1
         while self.capacity < 2 * self.num_entries:
             self.capacity *= 2
@@ -1946,6 +1948,7 @@ class DistanceTableShm:
                     ctypes.c_uint32.from_address(off + 8).value = dist
                     idx = NODE_IDX_NONE if node_of is None else node_of.get(key, NODE_IDX_NONE)
                     ctypes.c_uint32.from_address(off + 12).value = idx
+                    self._slot_of[key] = pos
                     break
                 pos = (pos + 1) % self.capacity
                 disp += 1
@@ -1957,6 +1960,28 @@ class DistanceTableShm:
         self.env_id = str(self.shm_id)
         _atexit_weak(self)
 
+    def slot_of(self, key: int) -> int | None:
+        """Slot index holding *key*, or None."""
+        return self._slot_of.get(key)
+
+    def slot_keys(self) -> dict[int, int]:
+        """Slot index -> key for every filled slot."""
+        return {slot: key for key, slot in self._slot_of.items()}
+
+    def rewrite(self, entries: dict[int, float]) -> None:
+        """Overwrite the distance of keys already in the table, in place.
+
+        Keys and slots never move, so the attached shim keeps probing the
+        same segment; an aligned u32 store is all a concurrent reader sees.
+        Unknown keys are ignored.
+        """
+        for key, dist in entries.items():
+            slot = self._slot_of.get(key)
+            if slot is None:
+                continue
+            off = self._ptr + 4 + slot * 16 + 8
+            ctypes.c_uint32.from_address(off).value = max(0, round(dist * 100))
+
     def cleanup(self):
         """Detach and remove the segment.
 
@@ -1965,6 +1990,59 @@ class DistanceTableShm:
         makes that arithmetic succeed and produce a plausible near-null
         address to write through. ``None`` raises TypeError instead.
         """
+        if self._ptr:
+            libc_shm.shmdt(self._ptr)
+        self._ptr = None
+        if self.shm_id >= 0:
+            libc_shm.shmctl_rmid(self.shm_id)
+            self.shm_id = -1
+
+    def __del__(self):
+        self.cleanup()
+
+
+class DistHitsShm:
+    """Per-slot hit counters for a ``DistanceTableShm`` (likelihood metric).
+
+    The shim attaches it via ``__AFL_DIST_HITS_ID`` and bumps
+    ``counts[slot]`` each time a probe matches that table slot. Cumulative,
+    never cleared; a slot count that disagrees with the table capacity is
+    refused by the shim. Layout::
+
+        uint32 slots            (== table capacity)
+        uint32 counts[slots]
+
+    Counters are u32 and wrap; ``site_hits`` accumulates deltas into u64,
+    so a wrap between two reads is not lost (two wraps would be).
+    """
+
+    def __init__(self, table: DistanceTableShm):
+        self.slots = table.capacity
+        self._keys = table.slot_keys()
+        self._idx = np.fromiter(self._keys, dtype=np.int64, count=len(self._keys))
+        self._prev = np.zeros(self.slots, dtype=np.uint32)
+        self._total = np.zeros(self.slots, dtype=np.uint64)
+        self.shm_bytes = 4 + 4 * self.slots
+
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes)
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        ctypes.c_uint32.from_address(self._ptr).value = self.slots
+        self.env_id = str(self.shm_id)
+        _atexit_weak(self)
+
+    def site_hits(self) -> dict[int, int]:
+        """Key -> cumulative probe hits since creation (nonzero keys only)."""
+        cur = np.frombuffer(
+            (ctypes.c_uint32 * self.slots).from_address(self._ptr + 4), dtype=np.uint32
+        ).copy()
+        self._total += (cur - self._prev).astype(np.uint64)  # u32 wrap-safe delta
+        self._prev = cur
+
+        totals = self._total[self._idx].tolist()
+        keys = self._keys
+        return {keys[s]: n for s, n in zip(self._idx.tolist(), totals, strict=True) if n}
+
+    def cleanup(self):
         if self._ptr:
             libc_shm.shmdt(self._ptr)
         self._ptr = None

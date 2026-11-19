@@ -477,8 +477,9 @@ Survey of 1608 files; absence checked by grep over `src/`. Already covered: BWT/
 Handover: `docs/handover/handover_thealgorithms_c_survey_2026-11-19.md`. Overlap with the Python survey above folded in.
 - [x] **Union-find consolidation** (2026-11-19) — `core/dsu.py`; 5 call sites migrated. Kept local: `shapley.py` (keyed wrapper 13% slower at ≤5 pairs), `plateau.py` (bounded/persisted), `lineage.py` (Tarjan LCA), `weizz_tags.py` (next-free pointer). `tests/test_dsu.py`.
 - [ ] **Regex dictionary tokens** (Thompson NFA) — sample matching and near-miss strings; grep pattern inputs.
-- [ ] **Euler-walk seed** (Hierholzer + Chinese postman) — one seed covering every `format_fsm` transition.
-- [ ] **Likelihood-weighted directed distance** (Dijkstra, `−log p` edges) — replaces hop-count BFS in `analyzer_distance`; A/B owed.
+- [x] **Euler-walk seed** (Hierholzer + Chinese postman) — `core/euler_walk.py`, `genseed --fsm F --euler-seed` (2026-11-19).
+- [x] **Likelihood-weighted directed distance** — `--distance-metric likelihood` (2026-11-19); A/B in ledger.
+- [x] **Likelihood metric: observed branch counts** — shim per-slot counters (`DistHitsShm`) → `services/branch_counts.py` → `reweight` every 5k execs (2026-11-19). Block hits, not edge hits: p(v|u) uses c(v), exact when v has one predecessor.
 - [ ] **A-law/µ-law PCM mutator** (2026-11-19) — shipped `g711_mutate` (WAV 6/7, AU 27/1). Open: (a) no G.711 seeds in the FFmpeg corpus or seed generator: op only fires via the 2% trickle until one exists; (b) raw `.al`/`.ul` not sniffed; (c) FFmpeg A/B (ledger) once seeds exist.
 - [ ] **Kohonen SOM seed map** (2026-11-19) — shipped as `--report` section (`core/seed_som.py`). Open: (a) read it on a real FFmpeg/fuzzgoat report; (b) square grid only (no PCA aspect ratio); (c) not in the exit summary.
 

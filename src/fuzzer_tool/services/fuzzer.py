@@ -4984,6 +4984,8 @@ class Fuzzer:
         self._waypoints_requested = bool(waypoints and targets)
         self._waypoints = None
         self._waypoint_bmp = None
+        # --distance-metric likelihood: shim site counters (services/branch_counts.py).
+        self._branch_counts = None
         if waypoints and not targets:
             log.warning("--waypoints needs --target-functions; ignored")
         # --prove-dead: verdict cache shared with the distance spec, keyed to

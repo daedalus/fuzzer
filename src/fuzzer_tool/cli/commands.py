@@ -1782,8 +1782,35 @@ def _genseed_fsm(args) -> int:
         seen.add(h)
         _write_seed(dest, data, h)
 
+    if args.euler_seed:
+        seen |= _write_euler_seeds(fsm, rng, dest, args.max_len)
+
     print(f"[+] Wrote {len(seen)} FSM seed(s) to {dest}/seeds/")
     return 0
+
+
+def _write_euler_seeds(fsm, rng, dest: Path, max_len: int) -> set[str]:
+    """--euler-seed: seeds walking every live FSM transition (core/euler_walk.py)."""
+    from fuzzer_tool.adapters.filesystem import hash_data
+    from fuzzer_tool.core.euler_walk import euler_seeds
+    from fuzzer_tool.services.import_corpus import _write_seed
+
+    try:
+        seeds = euler_seeds(fsm, rng)
+    except ValueError as e:
+        print(f"[-] --euler-seed: {e}")
+        return set()
+
+    written: set[str] = set()
+    for data in seeds:
+        if len(data) > max_len:
+            print(f"[!] --euler-seed: {len(data)}-byte walk > --max-len {max_len}; skipped")
+            continue
+        h = hash_data(data)
+        written.add(h)
+        _write_seed(dest, data, h)
+    print(f"[*] Euler walk: {len(seeds)} message(s) cover every live transition")
+    return written
 
 
 def cmd_genseed(args):
@@ -6026,7 +6053,8 @@ def main() -> int:
         help="Directed mode only (requires --target-functions): in-function "
         "block fitness. 'harmonic' (default): AFLGo harmonic CFG distance. "
         "'reach-prob': SelectFuzz reaching probability (mean over successors), "
-        "scored as -log2 P. Unmeasured; not in --hail-mary.",
+        "scored as -log2 P. 'likelihood': harmonic distance with edges "
+        "weighted -log2(1/outdeg) bits (Dijkstra). Unmeasured; not in --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--anneal-budget",
@@ -8399,6 +8427,12 @@ def main() -> int:
         default=None,
         metavar="FILE",
         help="Generate from a constraint-labelled FSM spec instead of a format",
+    )
+    genseed_parser.add_argument(
+        "--euler-seed",
+        action="store_true",
+        help="With --fsm: also write the fewest messages that walk every live "
+        "transition (Chinese postman + Hierholzer; one when the FSM allows)",
     )
     genseed_parser.set_defaults(func=cmd_genseed)
 

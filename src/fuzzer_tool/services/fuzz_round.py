@@ -791,6 +791,8 @@ class FuzzRound:
         if rss > f._peak_rss:
             f._peak_rss = rss
         f._retain_katz()
+        if f._branch_counts is not None:
+            f._branch_counts.tick(f.exec_count)
         elapsed = clock_of(f).time() - f.start_time
         eps = (f.exec_count - f._resume_baseline_exec) / elapsed if elapsed > 0 else 0
         if eps > f._peak_eps:

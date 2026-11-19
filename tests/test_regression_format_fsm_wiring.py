@@ -15,7 +15,9 @@ AB_C_RE = re.compile(rb"[ab]+c")
 
 
 def _genseed_args(**kw):
-    defaults = dict(format="all", corpus=None, count=1, max_len=4096, seed=None, fsm=None)
+    defaults = dict(
+        format="all", corpus=None, count=1, max_len=4096, seed=None, fsm=None, euler_seed=False
+    )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
 
@@ -98,6 +100,39 @@ class TestGenseed:
         rc = cmd_genseed(_genseed_args(fsm=str(spec), corpus=str(tmp_path / "c")))
         assert rc == 1
         assert not (tmp_path / "c").exists()
+
+
+class TestGenseedEuler:
+    POSTMAN = 'start A\nfinal A\nA -> B : "x"\nA -> B : "yy"\nB -> A : "z"\n'
+
+    def _run(self, tmp_path, spec, **kw):
+        path = tmp_path / "e.fsm"
+        path.write_text(spec)
+        corpus = tmp_path / "corpus"
+        args = _genseed_args(fsm=str(path), corpus=str(corpus), count=0, seed=1, **kw)
+        assert cmd_genseed(args) == 0
+        return [f.read_bytes() for f in corpus.rglob("id_*")]
+
+    def test_writes_euler_seed(self, tmp_path):
+        (seed,) = self._run(tmp_path, self.POSTMAN, euler_seed=True)
+        assert sorted(seed) == sorted(b"xyyzz")
+        assert parse_fsm(self.POSTMAN).accepts(seed)
+
+    def test_falsification_off_writes_nothing(self, tmp_path):
+        assert self._run(tmp_path, self.POSTMAN) == []
+
+    def test_adversarial_over_max_len_skipped(self, tmp_path):
+        assert self._run(tmp_path, self.POSTMAN, euler_seed=True, max_len=4) == []
+
+    def test_parser_accepts_flag(self, monkeypatch):
+        from fuzzer_tool.cli import commands
+
+        seen = {}
+        monkeypatch.setattr(commands, "cmd_genseed", lambda a: seen.setdefault("e", a.euler_seed))
+        argv = ["fuzzer-tool", "genseed", "-d", "c", "--fsm", "x.fsm", "--euler-seed"]
+        monkeypatch.setattr("sys.argv", argv)
+        commands.main()
+        assert seen["e"] is True
 
 
 class TestFuzzCli:

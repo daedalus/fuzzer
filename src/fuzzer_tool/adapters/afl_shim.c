@@ -272,6 +272,7 @@ static void __afl_cmplog_fini(void);
 #if __AFL_DISTANCE_MODE
 #include <dlfcn.h>
 static void __afl_map_dist_shm(void);
+static void __afl_map_dist_hits_shm(void);
 static void __afl_map_node_shm(void);
 #endif
 static void __afl_map_block_shm(void);
@@ -1349,6 +1350,7 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     __afl_mapping = 1;
 #if __AFL_DISTANCE_MODE
     __afl_map_dist_shm();
+    __afl_map_dist_hits_shm();
     __afl_map_node_shm();
 #endif
     __afl_map_block_shm();
@@ -3350,6 +3352,13 @@ static uint32_t   __afl_dist_window = 0;    /* max slots one lookup walks */
 static uint64_t   __afl_dist_sum = 0;
 static uint64_t   __afl_dist_hits = 0;
 
+/* Likelihood-metric site counters (DistHitsShm): u32 slots head, then one
+ * u32 count per distance-table slot, bumped on every table hit. Cumulative;
+ * Python reads deltas. Plain increment: a lost update under threads only
+ * blurs a statistic. Slots bound the index if the table is swapped. */
+static uint32_t  *__afl_dist_hit_cnt = NULL;
+static uint32_t   __afl_dist_hit_slots = 0;
+
 /* K-Scheduler node-visit bitmap (see NodeBitmapShm): u32 size_bytes head,
  * then the payload. Eagerly written on probe hits, read-and-cleared by
  * Python after each execution — no destructor writer. */
@@ -3418,6 +3427,7 @@ __AFL_GCC_NO_COV static void __afl_aux_hold(const char *env, struct __afl_aux_se
 
 static struct __afl_aux_seg __afl_node_seg = {-1, NULL};
 static struct __afl_aux_seg __afl_dist_seg = {-1, NULL};
+static struct __afl_aux_seg __afl_dist_hits_seg = {-1, NULL};
 
 __AFL_GCC_NO_COV static void __afl_map_node_shm(void) {
     if (__afl_aux_held("__AFL_NODE_BITMAP_ID", &__afl_node_seg)) return;
@@ -3741,6 +3751,25 @@ __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
     __afl_aux_hold("__AFL_DIST_SHM_ID", &__afl_dist_seg, p);
 }
 
+/* Site counters, after the table: refused unless the slot count equals the
+ * table capacity (counts are indexed by table slot). */
+__AFL_GCC_NO_COV static void __afl_map_dist_hits_shm(void) {
+    if (__afl_aux_held("__AFL_DIST_HITS_ID", &__afl_dist_hits_seg)) return;
+    void *p = __afl_attach_sized("__AFL_DIST_HITS_ID", sizeof(uint32_t));
+    if (!p) return;
+
+    uint32_t slots = *(uint32_t *)p;
+    if (!__afl_dist_table || slots != __afl_dist_cap) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        __afl_dist_hit_cnt = NULL;
+        return;
+    }
+    __afl_dist_hit_slots = slots;
+    __afl_dist_hit_cnt = (uint32_t *)((uint8_t *)p + 4);
+    __afl_aux_hold("__AFL_DIST_HITS_ID", &__afl_dist_hits_seg, p);
+}
+
 /* Distance-table lookup + node-bitmap probe for one already-computed key.
  * Shared by __sanitizer_cov_trace_pc() (PC-based edge, trace-pc builds) and
  * __sanitizer_cov_trace_pc_guard() (guard-counter edge, trace-pc-guard
@@ -3763,6 +3792,8 @@ __AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
         if (k == key) {
             __afl_dist_sum += __afl_dist_table[idx].dist;
             __afl_dist_hits++;
+            if (__afl_dist_hit_cnt && idx < __afl_dist_hit_slots)
+                __afl_dist_hit_cnt[idx]++;
             uint32_t nidx = __afl_dist_table[idx].node_idx;
             if (__afl_area && __afl_node_bitmap &&
                 nidx < __afl_node_bitmap_bytes * 8u) {
