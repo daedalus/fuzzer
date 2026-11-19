@@ -1186,6 +1186,9 @@ def _section_calls(elf: bytes, sec: tuple[int, int, int], want: np.ndarray) -> i
     return int(np.count_nonzero(want[hit] == dest))
 
 
+_ELF64_PHDR_SIZE = 56  # sizeof(Elf64_Phdr)
+
+
 def find_load_segment(elf_data: bytes, vaddr: int) -> tuple[int, int, int] | None:
     """Find the LOAD segment containing vaddr.
 
@@ -1203,6 +1206,9 @@ def find_load_segment(elf_data: bytes, vaddr: int) -> tuple[int, int, int] | Non
     e_phnum = struct.unpack_from("<H", elf_data, 56)[0]
     for i in range(e_phnum):
         off = e_phoff + i * e_phentsize
+        # Malformed phdr table past the image: no segment, not a crash.
+        if off + _ELF64_PHDR_SIZE > len(elf_data):
+            return None
         p_type = struct.unpack_from("<I", elf_data, off)[0]
         if p_type == 1:  # PT_LOAD
             p_vaddr = struct.unpack_from("<Q", elf_data, off + 16)[0]
