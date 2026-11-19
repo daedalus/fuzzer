@@ -4322,6 +4322,23 @@ class OperatorEngine:
             return self._op_declined("literal_mismatch", buf)
         return bytearray(out)
 
+    def _op_token_repair(self, buf, byte_idx, _data):
+        """Overwrite a near miss (<= k bytes off) of a dictionary/cmplog token with it."""
+        from fuzzer_tool.core.bitap import token_repair  # noqa: PLC0415
+
+        rng = self.ctx._rng
+        words, cmp_tokens = self.ctx.dictionary, self.ctx.cmplog_tokens
+        tokens = words or cmp_tokens
+        if words and cmp_tokens:
+            tokens = (words, cmp_tokens)[rng.randint(0, 1)]
+        if not tokens:
+            return self._op_declined("token_repair", buf)
+
+        out = token_repair(bytes(buf), tokens, byte_idx, rng=rng)
+        if out is None:
+            return self._op_declined("token_repair", buf)
+        return bytearray(out)
+
     def _op_punctuation_insert(self, buf, _byte_idx, _data):
         """Insert 1-4 random punctuation characters at a random position.
 

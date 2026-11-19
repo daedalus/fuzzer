@@ -122,6 +122,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "token_dup",
         "dict_compound",
         "literal_mismatch",
+        "token_repair",
     },
     "structural": {
         "seq_mutate",
@@ -981,6 +982,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "token_dup": _has_dictionary,
     "dict_compound": _has_dictionary,
     "literal_mismatch": _has_literals,
+    "token_repair": _has_literals,
     # model / engine-gated ops
     # bit_cross and arith_mid use parent_key only to skip ancestors/descendants
     # as donors (recorded under --lineage). Without it the ancestor test is a

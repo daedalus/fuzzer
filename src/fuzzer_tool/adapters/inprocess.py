@@ -35,6 +35,7 @@ from fuzzer_tool.adapters.shim_factory import (
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY
 from fuzzer_tool.adapters.stderr_capture import StderrCapture
 from fuzzer_tool.core.run_mode import InputPlacement, StateRestore
+from fuzzer_tool.core.token_bucket import ReportThrottle
 
 log = logging.getLogger(__name__)
 
@@ -227,6 +228,28 @@ def _no_stage(data: bytes) -> None:
     """No input file: the harness gets the buffer only."""
 
 
+def _to_stderr(text: str) -> None:
+    sys.stderr.write(text)
+    sys.stderr.flush()
+
+
+def _pre_captured(pre, capture, throttle):
+    """``pre`` with fd 2 captured; what it writes reaches the terminal via ``throttle``.
+
+    Costs 2 ``dup2`` + 1 read per exec; bound only for captured targets with
+    a restore stage.
+    """
+
+    def run(data: bytes) -> None:
+        capture.begin()
+        try:
+            pre(data)
+        finally:
+            throttle.emit(capture.finish())
+
+    return run
+
+
 def _pre_exec(restore, stage):
     """One per-exec call for globals restore + input file staging.
 
@@ -327,6 +350,7 @@ class InProcessRunner:
         self._pre = _pre_exec(self._restore, self._stage)
         # fd 2 -> reused pipe around direct-mode calls (ASAN reports).
         self._stderr = StderrCapture()
+        self._throttle = ReportThrottle(_to_stderr)
         self._is_c = False
         self._loader_path: str | None = None
         self._bitmap_out: str | None = None
@@ -515,6 +539,10 @@ class InProcessRunner:
             return
         self._restore = snap.restore
         self._pre = _pre_exec(self._restore, self._stage)
+        if self.capture_stderr:
+            # Restore runs outside the call's capture window; its reports
+            # (a copy over a redzone) would flood the terminal.
+            self._pre = _pre_captured(self._pre, self._stderr, self._throttle)
         log.info("snapshot-restore: %d bytes of globals per exec", snap.size)
 
     def _bind_fault(self) -> None:

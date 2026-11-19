@@ -2264,6 +2264,9 @@ class Fuzzer:
         # --bloat-reward: operator reward x child/parent edges per bit when a
         # discovery grew the input (core/edge_density.py). Off. Appended.
         bloat_reward=Switch.OFF,
+        # --corpus-tokens: corpus-wide repeats -> dictionary before the first
+        # exec (core/suffix_automaton.py). Off, out of --hail-mary. Appended.
+        corpus_tokens=Switch.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3510,6 +3513,8 @@ class Fuzzer:
 
         self._load_corpus()
         loaded = self.corpus
+        if corpus_tokens is Switch.ON:
+            self._learn_corpus_tokens()
 
         # Load pruned seeds into cuckoo filter if enabled
         # Sized at 10x the corpus + persisted pruned entries; minimum 100_000.
@@ -6006,6 +6011,14 @@ class Fuzzer:
 
     def _load_corpus(self):
         return self._corpus_manager.load_corpus()
+
+    def _learn_corpus_tokens(self) -> None:
+        """--corpus-tokens: repeats across the loaded corpus join the dictionary, zero execs."""
+        from fuzzer_tool.core.suffix_automaton import corpus_tokens  # noqa: PLC0415
+
+        before = len(self.dictionary)
+        self._operators._add_auto_tokens(corpus_tokens(self.corpus))
+        log.info("corpus-tokens: %d dictionary tokens", len(self.dictionary) - before)
 
     def _load_pruned_seeds_into_cuckoo(self):
         """Add all pruned seeds to the cuckoo filter at startup."""
