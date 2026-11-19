@@ -5444,6 +5444,18 @@ class OperatorEngine:
             return self._op_declined("poly1305_fix", buf)
         return bytearray(out[: self.ctx.max_len])
 
+    def _op_sha1_collide(self, buf, _byte_idx, _data):
+        """Rewrite a window so the SHA-1 prefix still matches (--sha1-collide-bits)."""
+        from fuzzer_tool.core.mutations.sha1_collide import sha1_collide
+
+        bits = self.f.sha1_collide_bits
+        if bits is None:
+            return self._op_declined("sha1_collide", buf)
+        out = sha1_collide(bytes(buf), bits, self.ctx._rng)
+        if out is None:
+            return self._op_declined("sha1_collide", buf)
+        return bytearray(out)
+
     def _op_hash_len_ext(self, buf, _byte_idx, _data):
         """Append padding plus a suffix and extend H(key||msg) (--hlx-algo)."""
         from fuzzer_tool.core.mutations.hash_len_ext import hash_len_ext

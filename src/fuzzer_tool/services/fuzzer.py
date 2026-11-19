@@ -1926,6 +1926,7 @@ class Fuzzer:
         hlx_algo=None,
         hlx_key_len=16,
         hlx_digest_at=None,
+        sha1_collide_bits=None,
         op_line_code=False,
         rq_xor_key=False,
         checksum_sites=False,
@@ -2623,6 +2624,7 @@ class Fuzzer:
         self.hlx_algo = hlx_algo
         self.hlx_key_len = hlx_key_len
         self.hlx_digest_at = hlx_digest_at
+        self.sha1_collide_bits = sha1_collide_bits
         self.op_line_code = op_line_code
         from fuzzer_tool.core.rq_encodings import LineEncoders, set_line_encoders  # noqa: PLC0415
 
