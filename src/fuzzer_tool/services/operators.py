@@ -5297,6 +5297,13 @@ class OperatorEngine:
         out = recompress_idat(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("recompress_png_idat", out, buf)
 
+    def _op_g711_mutate(self, buf, _byte_idx, _data):
+        """Decode A-law/µ-law samples, mutate in the linear domain, re-encode."""
+        from fuzzer_tool.core.mutations.g711 import mutate_g711  # noqa: PLC0415
+
+        out = mutate_g711(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("g711_mutate", out, buf)
+
     # ── Token-level text formats (core/mutations/{json_struct,sql_text}) ──
 
     def _op_json_mutate(self, buf, _byte_idx, _data):
