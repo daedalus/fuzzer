@@ -135,4 +135,6 @@ suppress = [
     "tests/test_overlap_density.py:TestUnionFind.test_naive_unconditional_attach_is_the_adversarial_case",
     "tests/test_overlap_density.py:TestUnionFind.test_size_invariant_after_random_unions",
     "tests/test_overlap_density.py:TestUnionFind.test_union_by_size_bounds_chain_depth",
+    # sha1_collide appended to the gated-op parametrize list; none removed.
+    "tests/test_regression_exhaustive_pool_gated_ops.py:test_regression_gated_op_declines_without_its_option",
 ]
