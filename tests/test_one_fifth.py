@@ -116,7 +116,7 @@ def _count_ops(scale: float, mutations: int = 8, stall: bool = False) -> int:
         applied.append(1)
         buf[0] ^= 1
 
-    engine.build_ops = lambda data: ["counted"]
+    engine.build_ops = lambda data, ctx=None: ["counted"]
     f._op_dispatch = {"counted": op}
     engine.mutate(b"A" * 64)
     return len(applied)

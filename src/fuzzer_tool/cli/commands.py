@@ -1452,7 +1452,7 @@ def cmd_fuzz(args):
             )
 
     # `is True`: only a real abort flag counts, not a stand-in fuzzer's attribute.
-    aborted = fuzzer.aborted is True
+    aborted = getattr(fuzzer, "aborted", False) is True
 
     # A truncated campaign is not a finished ledger row.
     if getattr(args, "ledger_preset", None) is not None and not aborted:

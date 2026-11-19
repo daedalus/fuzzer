@@ -68,7 +68,7 @@ class WindowInfluenceTracker(ByteSensitivityTracker):
     def _evict(self) -> None:
         if len(self._analyzed) <= self.max_seeds:
             return
-        oldest = next(iter(self._analyzed))
+        oldest = next(iter(self._sensitivity))  # dict: insertion order
         self._analyzed.discard(oldest)
         self._sensitivity.pop(oldest, None)
         self._cum_cache.pop(oldest, None)

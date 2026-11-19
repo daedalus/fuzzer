@@ -3998,7 +3998,9 @@ struct __afl_fd_id {
     int   fifo;   /* sink is a pipe: flush in atomic chunks */
 };
 
+#if __AFL_CMPLOG
 static struct __afl_fd_id __afl_cmplog_fd_id;
+#endif
 
 __AFL_NO_COV static int __afl_log_open(const char *path, int extra_flags, struct __afl_fd_id *id) {
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | extra_flags, 0644);
