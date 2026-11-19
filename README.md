@@ -562,4 +562,4 @@ pipeline. Eight crashes, three unique bugs, first crash at ~432 execs.
 
 ## License
 
-GPL-3.0-or-later (`LICENSE`). Copyright (C) 2025 Dario Clavijo. Releases before 2026-11-19 were MIT.
+MIT

@@ -472,7 +472,7 @@ Survey of 1608 files; absence checked by grep over `src/`. Already covered: BWT/
 - Skip: more schedulers (HRRN, Q-learning, tabu, hill climbing: Reality Check rows NULL; Metropolis/SA exist), crypto ciphers/hashes (hashlib; no inversion value), RMQ/segment/wavelet trees/treap/skip list (Fenwick + numpy cover), kd-tree (NN-descent exists), Graham scan, MFCC, Karnaugh, Manacher, dancing links (set cover exists), quickselect (`np.partition`).
 
 ## TheAlgorithms/C port candidates (2026-11-19, TheAlgorithms/C@e5dad3f)
-Upstream is GPL-3.0; repo relicensed GPL-3.0-or-later (2026-11-19), so verbatim ports are allowed. Algorithms add nothing over `core/`; value is upstream bugs as known-bug fuzz targets. Vendor via `tools/vendor_thealgorithms.sh`, one `targets/talgo_<name>_read.c` per function (`-Dmain=talgo_orig_main`, `fuzz_shm_run`), wire into `tools/build_targets.sh`. Bugs verified at the quoted lines:
+Upstream is GPL-3.0, repo is MIT: never commit upstream code; reimplement from the idea or vendor out of tree. Algorithms add nothing over `core/`; value is upstream bugs as known-bug fuzz targets. Vendor via `tools/vendor_thealgorithms.sh`, one `targets/talgo_<name>_read.c` per function (`-Dmain=talgo_orig_main`, `fuzz_shm_run`), wire into `tools/build_targets.sh`. Bugs verified at the quoted lines:
 - [ ] **Regex→NFA** (`misc/mcnaughton_yamada_thompson.c`) — leading `*` → NULL `left` deref (284); fixed pools (466/477/660) overflow on many `|`/nested `*`.
 - [ ] **Infix→postfix** (`conversions/infix_to_postfix.c:157`) — unmatched `)` loops, unbounded `postfix[j]` heap write.
 - [ ] **RLE** (`misc/run_length_encoding.c:32,58`) — `malloc(2*strlen)` + NUL write 1 past end.
