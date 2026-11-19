@@ -485,6 +485,20 @@ Handover: `docs/handover/handover_thealgorithms_c_survey_2026-11-19.md`. Overlap
 - [ ] **A-law/µ-law PCM mutator** (2026-11-19) — shipped `g711_mutate` (WAV 6/7, AU 27/1). Open: (a) no G.711 seeds in the FFmpeg corpus or seed generator: op only fires via the 2% trickle until one exists; (b) raw `.al`/`.ul` not sniffed; (c) FFmpeg A/B (ledger) once seeds exist.
 - [ ] **Kohonen SOM seed map** (2026-11-19) — shipped as `--report` section (`core/seed_som.py`). Open: (a) read it on a real FFmpeg/fuzzgoat report; (b) square grid only (no PCA aspect ratio); (c) not in the exit summary.
 
+## TheAlgorithms/Rust port candidates (2026-11-19, TheAlgorithms/Rust master)
+~430 files; absence checked by grep over `src/`. Python/C survey verdicts stand. Also covered: Aho-Corasick, BWT/MTF/RLE/Huffman/LZ77, Base32/85, BCD/negabinary, Gray code, Fenwick, Bloom, DSU, LCA/Tarjan, dominators, mincut, Hungarian, Gale-Shapley, Dijkstra/A*/Bellman, Euler walk, ant colony, GA, k-means, PCA, kNN, Kadane, Misra-Gries, SJT (`permutation.py`), Pollard rho/BSGS/CRT (`numtheory.py`), Carmichael/strong pseudoprimes (`prime_inject.py`), FFT/NTT, secp fields, Poly1305, suffix automaton. Ranked by fit:
+- [ ] **inet_aton literal forms** (`conversions/ipv4_conversion.rs`) — rewrite dotted quads as `127.1`, `0x7f.0.0.1`, `017700000001`, `2130706433`; URL/SSRF parsers disagree. `text_codec` op.
+- [ ] **Count-min path frequency** (`data_structures/count_min_sketch.rs`) — bounded per-path-hash hit estimates for AFLFast-style power schedules; Misra-Gries/CVM give heavy hitters/distinct counts, not per-key.
+- [ ] **Smith-Waterman crash localization** (`dynamic_programming/smith_waterman.rs`) — local alignment, affine gaps, crash vs parent: mutated region survives indels; Levenshtein/Myers give global distance only. Seeds reducer/`root_cause`.
+- [ ] **Galloping prefix truncation** (`searching/exponential_search.rs`) — smallest crashing prefix in O(log n) execs before ddmin; `reducer.py` has none.
+- [ ] **Crypto-constant sniffer** (`ciphers/tea.rs`, `salsa.rs`, `chacha.rs`, `hashing/sha2.rs`, `sha3.rs`, `blake2b.rs`) — scan `.rodata` (`elf.py` word scan) for TEA delta, `expand 32-byte k`, SHA-2 K / Keccak RC / BLAKE2 IV → label crypto sites, arm hash fixers, skip their bytes.
+- [ ] **Naive Bayes exec gate** (`machine_learning/naive_bayes.rs`) — P(new cov | op, pos bucket, seed class); skip predicted-dead mutants. A/B required.
+- [ ] **Word-break token tiling** (`dynamic_programming/word_break.rs`) — DP tiling of input into dict tokens (Aho-Corasick gives overlaps, `token_shuffle` splits on delimiters); mutate whole tokens.
+- [ ] **2-SAT bit implications** (`graph/two_satisfiability.rs`) — linear-time solve of pairwise bit constraints from bitflip→edge; subcase of DPLL item, before z3.
+- [ ] **Prüfer tree shapes** (`graph/prufer_code.rs`) — uniform random labeled trees as nesting skeletons for `gramatron`/`tlv_mutate`.
+- [ ] **Egg-drop threshold probe** (`dynamic_programming/egg_dropping.rs`) — find size/count threshold of OOM/timeout with bounded timeout budget.
+- Skip: sorting, searching (bisect/numpy), geometry, financial, navigation, unit conversions, classic ciphers, big_integer (Python int), AVL/RB/B-tree/vEB/skip list/treap/segment trees, HLD/centroid/decremental connectivity, Floyd-Warshall/Dinic/PageRank (existing distance/mincut/centrality), ML losses/optimizers, backtracking puzzles, Manacher/Jaro-Winkler/Z/KMP/Boyer-Moore (`bytes.find`), Duval (Booth shipped), Yin (`periodicity.py`).
+
 ## Standing notes
 - [ ] **Master test debt (2026-11-16)**: `test_perf_group_read.py::test_real_software_counters_count_own_work` fails in this container; `test_regression_end_of_run_persistence.py` lets the probe's KeyboardInterrupt abort the pytest session (later files never run); 16 failures across `test_regression_cli_fuzzer_kwargs`/`elo_all`/`fuzzer`/`one_fifth`/… also red on master.
 - [ ] **`test_regression_novel_crash_reward.py`: 2 failures on master** — stub `SimpleNamespace` lacks `_is_hw_max` (2026-11-16).
