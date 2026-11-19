@@ -183,7 +183,7 @@ class TimelineEntry:
 
     input_hash: str  # SHA256 prefix for identification
     mutation_op: str
-    mutation_offset: int
+    mutation_offset: int | None
     mutation_width: int
     coverage_before: int
     coverage_after: int
@@ -535,8 +535,9 @@ class FormatCluster:
         """Predict whether a mutation should affect coverage."""
         offset = entry.mutation_offset
         # Zero depth: no field covers offset, skip the span scan.
+        # Delocalised ops (offset None) have no span; only op sensitivity applies.
         cover = self._synced_cover()
-        covered = offset is None or offset < 0 or not cover.sparse or cover.depth(offset)
+        covered = offset is not None and (offset < 0 or not cover.sparse or cover.depth(offset))
         for h in self.hypotheses if covered else ():
             if h.offset <= offset < h.offset + h.width and h.confidence > 0.3:
                 return True
@@ -968,7 +969,7 @@ class FormatLearner:
         self,
         input_bytes: bytes,
         mutation_op: str,
-        mutation_offset: int,
+        mutation_offset: int | None,
         mutation_width: int,
         coverage_before: int,
         coverage_after: int,
