@@ -82,6 +82,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "prune_density",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "trim_sparse",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "bloat_reward",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "corpus_tokens",  # unmeasured: unit tests only
         "advisors",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "plateau_groups",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "elo_stale_bench",  # unmeasured: A/B pending (docs/AB_PENDING.md)

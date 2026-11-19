@@ -1065,6 +1065,7 @@ def cmd_fuzz(args):
         prune_density=Switch.ON if getattr(args, "prune_density", False) else Switch.OFF,
         trim_sparse=Switch.ON if getattr(args, "trim_sparse", False) else Switch.OFF,
         bloat_reward=Switch.ON if getattr(args, "bloat_reward", False) else Switch.OFF,
+        corpus_tokens=Switch.ON if getattr(args, "corpus_tokens", False) else Switch.OFF,
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -3057,6 +3058,9 @@ def cmd_sweep(args):
 # bloat_reward (--bloat-reward) is excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md).
 #
+# corpus_tokens (--corpus-tokens) is excluded as unmeasured: unit tests only,
+# no paired run.
+#
 # advisors (--advisors) is excluded as unmeasured: unit tests only, no paired
 # run (docs/AB_PENDING.md).
 #
@@ -3858,6 +3862,13 @@ def main() -> int:
         "and is not a safe global",
     )
     fuzz_parser.add_argument("-D", "--dict", nargs="+", help="Dictionary file(s)")
+    fuzz_parser.add_argument(
+        "--corpus-tokens",
+        action="store_true",
+        help="Before the first exec, add substrings repeated across the corpus "
+        "(suffix automaton, first 64 KiB) to the dictionary (core/suffix_automaton.py). "
+        "Off; unmeasured.",
+    )
     fuzz_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
@@ -6867,7 +6878,8 @@ def main() -> int:
         default=None,
         help=(
             "Declare input symmetries so equivalent mutants cost one exec: "
-            "swap@OFF:SIZExCOUNT (commuting chunks), endian@OFF:SIZE (byte-order "
+            "swap@OFF:SIZExCOUNT (commuting chunks), rot@OFF:SIZExCOUNT (ring "
+            "buffer, any cyclic shift), endian@OFF:SIZE (byte-order "
             "agnostic field), comma-separated. Orbit size capped at 16. "
             "A wrong declaration drops real novelty. Off by default."
         ),
