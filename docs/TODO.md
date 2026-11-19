@@ -477,8 +477,9 @@ Survey of 1608 files; absence checked by grep over `src/`. Already covered: BWT/
 Handover: `docs/handover/handover_thealgorithms_c_survey_2026-11-19.md`. Overlap with the Python survey above folded in.
 - [ ] **Union-find consolidation** — 7 local `find`/`union` copies → one `core/dsu.py` (Hard Rule 1).
 - [ ] **Regex dictionary tokens** (Thompson NFA) — sample matching and near-miss strings; grep pattern inputs.
-- [ ] **Euler-walk seed** (Hierholzer + Chinese postman) — one seed covering every `format_fsm` transition.
-- [ ] **Likelihood-weighted directed distance** (Dijkstra, `−log p` edges) — replaces hop-count BFS in `analyzer_distance`; A/B owed.
+- [x] **Euler-walk seed** (Hierholzer + Chinese postman) — `core/euler_walk.py`, `genseed --fsm F --euler-seed` (2026-11-19).
+- [x] **Likelihood-weighted directed distance** — `--distance-metric likelihood` (2026-11-19); A/B in ledger.
+- [ ] **Likelihood metric: observed branch counts** — p is `1/outdeg` today. Needs per-static-edge hit counts (guard index → block map, counts in the shim) to weight rare branches by data.
 - [ ] **A-law/µ-law PCM mutator** — FFmpeg; mutate in linear domain.
 - [ ] **Kohonen SOM seed map** — report only.
 

@@ -59,10 +59,17 @@ SelectFuzz, IEEE S&P '23) replaces the in-function CFG distance::
   surprisal ``-log2 P`` (bits of branch luck needed) so "lower is closer"
   holds for every consumer: a 4-way switch one hop away costs 2 bits, a
   straight line of any length costs 0. Function-level fallback unchanged.
+
+Optional likelihood metric (``DistanceMetric.LIKELIHOOD``): the harmonic
+CFG distance with each edge ``u -> v`` costing ``-log2 p(v|u)`` bits instead
+of one hop, via reverse Dijkstra. p is the Laplace prior ``1/outdeg(u)``
+(no runtime branch counts reach the static CFG yet). Unlike REACH_PROB
+(all paths averaged) this scores the single most probable path.
 """
 
 import bisect
 import enum
+import heapq
 import logging
 import math
 import multiprocessing
@@ -363,16 +370,64 @@ def _reach_values(cfg: FunctionCFG, tbbs: set[int]) -> dict[int, float]:
     return {b: max(0.0, -math.log2(pb)) for b, pb in _reach_probs(cfg, tbbs).items() if pb > 0.0}
 
 
+def _branch_bits(cfg: FunctionCFG) -> dict[int, float]:
+    """Cost in bits of leaving each block: -log2 p, p = 1/outdeg (Laplace prior).
+
+    Distinct successors only; out-of-function ones count. A fall-through
+    costs 0, a 4-way switch 2.
+    """
+    return {
+        b: math.log2(len(set(blk.successors))) if blk.successors else 0.0
+        for b, blk in cfg.blocks.items()
+    }
+
+
+def _harmonic_dijkstra(preds: dict, tbbs: set[int], bits: dict[int, float]):
+    """Reverse Dijkstra per target: per block, sum of 1/(1+d) and target count.
+
+    Edge pred -> cur costs ``bits[pred]``, so d(b, t) is the cheapest forward
+    path in bits. Same aggregation as ``_harmonic_bfs``.
+    """
+    sum_inv: dict[int, float] = {}
+    count: dict[int, int] = {}
+    for t in tbbs:
+        done: set[int] = set()
+        heap = [(0.0, t)]
+        while heap:
+            d, cur = heapq.heappop(heap)
+            if cur in done:
+                continue
+            done.add(cur)
+            sum_inv[cur] = sum_inv.get(cur, 0.0) + 1.0 / (1.0 + d)
+            count[cur] = count.get(cur, 0) + 1
+            for pred in preds.get(cur, ()):
+                if pred not in done:
+                    heapq.heappush(heap, (d + bits[pred], pred))
+    return sum_inv, count
+
+
+def _likelihood_values(cfg: FunctionCFG, tbbs: set[int]) -> dict[int, float]:
+    """AFLGo harmonic value with edges weighted by -log2 p instead of 1 hop.
+
+    Shortest path = most probable path: a rare branch one hop away costs
+    more than a long straight line.
+    """
+    sum_inv, count = _harmonic_dijkstra(predecessors(cfg), tbbs, _branch_bits(cfg))
+    return {b: count[b] / sum_inv[b] for b in count}
+
+
 class DistanceMetric(enum.Enum):
     """In-function block fitness for directed mode."""
 
     HARMONIC = "harmonic"  # AFLGo harmonic CFG distance
     REACH_PROB = "reach-prob"  # SelectFuzz reaching probability, as -log2 P
+    LIKELIHOOD = "likelihood"  # harmonic distance over -log2 p edge weights
 
 
 _METRIC_VALUES = {
     DistanceMetric.HARMONIC: _harmonic_values,
     DistanceMetric.REACH_PROB: _reach_values,
+    DistanceMetric.LIKELIHOOD: _likelihood_values,
 }
 
 

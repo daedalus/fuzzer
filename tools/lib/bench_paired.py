@@ -195,6 +195,7 @@ ARMS: dict[str, list[str]] = {
     # Read with --metric tte_<kind>. ctl is harmonic again: the A/A (Rule 46).
     "dist-harmonic": ["--distance-metric", "harmonic"],
     "dist-reach": ["--distance-metric", "reach-prob"],
+    "dist-likelihood": ["--distance-metric", "likelihood"],
     "dist-harmonic-ctl": ["--distance-metric", "harmonic"],
     "elo-alphabeta": ["--elo", "--mc-bandit", "--lineage", "--alphabeta"],
     # bootstrap runs only inside corpus minimization, and the recorded `edges`
@@ -414,7 +415,7 @@ GOOD_TURING_ARMS = ("elo-good-turing-seed", "elo-op-good-turing")
 
 REACTIVE_ARMS = ("elo-gradient", "elo-reactive")
 
-DIRECTED_ARMS = ("dist-harmonic", "dist-reach")
+DIRECTED_ARMS = ("dist-harmonic", "dist-reach", "dist-likelihood")
 
 # Arena subset group (pos-arena-uniform is the control the rest pair against).
 POSITION_ARENA_ARMS = (
@@ -434,6 +435,7 @@ ARM_BASELINES: dict[str, str] = {
     "elo-alphabeta": "elo-lineage",
     "bootstrap": "baseline",
     "dist-reach": "dist-harmonic",
+    "dist-likelihood": "dist-harmonic",
     "dist-harmonic-ctl": "dist-harmonic",
     "strata-a1": "strata-a0",
     "strata-a2": "strata-a1",
