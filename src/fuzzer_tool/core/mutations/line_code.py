@@ -16,6 +16,10 @@ Physical-layer and framing codes a decoder unwraps before it parses:
     ppp         RFC 1662 async HDLC (7D escape)    raw 7E, 7D 7E abort
     slip        RFC 1055 (DB escape)               raw C0, DB + other
     cobs        consistent overhead byte stuffing  zero byte, code overrun
+    fm          floppy SD, RLL(0,1): clock 1, data  missing clock bit
+    mfm         floppy DD/HD, RLL(1,3)             sync 4489, adjacent 1s
+    rll27       IBM RLL(2,7) disks, variable-length  11 / 101, eight 0s
+    8b10b       PCIe 1-2, SATA, GbE, USB 3         wrong disparity, 00 00
 
 Bits are MSB-first, level codes start from line level 0, and encoded bit
 streams are zero-padded to a byte.
@@ -75,7 +79,11 @@ def _from_bits(bits: str) -> bytes:
 
 def _manchester(one: str) -> tuple[Callable, Callable]:
     """Codec pair for the polarity that sends data 1 as *one* ("01"/"10")."""
-    zero = one[::-1]
+    return _pair_code(one[::-1], one)
+
+
+def _pair_code(zero: str, one: str) -> tuple[Callable, Callable]:
+    """Codec pair sending each data bit as a 2-bit symbol (FM: "10"/"11")."""
     code = [int("".join(one if (n >> i) & 1 else zero for i in (3, 2, 1, 0)), 2) for n in range(16)]
 
     enc_tab = bytearray(range(256))
@@ -339,6 +347,149 @@ def _cobs_dec(window: bytes) -> tuple[bytes, int]:
     return bytes(out), i
 
 
+# ── MFM: clock = NOR(prior bit, bit), interleaved like BMC ────────────
+
+
+def _mfm_enc(span: bytes) -> bytes:
+    d = int.from_bytes(span, "big")
+    clock = ~(d | (d >> 1)) & ((1 << 8 * len(span)) - 1)
+    return _interleave(clock.to_bytes(len(span), "big"), span)
+
+
+def _mfm_dec(window: bytes) -> tuple[bytes, int]:
+    n = len(window) // 2
+    nbits = 8 * n
+    coded = window[: 2 * n]
+    clock, data = _deinterleave(coded, 1), _deinterleave(coded, 0)
+
+    # Violation: a clock bit other than NOR(prior data bit, data bit).
+    bad = (clock ^ ~(data | (data >> 1))) & ((1 << nbits) - 1)
+    valid = nbits - bad.bit_length() if bad else nbits
+    keep = valid // 8
+    return data.to_bytes(n, "big")[:keep], 2 * keep
+
+
+# ── IBM RLL(2,7): prefix-free variable-length words, via regex ─────────
+
+_RLL27 = {
+    "10": "0100", "11": "1000", "000": "000100", "010": "100100",
+    "011": "001000", "0010": "00100100", "0011": "00001000",
+}  # fmt: skip
+_RLL27_INV = {v: k for k, v in _RLL27.items()}
+_RLL27_DATA = re.compile("1.|000|01.|001.")
+_RLL27_WORD = re.compile("|".join(_RLL27_INV))
+_RLL27_PREFIX = re.compile("(?:" + "|".join(_RLL27_INV) + ")*")
+# Longest partial data word is 3 bits; "00" completes it, never adds one.
+_RLL27_PAD = "00"
+
+
+def _rll27_words(bits: str) -> str:
+    """Code the whole data words in *bits*; a partial tail never matches."""
+    return "".join(map(_RLL27.__getitem__, _RLL27_DATA.findall(bits)))
+
+
+def _rll27_step(rem: str, b: int) -> tuple[str, str]:
+    """(code for rem + byte, leftover partial word)."""
+    bits = rem + format(b, "08b")
+    tail = len(bits) - len("".join(_RLL27_DATA.findall(bits)))
+    return _rll27_words(bits), bits[len(bits) - tail :]
+
+
+# [partial word][byte] -> (code, partial word): 5x faster than a regex pass.
+_RLL27_STEP = {
+    r: tuple(_rll27_step(r, b) for b in range(256)) for r in ("", "0", "1", "00", "01", "001")
+}
+
+
+def _rll27_enc(span: bytes) -> bytes:
+    rem, out = "", []
+    for b in span:
+        code, rem = _RLL27_STEP[rem][b]
+        out.append(code)
+    out.append(_rll27_words(rem + _RLL27_PAD))
+    return _from_bits("".join(out))
+
+
+def _rll27_dec(window: bytes) -> tuple[bytes, int]:
+    bits = _to_bits(window)
+    words = _RLL27_WORD.findall(bits, 0, _RLL27_PREFIX.match(bits).end())
+    data = "".join(map(_RLL27_INV.__getitem__, words))
+    keep = len(data) // 8
+    if not keep:
+        return b"", 0
+
+    # Coded bits through the word that completes data byte *keep*.
+    want, got, coded = 8 * keep, 0, 0
+    for w in words:
+        got += len(_RLL27_INV[w])
+        coded += len(w)
+        if got >= want:
+            break
+    return _from_bits(data[:want]), -(-coded // 8)
+
+
+# ── 8b/10b: 5b/6b + 3b/4b sub-blocks under running disparity ──────────
+#
+# RD- column only; RD+ is its complement when unbalanced, and for the two
+# balanced-but-polar codes D.07 (111000) and D.x.3 (1100). Index 8 is A7.
+
+_5B6B = (
+    "100111", "011101", "101101", "110001", "110101", "101001", "011001", "111000",
+    "111001", "100101", "010101", "110100", "001101", "101100", "011100", "010111",
+    "011011", "100011", "010011", "110010", "001011", "101010", "011010", "111010",
+    "110011", "100110", "010110", "110110", "001110", "101110", "011110", "101011",
+)  # fmt: skip
+_3B4B = ("1011", "1001", "0101", "1100", "1101", "1010", "0110", "1110", "0111")
+_POLAR_6B, _POLAR_4B, _P7, _A7 = 7, 3, 7, 8
+# D.x.A7 replaces D.x.P7 where P7 would make a run of five.
+_A7_AT = ({17, 18, 20}, {11, 13, 14})
+_INVERT = str.maketrans("01", "10")
+
+
+def _sub_block(code: str, rd: int, polar: bool) -> tuple[str, int]:
+    """RD- code -> the code sent at *rd* (0 = RD-), and the RD after it."""
+    balanced = 2 * code.count("1") == len(code)
+    if rd and (polar or not balanced):
+        code = code.translate(_INVERT)
+    return code, rd ^ (not balanced)
+
+
+def _8b10b_symbol(b: int, rd: int) -> tuple[str, int]:
+    x, y = b & 0x1F, b >> 5
+    six, rd = _sub_block(_5B6B[x], rd, x == _POLAR_6B)
+    if y == _P7 and x in _A7_AT[rd]:
+        y = _A7
+    four, rd = _sub_block(_3B4B[y], rd, y == _POLAR_4B)
+    return six + four, rd
+
+
+# [rd][byte] -> (10-bit string, rd after); decode: [rd][string] -> (byte, rd).
+_8B10B_ENC = tuple(tuple(_8b10b_symbol(b, rd) for b in range(256)) for rd in (0, 1))
+_8B10B_DEC = tuple({s: (b, nrd) for b, (s, nrd) in enumerate(_8B10B_ENC[rd])} for rd in (0, 1))
+_8B10B_BITS = 10
+
+
+def _8b10b_enc(span: bytes) -> bytes:
+    """Sequential: each symbol depends on the RD left by the last one."""
+    rd, out = 0, []
+    for b in span:
+        sym, rd = _8B10B_ENC[rd][b]
+        out.append(sym)
+    return _from_bits("".join(out))
+
+
+def _8b10b_dec(window: bytes) -> tuple[bytes, int]:
+    bits = _to_bits(window)
+    rd, out = 0, bytearray()
+    for i in range(0, len(bits) - _8B10B_BITS + 1, _8B10B_BITS):
+        hit = _8B10B_DEC[rd].get(bits[i : i + _8B10B_BITS])
+        if hit is None:
+            break
+        b, rd = hit
+        out.append(b)
+    return bytes(out), -(-len(out) * _8B10B_BITS // 8)
+
+
 _MAN_BAD = (b"\x00", b"\xff")
 # Append only: tests index this tuple by name.
 CODECS = (
@@ -354,6 +505,10 @@ CODECS = (
     Codec("ppp", _ppp_enc, _ppp_dec, (b"\x7e", b"\x7d\x7e")),
     Codec("slip", _slip_enc, _slip_dec, (b"\xc0", b"\xdb\x00")),
     Codec("cobs", _cobs_enc, _cobs_dec, (b"\x00", b"\xff")),
+    Codec("fm", *_pair_code("10", "11"), (b"\x00", b"\x55")),
+    Codec("mfm", _mfm_enc, _mfm_dec, (b"\x44\x89", b"\xff")),
+    Codec("rll27", _rll27_enc, _rll27_dec, (b"\xff", b"\x00\x00")),
+    Codec("8b10b", _8b10b_enc, _8b10b_dec, (b"\x00\x00", b"\xff\xff")),
 )
 
 

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`token_repair` op** (`core/bitap.py`): a token found with 1..k byte substitutions is overwritten with the exact token. `tests/test_bitap.py`.
 - **`--orbit-dedup rot@OFF:SIZExCOUNT`**: ring buffers equal under cyclic shift dedup to one exec. `tests/test_orbit_rotation.py`.
 - **Sanitizer report throttle** (`core/token_bucket.py`): reports written during snapshot restore (outside the capture window) reach stderr at most 4 per bug, then 1 per 10 s. `tests/test_token_bucket.py`.
+- **Classic op arms** `op_hrrn`, `op_qlearn`, `op_tabu`, `op_hill_climb` (`--op-hrrn`, `--op-qlearn`, `--op-tabu`, `--op-hill-climb`): ports from TheAlgorithms/Python. Elo-only, out of `--hail-mary`. `tests/test_classic_op_schedulers.py`. No paired benchmark yet.
 - **`tools/dir_seeds.py --decompress`** (`tools/unpack.py`): zip, tar(.gz/.bz2/.xz) and gzip/bzip2/xz files are sent as their members while walking, one level deep, bounded per member and per file. `tests/test_dir_seeds.py`.
 - **`tools/tcp_corpus.py`**: TCP listener that only builds a corpus: every message (any feeder) written to `CORPUS/seeds/<h[:2]>/id_<h>`, deduplicated by a persistent `--bloom` file and by the disk. `tests/test_tcp_corpus.py`.
 

@@ -179,7 +179,7 @@
 <g id="node6" class="node">
 <title>bandit</title>
 <path fill="#d8eade" stroke="transparent" stroke-width="0" d="M904.48,-1029C904.48,-1029 444.48,-1029 444.48,-1029 438.48,-1029 432.48,-1023 432.48,-1017 432.48,-1017 432.48,-981 432.48,-981 432.48,-975 438.48,-969 444.48,-969 444.48,-969 904.48,-969 904.48,-969 910.48,-969 916.48,-975 916.48,-981 916.48,-981 916.48,-1017 916.48,-1017 916.48,-1023 910.48,-1029 904.48,-1029"/>
-<text text-anchor="start" x="444.48" y="-1013" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">core/schedulers/op_* (54) &#160;+ &#160;elo · shapley</text>
+<text text-anchor="start" x="444.48" y="-1013" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">core/schedulers/op_* (59) &#160;+ &#160;elo · shapley</text>
 <text text-anchor="start" x="444.48" y="-1002" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">monte_carlo mopt exp3 gp_ucb cmaes contextual</text>
 <text text-anchor="start" x="444.48" y="-991" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">ducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy consolidated katz …</text>
 <text text-anchor="start" x="444.48" y="-980" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">elo stale bench (core/elo_stale_bench.py)</text>
