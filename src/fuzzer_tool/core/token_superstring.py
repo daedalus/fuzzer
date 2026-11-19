@@ -21,6 +21,7 @@ gates at once is not measured.
 
 import numpy as np
 
+from fuzzer_tool.core.dsu import DisjointSet
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 DEFAULT_KICKS = 300
@@ -68,20 +69,14 @@ def greedy_order(toks: list[bytes], ov: dict[tuple[int, int], int]) -> list[int]
     n = len(toks)
     nxt: list[int | None] = [None] * n
     has_prev = [False] * n
-    root = list(range(n))
+    union = DisjointSet(n).union
 
-    def find(x: int) -> int:
-        while root[x] != x:
-            root[x] = root[root[x]]
-            x = root[x]
-        return x
-
+    # union() refuses a pair already in one chain: that link would close a cycle.
     for (i, j), _k in sorted(ov.items(), key=lambda e: -e[1]):
-        if nxt[i] is not None or has_prev[j] or find(i) == find(j):
+        if nxt[i] is not None or has_prev[j] or not union(i, j):
             continue
         nxt[i] = j
         has_prev[j] = True
-        root[find(i)] = find(j)
 
     order: list[int] = []
     for head in range(n):

@@ -27,6 +27,8 @@ from itertools import islice
 
 import numpy as np
 
+from fuzzer_tool.core.dsu import DisjointSet
+
 WL_ITERS = 3
 # Fire log lines read per exec: one line per edge hit, so a loop floods it.
 MAX_FIRES = 1 << 22
@@ -175,22 +177,10 @@ def cluster_kernel(sim: np.ndarray, threshold: float) -> list[list[int]]:
 
     Returns clusters ordered by first member, members ascending.
     """
-    n = sim.shape[0]
-    parent = list(range(n))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]  # path halving
-            x = parent[x]
-        return x
-
-    # Union every linked pair; the smaller root wins, so roots are minima.
+    uf = DisjointSet(sim.shape[0])
     for i, j in np.argwhere(np.triu(sim >= threshold, 1)).tolist():
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[max(ri, rj)] = min(ri, rj)
-
-    return _groups([find(i) for i in range(n)])
+        uf.union(i, j)
+    return uf.groups()
 
 
 def _groups(keys: list[int]) -> list[list[int]]:

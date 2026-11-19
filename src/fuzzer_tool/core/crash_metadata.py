@@ -8,6 +8,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
+from fuzzer_tool.core.dsu import DisjointSet
 from fuzzer_tool.core.similarity import (
     hamming_similarity,
     levenshtein_diff_offsets,
@@ -668,26 +669,8 @@ def cluster_crashes(
         threshold = _CRASH_CLUSTER_THRESHOLD
 
     n = len(signatures)
-    parent = list(range(n))
-    rank = [0] * n
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]  # path halving
-            x = parent[x]
-        return x
-
-    def union(x: int, y: int) -> None:
-        px, py = find(x), find(y)
-        if px == py:
-            return
-        if rank[px] < rank[py]:
-            parent[px] = py
-        elif rank[px] > rank[py]:
-            parent[py] = px
-        else:
-            parent[py] = px
-            rank[px] += 1
+    uf = DisjointSet(n)
+    find, union = uf.find, uf.union
 
     # Both metrics are 1 - dist/max_len, so the pass is driven by the slack the
     # threshold leaves: a pair can only clear it if
@@ -752,12 +735,7 @@ def cluster_crashes(
         {i for i in range(n) if i < n_framed} if framed else None,
     )
 
-    clusters_map: dict[int, list[int]] = {}
-    for i in range(n):
-        root = find(i)
-        clusters_map.setdefault(root, []).append(i)
-
-    return list(clusters_map.values())
+    return uf.groups()
 
 
 def detect_chained_clusters(

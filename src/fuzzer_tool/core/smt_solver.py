@@ -18,7 +18,7 @@ from collections import OrderedDict
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.cond_stmt import CondStmt
 from fuzzer_tool.core.crc32 import crc32
-from fuzzer_tool.core.overlap_density import _UnionFind
+from fuzzer_tool.core.dsu import DisjointSet
 
 log = logging.getLogger(__name__)
 
@@ -211,7 +211,7 @@ def _connected_components_by_offset(conditions: list) -> list[list]:
     Order within each returned component preserves the input order.
     """
     n = len(conditions)
-    uf = _UnionFind(n)
+    uf = DisjointSet(n)
     offset_owner: dict[int, int] = {}
     for i, cond in enumerate(conditions):
         for off in cond.offsets or ():

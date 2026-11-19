@@ -118,4 +118,21 @@ suppress = [
     "tests/test_filesystem.py:TestSaveToCorpus.test_with_bloom_new",
     "tests/test_filesystem_extended.py:TestLoadCorpusDelta.test_delta_with_bloom",
     "tests/test_filesystem_extended.py:TestSaveToCorpus.test_with_bloom",
+    # Union-find consolidation 2026-11-19: nested find/union closures and the
+    # private _UnionFind replaced by core/dsu.DisjointSet. Closures were
+    # unreachable; _UnionFind's one importer (smt_solver) now uses
+    # DisjointSet. Its tests moved to tests/test_dsu.py.
+    "src/fuzzer_tool/core/crash_graph.py:find",
+    "src/fuzzer_tool/core/crash_metadata.py:find",
+    "src/fuzzer_tool/core/crash_metadata.py:union",
+    "src/fuzzer_tool/core/overlap_density.py:_UnionFind.depth",
+    "src/fuzzer_tool/core/overlap_density.py:_UnionFind.find",
+    "src/fuzzer_tool/core/overlap_density.py:_UnionFind.union",
+    "src/fuzzer_tool/core/token_superstring.py:find",
+    "tests/test_overlap_density.py:TestUnionFind.depth",
+    "tests/test_overlap_density.py:TestUnionFind.find",
+    "tests/test_overlap_density.py:TestUnionFind.naive_union",
+    "tests/test_overlap_density.py:TestUnionFind.test_naive_unconditional_attach_is_the_adversarial_case",
+    "tests/test_overlap_density.py:TestUnionFind.test_size_invariant_after_random_unions",
+    "tests/test_overlap_density.py:TestUnionFind.test_union_by_size_bounds_chain_depth",
 ]

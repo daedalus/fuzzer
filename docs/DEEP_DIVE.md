@@ -1725,6 +1725,16 @@ ruff check src/ tests/
 ruff format src/ tests/
 ```
 
+### Disjoint-set forest (`core/dsu.py`)
+
+One union-find for "which items connect": `DisjointSet(n)` over `0..n-1`, union by size, path halving. `union()` returns whether it merged; `groups()` orders sets by first member. Callers: `crash_metadata.cluster_crashes`, `crash_graph.cluster_kernel`, `overlap_density._build_clusters`, `smt_solver._connected_components_by_offset`, `token_superstring.greedy_order`. Measured four never slower (interleaved min-of-21, within ±2% or faster).
+- Lists, not `array('i')`: 1.46x faster at ≤10k elements; array wins only near 200k.
+- `labels()`: Python `find` loop below `NP_LABELS_MIN` = 128, numpy pointer jumping (`p = p[p]`) above (1000: 114 → 59 µs).
+- `union()` and small `labels()` inline the root walk: method calls per element cost more than the walks.
+- Not migrated: `shapley._components` (string keys; a keyed wrapper was 13% slower at 5 pairs, median of 15 alternated runs vs A/A 1.02, though 25-42% faster at ≥200 pairs), `plateau.py` (bounded, persisted, per-exec), `lineage.py` (Tarjan LCA re-inits nodes mid-walk), `weizz_tags.py` (next-free pointer, not set merge).
+
+Tests: `tests/test_dsu.py`.
+
 ## Benchmarking
 
 `tools/benchmark.py` is the single entry point; harnesses live in
