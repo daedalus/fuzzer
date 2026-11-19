@@ -405,6 +405,13 @@ def _battery() -> list[bytes]:
         # before only by the 2% bootstrap trickle -- i.e. by RNG luck.
         b"II*\x00\x08\x00\x00\x00" + bytes(40),
         b"ajkg" + bytes(40),
+        # g711_mutate: Sun .snd header (offset 24, 32 bytes, enc 1 = µ-law) + payload.
+        b".snd"
+        + (24).to_bytes(4, "big")
+        + (32).to_bytes(4, "big")
+        + (1).to_bytes(4, "big")
+        + bytes(8)
+        + bytes(range(0, 256, 8)),
         bytes(8) + SECP256K1_FIELD_P + bytes(24),
         # montgomery_word_mutate: a known 32-bit modulus (NTT prime) literal.
         bytes(8) + (998244353).to_bytes(4, "little") + bytes(24),

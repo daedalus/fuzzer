@@ -27,6 +27,7 @@ from itertools import compress
 
 from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.mutations.base64 import parse_base64
+from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
@@ -122,6 +123,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "token_dup",
         "dict_compound",
         "literal_mismatch",
+        "token_repair",
     },
     "structural": {
         "seq_mutate",
@@ -263,6 +265,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "recompress_lz4",
         "recompress_png_idat",
         "base64_chunk_mutate",
+        "g711_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -715,6 +718,8 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "rar_chunk_mutate": _sniff_rar,
     "recompress_lz4": _sniff_lz4_frame,
     "recompress_png_idat": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
+    # A-law/µ-law WAV (fmt tag 6/7) or AU (.snd enc 27/1) with a sample payload.
+    "g711_mutate": lambda d: _g711_payload(d) is not None,
     "json_mutate": _sniff_json,
     "sql_mutate": _sniff_sql,
     "ecdsa_field_mutate": _sniff_secp_payload,
@@ -981,6 +986,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "token_dup": _has_dictionary,
     "dict_compound": _has_dictionary,
     "literal_mismatch": _has_literals,
+    "token_repair": _has_literals,
     # model / engine-gated ops
     # bit_cross and arith_mid use parent_key only to skip ancestors/descendants
     # as donors (recorded under --lineage). Without it the ancestor test is a

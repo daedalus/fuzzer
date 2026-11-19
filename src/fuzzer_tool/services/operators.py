@@ -4335,6 +4335,23 @@ class OperatorEngine:
             return self._op_declined("literal_mismatch", buf)
         return bytearray(out)
 
+    def _op_token_repair(self, buf, byte_idx, _data):
+        """Overwrite a near miss (<= k bytes off) of a dictionary/cmplog token with it."""
+        from fuzzer_tool.core.bitap import token_repair  # noqa: PLC0415
+
+        rng = self.ctx._rng
+        words, cmp_tokens = self.ctx.dictionary, self.ctx.cmplog_tokens
+        tokens = words or cmp_tokens
+        if words and cmp_tokens:
+            tokens = (words, cmp_tokens)[rng.randint(0, 1)]
+        if not tokens:
+            return self._op_declined("token_repair", buf)
+
+        out = token_repair(bytes(buf), tokens, byte_idx, rng=rng)
+        if out is None:
+            return self._op_declined("token_repair", buf)
+        return bytearray(out)
+
     def _op_punctuation_insert(self, buf, _byte_idx, _data):
         """Insert 1-4 random punctuation characters at a random position.
 
@@ -5279,6 +5296,13 @@ class OperatorEngine:
 
         out = recompress_idat(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("recompress_png_idat", out, buf)
+
+    def _op_g711_mutate(self, buf, _byte_idx, _data):
+        """Decode A-law/µ-law samples, mutate in the linear domain, re-encode."""
+        from fuzzer_tool.core.mutations.g711 import mutate_g711  # noqa: PLC0415
+
+        out = mutate_g711(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("g711_mutate", out, buf)
 
     # ── Token-level text formats (core/mutations/{json_struct,sql_text}) ──
 

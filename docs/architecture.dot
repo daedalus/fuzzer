@@ -69,7 +69,7 @@ digraph fuzzer_tool {
     subgraph cluster_mut {
         label="2 · Mutation   —   250+ operators / 9 categories";
         color="#c3c6da"; fillcolor="#f4f4fa"; fontcolor="#454a75";
-        ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\ldet stage · effector map → core/auto_dict\ladvisors (services/advisors.py) · pos_hotspot arm\lTCP seed inbox (adapters/tcp_seed.py, --tcp-listen-port)\l",
+        ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\ldet stage · effector map → core/auto_dict\l--corpus-tokens → core/suffix_automaton · token_repair → core/bitap\ladvisors (services/advisors.py) · pos_hotspot arm\lTCP seed inbox (adapters/tcp_seed.py, --tcp-listen-port)\l",
              fillcolor="#c9cbe6", fontcolor="#2f3560"];
         lib [label="core/mutations/ (68 modules)  ·  core/operator_registry.py\lpng jpeg gif webp webm avif zip gzip zlib riff ogg flv asf mp3\ladts mpegts nal isobmff pgs sqlite der elf protobuf x86 arm\lgrammar · format_fsm (+ euler_walk seeds) · tree_mutator · frameshift · markov · field_hmm (Viterbi spans) · wfc · regularity\lchecksum_learner (Berlekamp-Massey · int checksums · linear via null_lattice)\l",
              fillcolor="#dedff0", fontcolor="#2f3560"];
@@ -91,7 +91,7 @@ digraph fuzzer_tool {
     subgraph cluster_fb {
         label="4 · Feedback   —   what came back";
         color="#b9cbd8"; fillcolor="#f2f7fa"; fontcolor="#37596e";
-        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM edge hash table · hit buckets · per-edge max counts (PerfFuzz)\ladapters/native_scan.c (ctypes): live gather · virgin/max fold · cmplog drains\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\lcore/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap\lcore/edge_clusters.py: incidence classes · clusters · medoids · gaps (--edge-clusters, --pos-centroid)\l",
+        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM edge hash table · hit buckets · per-edge max counts (PerfFuzz)\ladapters/native_scan.c (ctypes): live gather · virgin/max fold · cmplog drains\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\lcore/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap\lcore/edge_clusters.py: incidence classes · clusters · medoids · gaps (--edge-clusters, --pos-centroid)\lcore/seed_som.py: Kohonen map of seed coverage (--report only)\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];
         ltl [label="core/ltl.py  (--ltl)\lBuchi monitor over event trace\lltl:trap / ltl:lasso crash · frontier prefix\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];

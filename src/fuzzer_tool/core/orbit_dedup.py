@@ -8,11 +8,17 @@ Spec grammar (items separated by ``,``)::
 
     swap@OFFSET:SIZExCOUNT    COUNT chunks of SIZE bytes commute
     endian@OFFSET:SIZE        field is byte-order agnostic
+    rot@OFFSET:SIZExCOUNT     ring of COUNT SIZE-byte slots; any cyclic shift is equal
 
 Example: ``swap@8:4x3,endian@0:4``.
 
 * swap: canonical form = chunks sorted ascending. Orbit size ``COUNT!``.
 * endian: canonical form = min(field, reversed field). Orbit size 2.
+* rot: canonical form = least rotation (by slots). Orbit size ``COUNT``.
+  Booth's algorithm finds it in O(n) Python steps; the min over all slices
+  of the doubled span is O(n^2) memcmp yet 2-3.5x faster at every size
+  measured (16 slots: 1.5 vs 5.2 us; zero ring 4096 B: 1.1 vs 2.5 ms), so it
+  ships and Booth is the test oracle (Hard Rule 14).
 * Total orbit size (product over items) is capped at ``MAX_ORBIT``. A wrong
   declaration silently drops real novelty, so big orbits are refused.
 * Items must not overlap. An input too short for an item is left unchanged.
@@ -38,13 +44,14 @@ MAX_ENDIAN_SIZE = 8
 DEFAULT_PROBE_PERIOD = 64
 
 _ITEM_RE = re.compile(
-    r"^(?P<kind>swap|endian)@(?P<off>0x[0-9a-fA-F]+|\d+):(?P<size>\d+)(?:x(?P<count>\d+))?$"
+    r"^(?P<kind>swap|endian|rot)@(?P<off>0x[0-9a-fA-F]+|\d+):(?P<size>\d+)(?:x(?P<count>\d+))?$"
 )
 
 
 class OrbitKind(Enum):
     SWAP = "swap"
     ENDIAN = "endian"
+    ROT = "rot"
 
 
 @dataclass(frozen=True)
@@ -52,7 +59,7 @@ class OrbitSpec:
     kind: OrbitKind
     offset: int
     size: int
-    count: int  # chunks; 1 for ENDIAN
+    count: int  # chunks (slots for ROT); 1 for ENDIAN
 
     @property
     def end(self) -> int:
@@ -60,7 +67,9 @@ class OrbitSpec:
 
     @property
     def orbit_size(self) -> int:
-        return math.factorial(self.count) if self.kind is OrbitKind.SWAP else 2
+        if self.kind is OrbitKind.SWAP:
+            return math.factorial(self.count)
+        return self.count if self.kind is OrbitKind.ROT else 2
 
 
 def parse_orbit_spec(spec: str) -> list[OrbitSpec]:
@@ -73,7 +82,8 @@ def parse_orbit_spec(spec: str) -> list[OrbitSpec]:
         m = _ITEM_RE.match(raw)
         if m is None:
             raise ValueError(
-                f"bad orbit spec {raw!r}; expected swap@OFF:SIZExCOUNT|endian@OFF:SIZE"
+                f"bad orbit spec {raw!r}; expected "
+                "swap@OFF:SIZExCOUNT|rot@OFF:SIZExCOUNT|endian@OFF:SIZE"
             )
         items.append(_build_item(raw, m))
     if not items:
@@ -101,10 +111,10 @@ def _build_item(raw: str, m: re.Match) -> OrbitSpec:
         return OrbitSpec(kind, int(m["off"], 0), size, 1)
 
     if m["count"] is None:
-        raise ValueError(f"{raw!r}: swap needs xCOUNT")
+        raise ValueError(f"{raw!r}: {kind.value} needs xCOUNT")
     count = int(m["count"])
     if size < 1 or count < 2:
-        raise ValueError(f"{raw!r}: swap needs SIZE >= 1 and COUNT >= 2")
+        raise ValueError(f"{raw!r}: {kind.value} needs SIZE >= 1 and COUNT >= 2")
     return OrbitSpec(kind, int(m["off"], 0), size, count)
 
 
@@ -128,9 +138,19 @@ def _fold(data: bytes, s: OrbitSpec) -> bytes:
         low = min(field, field[::-1])
         return data[: s.offset] + low + data[s.end :]
 
+    if s.kind is OrbitKind.ROT:
+        return data[: s.offset] + _least_rotation(data[s.offset : s.end], s.size) + data[s.end :]
+
     step = s.size
     chunks = [data[s.offset + i * step : s.offset + (i + 1) * step] for i in range(s.count)]
     return data[: s.offset] + b"".join(sorted(chunks)) + data[s.end :]
+
+
+def _least_rotation(span: bytes, size: int) -> bytes:
+    """Lexicographically least slot rotation: ``ca|ab|bc`` -> ``ab|bc|ca``."""
+    ring = span + span
+    n = len(span)
+    return min(ring[i : i + n] for i in range(0, n, size))
 
 
 class Verdict(Enum):
