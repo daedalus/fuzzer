@@ -686,7 +686,7 @@ Off by default (loading is not: see below). New full seeds (`seeds/`, `irreplace
 ### Self-Fuzzer (`tools/fuzz.py`, `tools/lib/fuzzkit/`)
 - **What**: robustness fuzzer for fuzzer-tool's own parsers, ported from impactguard `tools/fuzz.py`. Finding = uncaught exception, broken output contract, or call > `SLOW_SECONDS` (5 s).
 - **Suites**: `elf` (bytes + path ELF parsers, AFL dictionaries), `state` (corrupt `state.pkl.gz`, mutated markov / edge-tracker / format-learner sections), `learner` (type-valid extreme transition streams), `ops` (every armed op on degenerate buffers via a mock fuzzer; mock `AttributeError`s are skipped as harness gaps), `mutate` (seeded campaign over all of them).
-- **`regress` kind**: past bugs regenerated with random parameters + oracles: `none_offset` (metamorphic op-only prediction), `mg_flood` (signature-counter bound), `wide_length` (kilobyte-wide `length` field). Add one per fixed bug.
+- **`regress` kind**: 13 past bugs regenerated with random parameters + oracles (table in `regress.py`): format learner (`none_offset`, `mg_flood`, `wide_length`), RandPool (`rp_batch`, `weighted_choice`), diffs (`delta_roundtrip`, `myers_script`), parsers (`dict_quotes`, `tiff_ifd`, `vu64_roundtrip`), state (`bloom_roundtrip`, `edge_prune`, `lineage_cycle`). Each has a breaker test that reintroduces the bug. Add one per fixed bug.
 - **Repro**: every case has its own sub-seed; the campaign seed is printed. Crashes: `~/fuzzing/selffuzz-crashes/<target>__<hash>.<ext>`, re-run with `--replay FILE`. Section inputs decode through the allowlisted state unpickler.
 
 ### Performance
