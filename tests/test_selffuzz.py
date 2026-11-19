@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import pickle
+import struct
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -189,6 +191,42 @@ class TestCampaign:
 
 # ── regress ──────────────────────────────────────────────────────────────────
 
+SEED_MAX = (1 << 32) - 1
+REGRESS_CASE_BUDGET_S = 2.0
+
+
+def _raise(exc: type[Exception]):
+    def fn(*_a, **_k):
+        raise exc("reintroduced")
+
+    return fn
+
+
+def _break_delta(mp):
+    mp.setattr(regress, "compute_delta_v2", lambda _p, _c: [])
+    mp.setattr(regress, "apply_delta_v2", _raise(ValueError))
+
+
+# One breaker per mutator: patch the fixed code back into a failing shape.
+_BREAKERS = {
+    "rp_batch": lambda mp: mp.setattr(RandPool, "random_list", lambda _s, _n: []),
+    "weighted_choice": lambda mp: mp.setattr(RandPool, "weighted_choice", _raise(IndexError)),
+    "delta_roundtrip": _break_delta,
+    "myers_script": lambda mp: mp.setattr(
+        regress, "levenshtein_align", lambda _a, _b: [("bogus", 0, b"")]
+    ),
+    "dict_quotes": lambda mp: mp.setattr(regress, "parse_dict_line", lambda _line: None),
+    "tiff_ifd": lambda mp: mp.setattr(regress, "parse_tiff", _raise(struct.error)),
+    "bloom_roundtrip": lambda mp: mp.setattr(
+        regress.BloomFilter, "query_bytes", lambda _s, _k: False
+    ),
+    "edge_prune": lambda mp: mp.setattr(regress.EdgeTracker, "_maybe_prune", lambda _s: None),
+    "lineage_cycle": lambda mp: mp.setattr(
+        regress.LineageTree, "subtree_keys", lambda s, k: [k] * (len(s) + 1)
+    ),
+    "vu64_roundtrip": lambda mp: mp.setattr(regress, "vu64_decode_bytes", lambda _d: (0, 0)),
+}
+
 
 class TestRegress:
     @pytest.mark.parametrize("name", sorted(regress.REGRESSION_MUTATORS))
@@ -220,6 +258,21 @@ class TestRegress:
         detail = regress.run_regression("mg_flood", RandPool(0), tmp_path)
 
         assert detail is not None
+
+    @pytest.mark.parametrize("name", sorted(_BREAKERS))
+    def test_falsify_reintroduced_bug_detected(self, name, monkeypatch, tmp_path):
+        # Each breaker fails every case of its class, so one seed is exact.
+        _BREAKERS[name](monkeypatch)
+
+        assert regress.run_regression(name, RandPool(0), tmp_path) is not None
+
+    @pytest.mark.parametrize("name", sorted(regress.REGRESSION_MUTATORS))
+    def test_adversarial_extreme_seed_is_fast(self, name, tmp_path):
+        # Mutators run inside the campaign loop: clean and cheap at any seed.
+        started = time.monotonic()
+
+        assert regress.run_regression(name, RandPool(SEED_MAX), tmp_path) is None
+        assert time.monotonic() - started < REGRESS_CASE_BUDGET_S
 
 
 # ── driver ───────────────────────────────────────────────────────────────────
