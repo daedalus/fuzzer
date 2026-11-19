@@ -1258,7 +1258,7 @@ class TestPowerSchedulerWiring:
 
         def counting_select_op(ops):
             call_count[0] += 1
-            return ops[0]
+            return "bit_flip"  # the only op with a dispatch entry
 
         engine.select_op = counting_select_op
 
@@ -1291,7 +1291,7 @@ class TestPowerSchedulerWiring:
 
         def counting_select_op(ops):
             call_count[0] += 1
-            return ops[0]
+            return "bit_flip"  # the only op with a dispatch entry
 
         engine.select_op = counting_select_op
 

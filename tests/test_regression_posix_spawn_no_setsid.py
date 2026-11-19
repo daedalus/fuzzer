@@ -46,6 +46,16 @@ def _alive(pid: int) -> bool:
         return False
 
 
+def _dies_within(pid: int, timeout: float) -> bool:
+    """SIGKILL lands asynchronously: wait (bounded) for the kernel to finish *pid*."""
+    deadline = time.monotonic() + timeout
+    while _alive(pid):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
 @pytest.fixture
 def no_setsid(monkeypatch):
     """Emulate a Python built without POSIX_SPAWN_SETSID."""
@@ -95,7 +105,7 @@ def test_fallback_timeout_kills_stragglers(tmp_path, no_setsid):
 
     # Background child shared the group, so the timeout kill reached it.
     straggler = int(err.split()[0])
-    assert not _alive(straggler)
+    assert _dies_within(straggler, SLACK)
 
 
 def test_regression_setsid_fallback_race(tmp_path, monkeypatch):

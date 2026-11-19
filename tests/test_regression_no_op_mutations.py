@@ -398,6 +398,8 @@ def _battery() -> list[bytes]:
         # satisfy flac_chunk_mutate's sniffer deterministically, same
         # rationale as the CFHD/JPEG2000 entries above.
         b"fLaC" + bytes(40),
+        # libbase64_read.c decode mode: mode byte 0 + base64 payload.
+        b"\x00" + b"QUJDREVGR0g=" * 4,
         # lz4_read.c frame path: even mode byte, then the LZ4 frame magic.
         b"\x00\x04\x22\x4d\x18\x64\x40\xa7" + bytes(40),
         # TIFF (LE header, IFD at 8 with 0 entries), Shorten and a secp256k1
@@ -786,6 +788,7 @@ class TestStateGatedOperatorsAreNotNoOps:
 
         self._gate_grimoire(f)
         self._gate_ltl(f)
+        self._gate_fox_newton(f)
 
         return unreachable
 
@@ -814,6 +817,13 @@ class TestStateGatedOperatorsAreNotNoOps:
         ch = LtlChannel(parse_hoa(CHAIN), os.devnull)
         ch.observe([Record(1, 4, 0)], b"abcdefgh")
         f.ltl = ch
+
+    @staticmethod
+    def _gate_fox_newton(f: Fuzzer) -> None:
+        """Secant log with two fitted runs of one compare site (fox_newton gate)."""
+        from tests.test_fox_newton import _log_runs
+
+        f._secant_log = _log_runs([10, 20])
 
     @staticmethod
     def _gate_redqueen(f: Fuzzer) -> None:

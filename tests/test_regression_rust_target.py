@@ -48,6 +48,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -158,32 +159,42 @@ def rust_target_exe(tmp_path_factory):
     return str(out)
 
 
+_GUARDED_CHILD = """
+import ctypes, os, sys
+lib = ctypes.CDLL(sys.argv[1])
+data = bytes.fromhex(sys.argv[2])
+fn = lib.fuzz_shm_run
+fn.restype = ctypes.c_int
+fn.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+buf = (ctypes.c_uint8 * len(data))(*data)
+guarded = lib.__afl_guarded_call
+guarded.restype = ctypes.c_int
+guarded.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+rc = guarded(ctypes.cast(fn, ctypes.c_void_p), buf, len(data))
+os._exit(0 if rc == 0 else 128 + (-rc))
+"""
+
+
 def _run_guarded(so_path: str, data: bytes) -> int:
-    """Call fuzz_shm_run via __afl_guarded_call, in a forked child.
+    """Call fuzz_shm_run via __afl_guarded_call, in a fresh interpreter.
 
     Mirrors adapters/inprocess.py's direct-call convention exactly (see
     that file's ``lib = ctypes.CDLL(target)`` / ``__afl_guarded_call``
-    block). Forked per case: __afl_guarded_call's sigsetjmp/siglongjmp is
-    only meant to survive one signal per call in this harness -- the real
+    block). One process per case: __afl_guarded_call's sigsetjmp/siglongjmp
+    is only meant to survive one signal per call in this harness -- the real
     fuzzer isolates each in-process execution the same way at a higher
     level (fresh child per campaign restart / bounded consecutive crashes),
     which a shared-process test loop should not skip.
+
+    Not forked from the test process: forked from a long-lived xdist worker,
+    'S' returned 0 (no fault) in 2 of 3 full parallel runs; cause not pinned
+    (docs/TODO.md). A fresh interpreter carries no worker state.
     """
-    pid = os.fork()
-    if pid == 0:
-        lib = ctypes.CDLL(so_path)
-        fn = lib.fuzz_shm_run
-        fn.restype = ctypes.c_int
-        fn.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
-        buf = (ctypes.c_uint8 * len(data))(*data)
-        guarded = lib.__afl_guarded_call
-        guarded.restype = ctypes.c_int
-        guarded.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
-        rc = guarded(ctypes.cast(fn, ctypes.c_void_p), buf, len(data))
-        os._exit(0 if rc == 0 else 128 + (-rc))
-    _, status = os.waitpid(pid, 0)
-    assert os.WIFEXITED(status), f"child for {data!r} did not exit cleanly: {status}"
-    return os.WEXITSTATUS(status)
+    r = subprocess.run(
+        [sys.executable, "-c", _GUARDED_CHILD, so_path, data.hex()], capture_output=True
+    )
+    assert r.returncode >= 0, f"child for {data!r} did not exit cleanly: {r.returncode}"
+    return r.returncode
 
 
 @pytest.mark.parametrize(

@@ -79,6 +79,9 @@ class _FakeFuzzer:
     def _tag_seed_distance(self, _seed):
         pass
 
+    def _note_c11(self, _seed):
+        pass
+
     def _confirm_new_coverage(self, _seed, _shm, has_new, edges):
         return has_new, edges
 

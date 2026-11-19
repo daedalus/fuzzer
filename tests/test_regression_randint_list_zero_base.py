@@ -7,7 +7,7 @@ Oracle: the pre-change body, frozen here.
 
 import numpy as np
 
-from fuzzer_tool.core.rand_pool import _POOL_ENTRIES, RandPool
+from fuzzer_tool.core.rand_pool import _MODULO_SAFE_MAX, _POOL_ENTRIES, RandPool
 
 _SEED = 0x5EED
 # Widths: tiny, odd, the 256 fast path's neighbours, large, 2**32 - 1.
@@ -24,7 +24,8 @@ def _oracle(pool: RandPool, a: int, b: int, count: int) -> list[int]:
 
 def _pairs():
     for width in _WIDTHS:
-        if width == 256:
+        # 256 has its own fast path; past _MODULO_SAFE_MAX it rejection-samples.
+        if width == 256 or width > _MODULO_SAFE_MAX:
             continue
         for count in _COUNTS:
             for a in _OFFSETS:

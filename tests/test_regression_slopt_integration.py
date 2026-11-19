@@ -132,7 +132,7 @@ def _engine_with_counter(t, mutations=8):
         applied.append(len(buf))
         buf[0] ^= 1
 
-    engine.build_ops = lambda data: ["counted"]
+    engine.build_ops = lambda data, ctx=None: ["counted"]
     f._op_dispatch = {"counted": op}
     return f, engine, applied
 

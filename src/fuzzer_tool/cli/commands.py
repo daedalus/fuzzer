@@ -1453,7 +1453,7 @@ def cmd_fuzz(args):
             )
 
     # `is True`: only a real abort flag counts, not a stand-in fuzzer's attribute.
-    aborted = fuzzer.aborted is True
+    aborted = getattr(fuzzer, "aborted", False) is True
 
     # A truncated campaign is not a finished ledger row.
     if getattr(args, "ledger_preset", None) is not None and not aborted:
@@ -3210,6 +3210,8 @@ def cmd_sweep(args):
 # crash_explore (--crash-explore) is excluded: a mode switch (AFL -C), not a
 # strategy. It zeroes has_new_coverage on every non-crashing round, so under
 # --hail-mary nothing was admitted and the EdgeTracker froze.
+#
+# admit_all (--admit-all) is excluded: needs --tcp-mode direct, rejected otherwise.
 #
 _HAIL_MARY_FLAGS = (
     "isolate_crash_fields",

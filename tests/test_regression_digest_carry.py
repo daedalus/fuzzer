@@ -29,7 +29,7 @@ def _engine(ops, max_len=0):
 
     names = list(ops)
     turn = itertools.count()
-    engine.build_ops = lambda data: names
+    engine.build_ops = lambda data, ctx=None: names
     engine.select_op = lambda _ops: names[next(turn) % len(names)]
     f._op_dispatch = dict(ops)
     return f, engine

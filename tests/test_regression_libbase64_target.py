@@ -454,6 +454,10 @@ def _run_asan(binary: Path, data: bytes) -> tuple[int, str]:
     return proc.returncode, proc.stderr
 
 
+@pytest.mark.skipif(
+    shutil.which("clang") is None or not (VENDOR_TREE / "lib" / "lib.c").is_file(),
+    reason="needs clang and tools/vendor_libbase64.sh (FUZZ_VENDOR_ROOT/libbase64)",
+)
 class TestOracle:
     @pytest.fixture(scope="class")
     def control(self, tmp_path_factory) -> Path:

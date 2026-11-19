@@ -140,13 +140,15 @@ class TestFalsification:
         # taking the quiet path it always took, and must NOT be recorded as an
         # error abort.
         #
-        # Raised only after the pre-loop raw-speed probe. That probe calls
-        # _run_target inside its own `except Exception: pass`, which by design
-        # does not catch BaseException -- so a Ctrl-C landing there escapes
-        # run() entirely. Separate pre-existing behaviour, out of scope here;
-        # this test targets the main loop.
+        # The pre-loop raw-speed probe is stubbed: it runs corpus seeds inside
+        # `except Exception`, which does not catch BaseException -- so a Ctrl-C
+        # landing there escapes run() entirely. Separate pre-existing
+        # behaviour, out of scope here; this test targets the main loop.
         f = _make_fuzzer(tmp_root)
-        with patch.object(f, "_run_target", side_effect=_raise_on(KeyboardInterrupt)):
+        with (
+            patch.object(f, "_probe_raw_speed", return_value=0.0),
+            patch.object(f, "_run_target", side_effect=_raise_on(KeyboardInterrupt)),
+        ):
             f.run(iterations=5)
         assert f._aborted_by_error is False
         # Guard against a vacuous pass: the interrupt must actually have cut

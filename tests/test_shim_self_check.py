@@ -158,6 +158,7 @@ def _bare_fuzzer(stderr: str = "", counters=None, edges=None, targets=()) -> Fuz
     )
     f._init_shim_watch()
     f._exec_timer = ExecTimer()
+    f._hw_instr_limit = 0
     return f
 
 

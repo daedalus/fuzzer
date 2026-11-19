@@ -3998,7 +3998,9 @@ struct __afl_fd_id {
     int   fifo;   /* sink is a pipe: flush in atomic chunks */
 };
 
+#if __AFL_CMPLOG
 static struct __afl_fd_id __afl_cmplog_fd_id;
+#endif
 
 __AFL_NO_COV static int __afl_log_open(const char *path, int extra_flags, struct __afl_fd_id *id) {
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | extra_flags, 0644);
@@ -8792,9 +8794,6 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     const char *optin = getenv("__AFL_FORKSRV");
     if (!optin || strcmp(optin, "1") != 0) return;
 
-    /* No control pipe: not being driven by the loader. */
-    if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, hello, 4) != 1) return;
-
     const char *persist = getenv("__AFL_PERSISTENT");
     __afl_persistent = persist && strcmp(persist, "1") == 0;
 
@@ -8812,6 +8811,7 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
      * returns before prev_loc is read or written — every child forks from
      * an identical coverage state. */
     struct __afl_entry *saved_area = __afl_area;
+    int saved_fast = __afl_fast;
     __afl_fast = 0;
     __afl_area = NULL;
 
@@ -8848,6 +8848,17 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
      * PC inside the shim. Counters only: the keys are worth keeping. */
     __afl_cmp_counts_zero();
 #endif
+
+    /* Hello last: it marks the server ready, and the fuzzer may drain the
+     * shared counters from then on -- a hello sent before the zeroing let
+     * it read the strcmps above as a phantom target comparison. */
+    if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, hello, 4) != 1) {
+        /* No control pipe: not being driven by the loader. */
+        __afl_area = saved_area;
+        __afl_fast = saved_fast;
+        __afl_persistent = 0;
+        return;
+    }
 
     /* An ignored SIGCHLD auto-reaps children, so waitpid() below fails
      * with ECHILD and the status is lost. Reap here with the default
