@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.rand_pool import RandPool
 
 MP3_HEADER_LEN = 4
@@ -109,6 +110,11 @@ class Mp3Mutator:
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
         self._rng = rng or self._rng
         rng = self._rng
+
+        # Pass a leading ID3v2 tag through untouched; mutate the frames after it.
+        tag_len = id3v2_len(data)
+        tag, data = data[:tag_len], data[tag_len:]
+
         frames = parse_mp3_frames(data)
         if not frames:
             return self._generate_random_mp3(max_len=max_len, rng=rng)
@@ -125,7 +131,7 @@ class Mp3Mutator:
             self._reorder_frames,
         ]
         mutators[op](frames, rng)
-        return serialize_mp3_frames(frames)[:max_len]
+        return (tag + serialize_mp3_frames(frames))[:max_len]
 
     def _mutate_bitrate_index(self, frames: list[Mp3Frame], rng) -> None:
         """Set to the reserved 0xF index or another value -- the classic
