@@ -198,6 +198,10 @@ XXH32_ABC = 0x32D153FF
 XXH64_TEXT = b"Nobody inspects the spammish repetition"
 XXH64_TEXT_DIGEST = 0xFBCEA83C8A378BF1
 MURMUR3_HELLO = 0x248BFA47
+# CRC-32/ISO-HDLC in compute_checksum's convention: reflected mode takes the
+# reversed poly and leaves the register reflected (refout False).
+CRC32_PARAMS = (0xEDB88320, 32, 0xFFFFFFFF, 0xFFFFFFFF, True, False)
+CRC32_CHECK = 0xCBF43926
 REGRESS_CASE_BUDGET_S = 2.0
 
 
@@ -265,6 +269,28 @@ _BREAKERS = {
         regress.grammar, "GENERATION_EXPANSION_CAP", regress.EXPANSION_CAP + 64
     ),
     "sanitizer_stack": lambda mp: mp.setattr(regress.sanitizer, "_PAGE_OFFSET_MASK", 0x1FFF),
+    "span_relocate": lambda mp: mp.setattr(
+        regress.generic, "span_relocate", lambda d, _r: d + b"\0"
+    ),
+    "parity_lock": lambda mp: mp.setattr(
+        regress.parity, "_table", lambda c, p: bytes(b ^ (1 << c) for b in range(256))
+    ),
+    "diverse_copy": lambda mp: mp.setattr(
+        regress.colorization, "_diverse_copy", lambda d, _r: bytearray(d)
+    ),
+    "partial_parse": lambda mp: mp.setattr(
+        regress.tree_mutator, "_interesting_positions", lambda _d: []
+    ),
+    "crc_checksum": lambda mp: mp.setattr(regress, "compute_checksum", lambda *_a, **_k: -1),
+    "lfsr_recover": lambda mp: mp.setattr(regress, "recover_lfsr", lambda _v, width=32: None),
+    "dominators": lambda mp: mp.setattr(regress, "compute_idom", lambda _c, entry=None: {}),
+    "crash_cluster": lambda mp: mp.setattr(
+        regress, "cluster_crashes", lambda s, f=None, threshold=None: [[i] for i in range(len(s))]
+    ),
+    "cdf_walk": lambda mp: mp.setattr(
+        regress.edge_tracker, "_cdf_norms", lambda _a, _b: (0.0, 0.0, 0.0)
+    ),
+    "checksum_state": lambda mp: mp.setattr(regress.acl, "CHECKSUM_STATE_BYTES_MAX", -1),
 }
 
 
@@ -320,6 +346,7 @@ class TestRegress:
         assert regress._ref_xxh64(XXH64_TEXT) == XXH64_TEXT_DIGEST
         assert regress._ref_murmur3(b"", 0) == 0
         assert regress._ref_murmur3(b"hello", 0) == MURMUR3_HELLO
+        assert regress._ref_crc(b"123456789", *CRC32_PARAMS) == CRC32_CHECK
 
 
 # ── driver ───────────────────────────────────────────────────────────────────

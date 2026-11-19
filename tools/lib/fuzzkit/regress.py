@@ -72,6 +72,26 @@ pinned unit-test case, is caught.
 |              |   (test_regression_grammar_zero_byte_budget.py)               |
 | sanitizer_stack | echoed text parsed; alloc stack in frames; XOR hash        |
 |              |   (test_regression_sanitizer_parse.py)                        |
+| span_relocate | destination shifted by -span (negative, tail-biased)        |
+|              |   (test_regression_span_relocate_dest.py)                     |
+| parity_lock  | lock table must flip only wrong-parity bytes                  |
+|              |   (test_regression_parity_ops.py)                             |
+| diverse_copy | single shifted draw must never keep a byte                    |
+|              |   (test_regression_colorization_replace_identity.py)          |
+| partial_parse | vectorized delimiter scan == per-byte parser                 |
+|              |   (test_regression_partial_parse_vectorized.py)               |
+| crc_checksum | table / braid CRC paths == bitwise CRC                        |
+|              |   (test_regression_checksum_learner.py, _cost_bound.py)       |
+| lfsr_recover | Berlekamp-Massey recovery predicts lane 0                     |
+|              |   (test_regression_ensure_poly_no_rerecovery.py)              |
+| dominators   | CHK stalled on irreducible CFGs; idom == definition           |
+|              |   (test_regression_dominators_worst_case.py)                  |
+| crash_cluster | LSH pruning under-merged; == all-pairs single linkage        |
+|              |   (test_regression_crash_cluster_exact.py)                    |
+| cdf_walk     | numpy CDF norms bit-identical to the loop                     |
+|              |   (test_regression_cdf_walk_vectorized.py)                    |
+| checksum_state | pairs lost across resume; byte budget; junk dropped         |
+|              |   (test_regression_checksum_learner_state.py)                 |
 """
 
 from __future__ import annotations
@@ -83,12 +103,24 @@ import math
 import pkgutil
 import struct
 from importlib import import_module
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import fuzzer_tool.core.mutations as mutations_pkg
 from fuzzer_tool.adapters.filesystem import apply_delta_v2, compute_delta_v2
 from fuzzer_tool.adapters.track_parser import cond_tuples_from_cmplog_text
-from fuzzer_tool.core import gf2_common, grammar, hashing, sanitizer, similarity
+from fuzzer_tool.core import (
+    colorization,
+    crc_engine,
+    edge_tracker,
+    gf2_common,
+    grammar,
+    hashing,
+    sanitizer,
+    similarity,
+    tree_mutator,
+)
+from fuzzer_tool.core.analyzers import analyzer_checksum_learner as acl
 from fuzzer_tool.core.analyzers import analyzer_format_learner as afl
 from fuzzer_tool.core.analyzers.analyzer_format_learner import (
     FieldHypothesis,
@@ -96,8 +128,17 @@ from fuzzer_tool.core.analyzers.analyzer_format_learner import (
     FormatLearner,
     TimelineEntry,
 )
+from fuzzer_tool.core.berlekamp_massey import (
+    compute_checksum,
+    lfsr_step,
+    linear_complexity,
+    recover_lfsr,
+)
 from fuzzer_tool.core.bloom import BloomFilter
+from fuzzer_tool.core.cfg import BasicBlock, FunctionCFG
 from fuzzer_tool.core.chi_squared import COCHRAN_MIN_EXPECTED, _log_gamma, drop_sparse_rows
+from fuzzer_tool.core.crash_metadata import cluster_crashes
+from fuzzer_tool.core.dominators import compute_idom
 from fuzzer_tool.core.edge_tracker import EdgeTracker, MinHashLSH
 from fuzzer_tool.core.elf import find_load_segment
 from fuzzer_tool.core.format_seed_generator import generate_seeds
@@ -105,7 +146,7 @@ from fuzzer_tool.core.grammar import _SIMPLE_ESCAPES as GRAMMAR_SIMPLE
 from fuzzer_tool.core.grammar import decode_quoted_literal
 from fuzzer_tool.core.int_checksum_solver import _modal_value
 from fuzzer_tool.core.lineage import LineageTree
-from fuzzer_tool.core.mutations import lz4, murmur3, structured
+from fuzzer_tool.core.mutations import generic, lz4, murmur3, parity, structured
 from fuzzer_tool.core.mutations.generic import parse_dict_line
 from fuzzer_tool.core.mutations.hackers_delight import snoob, snoob_prev
 from fuzzer_tool.core.mutations.tiff import TiffMutator, parse_tiff
@@ -119,6 +160,8 @@ from fuzzer_tool.core.set_cover import min_cover
 from fuzzer_tool.core.similarity import (
     _levenshtein_align_numpy,
     configure_diff_limits,
+    crash_signature_similarity,
+    frame_sequence_similarity,
     levenshtein_align,
 )
 from fuzzer_tool.services.operators import _fold_bits
@@ -239,6 +282,46 @@ ASAN_DEPTH_MAX = 8
 ASAN_PC_BITS = 47
 ASAN_SHIFT_PAGES = 1 << 16
 ASAN_ECHO = "log: 'AddressSanitizer: heap-buffer-overflow'\n"
+# span_relocate: n < 3 is a no-op; spans are at most 16 bytes.
+RELOCATE_MIN = 3
+RELOCATE_SPAN_MAX = 16
+RELOCATE_MAX = 80
+PARITY_MAX = 80
+PARITY_EVEN_BYTE = 0x00  # popcount 0; ^ 1 gives an odd one
+DIVERSE_MAX = 80
+NO_CLOSE = 0xFF  # _DELIM_CLOSE entry for a non-delimiter byte
+PARSE_ALPHABET = b"abX({[\")]}'<>\x00\xff"
+PARSE_SHORT_MAX = 40
+PARSE_LONG_MAX = 400
+CRC_WIDTHS = (8, 16, 24, 32, 40, 64)
+CRC_DATA_MAX = 2000
+LFSR_WIDTHS = (8, 16, 32)
+LFSR_EXTRA = 16
+CFG_ROOT = 0
+CFG_NODES_MAX = 25
+CFG_OUT_MAX = 3
+CRASH_K_MAX = 14
+CRASH_KINDS = ("SEGV", "ASAN:heap-buffer-overflow", "ASAN:heap-use-after-free", "FPE")
+CRASH_FRAMES = (
+    "malloc",
+    "free",
+    "memcpy",
+    "av_read_frame",
+    "decode_slice",
+    "parse_hdr",
+    "main",
+    "__libc_start",
+    "inflate",
+    "png_read",
+    "sqlite3Step",
+)
+CDF_OBS_MAX = 500
+CDF_COUNT_MAX = 3000
+# Checksum learner: captured at import so a patched budget is caught.
+STATE_BYTES_MAX = acl.CHECKSUM_STATE_BYTES_MAX
+PAIR_OVERHEAD = 8  # bytes charged per pair besides its data
+NEVER_RECOVER = 1 << 30  # min_pairs: recovery (and its globals) never runs
+CHECKSUM_JUNK = (None, 42, ("s", 1), (b"x", "y"), (b"x",))
 
 
 def _flood_cap() -> int:
@@ -1389,6 +1472,388 @@ def _reg_sanitizer_stack(rng: RandPool, _workdir: Path) -> str | None:
     return None
 
 
+# ── seeded operators, replayed draw for draw ─────────────────────────────────
+
+
+def _reg_span_relocate(rng: RandPool, _workdir: Path) -> str | None:
+    """Span lands at the drawn index of the remainder (was shifted by -span)."""
+    data = rng.randbytes(rng.randint(0, RELOCATE_MAX))
+    seed = rng.randrange(SUBSEED_RANGE)
+    got = generic.span_relocate(data, RandPool(seed))
+
+    # Replay the operator's three draws on the same seed.
+    n = len(data)
+    want = data
+    if n >= RELOCATE_MIN:
+        r = RandPool(seed)
+        span = r.randint(1, min(RELOCATE_SPAN_MAX, n - 1))
+        src = r.randint(0, n - span)
+        dest = r.randint(0, n - span)
+        if dest == src:
+            dest = (src + 1) % (n - span + 1)
+        rest = data[:src] + data[src + span :]
+        want = rest[:dest] + data[src : src + span] + rest[dest:]
+
+    if got != want:
+        return f"span_relocate({n} B, seed {seed}) misplaced the span"
+    return None
+
+
+def _reg_parity_lock(rng: RandPool, _workdir: Path) -> str | None:
+    """Only wrong-parity bytes of the window flip, on the drawn carrier bit."""
+    data = bytearray(rng.randbytes(rng.randint(parity.MIN_LEN, PARITY_MAX)))
+    seed = rng.randrange(SUBSEED_RANGE)
+
+    # Window and carrier draws do not depend on content: replay them first.
+    r = RandPool(seed)
+    off, length = structured._region(len(data), r, min_len=parity.MIN_LEN)
+    if length < parity.MIN_LEN:
+        return None
+    carrier = r.choice(parity.CARRIERS)
+    want_parity = r.choice(tuple(parity.Parity)).value
+    data[off] = PARITY_EVEN_BYTE ^ want_parity  # one byte already right: must not flip
+
+    got = parity.parity_lock(bytes(data), RandPool(seed))
+    window = bytes(
+        b ^ (1 << carrier) if b.bit_count() & 1 != want_parity else b
+        for b in data[off : off + length]
+    )
+    if got != bytes(data[:off]) + window + bytes(data[off + length :]):
+        return f"parity_lock window [{off}, {off + length}) carrier {carrier} wrong"
+    return None
+
+
+def _reg_diverse_copy(rng: RandPool, _workdir: Path) -> str | None:
+    """Every byte changes, length kept, same seed -> same output."""
+    data = rng.randbytes(rng.randint(1, DIVERSE_MAX))
+    seed = rng.randrange(SUBSEED_RANGE)
+
+    got = colorization._diverse_copy(data, RandPool(seed))
+    if len(got) != len(data):
+        return f"length {len(data)} -> {len(got)}"
+    same = next((i for i, (a, b) in enumerate(zip(data, got, strict=True)) if a == b), None)
+    if same is not None:
+        return f"byte {same} kept its value {data[same]:#x}"
+    if colorization._diverse_copy(data, RandPool(seed)) != got:
+        return "not deterministic for a fixed seed"
+    return None
+
+
+# ── parsers vs their reference implementations ───────────────────────────────
+
+
+def _ref_parse(data: bytes) -> tree_mutator._Node:
+    """Per-byte delimiter parser: the pre-vectorization logic, branches merged."""
+    node_cls = tree_mutator._Node
+    close_of, close_table = tree_mutator._DELIM_CLOSE, tree_mutator._CLOSE_TABLE
+    root = node_cls()
+    stack = [root]
+    buf: list[bytes] = []
+
+    def flush() -> None:
+        if buf:
+            stack[-1].children.append(b"".join(buf))
+            buf.clear()
+
+    for byte in data:
+        close = close_of[byte]
+        top = stack[-1]
+        if close != NO_CLOSE and not (byte == close and top.open == byte):
+            flush()  # opener (or a self-closing delimiter opening)
+            node = node_cls(byte)
+            top.children.append(node)
+            stack.append(node)
+        elif close != NO_CLOSE or (top.open is not None and byte == close_table[top.open]):
+            flush()  # closer of the open node
+            if len(stack) > 1:
+                top.closed = True
+                stack.pop()
+        else:
+            buf.append(bytes((byte,)))
+    flush()
+    return root
+
+
+def _shape(node) -> tuple:
+    """Comparable tree: (open, closed, children) with byte leaves."""
+    if isinstance(node, bytes):
+        return ("leaf", node)
+    return (node.open, node.closed, tuple(_shape(c) for c in node.children))
+
+
+def _reg_partial_parse(rng: RandPool, _workdir: Path) -> str | None:
+    """Vectorized delimiter scan builds the per-byte parser's tree."""
+    lo, hi = rng.choice(((1, PARSE_SHORT_MAX), (tree_mutator._VECTOR_MIN_LEN, PARSE_LONG_MAX)))
+    data = bytearray(rng.choice(PARSE_ALPHABET) for _ in range(rng.randint(lo, hi)))
+    data[rng.randrange(len(data))] = rng.choice(b"([")  # >= 1 structural node
+
+    tree = tree_mutator.partial_parse(bytes(data))
+    if tree.flatten() != data:
+        return f"flatten() does not give back the {len(data)}-byte input"
+    if _shape(tree) != _shape(_ref_parse(bytes(data))):
+        return f"tree differs from per-byte parse on {bytes(data[:24])!r}.."
+    return None
+
+
+# ── checksums, LFSR, dominators, clustering ──────────────────────────────────
+
+
+def _reflect(x: int, bits: int) -> int:
+    return int(format(x, f"0{bits}b")[::-1], 2)
+
+
+def _ref_crc(
+    data: bytes, poly: int, width: int, init: int, xorout: int, refin: bool, refout: bool
+) -> int:
+    """Bit-at-a-time CRC as compute_checksum documents it (no tables).
+
+    refin: LSB-first, *poly* in reversed form, register shifts right.
+    Otherwise MSB-first, normal-form *poly*. refout reverses the result.
+    """
+    top, mask = 1 << (width - 1), (1 << width) - 1
+    reg = init & mask
+    for byte in data:
+        if refin:
+            reg ^= byte
+            for _ in range(8):
+                reg = (reg >> 1) ^ poly if reg & 1 else reg >> 1
+            continue
+
+        reg ^= byte << (width - 8)
+        for _ in range(8):
+            reg = ((reg << 1) & mask) ^ poly if reg & top else (reg << 1) & mask
+    if refout:
+        reg = _reflect(reg, width)
+    return (reg ^ xorout) & mask
+
+
+def _reg_crc_checksum(rng: RandPool, _workdir: Path) -> str | None:
+    """Table / braid paths (cold and warm engine) equal the bitwise CRC."""
+    width = rng.choice(CRC_WIDTHS)
+    poly = rng.randrange(1 << width) | 1
+    init, xorout = rng.randrange(1 << width), rng.randrange(1 << width)
+    refin, refout = rng.random() < 0.5, rng.random() < 0.5
+    data = rng.randbytes(rng.choice((rng.randint(0, 63), rng.randint(64, CRC_DATA_MAX))))
+    args = (poly, width, init, xorout, refin, refout)
+
+    try:
+        if rng.random() < 0.5:  # warm: enough bytes for the engine to build tables
+            compute_checksum(bytes(crc_engine._BUILD_BYTES), *args)
+        got = compute_checksum(data, *args)
+    finally:
+        crc_engine.clear()
+
+    if got != _ref_crc(data, *args):
+        return f"CRC width={width} poly={poly:#x} refin={refin} refout={refout} on {len(data)} B"
+    return None
+
+
+def _reg_lfsr_recover(rng: RandPool, _workdir: Path) -> str | None:
+    """Recovered taps predict lane 0 past its linear complexity."""
+    width = rng.choice(LFSR_WIDTHS)
+    poly = rng.randrange(1 << width) | 1
+    state = rng.randrange(1 << width) | 1  # bit 0 set: lane 0 is not all zero
+    values = []
+    for _ in range(2 * width + rng.randint(0, LFSR_EXTRA)):
+        values.append(state)
+        state = lfsr_step(state, poly, width)
+
+    bits = [v & 1 for v in values]
+    complexity = linear_complexity(bits)
+    q = recover_lfsr(values, width)
+    if q is None:
+        return f"no polynomial recovered (linear complexity {complexity})"
+
+    taps = [i + 1 for i in range(width) if q >> i & 1]
+    for n in range(max(complexity, max(taps, default=0)), len(bits)):
+        pred = 0
+        for t in taps:
+            pred ^= bits[n - t]
+        if pred != bits[n]:
+            return f"taps of {q:#x} mispredict bit {n} (L={complexity})"
+    if complexity == width and q != poly:
+        return f"full-complexity lane recovered {q:#x}, not {poly:#x}"
+    return None
+
+
+def _reach(edges: dict[int, list[int]], skip: int | None) -> set[int]:
+    """Blocks reachable from the root without passing through *skip*."""
+    if skip == CFG_ROOT:
+        return set()
+    seen, stack = {CFG_ROOT}, [CFG_ROOT]
+    while stack:
+        for s in edges[stack.pop()]:
+            if s != skip and s not in seen:
+                seen.add(s)
+                stack.append(s)
+    return seen
+
+
+def _brute_idom(edges: dict[int, list[int]]) -> dict[int, int]:
+    """idom by definition: a dominates v iff removing a cuts v off."""
+    live = _reach(edges, None)
+    doms = {v: {v} for v in live}
+    for a in live:
+        for v in live - _reach(edges, a):
+            doms[v].add(a)
+    idom = {CFG_ROOT: CFG_ROOT}
+    for v in live - {CFG_ROOT}:
+        idom[v] = max(doms[v] - {v}, key=lambda d: len(doms[d]))
+    return idom
+
+
+def _reg_dominators(rng: RandPool, _workdir: Path) -> str | None:
+    """Semi-NCA idom == brute-force dominators on random (irreducible) CFGs."""
+    n = rng.randint(3, CFG_NODES_MAX)
+    edges = {v: [rng.randrange(n) for _ in range(rng.randint(0, CFG_OUT_MAX))] for v in range(n)}
+    for v in edges:  # node 2 reachable only through 0 -> 1 -> 2
+        edges[v] = [s for s in edges[v] if s != 2]
+    edges[0].append(1)
+    edges[1].append(2)
+
+    blocks = {a: BasicBlock(start=a, end=a + 1, successors=list(edges[a])) for a in edges}
+    blocks[CFG_ROOT].is_entry = True
+    cfg = FunctionCFG(name="f", start=0, end=n, blocks=blocks)
+
+    got, want = compute_idom(cfg), _brute_idom(edges)
+    if got != want:
+        bad = sorted(v for v in want if got.get(v) != want[v])[:4]
+        return f"idom differs at {bad} ({n} nodes)"
+    return None
+
+
+def _dense_clusters(sigs: list[str], frames, threshold: float) -> list[list[int]]:
+    """All-pairs single linkage (the pre-pruning oracle)."""
+    parent = list(range(len(sigs)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(len(sigs)):
+        for j in range(i + 1, len(sigs)):
+            if frames and i < len(frames) and j < len(frames):
+                sim = frame_sequence_similarity(frames[i], frames[j])
+            else:
+                sim = crash_signature_similarity(sigs[i], sigs[j])
+            if sim >= threshold:
+                parent[find(i)] = find(j)
+
+    out: dict[int, list[int]] = {}
+    for i in range(len(sigs)):
+        out.setdefault(find(i), []).append(i)
+    return list(out.values())
+
+
+def _crash(rng: RandPool) -> tuple[str, list[str]]:
+    frames = [rng.choice(CRASH_FRAMES) for _ in range(rng.randint(1, 9))]
+    frames = [f + (f"+0x{rng.randrange(PAGE):x}" if rng.random() < 0.4 else "") for f in frames]
+    return rng.choice(CRASH_KINDS) + ":" + ":".join(frames), frames
+
+
+def _reg_crash_cluster(rng: RandPool, _workdir: Path) -> str | None:
+    """Pruned single linkage == all-pairs single linkage (same partition)."""
+    pairs = [_crash(rng) for _ in range(rng.randint(1, CRASH_K_MAX))]
+    pairs.append(rng.choice(pairs))  # a duplicate always merges
+    sigs = [p[0] for p in pairs]
+    frames = [p[1] for p in pairs]
+    fl = rng.choice((None, frames, frames[: len(frames) // 2]))
+    threshold = rng.choice((0.5, 0.7, 0.85, rng.random()))
+
+    def part(clusters):
+        return frozenset(frozenset(c) for c in clusters)
+
+    got = part(cluster_crashes(sigs, fl, threshold))
+    if got != part(_dense_clusters(sigs, fl, threshold)):
+        return f"{len(sigs)} crashes at threshold {threshold:.3f}: partitions differ"
+    return None
+
+
+# ── CDF distances, checksum learner state ────────────────────────────────────
+
+
+def _ref_cdf(prof_a: dict, prof_b: dict) -> tuple:
+    """Merged-support CDF walk (the pre-numpy loop, verbatim)."""
+    xs = sorted(set(prof_a) | set(prof_b))
+    if not xs:
+        return 0.0, 0.0, 0.0
+    cdf_diff = wasserstein = ks = crps = 0.0
+    prev = xs[0]
+    for x in xs:
+        gap = x - prev
+        abs_diff = abs(cdf_diff)
+        wasserstein += abs_diff * gap
+        ks = max(ks, abs_diff)
+        crps += cdf_diff * cdf_diff * gap
+        cdf_diff += prof_a.get(x, 0.0) - prof_b.get(x, 0.0)
+        prev = x
+    return wasserstein, max(ks, abs(cdf_diff)), crps
+
+
+def _profile(rng: RandPool) -> dict[float, float]:
+    """log2(1 + count) support, equal mass per observation."""
+    n = rng.randint(1, CDF_OBS_MAX)
+    prof: dict[float, float] = {}
+    for count in rng.randint_list(0, rng.randint(1, CDF_COUNT_MAX), n):
+        x = math.log2(1.0 + count)
+        prof[x] = prof.get(x, 0.0) + 1.0 / n
+    return prof
+
+
+def _reg_cdf_walk(rng: RandPool, _workdir: Path) -> str | None:
+    """numpy CDF norms bit-identical to the loop, both argument orders."""
+    a, b = _profile(rng), _profile(rng)
+    if a == b:
+        b[max(b) + 1.0] = 1.0  # distinct profiles: a zero distance proves nothing
+    for x, y in ((a, b), (b, a)):
+        if edge_tracker.EdgeTracker._cdf_walk(x, y) != _ref_cdf(x, y):
+            return f"_cdf_walk differs from loop ({len(x)} vs {len(y)} points)"
+    return None
+
+
+def _kept_suffix(pairs: list[tuple[bytes, int]]) -> list[tuple[bytes, int]]:
+    """Longest newest suffix whose len + 8 per pair fits the state budget."""
+    kept, budget = [], STATE_BYTES_MAX
+    for data, checksum in reversed(pairs):
+        budget -= len(data) + PAIR_OVERHEAD
+        if budget < 0:
+            break
+        kept.append((data, checksum))
+    return kept[::-1]
+
+
+def _reg_checksum_state(rng: RandPool, _workdir: Path) -> str | None:
+    """Pairs persist under the byte budget, round-trip, junk dropped in order."""
+    big = rng.random() < 0.5
+    pairs = [
+        (
+            rng.randbytes(rng.randint(1, 6 * 1024) if big else rng.randint(0, 64)),
+            rng.randrange(U32_SPAN),
+        )
+        for _ in range(rng.randint(1, acl.CHECKSUM_PAIRS_MAX))
+    ]
+    host = SimpleNamespace(corpus=[], seed_meta={})
+    learner = acl.ChecksumLearner(host, min_pairs=NEVER_RECOVER)
+    learner._pairs = list(pairs)
+
+    want = _kept_suffix(pairs)
+    state = learner.to_dict()
+    if not want or state["pairs"] != want:
+        return f"to_dict kept {len(state['pairs'])} pairs, budget allows {len(want)}"
+    restored = acl.ChecksumLearner.from_dict(host, state)
+    if restored._pairs != want or restored.to_dict()["pairs"] != want:
+        return "pairs changed across to_dict/from_dict"
+
+    noisy = list(state["pairs"])
+    for junk in CHECKSUM_JUNK:
+        noisy.insert(rng.randint(0, len(noisy)), junk)
+    if acl.ChecksumLearner.from_dict(host, {**state, "pairs": noisy})._pairs != want:
+        return "junk pairs not dropped, or order lost"
+    return None
+
+
 REGRESSION_MUTATORS: dict[str, Callable[[RandPool, Path], str | None]] = {
     "none_offset": _reg_none_offset,
     "mg_flood": _reg_mg_flood,
@@ -1423,6 +1888,16 @@ REGRESSION_MUTATORS: dict[str, Callable[[RandPool, Path], str | None]] = {
     "set_cover": _reg_set_cover,
     "grammar_cap": _reg_grammar_cap,
     "sanitizer_stack": _reg_sanitizer_stack,
+    "span_relocate": _reg_span_relocate,
+    "parity_lock": _reg_parity_lock,
+    "diverse_copy": _reg_diverse_copy,
+    "partial_parse": _reg_partial_parse,
+    "crc_checksum": _reg_crc_checksum,
+    "lfsr_recover": _reg_lfsr_recover,
+    "dominators": _reg_dominators,
+    "crash_cluster": _reg_crash_cluster,
+    "cdf_walk": _reg_cdf_walk,
+    "checksum_state": _reg_checksum_state,
 }
 
 
