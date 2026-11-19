@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NAL emulation-prevention op** (`NalMutator._mutate_emulation`) and **AVCC/HVCC length op** (`IsobmffMutator._mutate_nal_length`, `avcc_length_size`). `tests/test_nal_emulation_avcc.py`.
+- **`mpegps_chunk_mutate`** (`core/mutations/mpegps.py`): MPEG Program Stream unit mutator (PES/pack/system header fields, DVD substream ids). `tests/test_mpegps_mutator.py`.
+- **ISOBMFF sample-table op** (`IsobmffMutator._mutate_sample_table`): edge values into `stts`/`stsc`/`stsz`/`stco`/`co64`/`elst` counts and entry fields (elst v0/v1 layouts); entries indexed by bytes present. `tests/test_isobmff_sample_tables.py`.
 - **`--corpus-tokens`** (`core/suffix_automaton.py`): repeated substrings across the corpus join the dictionary before the first exec. Off; unmeasured. `tests/test_suffix_automaton.py`.
 - **`token_repair` op** (`core/bitap.py`): a token found with 1..k byte substitutions is overwritten with the exact token. `tests/test_bitap.py`.
 - **`--orbit-dedup rot@OFF:SIZExCOUNT`**: ring buffers equal under cyclic shift dedup to one exec. `tests/test_orbit_rotation.py`.
@@ -19,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MPEG sniffers** (`core/operator_registry.py`): `nal_chunk_mutate` claimed MPEG-1/2 video, MPEG-PS and MPEG-4 Part 2 (now requires forbidden_zero_bit 0); `mp3`/`adts_chunk_mutate` missed ID3v2-prefixed files (`core/mutations/id3.py`; tag passed through); `isobmff_chunk_mutate` missed fMP4 segments and non-`ftyp` QuickTime heads. `_op_mp3/adts_chunk_mutate` no longer pre-parse (an ID3-prefixed seed was replaced by a generated stream). `tests/test_regression_mpeg_sniffers.py`.
+- **`mpegts_chunk_mutate` PAT edits were dropped by FFmpeg**: no CRC-32/MPEG-2 fixup (FFmpeg skips PSI sections with a bad CRC), and the PMT-PID write landed one byte early, corrupting `program_number`. Generated PAT/PMT now carry valid CRCs. `tests/test_mpegts_mutator.py`.
 - **Snapshot restore on ASAN targets**: restore wrote over ASAN global redzones, 3 reports per exec (libbase64_read_asan 131 -> 553 eps). Spans now skip poisoned bytes. `tests/test_global_snapshot.py`.
 - **libbase64 target** (`targets/libbase64_read.c`): stream decode aborted on every payload ending in a partial quantum (one-shot fails it via `state.bytes`, the stream call returns 1); chunks capped at 128 bytes (4096 left ~99% of seeds unsplit), split within the first 512 bytes; payload decoded from an exact-size copy so ASAN sees over-reads. `compile_libbase64_objects()`: a probe-dropped codec kept `HAVE_<codec> 1` and failed the target. `base64_chunk_mutate`: sniffer skips the stream seed byte and ignores encode modes, pad op yields a valid quantum, generator batched. `tests/test_regression_libbase64_target.py`.
 - `SentLog.save()` (`--sent-bloom`) re-added already-saved records to `n_added` on a second save.

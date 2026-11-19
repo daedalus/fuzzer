@@ -55,6 +55,12 @@ H265_NAL_IDR_W_RADL = 19
 H265_NAL_IDR_N_LP = 20
 H265_NAL_CRA = 21
 
+# Emulation prevention (H.264 7.4.1 / H.265 7.4.2): an encoder writes
+# 00 00 03 before any 00/01/02/03 so payload never contains a start code.
+EP_SEQ = b"\x00\x00\x03"
+# Byte after an inserted EP: conforming (00-03), then non-conforming.
+EP_FOLLOW = (0x00, 0x01, 0x02, 0x03, 0x04, 0xFF)
+
 # Preserve-critical NAL types (SPS, PPS, VPS)
 CRITICAL_NAL_TYPES_H264 = {H264_NAL_SPS, H264_NAL_PPS}
 CRITICAL_NAL_TYPES_H265 = {H265_NAL_VPS, H265_NAL_SPS_HEVC, H265_NAL_PPS_HEVC}
@@ -157,6 +163,16 @@ def serialize_nal_units(units: list[NalUnit]) -> bytes:
     return bytes(buf)
 
 
+def _ep_sites(payload: bytes) -> list[int]:
+    """Offsets of every `00 00 03` in *payload* (C-level find, no byte loop)."""
+    sites: list[int] = []
+    i = payload.find(EP_SEQ)
+    while i != -1:
+        sites.append(i)
+        i = payload.find(EP_SEQ, i + 1)
+    return sites
+
+
 class NalMutator:
     """Structure-aware NAL unit bitstream mutator."""
 
@@ -173,7 +189,7 @@ class NalMutator:
         if units is None or not units:
             return self._generate_random_nal_stream(max_len=max_len, rng=self._rng)
 
-        op = self._rng.randint(0, 8)
+        op = self._rng.randint(0, 9)
         mutators = [
             self._mutate_nal_type,
             self._mutate_nal_ref_idc,
@@ -184,6 +200,7 @@ class NalMutator:
             self._delete_nal,
             self._reorder_nal,
             self._generate_random_nal_stream,
+            self._mutate_emulation,
         ]
         result = mutators[op](units, max_len)
         if isinstance(result, list):
@@ -246,6 +263,33 @@ class NalMutator:
                     idx = self._rng.randint(0, len(data) - 1)
                     data[idx] ^= 1 << self._rng.randint(0, 7)
                 unit.payload = bytes(data)
+        return units
+
+    def _mutate_emulation(self, units: list[NalUnit], max_len: int) -> list[NalUnit]:
+        """Insert or strip an emulation-prevention byte in a unit's payload.
+
+        Decoders unescape `00 00 03` before RBSP parsing (FFmpeg
+        `ff_h2645_extract_rbsp`). Insert: `00 00 03 XX` with XX conforming
+        or not. Strip: drop one EP byte, exposing a start code or a
+        forbidden `00 00 00` inside the unit. Byte flips almost never form
+        either sequence.
+        """
+        cands = [u for u in units if u.payload]
+        if not cands:
+            return units
+
+        unit = self._rng.choice(cands)
+        p = unit.payload
+        sites = _ep_sites(p) if self._rng.randint(0, 1) else []
+
+        # Strip: remove the 03 of one 00 00 03.
+        if sites:
+            at = self._rng.choice(sites) + 2
+            unit.payload = p[:at] + p[at + 1 :]
+            return units
+
+        off = self._rng.randint(0, len(p))
+        unit.payload = p[:off] + EP_SEQ + bytes([self._rng.choice(EP_FOLLOW)]) + p[off:]
         return units
 
     def _duplicate_nal(self, units: list[NalUnit], max_len: int) -> list[NalUnit]:

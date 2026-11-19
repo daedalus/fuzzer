@@ -28,6 +28,7 @@ from itertools import compress
 from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.mutations.base64 import parse_base64
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
+from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
@@ -224,6 +225,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "isobmff_chunk_mutate",
         "nal_chunk_mutate",
         "mpegts_chunk_mutate",
+        "mpegps_chunk_mutate",
         "adts_chunk_mutate",
         "mp3_chunk_mutate",
         "ogg_chunk_mutate",
@@ -561,6 +563,45 @@ def _sniff_secp_payload(d: bytes) -> bool:
     return len(d) >= _SECP_MIN_LEN and 0 < d[0] <= _SECP_MODE_MASK and d[2] in _SECP_PAYLOAD_LEADS
 
 
+# First box of an MP4/MOV file: `ftyp` normally; `styp`/`moof`/`sidx` open
+# fMP4/DASH segments; `moov`/`mdat`/`free`/`skip`/`wide` open older QuickTime.
+_ISOBMFF_HEAD_TYPES = frozenset(
+    (b"ftyp", b"styp", b"moof", b"sidx", b"moov", b"mdat", b"free", b"skip", b"wide")
+)
+
+_START_CODE_3 = b"\x00\x00\x01"
+_START_CODE_4 = b"\x00\x00\x00\x01"
+_NAL_FORBIDDEN_BIT = 0x80
+
+
+def _sniff_nal(d: bytes) -> bool:
+    """Annex B start code then an H.264/HEVC header with forbidden_zero_bit 0.
+
+    The bit rejects MPEG-1/2 video, MPEG-PS and MPEG-4 Part 2, whose start
+    codes (`00 00 01 B3`, `BA`, `B6`, ...) are all >= 0x80.
+    """
+    if d[:4] == _START_CODE_4:
+        return len(d) > 4 and not d[4] & _NAL_FORBIDDEN_BIT
+    return d[:3] == _START_CODE_3 and len(d) > 3 and not d[3] & _NAL_FORBIDDEN_BIT
+
+
+def _is_adts(d: bytes, k: int) -> bool:
+    """ADTS AAC header at offset *k*: 12-bit syncword plus layer fixed at 0 --
+    MPEG-TS's sync byte is a single 0x47, so the layer check keeps unrelated
+    0xFF pairs out."""
+    return len(d) >= k + 7 and d[k] == 0xFF and (d[k + 1] & 0xF6) == 0xF0
+
+
+def _is_mp3(d: bytes, k: int) -> bool:
+    """MP3 header at offset *k*: 11-bit syncword with non-reserved version
+    (!= 01) and layer (!= 00) -- narrows past ADTS's 12-bit sync, which the
+    all-1s prefix would otherwise also match."""
+    if len(d) < k + 4 or d[k] != 0xFF:
+        return False
+    b1 = d[k + 1]
+    return (b1 & 0xE0) == 0xE0 and ((b1 >> 3) & 0x03) != 0x01 and ((b1 >> 1) & 0x03) != 0x00
+
+
 def _sniff_avif(d: bytes) -> bool:
     """Leading ftyp box declaring an AVIF-family brand.
 
@@ -623,31 +664,18 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "webp_chunk_mutate": lambda d: d[:4] == b"RIFF" and d[8:12] == b"WEBP",
     "webm_chunk_mutate": lambda d: d[:4] == b"\x1a\x45\xdf\xa3",
     "zip_chunk_mutate": lambda d: d[:2] == b"PK",
-    "isobmff_chunk_mutate": lambda d: d[4:8] == b"ftyp",
+    "isobmff_chunk_mutate": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES,
     "pgs_chunk_mutate": lambda d: d[:2] == b"PG",
-    "nal_chunk_mutate": lambda d: (
-        d[:4] in (b"\x00\x00\x00\x01", b"\x00\x00\x01\x00") or d[:3] == b"\x00\x00\x01"
-    ),
+    "nal_chunk_mutate": _sniff_nal,
     # MPEG-TS: 0x47 sync byte on a 188-byte grid. Require it at both offset 0
     # and offset 188 (not just one sync byte) so a coincidental 0x47 in
     # otherwise-random data doesn't falsely sniff as TS.
     "mpegts_chunk_mutate": lambda d: len(d) >= 376 and d[0] == 0x47 and d[188] == 0x47,
-    # ADTS AAC: 12-bit syncword (0xFFF) plus the layer field (bits 4-3 of
-    # byte 1) fixed at 0 -- MPEG-TS's sync byte is a single 0x47, so this
-    # needs the extra layer-field check to avoid false-triggering on an
-    # unrelated 0xFF byte pair.
-    "adts_chunk_mutate": lambda d: len(d) >= 7 and d[0] == 0xFF and (d[1] & 0xF6) == 0xF0,
-    # MP3: 11-bit syncword (top byte 0xFF, top 3 bits of next byte set),
-    # with version/layer fields that must be non-reserved (MPEG version
-    # != 01, layer != 00) -- narrows past ADTS's 12-bit sync, which this
-    # would otherwise also match on the all-1s prefix.
-    "mp3_chunk_mutate": lambda d: (
-        len(d) >= 4
-        and d[0] == 0xFF
-        and (d[1] & 0xE0) == 0xE0
-        and ((d[1] >> 3) & 0x03) != 0x01
-        and ((d[1] >> 1) & 0x03) != 0x00
-    ),
+    # MPEG-PS: pack header start code (disjoint from nal: 0xBA has bit 7 set).
+    "mpegps_chunk_mutate": lambda d: d[:4] == b"\x00\x00\x01\xba",
+    # ADTS / MP3 frames, after an optional ID3v2 tag.
+    "adts_chunk_mutate": lambda d: _is_adts(d, id3v2_len(d)),
+    "mp3_chunk_mutate": lambda d: _is_mp3(d, id3v2_len(d)),
     "ogg_chunk_mutate": lambda d: d[:4] == b"OggS",
     "flv_chunk_mutate": lambda d: d[:3] == b"FLV",
     "asf_chunk_mutate": lambda d: (

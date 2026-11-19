@@ -4693,28 +4693,33 @@ class OperatorEngine:
             mutated = self._mpegts_mutator._generate_random_ts(max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
+    def _op_mpegps_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.mpegps import MpegpsMutator
+
+        if not hasattr(self, "_mpegps_mutator"):
+            self._mpegps_mutator = MpegpsMutator()
+        # mutate() generates a fresh stream when no pack header parses.
+        mutated = self._mpegps_mutator.mutate(
+            bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng
+        )
+        return bytearray(mutated[: self.ctx.max_len])
+
     def _op_adts_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations.adts import AdtsMutator, parse_adts_frames
+        from fuzzer_tool.core.mutations.adts import AdtsMutator
 
         if not hasattr(self, "_adts_mutator"):
             self._adts_mutator = AdtsMutator()
-        rng = self.ctx._rng
-        if parse_adts_frames(bytes(buf)):
-            mutated = self._adts_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
-        else:
-            mutated = self._adts_mutator._generate_random_adts(max_len=self.ctx.max_len, rng=rng)
+        # mutate() skips a leading ID3v2 tag and generates when no frame parses.
+        mutated = self._adts_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng)
         return bytearray(mutated[: self.ctx.max_len])
 
     def _op_mp3_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations.mp3 import Mp3Mutator, parse_mp3_frames
+        from fuzzer_tool.core.mutations.mp3 import Mp3Mutator
 
         if not hasattr(self, "_mp3_mutator"):
             self._mp3_mutator = Mp3Mutator()
-        rng = self.ctx._rng
-        if parse_mp3_frames(bytes(buf)):
-            mutated = self._mp3_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
-        else:
-            mutated = self._mp3_mutator._generate_random_mp3(max_len=self.ctx.max_len, rng=rng)
+        # mutate() skips a leading ID3v2 tag and generates when no frame parses.
+        mutated = self._mp3_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng)
         return bytearray(mutated[: self.ctx.max_len])
 
     def _op_ogg_chunk_mutate(self, buf, _byte_idx, _data):

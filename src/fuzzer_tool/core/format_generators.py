@@ -61,6 +61,7 @@ GENERATED_SEED_FORMATS: dict[str, tuple[str, str, str]] = {
     "jpeg2000": ("jpeg2000", "Jpeg2000Mutator", "_generate_random_jpeg2000"),
     "magicyuv": ("magicyuv", "MagicYUVMutator", "_generate_random_magicyuv"),
     "mp3": ("mp3", "Mp3Mutator", "_generate_random_mp3"),
+    "mpegps": ("mpegps", "MpegpsMutator", "_generate_random_ps"),
     "mpegts": ("mpegts", "MpegtsMutator", "_generate_random_ts"),
     "nal": ("nal", "NalMutator", "_generate_random_nal_stream"),
     "ogg": ("ogg", "OggMutator", "_generate_random_ogg"),

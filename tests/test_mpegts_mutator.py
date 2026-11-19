@@ -10,12 +10,39 @@ from fuzzer_tool.core.mutations.mpegts import (
     SYNC_BYTE,
     MpegtsMutator,
     TsPacket,
+    fix_psi_crc,
     parse_ts_packets,
     serialize_ts_packets,
 )
 from fuzzer_tool.core.operator_registry import format_gate_matches
 
 from .support.scripted_rng import ScriptedRng
+
+# pointer(1) + table_id(1) + section_length(2) + tsid(2) + version(1) + sec(2).
+PAT_ENTRY_OFF = 9
+CRC_MPEG2_CHECK = 0x0376E6E7  # catalogue check value of b"123456789"
+
+
+def _crc_mpeg2(data: bytes) -> int:
+    """Bitwise CRC-32/MPEG-2: independent oracle, not the code under test."""
+    reg = 0xFFFFFFFF
+    for byte in data:
+        reg ^= byte << 24
+        for _ in range(8):
+            reg = ((reg << 1) ^ 0x04C11DB7) & 0xFFFFFFFF if reg & 0x80000000 else reg << 1
+    return reg
+
+
+def _section_crc_ok(payload: bytes) -> bool:
+    # CRC over the whole section, CRC included, is zero (as FFmpeg checks it).
+    start = 1 + payload[0]
+    end = start + 3 + (((payload[start + 1] & 0x0F) << 8) | payload[start + 2])
+    return _crc_mpeg2(payload[start:end]) == 0
+
+
+def test_crc_oracle_control():
+    # Hard Rule 46: the oracle must reproduce the catalogue value first.
+    assert _crc_mpeg2(b"123456789") == CRC_MPEG2_CHECK
 
 
 def _pat_packet(pid: int = PAT_PID, cc: int = 0) -> bytes:
@@ -31,6 +58,7 @@ def _pat_packet(pid: int = PAT_PID, cc: int = 0) -> bytes:
         continuity_counter=cc,
         payload=payload,
     )
+    fix_psi_crc(pkt)  # real PATs carry a valid CRC
     return pkt.to_bytes()
 
 
@@ -145,6 +173,41 @@ class TestMpegtsMutator:
         mutator._rng = rng
         mutator._mutate_pat_program_pid(packets, 65536)
         assert bytes(packets[0].payload) != before
+
+    def test_regression_pat_mutation_keeps_crc_valid(self):
+        # Op 6 = PAT edit; choice 0 = first PAT packet, choice 1 = PMT PID 0x1FFF.
+        _packets_unused, data = self._packets()
+        pat_op = 6
+        rng = ScriptedRng(randints=[pat_op, 0], choice_idxs=[0, 1])
+        out = MpegtsMutator().mutate(data, max_len=len(data), rng=rng)
+
+        payload = out[4:PACKET_SIZE]
+        assert payload[PAT_ENTRY_OFF : PAT_ENTRY_OFF + 2] == b"\x00\x01"  # program kept
+        pmt_pid = int.from_bytes(payload[PAT_ENTRY_OFF + 2 : PAT_ENTRY_OFF + 4], "big")
+        assert pmt_pid & 0x1FFF == 0x1FFF
+        assert _section_crc_ok(payload)
+
+    def test_generated_psi_crcs_valid(self):
+        out = MpegtsMutator()._generate_random_ts(max_len=65536, rng=random.Random(5))
+        pat, pmt = out[4:PACKET_SIZE], out[PACKET_SIZE + 4 : 2 * PACKET_SIZE]
+        assert _section_crc_ok(pat)
+        assert _section_crc_ok(pmt)
+
+    def test_crc_fix_skips_pes(self):
+        # Falsification: a PES payload (no section-syntax bit) must stay byte-identical.
+        pes = TsPacket(0, 1, 0, 0x0101, 0, 0x1, 0, payload=b"\x00\x00\x01\xe0" + bytes(20))
+        before = pes.payload
+        fix_psi_crc(pes)
+        assert pes.payload == before
+
+    def test_crc_fix_adversarial_lengths(self):
+        # section_length and pointer_field past the packet end: leave untouched, no raise.
+        long_sec = bytes([0x00, 0x00, 0xBF, 0xFF]) + bytes(20)
+        far_ptr = bytes([0xFF]) + bytes(20)
+        for payload in (long_sec, far_ptr, b"", b"\x00"):
+            pkt = TsPacket(0, 1, 0, PAT_PID, 0, 0x1, 0, payload=payload)
+            fix_psi_crc(pkt)
+            assert pkt.payload == payload
 
     def test_delete_packet_never_drops_below_two(self):
         packets, _data = self._packets()

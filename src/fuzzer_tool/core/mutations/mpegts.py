@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from fuzzer_tool.core.berlekamp_massey import compute_checksum
 from fuzzer_tool.core.mutations.generic import _swap_pair
 from fuzzer_tool.core.rand_pool import RandPool
 
@@ -38,6 +39,19 @@ PACKET_SIZE = 188
 SYNC_BYTE = 0x47
 PAT_PID = 0x0000
 NULL_PID = 0x1FFF
+
+# PSI section framing (ISO/IEC 13818-1 2.4.4).
+PAT_TABLE_ID = 0x00
+PMT_TABLE_ID = 0x02
+PSI_TABLE_IDS = frozenset({PAT_TABLE_ID, PMT_TABLE_ID})
+SECTION_SYNTAX_BIT = 0x80
+SECTION_HEADER_LEN = 3  # table_id + section_length(2)
+CRC_LEN = 4
+CRC32_MPEG2_POLY = 0x04C11DB7
+CRC32_MPEG2_INIT = 0xFFFFFFFF
+# pointer_field(1) + table_id(1) + section_length(2) + tsid(2) + version(1)
+# + section_number(1) + last_section_number(1).
+PAT_ENTRY_OFF = 9
 
 # Common stream_type values usable for PMT corruption (ISO/IEC 13818-1
 # Table 2-34 plus the private/registered ranges FFmpeg recognizes).
@@ -147,6 +161,34 @@ def serialize_ts_packets(packets: list[TsPacket]) -> bytes:
     return b"".join(p.to_bytes() for p in packets)
 
 
+def fix_psi_crc(pkt: TsPacket) -> None:
+    """Recompute a single-packet PAT/PMT section's CRC-32/MPEG-2 in place.
+
+    FFmpeg drops PSI sections whose CRC fails, so a stale CRC hides every
+    PSI mutation from the demuxer. Sections that don't fit the packet, or
+    payloads that aren't PAT/PMT (e.g. PES), are left untouched.
+    """
+    p = pkt.payload
+    if not pkt.payload_unit_start_indicator or not p:
+        return
+
+    # Section bounds: pointer_field skips to table_id; section_length counts
+    # bytes after the 3-byte header, CRC included.
+    start = 1 + p[0]
+    room = min(len(p), PACKET_SIZE - 4 - len(pkt.adaptation_field))
+    if start + SECTION_HEADER_LEN > room:
+        return
+    if p[start] not in PSI_TABLE_IDS or not p[start + 1] & SECTION_SYNTAX_BIT:
+        return
+    end = start + SECTION_HEADER_LEN + (((p[start + 1] & 0x0F) << 8) | p[start + 2])
+    crc_at = end - CRC_LEN
+    if crc_at < start + SECTION_HEADER_LEN or end > room:
+        return
+
+    crc = compute_checksum(p[start:crc_at], CRC32_MPEG2_POLY, 32, CRC32_MPEG2_INIT)
+    pkt.payload = p[:crc_at] + crc.to_bytes(CRC_LEN, "big") + p[end:]
+
+
 def _pat_pids(packets: list[TsPacket]) -> list[int]:
     """Return the indices of packets on PID 0 (PAT)."""
     return [i for i, p in enumerate(packets) if p.pid == PAT_PID]
@@ -246,7 +288,7 @@ class MpegtsMutator:
         PAT payload (after the 1-byte pointer_field on a PUSI packet):
           table_id(1) section_length hi/lo(2) ... then repeated
           program_number(2) + reserved/PMT_PID(2) entries, 4 bytes each,
-          starting at payload offset 8 and running to length-4 (CRC32 tail).
+          starting at payload offset 9 and running to length-4 (CRC32 tail).
         Best-effort: falls through to a byte flip if the PAT doesn't parse
         cleanly, since malformed PATs are exactly what this operator wants
         to feed the demuxer.
@@ -262,10 +304,10 @@ class MpegtsMutator:
             return packets
         target = packets[self._rng.choice(pat_indices)]
         data = bytearray(target.payload)
-        if len(data) >= 12:
-            # First entry starts at offset 8 (after pointer_field + PAT
-            # header); PMT PID occupies the low 13 bits of the 2nd u16.
-            entry_off = 8
+        if len(data) >= PAT_ENTRY_OFF + 4:
+            # First entry follows pointer_field + PAT header; PMT PID
+            # occupies the low 13 bits of the 2nd u16.
+            entry_off = PAT_ENTRY_OFF
             pmt_pid = self._rng.choice([PAT_PID, 0x1FFF, self._rng.randint(0, 0x1FFF)])
             hi = 0xE0 | ((pmt_pid >> 8) & 0x1F)
             lo = pmt_pid & 0xFF
@@ -273,6 +315,8 @@ class MpegtsMutator:
                 data[entry_off + 2] = hi
                 data[entry_off + 3] = lo
                 target.payload = bytes(data)
+                # Keep the PAT reachable: FFmpeg drops sections with a bad CRC.
+                fix_psi_crc(target)
                 return packets
         if data:
             idx = self._rng.randint(0, len(data) - 1)
@@ -322,7 +366,7 @@ class MpegtsMutator:
         # PAT: program 1 -> PMT PID 0x1000.
         pat_section = bytes([0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00])
         pat_section += bytes([0x00, 0x01, 0xE1, 0x00])  # program 1 -> PMT PID 0x0100
-        pat_section += bytes(4)  # CRC32 stand-in (not validated by this generator)
+        pat_section += bytes(CRC_LEN)  # filled by fix_psi_crc
         pat_payload = bytes([0x00]) + pat_section  # pointer_field
         pat = TsPacket(
             transport_error_indicator=0,
@@ -369,5 +413,7 @@ class MpegtsMutator:
             payload=pes_payload,
         )
 
+        fix_psi_crc(pat)
+        fix_psi_crc(pmt)
         result = serialize_ts_packets([pat, pmt, es])
         return result[:max_len]

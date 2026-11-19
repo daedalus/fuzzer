@@ -33,6 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.rand_pool import RandPool
 
 ADTS_HEADER_LEN = 7  # fixed + variable header, CRC (if any) folds into payload
@@ -116,6 +117,11 @@ class AdtsMutator:
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
         self._rng = rng or self._rng
         rng = self._rng
+
+        # Pass a leading ID3v2 tag through untouched; mutate the frames after it.
+        tag_len = id3v2_len(data)
+        tag, data = data[:tag_len], data[tag_len:]
+
         frames = parse_adts_frames(data)
         if not frames:
             return self._generate_random_adts(max_len=max_len, rng=rng)
@@ -132,7 +138,7 @@ class AdtsMutator:
             self._reorder_frames,
         ]
         mutators[op](frames, rng)
-        return serialize_adts_frames(frames)[:max_len]
+        return (tag + serialize_adts_frames(frames))[:max_len]
 
     def _mutate_frame_length(self, frames: list[AdtsFrame], rng) -> None:
         """Corrupt the 13-bit aac_frame_length field independent of the
