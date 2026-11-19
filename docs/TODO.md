@@ -493,6 +493,8 @@ Handover: `docs/handover/handover_codec_mutator_gaps_2026-11-19.md`.
 - [ ] **C17 start-code generalization** — extend `nal_chunk_mutate` to MPEG-1/2/4, VC-1, VVC, AVS.
 - [ ] **Tier 2 codec ops** — C8–C16, after Tier 1 A/B.
 - [ ] **Finish survey** — re-fetch page §3.4.2–3.4.12 (truncated); confirm decoders in `libavcodec/allcodecs.c`.
+- [ ] **Non-codec gaps** (handover §Non-codec gaps) — N1 regex AST op (grep), N2 Base58Check/Luhn fixer, N3 NAL emulation-prevention (with C17).
+- [ ] **Prune unmeasured ops** — fuzzgoat A/B the shipped-unmeasured ops (handover §Measurement debt); drop zero-yield arms.
 
 ## TheAlgorithms/Rust port candidates (2026-11-19, TheAlgorithms/Rust master)
 ~430 files; absence checked by grep over `src/`. Python/C survey verdicts stand. Also covered: Aho-Corasick, BWT/MTF/RLE/Huffman/LZ77, Base32/85, BCD/negabinary, Gray code, Fenwick, Bloom, DSU, LCA/Tarjan, dominators, mincut, Hungarian, Gale-Shapley, Dijkstra/A*/Bellman, Euler walk, ant colony, GA, k-means, PCA, kNN, Kadane, Misra-Gries, SJT (`permutation.py`), Pollard rho/BSGS/CRT (`numtheory.py`), Carmichael/strong pseudoprimes (`prime_inject.py`), FFT/NTT, secp fields, Poly1305, suffix automaton. All shipped 2026-11-19 (DEEP_DIVE §TheAlgorithms/Rust ports); none A/B'd on a real target (no build root here; clang lacks ASAN runtime).

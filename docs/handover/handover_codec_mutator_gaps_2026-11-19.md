@@ -72,6 +72,36 @@ Rank = FFmpeg history of decoder bugs × how much structure a flat mutator break
 
 `nal.py` handles H.264/HEVC headers only **[verified]** (`core/mutations/nal.py:1-12`). Start-code scanning is shared by MPEG-1/2 video (`00 00 01 B3/B5/00`), MPEG-4 Part 2 (`00 00 01 B0/B6`), VC-1 (`00 00 01 0F/0E/0D`), VVC (2-byte NAL header, `nuh_unit_type` 5 bits), AVS (`00 00 01 B0/B3`). Add a per-standard header table; one op, sniffer picks the table. Cost S–M.
 
+## Non-codec gaps (registry survey, `67f56ff4`)
+
+Registry: ~320 ops over 8 bands. Byte/bit/numeric breadth is saturated; gaps are structure-aware and target-bound. **[verified]** by grep over `core/mutations/` and `operator_registry.py`.
+
+### N-tier 1 — a current target consumes it
+
+| ID | Op | Target | Note | Cost |
+|---|---|---|---|---|
+| N1 | `regex_ast_mutate` | grep, fgrep | Parse pattern → classes, quantifiers, groups, backrefs; mutate nodes. Only `regex_bomb` today. Pairs with TODO "Regex dictionary tokens". | M |
+| N2 | `check_digit_fix` | secp256k1, brainflayer | Base58Check, Luhn repair after mutation; `rs_fix`/`poly1305_fix` pattern. | S |
+| N3 | NAL emulation-prevention | ffmpeg | `nal.py` ignores `00 00 03`: unescape → mutate → re-escape. Do with C17. | S |
+
+### N-tier 2 — open in `docs/TODO.md`, unbuilt
+
+- JSON leaf havoc (`json_struct` mode; fuzzgoat).
+- `seq_mutate` message-boundary splice + replace.
+- Regex-sampled `special_strings`.
+- Per-width integer boundaries from cmplog (Phrack 60/10).
+- Coverage-distance splice partner (honggfuzz).
+- Local-space branch flip (Fizzer).
+- CBOR/MessagePack/BSON/bencode: blocked, no target.
+
+### N-tier 3 — dict exists, no structural op, no target
+
+XML/HTML/SVG, PDF, YAML/TOML/INI, HTTP/1 (+chunked), bzip2/xz/zstd, pcap (only `formatfuzzer`), OTF/TTF, PE/Mach-O, X.509, wasm, tar, 7z, OpenEXR, PSD, DICOM, ICC. Build only with a target (no A/B otherwise).
+
+### Measurement debt (higher yield than new ops)
+
+Unmeasured, scripted-RNG tests only: FXT eight, the "eleven" numeric/text/merge ops, `arith_mid`, `bit_cross`, the 2026-09-30 ten, `token_repair`, `g711_mutate`, `tlul_mutate`, `line_code`. Each holds a scheduler slot. Fuzzgoat A/B (Rule 52), drop zero-yield arms.
+
 ## Sketch (C2, representative)
 
 ```python
