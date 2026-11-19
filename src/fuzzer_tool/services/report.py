@@ -17,6 +17,7 @@ from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD, fit_tracker
 from fuzzer_tool.core.edge_density import edges_per_bit
 from fuzzer_tool.core.pool_drift import PoolDrift
+from fuzzer_tool.core.seed_som import fit_tracker as fit_seed_som
 from fuzzer_tool.core.shim_health import Attach, health_issues
 from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.core.temporal_join import join_streams
@@ -165,6 +166,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_seed_contribution(fuzzer))
     sections.append(_edge_rarity(fuzzer))
     sections.append(_edge_clusters(fuzzer))
+    sections.append(_seed_som(fuzzer))
     sections.append(_edge_lifetimes(fuzzer))
     sections.append(_corpus_health(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
@@ -2620,6 +2622,37 @@ def _edge_clusters(f) -> str:
             f"  Near-miss seeds:  {clusters.near_miss_seeds()}",
         ]
     )
+
+
+SOM_SHADES = " .:-=+*#%@"  # U-matrix: close neighbours .. coverage border
+
+
+def _seed_som(f) -> str:
+    """Kohonen map of seed coverage: seeds per unit, U-matrix shade per cell."""
+    som = fit_seed_som(getattr(f, "_edge_tracker", None))
+    if som is None:
+        return ""
+
+    rows, cols = som.shape
+    occupied = int((som.hits > 0).sum())
+    lines = [
+        "",
+        "--- Seed Coverage Map (SOM) ---",
+        f"  Grid:             {rows}x{cols}, {som.bmu.size} seeds x {som.weights.shape[1]} edges",
+        f"  Quantization err: {som.quantization_error:.2f} (mean distance seed -> unit)",
+        f"  Topographic err:  {som.topographic_error:.1%} (2nd-best unit not adjacent)",
+        f"  Occupied units:   {occupied}/{rows * cols}, largest {int(som.hits.max())} seeds",
+        f"  Seeds per unit, U-matrix shade '{SOM_SHADES[0]}' close .. '{SOM_SHADES[-1]}' border:",
+    ]
+
+    # Shade = U-matrix value scaled to the map's own range.
+    u = som.umatrix
+    span = float(u.max() - u.min()) or 1.0
+    levels = ((u - u.min()) / span * (len(SOM_SHADES) - 1)).round().astype(int)
+    for r in range(rows):
+        cells = (f"{int(som.hits[r, c]):>4}{SOM_SHADES[levels[r, c]]}" for c in range(cols))
+        lines.append("    " + "".join(cells))
+    return "\n".join(lines)
 
 
 def _edge_lifetimes(f) -> str:

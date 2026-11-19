@@ -479,8 +479,8 @@ Handover: `docs/handover/handover_thealgorithms_c_survey_2026-11-19.md`. Overlap
 - [ ] **Regex dictionary tokens** (Thompson NFA) — sample matching and near-miss strings; grep pattern inputs.
 - [ ] **Euler-walk seed** (Hierholzer + Chinese postman) — one seed covering every `format_fsm` transition.
 - [ ] **Likelihood-weighted directed distance** (Dijkstra, `−log p` edges) — replaces hop-count BFS in `analyzer_distance`; A/B owed.
-- [ ] **A-law/µ-law PCM mutator** — FFmpeg; mutate in linear domain.
-- [ ] **Kohonen SOM seed map** — report only.
+- [ ] **A-law/µ-law PCM mutator** (2026-11-19) — shipped `g711_mutate` (WAV 6/7, AU 27/1). Open: (a) no G.711 seeds in the FFmpeg corpus or seed generator: op only fires via the 2% trickle until one exists; (b) raw `.al`/`.ul` not sniffed; (c) FFmpeg A/B (ledger) once seeds exist.
+- [ ] **Kohonen SOM seed map** (2026-11-19) — shipped as `--report` section (`core/seed_som.py`). Open: (a) read it on a real FFmpeg/fuzzgoat report; (b) square grid only (no PCA aspect ratio); (c) not in the exit summary.
 
 ## Standing notes
 - [ ] **Master test debt (2026-11-16)**: `test_perf_group_read.py::test_real_software_counters_count_own_work` fails in this container; `test_regression_end_of_run_persistence.py` lets the probe's KeyboardInterrupt abort the pytest session (later files never run); 16 failures across `test_regression_cli_fuzzer_kwargs`/`elo_all`/`fuzzer`/`one_fifth`/… also red on master.
