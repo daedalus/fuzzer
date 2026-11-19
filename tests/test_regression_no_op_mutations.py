@@ -663,6 +663,8 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.hlx_algo = "sha256"
         f.hlx_key_len = 16
         f.hlx_digest_at = None
+        # sha1_collide: offered only when a prefix width is set.
+        f.sha1_collide_bits = 4
         # bit_cross / arith_mid / geo_mid / power_mid / lineage_step: gated on parent_key, which seed_meta records only
         # under --lineage.
         f._use_lineage = True

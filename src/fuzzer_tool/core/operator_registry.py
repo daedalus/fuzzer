@@ -208,6 +208,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "png_crc_fix",
         "poly1305_fix",
         "hash_len_ext",
+        "sha1_collide",
         "rs_fix",
         "jpeg_chunk_mutate",
         "jpeg_crc_fix",
@@ -1073,6 +1074,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "poly1305_fix": lambda f, _d: getattr(f, "poly1305_key", None) is not None,
     # Merkle-Damgard length extension needs the hash and key length; --hlx-algo
     "hash_len_ext": lambda f, _d: getattr(f, "hlx_algo", None) is not None,
+    # Truncated SHA-1 second preimage needs a prefix width; --sha1-collide-bits
+    "sha1_collide": lambda f, _d: getattr(f, "sha1_collide_bits", None) is not None,
     # Reed-Solomon parity repair / symbol errors need the parity length; --rs-nsym
     "rs_fix": lambda f, _d: getattr(f, "rs_nsym", None) is not None,
     # Manchester and friends; --op-line-code

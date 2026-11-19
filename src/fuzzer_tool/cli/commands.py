@@ -1393,6 +1393,7 @@ def cmd_fuzz(args):
         hlx_algo=getattr(args, "hlx_algo", None),
         hlx_key_len=getattr(args, "hlx_key_len", 16),
         hlx_digest_at=getattr(args, "hlx_digest_at", None),
+        sha1_collide_bits=getattr(args, "sha1_collide_bits", None),
         op_line_code=getattr(args, "op_line_code", False),
         rq_xor_key=getattr(args, "rq_xor_key", False),
         checksum_sites=getattr(args, "checksum_sites", False),
@@ -3459,6 +3460,16 @@ def _pos_arena_arms_arg(value: str) -> tuple[str, ...]:
         return parse_arena_arms(value)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def _sha1_bits(value: str) -> int:
+    """argparse ``type=`` for --sha1-collide-bits; out of range is a usage error."""
+    from fuzzer_tool.core.mutations.sha1_collide import MAX_BITS  # noqa: PLC0415
+
+    bits = int(value)
+    if not 1 <= bits <= MAX_BITS:
+        raise argparse.ArgumentTypeError(f"bits must be in 1..{MAX_BITS}")
+    return bits
 
 
 def _poly1305_key(value: str) -> bytes:
@@ -7890,6 +7901,17 @@ def main() -> int:
         help=(
             "Offset of the digest for hash_len_ext; negative counts from the end "
             "(default: the last digest-size bytes)."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--sha1-collide-bits",
+        type=_sha1_bits,
+        default=None,
+        metavar="N",
+        help=(
+            "Enable sha1_collide: rewrite an 8-byte window so the mutant's SHA-1 "
+            "top N bits (1..16) equal the seed's; hits truncated-hash keyed "
+            "caches/tables. ~4*2^N hashes per call worst case."
         ),
     )
     fuzz_parser.add_argument(
