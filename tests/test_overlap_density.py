@@ -1,12 +1,10 @@
 """Tests for FMM-clustered pairwise overlap density (overlap_density.py)."""
 
-import math
 import random
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker, MinHashLSH
 from fuzzer_tool.core.overlap_density import (
     _build_clusters,
-    _UnionFind,
     compute_corpus_overlap_density,
 )
 
@@ -549,73 +547,3 @@ class TestBuildClustersChainRegression:
         assert len({seed_to_cluster[i] for i in range(n_each)}) == 1
         assert len({seed_to_cluster[i] for i in range(n_each, 2 * n_each)}) == 1
         assert seed_to_cluster[0] != seed_to_cluster[n_each]
-
-
-class TestUnionFind:
-    """Direct tests of the _UnionFind helper (union-by-size + path halving)."""
-
-    def test_size_invariant_after_random_unions(self):
-        n = 200
-        uf = _UnionFind(n)
-        rng = random.Random(7)
-        for _ in range(500):
-            a, b = rng.randrange(n), rng.randrange(n)
-            uf.union(a, b)
-
-        counts: dict[int, int] = {}
-        for i in range(n):
-            root = uf.find(i)
-            counts[root] = counts.get(root, 0) + 1
-
-        for root, count in counts.items():
-            assert uf.size[root] == count, (
-                f"size[{root}]={uf.size[root]} but {count} members map to it"
-            )
-
-    def test_union_by_size_bounds_chain_depth(self):
-        """A chain 0-1-2-...-(n-1) unioned in order must not degrade to
-        O(n) depth the way unconditional root-attachment does (see the
-        companion test below)."""
-        n = 512
-        uf = _UnionFind(n)
-        for i in range(n - 1):
-            uf.union(i, i + 1)
-
-        max_depth = max(uf.depth(i) for i in range(n))
-        bound = 2 * math.log2(n) + 2
-        assert max_depth <= bound, (
-            f"max depth {max_depth} exceeds O(log n) bound {bound:.1f} for n={n}"
-        )
-
-    def test_naive_unconditional_attach_is_the_adversarial_case(self):
-        """Sanity check that the chain scenario above is actually adversarial
-        for the *old* union() (unconditional `parent[ra] = rb`, no size
-        check) — confirms the depth bound in the previous test is a
-        meaningful regression guard rather than a tautology."""
-        n = 512
-        parent = list(range(n))
-
-        def find(x: int) -> int:
-            while parent[x] != x:
-                x = parent[x]
-            return x
-
-        def naive_union(a: int, b: int) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                parent[ra] = rb  # old behavior: unconditional attach
-
-        for i in range(n - 1):
-            naive_union(i, i + 1)
-
-        def depth(x: int) -> int:
-            d = 0
-            while parent[x] != x:
-                x = parent[x]
-                d += 1
-            return d
-
-        max_depth = max(depth(i) for i in range(n))
-        assert max_depth >= n - 2, (
-            f"expected the naive union to degrade to ~O(n) depth, got {max_depth}"
-        )

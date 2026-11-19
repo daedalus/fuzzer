@@ -475,7 +475,7 @@ Survey of 1608 files; absence checked by grep over `src/`. Already covered: BWT/
 
 ## TheAlgorithms/C port candidates (2026-11-19, TheAlgorithms/C)
 Handover: `docs/handover/handover_thealgorithms_c_survey_2026-11-19.md`. Overlap with the Python survey above folded in.
-- [ ] **Union-find consolidation** — 7 local `find`/`union` copies → one `core/dsu.py` (Hard Rule 1).
+- [x] **Union-find consolidation** (2026-11-19) — `core/dsu.py`; 5 call sites migrated. Kept local: `shapley.py` (keyed wrapper 13% slower at ≤5 pairs), `plateau.py` (bounded/persisted), `lineage.py` (Tarjan LCA), `weizz_tags.py` (next-free pointer). `tests/test_dsu.py`.
 - [ ] **Regex dictionary tokens** (Thompson NFA) — sample matching and near-miss strings; grep pattern inputs.
 - [ ] **Euler-walk seed** (Hierholzer + Chinese postman) — one seed covering every `format_fsm` transition.
 - [ ] **Likelihood-weighted directed distance** (Dijkstra, `−log p` edges) — replaces hop-count BFS in `analyzer_distance`; A/B owed.
