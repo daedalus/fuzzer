@@ -24,6 +24,7 @@ from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.global_snapshot import GlobalSnapshot
 from fuzzer_tool.adapters.guard_arena import GUARD_OVERREAD, GuardArena
 from fuzzer_tool.adapters.heap_input import HeapInput
+from fuzzer_tool.adapters.loaded_image import NO_IMAGE, LoadedImage, NoImage
 from fuzzer_tool.adapters.memfd_input import INPUT_PATH_ENV
 from fuzzer_tool.adapters.process import run_target_stdin
 from fuzzer_tool.adapters.shim_factory import (
@@ -352,6 +353,8 @@ class InProcessRunner:
         self._pre = _pre_exec(self._restore, self._stage)
         # fd 2 -> reused pipe around direct-mode calls (ASAN reports).
         self._stderr = StderrCapture()
+        # The loaded .so, held open so reports survive a mid-run rebuild.
+        self._image: LoadedImage | NoImage = NO_IMAGE
         self._throttle = ReportThrottle(_to_stderr)
         self._is_c = False
         self._loader_path: str | None = None
@@ -466,7 +469,10 @@ class InProcessRunner:
             fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
             os.close(fd)
         try:
+            self._image.close()
+            self._image = LoadedImage.open(self.target)
             self._lib = ctypes.CDLL(self.target)
+            self._image.locate()
             # The constructor __afl_auto_init may not fire during
             # ctypes.CDLL loading (getenv() may not see os.environ
             # updates at constructor time). Check if __afl_area was
@@ -937,6 +943,8 @@ class InProcessRunner:
             # Restore stderr and read any captured output
             captured = self._stderr.finish()
             capturing = False
+            if captured:
+                captured = self._image.fix(captured)
 
             # A report written before the deadline is a crash, not a hang.
             result = (-1, captured or "timeout") if timed_out else (rc, captured)
@@ -1010,6 +1018,8 @@ class InProcessRunner:
                 # or replaced ASAN fd cannot hang the drain.
                 _captured_stderr = self._stderr.finish()
 
+        if _captured_stderr:
+            _captured_stderr = self._image.fix(_captured_stderr)
         if self._timed_out:
             # A report written before the deadline is a crash, not a hang.
             return -1, _captured_stderr or "timeout"
@@ -1168,6 +1178,8 @@ class InProcessRunner:
         self._func = None
         self._lib = None
         self._func_ptr = None
+        self._image.close()
+        self._image = NO_IMAGE
         self._unbind_guard()
         self._c_buf = None
         self._heap.close()
