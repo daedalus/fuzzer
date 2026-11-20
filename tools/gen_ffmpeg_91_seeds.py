@@ -176,25 +176,33 @@ def write_seeds(seeds_dir):
     """Write the crafted 9.0.2 crash seeds into ``seeds_dir``.
 
     ``seeds_dir`` must already be the ``seeds/`` directory ``load_corpus`` reads
-    (``main`` appends it to ``--out``), not the pack root. Each seed is written
-    to a temp sibling and atomically renamed, so a reader never sees a partial
-    seed if generation is interrupted mid-write.
+    (``main`` appends it to ``--out``), not the pack root.
+
+    Each seed is staged in the *parent* directory -- outside the scanned
+    ``seeds/`` tree -- via an exclusive, uniquely named temp file, then
+    atomically renamed into place. So:
+      - load_corpus never sees a partial or temp file (it only scans seeds/);
+      - a planted ``<name>.tmp`` symlink can't redirect the write (mkstemp uses
+        O_CREAT|O_EXCL and a random name, so it neither follows nor reuses);
+      - two concurrent runs can't collide on a fixed temp name.
+    An interrupted run leaves no stray temp behind.
     """
+
+    # Staging sibling of seeds/, on the same filesystem so os.replace is atomic.
+    stage_dir = os.path.dirname(os.path.abspath(seeds_dir))
 
     for name, build in SEEDS.items():
         data = build()
-        path = os.path.join(seeds_dir, name)
+        fd, tmp = tempfile.mkstemp(dir=stage_dir, prefix=f".{name}.", suffix=".part")
 
-        # mkstemp: unique O_EXCL name, so no symlink follow or concurrent clash;
-        # `.tmp` is in load_corpus's skip list.
-        fd, tmp = tempfile.mkstemp(dir=seeds_dir, prefix=f".{name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
-            os.replace(tmp, path)  # atomic publish
-        except BaseException:
-            os.unlink(tmp)
-            raise
+            os.replace(tmp, os.path.join(seeds_dir, name))  # atomic publish
+        finally:
+            # Only reached with tmp still present if write/replace failed.
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
         print(f"{name}: {len(data)}B")
 
