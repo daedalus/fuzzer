@@ -92,22 +92,50 @@ pinned unit-test case, is caught.
 |              |   (test_regression_cdf_walk_vectorized.py)                    |
 | checksum_state | pairs lost across resume; byte budget; junk dropped         |
 |              |   (test_regression_checksum_learner_state.py)                 |
+| format_field_limits | header field at its type's limit: struct.pack raised   |
+|              |   (test_regression_mutator_field_overflow.py)                 |
+| regime_state | enum in regime history made the whole state file rejected     |
+|              |   (test_regression_state_enum_payload.py)                     |
+| key16_collision | forged XXH64 collisions dropped inputs on load / import    |
+|              |   (test_regression_key16_collision.py)                        |
+| crash_replace | smaller trigger replaces; one reproducer per signature       |
+|              |   (test_regression_crash_evict_order.py, _write_atomic.py)    |
+| symlink_victim | loader read / renamed files outside the corpus via links    |
+|              |   (test_regression_path_traversal.py)                         |
+| resume_crash_sigs | resume re-saved known crashes (signature drift)          |
+|              |   (test_regression_resume_crash_sigs.py)                      |
+| sig_frames   | runtime / harness frames split one bug; TSAN kind truncated   |
+|              |   (test_regression_signature_frames.py, _msan_tsan.py)        |
+| hang_dedup   | one loop filled seeds/timeouts/ without bound                 |
+|              |   (test_regression_hang_dedup.py)                             |
+| stderr_spoof | forged crash markers on a clean exit filed as crashes         |
+|              |   (test_regression_stderr_crash_spoof.py)                     |
+| state_allowlist | crafted --resume pickle ran attacker code                  |
+|              |   (test_regression_pickle_load_rce.py)                        |
 """
 
 from __future__ import annotations
 
 import functools
+import gzip
 import inspect
 import logging
 import math
+import pickle
 import pkgutil
 import struct
+import tempfile
 from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 import fuzzer_tool.core.mutations as mutations_pkg
+from fuzzer_tool.adapters import filesystem as fs
 from fuzzer_tool.adapters.filesystem import apply_delta_v2, compute_delta_v2
+from fuzzer_tool.adapters.process import CRASH_STDERR_MARKERS
 from fuzzer_tool.adapters.track_parser import cond_tuples_from_cmplog_text
 from fuzzer_tool.core import (
     colorization,
@@ -118,10 +146,13 @@ from fuzzer_tool.core import (
     hashing,
     sanitizer,
     similarity,
+    state_store,
     tree_mutator,
 )
 from fuzzer_tool.core.analyzers import analyzer_checksum_learner as acl
 from fuzzer_tool.core.analyzers import analyzer_format_learner as afl
+from fuzzer_tool.core.analyzers.analyzer_coverage_regime import CoverageRegimeDetector
+from fuzzer_tool.core.analyzers.analyzer_critical_slowing import CriticalSlowingDown
 from fuzzer_tool.core.analyzers.analyzer_format_learner import (
     FieldHypothesis,
     FormatCluster,
@@ -144,6 +175,7 @@ from fuzzer_tool.core.elf import find_load_segment
 from fuzzer_tool.core.format_seed_generator import generate_seeds
 from fuzzer_tool.core.grammar import _SIMPLE_ESCAPES as GRAMMAR_SIMPLE
 from fuzzer_tool.core.grammar import decode_quoted_literal
+from fuzzer_tool.core.hash_inverse import xxh64_collide
 from fuzzer_tool.core.int_checksum_solver import _modal_value
 from fuzzer_tool.core.lineage import LineageTree
 from fuzzer_tool.core.mutations import generic, lz4, murmur3, parity, structured
@@ -155,6 +187,7 @@ from fuzzer_tool.core.mutations.vu64 import (
     vu64_encode_value,
     vu64_encoded_len,
 )
+from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.rand_pool import _POOL_ENTRIES, RandPool
 from fuzzer_tool.core.set_cover import min_cover
 from fuzzer_tool.core.similarity import (
@@ -164,6 +197,9 @@ from fuzzer_tool.core.similarity import (
     frame_sequence_similarity,
     levenshtein_align,
 )
+from fuzzer_tool.services import runner
+from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.import_corpus import import_from_libfuzzer
 from fuzzer_tool.services.operators import _fold_bits
 
 from .corpus import err
@@ -322,6 +358,40 @@ STATE_BYTES_MAX = acl.CHECKSUM_STATE_BYTES_MAX
 PAIR_OVERHEAD = 8  # bytes charged per pair besides its data
 NEVER_RECOVER = 1 << 30  # min_pairs: recovery (and its globals) never runs
 CHECKSUM_JUNK = (None, 42, ("s", 1), (b"x", "y"), (b"x",))
+# Format mutators: header fields pinned at their type's extremes.
+FORMAT_MAX_LEN = 65536
+FORMAT_CHAIN_MAX = 6
+LIMIT_BYTES = (b"\x00", b"\xff", b"\x7f", b"\x80")
+REGIME_HIST_MAX = 30
+# xxh64_collide: ref >= 64 bytes, 32-byte prefixes.
+COLLIDE_REF_MIN = 64
+COLLIDE_REF_MAX = 200
+COLLIDE_PREFIX = 32
+CRASH_RCS = (-4, -6, -7, -8, -11)  # SIGILL, SIGABRT, SIGBUS, SIGFPE, SIGSEGV
+CRASH_SAVES_MAX = 6
+CRASH_SIZE_MIN = 8
+CRASH_SIZE_MAX = 200
+SECRET_TAG = b"victim-secret:"
+SYMLINK_ROOTS = (
+    "seeds/irreplaceable",
+    "seeds/crashing",
+    "seeds/timeouts",
+    "seeds/pruned",
+    "deltas",
+)
+ASAN_KINDS = ("heap-use-after-free", "heap-buffer-overflow", "stack-buffer-overflow")
+SIG_NAME_SPACE = 1 << 24
+RUNTIME_FRAMES = ("free", "malloc", "__asan_memcpy", "__interceptor_free", "libc.so.6+0x2d1c")
+HARNESS_FRAMES = ("fuzz_shm_run", "LLVMFuzzerTestOneInput")
+UAF_HEADER = "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+UAF_PREFIX = "AddressSanitizer:heap-use-after-free"
+TSAN_HEADER = "WARNING: ThreadSanitizer: data race (pid=1)\n"
+TSAN_KIND = "data race"
+HANG_EDGES = 64
+HANG_MAX = 8
+NOISE_CHARS = "abcdefghijklmnopqrstuvwxyz ,.:"
+MARKER_EXIT_CODES = (1, 2, 3, 101, 127)  # failing exits a marker corroborates
+_ALLOWLIST_CALLS: list[str] = []
 
 
 def _flood_cap() -> int:
@@ -1854,6 +1924,356 @@ def _reg_checksum_state(rng: RandPool, _workdir: Path) -> str | None:
     return None
 
 
+# ── high priority: run aborts, silent data loss, untrusted input ─────────────
+
+
+@functools.cache
+def _format_mutators() -> list[tuple[str, type]]:
+    """Every format ``*Mutator`` with a generator and a seed-only constructor."""
+    found = []
+    for info in pkgutil.iter_modules(mutations_pkg.__path__):
+        mod = import_module(f"{mutations_pkg.__name__}.{info.name}")
+        for name, cls in vars(mod).items():
+            if _seedable_mutator(name, cls, mod.__name__):
+                found.append((f"{info.name}.{name}", cls))
+    return found
+
+
+def _seedable_mutator(name: str, cls: object, module: str) -> bool:
+    if not inspect.isclass(cls) or cls.__module__ != module or not name.endswith("Mutator"):
+        return False
+    if not hasattr(cls, "mutate") or not any(n.startswith("_generate_random") for n in dir(cls)):
+        return False
+    try:
+        cls(seed=1)
+    except TypeError:
+        return False  # takes a required rng: another interface
+    return True
+
+
+def _reg_format_field_limits(rng: RandPool, _workdir: Path) -> str | None:
+    """Fields at their type's limit never make a format mutator raise."""
+    label, cls = rng.choice(_format_mutators())
+    inst = cls(seed=rng.randrange(SUBSEED_RANGE))
+    gen = next(n for n in dir(cls) if n.startswith("_generate_random"))
+    data = bytearray(getattr(inst, gen)(max_len=FORMAT_MAX_LEN, rng=rng))
+    for _ in range(rng.randint(0, 3)):  # pin fields at 00/FF/7F/80
+        if data:
+            at = rng.randrange(len(data))
+            data[at : at + rng.randint(1, 8)] = rng.choice(LIMIT_BYTES) * rng.randint(1, 8)
+
+    out: bytes | None = bytes(data)
+    for _ in range(rng.randint(1, FORMAT_CHAIN_MAX)):  # own output is the adversary
+        out = inst.mutate(out or bytes(data), max_len=FORMAT_MAX_LEN, rng=rng)
+        if out is not None and not isinstance(out, bytes | bytearray):
+            return f"{label}.mutate returned {type(out).__name__}"
+    return None
+
+
+def _reg_regime_state(rng: RandPool, workdir: Path) -> str | None:
+    """Regime history persists as primitives: the whole state file survives."""
+    det = CoverageRegimeDetector(csd=CriticalSlowingDown(), homogeneity=None)
+    regimes = tuple(CoverageRegime)
+    det._regime_history = [
+        (rng.randrange(1 << 40), rng.choice(regimes))
+        for _ in range(rng.randint(1, REGIME_HIST_MAX))
+    ]
+    det._regime = rng.choice(regimes)
+
+    saved = det.save()
+    state_store._safe_loads(pickle.dumps(saved))  # UnsafeStateError = whole file lost
+    back = CoverageRegimeDetector(csd=CriticalSlowingDown(), homogeneity=None)
+    back.load(saved)
+    if back._regime_history != det._regime_history or back._regime is not det._regime:
+        return "regime history or regime changed across save/load"
+
+    with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+        store = state_store.StateStore(tmp)
+        store.set("regime", saved)
+        store.set("corpus", {"marker": 1})
+        store.save()
+        if state_store.StateStore(tmp).load().get("corpus") != {"marker": 1}:
+            return "state file with a regime section lost its other sections"
+    return None
+
+
+def _stored(root: Path) -> list[bytes]:
+    return sorted(f.read_bytes() for f in root.rglob("*") if f.is_file())
+
+
+def _reg_key16_collision(rng: RandPool, workdir: Path) -> str | None:
+    """Forged XXH64 collisions: load and import never drop a distinct input."""
+    ref = rng.randbytes(rng.randint(COLLIDE_REF_MIN, COLLIDE_REF_MAX))
+    prefixes = [rng.randbytes(COLLIDE_PREFIX) for _ in range(rng.randint(1, 4))]
+    forged = xxh64_collide(ref, prefixes)
+    distinct = sorted(set(forged))
+    files = list(forged) + ([rng.choice(forged)] if rng.random() < 0.5 else [])
+
+    with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+        corpus = Path(tmp) / "corpus"
+        seeds = corpus / "seeds"
+        seeds.mkdir(parents=True)
+        for j, data in enumerate(files):  # mix of canonical and foreign names
+            name = f"id_{fs.hash_data(data)}"
+            if rng.random() < 0.5 or (seeds / name).exists():
+                name = f"raw_{j}"  # forged inputs share one id_<h>: only one can own it
+            (seeds / name).write_bytes(data)
+        on_disk = sorted(set(_stored(seeds)))  # what the user handed over
+
+        for _ in range(2):
+            fs.load_corpus(corpus, add_default=False)
+            if sorted(set(_stored(seeds))) != on_disk or len(_stored(seeds)) < len(distinct):
+                return f"load dropped one of {len(distinct)} colliding inputs"
+
+        src = Path(tmp) / "libfuzzer"
+        src.mkdir()
+        for j, data in enumerate(files):
+            (src / f"in_{j}").write_bytes(data)
+        imported = import_from_libfuzzer(str(src), str(Path(tmp) / "target"))
+        if imported != len(distinct):
+            return f"import kept {imported} of {len(distinct)} colliding inputs"
+    return None
+
+
+def _reg_crash_replace(rng: RandPool, workdir: Path) -> str | None:
+    """Per signature, only the smallest first-seen trigger stays on disk."""
+    rcs = [rng.choice(CRASH_RCS) for _ in range(rng.randint(1, CRASH_SAVES_MAX))]
+    rcs += [rcs[0]]  # the same bug again, smaller: must replace
+    sizes = [rng.randint(CRASH_SIZE_MIN, CRASH_SIZE_MAX) for _ in rcs[:-1]]
+    sizes.append(CRASH_SIZE_MIN - 1)
+    inputs = [rng.randbytes(n) for n in sizes]
+
+    with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+        crashes = Path(tmp)
+        hashes: set[str] = set()
+        sigs: dict[str, int] = {}
+        mins: dict[str, int] = {}
+        best: dict[str, bytes] = {}
+        for data, rc in zip(inputs, rcs, strict=True):
+            fs.save_crash(data, rc, "", crashes, hashes, sigs, crash_min_sizes=mins)
+            sig = fs.crash_signature("", rc)
+            if sig not in best or len(data) < len(best[sig]):
+                best[sig] = data
+
+        bins = sorted(p.read_bytes() for p in crashes.glob("*.bin"))
+        if bins != sorted(best.values()):
+            return f"{len(bins)} crash files, want the smallest of {len(best)} signatures"
+        if any(crashes.glob("*.bak")):
+            return "set-aside .bak left behind"
+        if {k: v for k, v in mins.items()} != {s: len(d) for s, d in best.items()}:
+            return "crash_min_sizes disagrees with the files kept"
+    return None
+
+
+def _reg_symlink_victim(rng: RandPool, workdir: Path) -> str | None:
+    """Symlinked shards/roots: the loader never reads or renames outside the corpus."""
+    with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+        victim = Path(tmp) / "victim"
+        victim.mkdir()
+        secrets = {f"s{i}.ini": SECRET_TAG + rng.randbytes(8) for i in range(rng.randint(1, 4))}
+        for name, data in secrets.items():
+            (victim / name).write_bytes(data)
+        corpus = Path(tmp) / "corpus"
+        shard = corpus / "seeds" / "ab"
+        shard.mkdir(parents=True)
+        real = {rng.randbytes(rng.randint(1, 32)) for _ in range(rng.randint(1, 4))}
+        for data in real:
+            (shard / f"seed_{fs.hash_data(data)}").write_bytes(data)
+        (shard / "linked").symlink_to(victim / next(iter(secrets)))  # file link in a real shard
+
+        links = ["seeds/cd", *rng.sample(SYMLINK_ROOTS, rng.randint(0, len(SYMLINK_ROOTS)))]
+        for rel in links:
+            (corpus / rel).parent.mkdir(parents=True, exist_ok=True)
+            if not (corpus / rel).exists():
+                (corpus / rel).symlink_to(victim)
+
+        loaded, _, _ = fs.load_corpus(corpus, add_default=False)
+        seen = set(loaded) | set(fs._iter_seeds(corpus))
+        if sorted(p.name for p in victim.iterdir()) != sorted(secrets):
+            return "a file outside the corpus was renamed or removed"
+        if any(SECRET_TAG in d for d in seen):
+            return "a file outside the corpus was read as a seed"
+        if not real <= set(loaded):
+            return "a real seed was not loaded"
+    return None
+
+
+def _asan_report(rng: RandPool) -> str:
+    kind = rng.choice(ASAN_KINDS)
+    frames = [f"fn_{rng.randrange(SIG_NAME_SPACE):x}" for _ in range(rng.randint(1, 4))]
+    body = "".join(f"    #{i} 0x{0x401000 + i:x} in {f}\n" for i, f in enumerate(frames))
+    return f"==1==ERROR: AddressSanitizer: {kind} on address 0x1\n{body}"
+
+
+def _reg_resume_crash_sigs(rng: RandPool, workdir: Path) -> str | None:
+    """Signatures re-derived from sidecars == the ones save_crash recorded."""
+    with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+        crashes = Path(tmp)
+        hashes: set[str] = set()
+        sigs: dict[str, int] = {}
+        for i in range(rng.randint(1, CRASH_SAVES_MAX)):
+            stderr = _asan_report(rng) if rng.random() < 0.7 else ""
+            data = rng.randbytes(8) + bytes([i])
+            fs.save_crash(data, rng.choice(CRASH_RCS), stderr, crashes, hashes, sigs)
+
+        if set(fs.saved_crash_sigs(crashes)) != set(sigs):
+            return (
+                f"resume re-derives {len(fs.saved_crash_sigs(crashes))} of {len(sigs)} signatures"
+            )
+    return None
+
+
+def _sig_report(header: str, frames: list[str]) -> sanitizer.SanitizerReport | None:
+    body = "".join(f"    #{i} 0x{0x401000 + i:x} in {f}\n" for i, f in enumerate(frames))
+    return sanitizer.SanitizerReport.parse(header + body)
+
+
+def _reg_sig_frames(rng: RandPool, _workdir: Path) -> str | None:
+    """Dedup key = first 3 target frames; runtime and harness frames never split a bug."""
+    target = [f"fn_{rng.randrange(SIG_NAME_SPACE):x}" for _ in range(rng.randint(1, 5))]
+    stack = [rng.choice(RUNTIME_FRAMES)]  # runtime frame in front, always
+    for f in target:
+        stack.append(f)
+        if rng.random() < 0.3:
+            stack.append(rng.choice(RUNTIME_FRAMES))
+    tail = [rng.choice(HARNESS_FRAMES)] + [
+        f"junk_{rng.randrange(SIG_NAME_SPACE):x}" for _ in range(3)
+    ]
+
+    want = f"{UAF_PREFIX}@" + "@".join(target[:3])
+    for t in (tail, [rng.choice(HARNESS_FRAMES), "libffi.so.8+0x7b15"]):
+        rep = _sig_report(UAF_HEADER, stack + t)
+        if rep is None or rep.signature != want:
+            return f"signature {rep and rep.signature!r}, want {want!r}"
+
+    tsan = _sig_report(TSAN_HEADER, target)
+    if tsan is None or TSAN_KIND not in tsan.signature:
+        return f"TSAN signature {tsan and tsan.signature!r} lost '{TSAN_KIND}'"
+    return None
+
+
+class _HangShm:
+    """Scripted SHM trace: the edge ids of the last execution."""
+
+    def __init__(self) -> None:
+        self.edges: list[int] = []
+
+    def edge_id_array(self) -> np.ndarray:
+        return np.array(sorted(set(self.edges)), dtype=np.uint32)
+
+
+def _reg_hang_dedup(rng: RandPool, workdir: Path) -> str | None:
+    """One loop fed other bytes is one saved hang (virgin-tmout rule)."""
+    first = sorted({rng.randrange(HANG_EDGES) for _ in range(rng.randint(1, 8))})
+    hangs = [(rng.randbytes(8), first), (rng.randbytes(8), first[: rng.randint(1, len(first))])]
+    for _ in range(rng.randint(0, HANG_MAX)):
+        edges = [rng.randrange(HANG_EDGES) for _ in range(rng.randint(0, 8))]
+        hangs.append((rng.randbytes(8) if rng.random() < 0.8 else hangs[0][0], edges))
+
+    seen_edges: set[int] = set()
+    saved: set[bytes] = set()
+    for data, edges in hangs:  # reference: novel edge, or no trace at all
+        novel = not edges or not set(edges) <= seen_edges
+        seen_edges |= set(edges)
+        if novel:
+            saved.add(data)
+
+    with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+        shm = _HangShm()
+        host = SimpleNamespace(
+            corpus_dir=Path(tmp),
+            seen_hashes=set(),
+            irreplaceable_hashes=set(),
+            multi_targets=None,
+            target="t",
+            shm_cov=shm,
+        )
+        cm = CorpusManager(host)
+        for data, edges in hangs:
+            shm.edges = edges
+            cm.save_timeout(data)
+        got = sum(1 for p in Path(tmp).rglob("id_*") if p.is_file())
+    if got != len(saved):
+        return f"{got} hangs saved, {len(saved)} novel"
+    return None
+
+
+def _reg_stderr_spoof(rng: RandPool, _workdir: Path) -> str | None:
+    """Target stderr only corroborates a failing exit; it never makes a crash."""
+    tr = runner.TargetRunner(SimpleNamespace(last_report=None, extra_crash_codes=set()))
+    noise = "".join(rng.choice(NOISE_CHARS) for _ in range(rng.randint(0, 60)))
+    markers = " ".join(rng.choice(CRASH_STDERR_MARKERS) for _ in range(rng.randint(1, 3)))
+    spoof = f"{noise} {markers} {noise}\n"
+
+    for rc in (0, -1, -2):
+        if tr.is_crash(rc, spoof):
+            return f"exit {rc} with forged marker filed as a crash"
+    rc = rng.choice(MARKER_EXIT_CODES)
+    if not tr.is_crash(rc, spoof):
+        return f"exit {rc} with a crash marker not filed as a crash"
+    if tr.is_crash(rc, noise + "\n"):
+        return f"exit {rc} with plain noise filed as a crash"
+    return None
+
+
+def _record_call(tag: str) -> str:
+    """Stand-in for os.system: a call means the loader ran attacker code."""
+    _ALLOWLIST_CALLS.append(tag)
+    return tag
+
+
+class _Evil:
+    def __init__(self, tag: str) -> None:
+        self.tag = tag
+
+    def __reduce__(self):
+        return _record_call, (self.tag,)
+
+
+class _EvilBuiltin:
+    """Same module as allowed types (builtins), forbidden name."""
+
+    def __reduce__(self):
+        return eval, ("0",)
+
+
+def _nest(rng: RandPool, leaf: object) -> object:
+    for _ in range(rng.randint(0, 4)):
+        leaf = rng.choice(([leaf], {"k": leaf}, (leaf, 1)))
+    return leaf
+
+
+def _reg_state_allowlist(rng: RandPool, workdir: Path) -> str | None:
+    """A crafted --resume pickle never executes code; a safe one round-trips."""
+    del _ALLOWLIST_CALLS[:]
+    evil = rng.choice((_Evil(f"t{rng.randrange(SUBSEED_RANGE)}"), _EvilBuiltin()))
+    payload = {"corpus": {"x": 1}, "pwn": _nest(rng, evil)}
+    log = logging.getLogger(state_store.__name__)
+    level = log.level
+    log.setLevel(logging.CRITICAL)  # the refusal logs an error per case
+    try:
+        with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+            raw = pickle.dumps(payload, protocol=rng.randint(2, pickle.HIGHEST_PROTOCOL))
+            (Path(tmp) / state_store.STATE_FILENAME).write_bytes(gzip.compress(raw))
+            got = state_store.StateStore(tmp).load()
+            safe = {"corpus": _nest(rng, {"x": rng.randrange(1 << 30)})}
+            store = state_store.StateStore(tmp)
+            store.start_empty()
+            store.set("corpus", safe["corpus"])
+            store.save()
+            back = state_store.StateStore(tmp).load()
+    finally:
+        log.setLevel(level)
+
+    if _ALLOWLIST_CALLS:
+        return f"loader executed attacker code: {_ALLOWLIST_CALLS}"
+    if got != {}:
+        return "crafted state file loaded instead of being refused"
+    if back != safe:
+        return "safe state did not round-trip"
+    return None
+
+
 REGRESSION_MUTATORS: dict[str, Callable[[RandPool, Path], str | None]] = {
     "none_offset": _reg_none_offset,
     "mg_flood": _reg_mg_flood,
@@ -1898,6 +2318,16 @@ REGRESSION_MUTATORS: dict[str, Callable[[RandPool, Path], str | None]] = {
     "crash_cluster": _reg_crash_cluster,
     "cdf_walk": _reg_cdf_walk,
     "checksum_state": _reg_checksum_state,
+    "format_field_limits": _reg_format_field_limits,
+    "regime_state": _reg_regime_state,
+    "key16_collision": _reg_key16_collision,
+    "crash_replace": _reg_crash_replace,
+    "symlink_victim": _reg_symlink_victim,
+    "resume_crash_sigs": _reg_resume_crash_sigs,
+    "sig_frames": _reg_sig_frames,
+    "hang_dedup": _reg_hang_dedup,
+    "stderr_spoof": _reg_stderr_spoof,
+    "state_allowlist": _reg_state_allowlist,
 }
 
 

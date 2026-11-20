@@ -212,6 +212,26 @@ def _raise(exc: type[Exception]):
     return fn
 
 
+class _RaisingMutator:
+    """Format mutator whose header arithmetic overflows (the original bug)."""
+
+    def __init__(self, seed: int = 0) -> None:
+        self.seed = seed
+
+    def _generate_random_x(self, max_len: int, rng) -> bytes:
+        return b"\xff" * 8
+
+    def mutate(self, data: bytes, max_len: int, rng) -> bytes:
+        return struct.pack("<H", 0xFFFF + 8)
+
+
+def _break_crash_evict(mp):
+    # No eviction, and a distinct timestamp per save so names never coincide.
+    clock = iter(range(1_700_000_000, 1_800_000_000, 1000))
+    mp.setattr(regress.fs, "_evict_crash", lambda *_a, **_k: None)
+    mp.setattr(regress.fs.time, "time", lambda: next(clock))
+
+
 def _break_delta(mp):
     mp.setattr(regress, "compute_delta_v2", lambda _p, _c: [])
     mp.setattr(regress, "apply_delta_v2", _raise(ValueError))
@@ -291,6 +311,26 @@ _BREAKERS = {
         regress.edge_tracker, "_cdf_norms", lambda _a, _b: (0.0, 0.0, 0.0)
     ),
     "checksum_state": lambda mp: mp.setattr(regress.acl, "CHECKSUM_STATE_BYTES_MAX", -1),
+    "format_field_limits": lambda mp: mp.setattr(
+        regress, "_format_mutators", lambda: [("planted", _RaisingMutator)]
+    ),
+    "regime_state": lambda mp: mp.setattr(
+        regress.CoverageRegimeDetector, "save", lambda s: {"history": list(s._regime_history)}
+    ),
+    "key16_collision": lambda mp: mp.setattr(regress.fs, "free_slot", lambda dest, _data: dest),
+    "crash_replace": _break_crash_evict,
+    "symlink_victim": lambda mp: mp.setattr(regress.fs, "_is_full_seed", lambda f, _b: f.is_file()),
+    "resume_crash_sigs": lambda mp: mp.setattr(regress.fs, "_sidecar_sig", lambda _p: None),
+    "sig_frames": lambda mp: mp.setattr(regress.sanitizer, "_is_runtime", lambda _f: False),
+    "hang_dedup": lambda mp: mp.setattr(regress.CorpusManager, "_hang_is_novel", lambda _s: True),
+    "stderr_spoof": lambda mp: mp.setattr(
+        regress.runner,
+        "stderr_crash_marker",
+        lambda _rc, s: next((m for m in regress.CRASH_STDERR_MARKERS if m in s), None),
+    ),
+    "state_allowlist": lambda mp: mp.setattr(
+        regress.state_store, "allowed_global", lambda _m, _n, extra=frozenset(): True
+    ),
 }
 
 
