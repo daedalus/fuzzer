@@ -41,8 +41,7 @@ FAKE_LIB = r"""
 #include <string.h>
 #include "libbase64.h"
 
-static int fake_ok(const char *s, size_t n) {
-    if (n % 4) return 0;
+static int fake_chars(const char *s, size_t n) {
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
         if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -51,6 +50,7 @@ static int fake_ok(const char *s, size_t n) {
     }
     return 1;
 }
+static int fake_ok(const char *s, size_t n) { return n % 4 == 0 && fake_chars(s, n); }
 int base64_decode(const char *s, size_t n, char *o, size_t *ol, int f) {
     (void)f; *ol = n / 4 * 3; memset(o, 0, *ol); return fake_ok(s, n);
 }
@@ -60,10 +60,15 @@ void base64_encode(const char *s, size_t n, char *o, size_t *ol, int f) {
 void base64_stream_decode_init(struct base64_state *st, int f) {
     memset(st, 0, sizeof *st); st->flags = f;
 }
+/* libbase64 contract: 1 ok, 0 bad input, -1 codec not built. A partial
+ * quantum carries over in st->bytes, as in the real stream decoder. */
 int base64_stream_decode(struct base64_state *st, const char *s, size_t n,
                          char *o, size_t *ol) {
-    (void)s; (void)n; (void)o; *ol = 0;
-    return st->flags == BASE64_FORCE_PLAIN && n == 8 ? 1 : -1;
+    if (st->flags != BASE64_FORCE_PLAIN) return -1;
+    size_t total = (size_t)st->bytes + n;
+    *ol = total / 4 * 3; memset(o, 0, *ol);
+    st->bytes = (int)(total % 4);
+    return fake_chars(s, n);
 }
 void base64_stream_encode_init(struct base64_state *st, int f) { (void)st; (void)f; abort(); }
 void base64_stream_encode(struct base64_state *st, const char *s, size_t n,

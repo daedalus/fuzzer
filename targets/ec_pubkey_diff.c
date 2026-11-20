@@ -15,8 +15,8 @@
  * headers, so for a valid key they MUST produce byte-identical 65-byte
  * output. A disagreement is a real bug in the fast path — exactly the
  * class a crash-only single-implementation target cannot see. The oracle
- * is a memcmp; a mismatch calls abort(), which the runner reports as a
- * crash.
+ * is a memcmp; a mismatch raises SIGABRT, which the runner reports as a
+ * crash (abort() would be rewritten into a return by the shim).
  *
  * Oracle gate: the reference rejects k = 0 and k >= n (returns 0). The
  * fast path does not range-check, so for a rejected key the two legitimately
@@ -47,6 +47,7 @@
  * as lz4_read.c / secp256k1_read.c. See compile_brainflayer_ec_objects()
  * in build_targets.sh.
  */
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -108,7 +109,7 @@ int fuzz_ec_pubkey_diff(const unsigned char *buf, size_t size) {
         /* Serialization of a just-created key cannot fail; if it ever
          * does, that is itself a reference-side bug worth surfacing. */
         __afl_map_edge(0x9005);
-        abort();
+        raise(SIGABRT);
     }
 
     /* Key accepted by the reference, so the fast path must agree. */
@@ -124,7 +125,7 @@ int fuzz_ec_pubkey_diff(const unsigned char *buf, size_t size) {
     if (got_len != 65 || got[0] != 0x04 ||
         memcmp(ref, got, 65) != 0) {
         __afl_map_edge(0x9006);
-        abort();   /* fast path disagrees with the reference — a real bug */
+        raise(SIGABRT);   /* fast path disagrees with the reference — a real bug */
     }
     __afl_map_edge(0x9007);
     return 0;

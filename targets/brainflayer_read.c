@@ -29,6 +29,7 @@
  * bloom.c is compiled separately, without the shim — see
  * compile_brainflayer_bloom_objects() in build_targets.sh.
  */
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -71,7 +72,7 @@ static void bf_check_slices(const bloom_t *b, const uint32_t *h) {
         unsigned off = i * BF_HASH_BITS / b->k;
         if (bloom_slice(b, w, i) != bf_ref_slice(h, off, b->log2bits)) {
             __afl_map_edge(0x9501);
-            abort();
+            raise(SIGABRT);
         }
     }
 }
@@ -85,7 +86,7 @@ static void bf_check_batch(bloom_t *b, const uint32_t *q, size_t nq, int simd) {
     for (size_t i = 0; i < nq; i++) {
         if (hit[i] != bloom_chk(b, q + BF_WORDS * i)) {
             __afl_map_edge(0x9503 + (unsigned)simd);
-            abort();
+            raise(SIGABRT);
         }
     }
 }
@@ -109,7 +110,7 @@ static void bf_run(bloom_t *b, const uint32_t *q, size_t n) {
     for (size_t i = 0; i < n; i++) {
         if (bloom_chk(b, q + BF_WORDS * i) != 1) {
             __afl_map_edge(0x9502);
-            abort();
+            raise(SIGABRT);
         }
     }
 

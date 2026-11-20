@@ -29,7 +29,8 @@
  *   capped at HASH_DIFF_MAX_RECS so an adversarial length cannot allocate
  *   or spin without bound.
  *
- * A mismatch calls abort(), reported by the runner as a crash. Agreement
+ * A mismatch raises SIGABRT (the shim rewrites abort() into a return),
+ * reported by the runner as a crash. Agreement
  * is the expected result and returns 0.
  *
  * Vendor the sources first (clones daedalus/brainflayer into
@@ -43,6 +44,7 @@
  * shim — same discipline as lz4_read.c. See compile_brainflayer_hash_objects()
  * in build_targets.sh.
  */
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -86,7 +88,7 @@ static void fuzz_sha256(const unsigned char *buf, size_t size) {
     for (size_t i = 0; i < n; i++) {
         unsigned char ref[32];
         sha256_upub(ref, recs[i]);
-        if (memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9301); abort(); }
+        if (memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9301); raise(SIGABRT); }
     }
 
     /* Compressed-form SHA-256 (parity byte + x, derived from the same 65). */
@@ -94,7 +96,7 @@ static void fuzz_sha256(const unsigned char *buf, size_t size) {
     for (size_t i = 0; i < n; i++) {
         unsigned char ref[32];
         sha256_cpub(ref, recs[i]);
-        if (memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9302); abort(); }
+        if (memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9302); raise(SIGABRT); }
     }
 
     free(simd);
@@ -116,7 +118,7 @@ static void fuzz_ripemd160(const unsigned char *buf, size_t size) {
     for (size_t i = 0; i < n; i++) {
         unsigned char ref[20];
         ripemd160_256(buf + i * 32u, ref);
-        if (memcmp(ref, simd[i], 20) != 0) { __afl_map_edge(0x9401); abort(); }
+        if (memcmp(ref, simd[i], 20) != 0) { __afl_map_edge(0x9401); raise(SIGABRT); }
     }
 
     free(simd);

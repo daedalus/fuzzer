@@ -12,6 +12,7 @@
  *
  * Build: cc -O2 -g -fsanitize=address,undefined -o gf256_inv_diff targets/gf256_inv_diff.c
  */
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +26,7 @@ static int nids = 0, fuzzmode = 0;
 
 static void record(int id, const char *nm, int a, int b, int got, int ref) {
     if (fails[id]++ == 0) snprintf(first[id], sizeof first[id], "a=%02x b=%02x got=%02x ref=%02x", a, b, got, ref);
-    if (fuzzmode) { fprintf(stderr, "MISMATCH %s: %s\n", nm, first[id]); abort(); }
+    if (fuzzmode) { fprintf(stderr, "MISMATCH %s: %s\n", nm, first[id]); raise(SIGABRT); }
 }
 #define CHK(nm, cond, a, b, got, ref) do { enum { ID = __COUNTER__ }; names[ID] = nm; \
     if (ID + 1 > nids) { nids = ID + 1; } \
