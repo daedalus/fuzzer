@@ -54,6 +54,33 @@ extern void __afl_map_edge(unsigned int cur_loc);
 /* Certificates and chains rarely exceed this; bounds bignum print cost. */
 #define OPENSSL_FUZZ_MAX_IN (16u * 1024u)
 
+/* IJON (--ijon): element counts are not coverage -- a certificate with 3
+ * or 30 extensions walks the same decoder edges. One max slot per count,
+ * direct (no hashing, no aliasing in 512 slots), value min(n, CAP) + 1:
+ * bounded (no reward for bloat past CAP), and n = 0 still registers.
+ * A negative n (absent stack: unsigned PKCS#7, CRL without revoked list)
+ * is not a count and sets nothing. Inert without --ijon; compiled out
+ * without the shim; the helper adds no guard sites. */
+enum ossl_ijon_slot {
+    OSSL_IJON_CERT_EXT = 0,
+    OSSL_IJON_CERT_SUBJ,
+    OSSL_IJON_CERT_ISS,
+    OSSL_IJON_CRL_REV,
+    OSSL_IJON_CRL_EXT,
+    OSSL_IJON_REQ_ATTR,
+    OSSL_IJON_REQ_SUBJ,
+    OSSL_IJON_P7_SIGNERS,
+};
+#define OSSL_IJON_CAP 256
+#if defined(__AFL_EDGE) && __AFL_EDGE
+__AFL_NO_COV static void ossl_ijon(enum ossl_ijon_slot slot, int n) {
+    if (n < 0) return;
+    ijon_max((uint32_t)slot, (uint64_t)(n < OSSL_IJON_CAP ? n : OSSL_IJON_CAP) + 1u);
+}
+#else
+#define ossl_ijon(slot, n) ((void)0)
+#endif
+
 /* Shared sink for all printers; created once in openssl_init(). */
 static BIO *g_null_bio;
 
@@ -81,6 +108,9 @@ static void fuzz_x509(const unsigned char *buf, size_t size) {
     X509 *x = d2i_X509(NULL, &p, (long)size);
     if (!x) { __afl_map_edge(0x6100); return; }
     __afl_map_edge(0x6101);
+    ossl_ijon(OSSL_IJON_CERT_EXT, X509_get_ext_count(x));
+    ossl_ijon(OSSL_IJON_CERT_SUBJ, X509_NAME_entry_count(X509_get_subject_name(x)));
+    ossl_ijon(OSSL_IJON_CERT_ISS, X509_NAME_entry_count(X509_get_issuer_name(x)));
 
     X509_print(g_null_bio, x);
     ROUND_TRIP(i2d_X509, x, 0x6102);
@@ -101,6 +131,8 @@ static void fuzz_crl(const unsigned char *buf, size_t size) {
     X509_CRL *crl = d2i_X509_CRL(NULL, &p, (long)size);
     if (!crl) { __afl_map_edge(0x6200); return; }
     __afl_map_edge(0x6201);
+    ossl_ijon(OSSL_IJON_CRL_REV, sk_X509_REVOKED_num(X509_CRL_get_REVOKED(crl)));
+    ossl_ijon(OSSL_IJON_CRL_EXT, X509_CRL_get_ext_count(crl));
 
     X509_CRL_print(g_null_bio, crl);
     ROUND_TRIP(i2d_X509_CRL, crl, 0x6202);
@@ -113,6 +145,8 @@ static void fuzz_req(const unsigned char *buf, size_t size) {
     X509_REQ *req = d2i_X509_REQ(NULL, &p, (long)size);
     if (!req) { __afl_map_edge(0x6300); return; }
     __afl_map_edge(0x6301);
+    ossl_ijon(OSSL_IJON_REQ_ATTR, X509_REQ_get_attr_count(req));
+    ossl_ijon(OSSL_IJON_REQ_SUBJ, X509_NAME_entry_count(X509_REQ_get_subject_name(req)));
 
     X509_REQ_print(g_null_bio, req);
     ROUND_TRIP(i2d_X509_REQ, req, 0x6302);
@@ -125,6 +159,7 @@ static void fuzz_pkcs7(const unsigned char *buf, size_t size) {
     PKCS7 *p7 = d2i_PKCS7(NULL, &p, (long)size);
     if (!p7) { __afl_map_edge(0x6400); return; }
     __afl_map_edge(0x6401);
+    ossl_ijon(OSSL_IJON_P7_SIGNERS, sk_PKCS7_SIGNER_INFO_num(PKCS7_get_signer_info(p7)));
 
     PKCS7_print_ctx(g_null_bio, p7, 0, NULL);
     ROUND_TRIP(i2d_PKCS7, p7, 0x6402);
