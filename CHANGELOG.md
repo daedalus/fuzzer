@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Guarded `abort()` swallowed** (`afl_shim.c`): inside `__afl_guarded_call` the abort() override returned, so in-process UBSAN/assertion aborts never reached the crash classifier. It now raises `SIGABRT`; the guard recovers it, the fuzzer records the crash and continues. Out-of-guard (one-shot, forkserver) behaviour unchanged. `tests/test_regression_abort_is_crash.py`.
 - **MPEG sniffers** (`core/operator_registry.py`): `nal_chunk_mutate` claimed MPEG-1/2 video, MPEG-PS and MPEG-4 Part 2 (now requires forbidden_zero_bit 0); `mp3`/`adts_chunk_mutate` missed ID3v2-prefixed files (`core/mutations/id3.py`; tag passed through); `isobmff_chunk_mutate` missed fMP4 segments and non-`ftyp` QuickTime heads. `_op_mp3/adts_chunk_mutate` no longer pre-parse (an ID3-prefixed seed was replaced by a generated stream). `tests/test_regression_mpeg_sniffers.py`.
 - **`mpegts_chunk_mutate` PAT edits were dropped by FFmpeg**: no CRC-32/MPEG-2 fixup (FFmpeg skips PSI sections with a bad CRC), and the PMT-PID write landed one byte early, corrupting `program_number`. Generated PAT/PMT now carry valid CRCs. `tests/test_mpegts_mutator.py`.
 - **Snapshot restore on ASAN targets**: restore wrote over ASAN global redzones, 3 reports per exec (libbase64_read_asan 131 -> 553 eps). Spans now skip poisoned bytes. `tests/test_global_snapshot.py`.

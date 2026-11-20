@@ -3854,10 +3854,10 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--abort-is-crash",
         action="store_true",
-        help="Make abort() in shim-compiled code a crash (SIGABRT). By default "
-        "the shim turns it into a stderr marker and a return, so library "
-        "assertions (FFmpeg av_assert0) do not flood the crash set. Not "
-        "enabled by --hail-mary.",
+        help="Make abort() in shim-compiled code a crash (SIGABRT) outside "
+        "the in-process guard too. Inside it (in-process, persistent) abort() "
+        "is always a recovered crash; outside, the shim writes a stderr "
+        "marker and returns. Not enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--hail-mary",

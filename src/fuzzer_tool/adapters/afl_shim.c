@@ -8764,11 +8764,20 @@ __AFL_GCC_NO_COV static int __afl_abort_is_crash(void) {
     return mode;
 }
 
+/* Inside __afl_guarded_call, on the thread that owns the frame: a SIGABRT
+ * here is recovered by the guard. A returned abort was a crash the fuzzer
+ * never saw (UBSAN aborts went unclassified); raised, the guard reports
+ * -SIGABRT and the campaign continues. */
+__AFL_GCC_NO_COV static int __afl_abort_guarded(void) {
+    return __afl_guard_jmp && __afl_guard_mine();
+}
+
 __AFL_GCC_NO_COV __attribute__((unused)) static void __afl_shim_abort(void) {
     static const char msg[] = "[shim] abort() intercepted\n";
-    __afl_health[__AFL_HEALTH_ABORTS_INTERCEPTED]++;
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
-    if (__afl_abort_is_crash()) raise(SIGABRT);   /* returns only if SIGABRT is blocked */
+    if (__afl_abort_is_crash() || __afl_abort_guarded())
+        raise(SIGABRT);   /* returns only if SIGABRT is blocked */
+    __afl_health[__AFL_HEALTH_ABORTS_INTERCEPTED]++;
 }
 #define abort() __afl_shim_abort()
 
