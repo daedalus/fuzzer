@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from fuzzer_tool.core.mutations.rpl import (
@@ -23,8 +25,8 @@ from .support.scripted_rng import ScriptedRng
 CATALOG_LINE = 17
 
 
-def _rpl(rows: list[str], video: str = "0") -> bytes:
-    """Header (20 lines, 21 with video) + index rows; catalog points at the rows."""
+def _rpl(rows: list[str], video: str = "0", gap: str = "") -> bytes:
+    """Header (20 lines, 21 with video) + gap + index rows; catalog points at the rows."""
     lines = ["ARMovie", "t", "c", "a", video, "0", "0", "0", "1", "1", "1", "1", "8"]
     lines += ["0", str(len(rows) - 1), "0", "0", "@", "0", "0"]
     if video != "0":
@@ -33,9 +35,9 @@ def _rpl(rows: list[str], video: str = "0") -> bytes:
     head = "".join(f"{s}\n" for s in lines)
     base = len(head) - 1  # "@" is one byte; the offset's digits replace it
     off = base + len(str(base + len(str(base))))
-    head = head.replace("@", str(off))
+    head = head.replace("@", str(off + len(gap)))
     assert len(head) == off
-    return (head + "".join(f"{r}\n" for r in rows)).encode()
+    return (head + gap + "".join(f"{r}\n" for r in rows)).encode()
 
 
 def _catalog(data: bytes) -> int:
@@ -47,12 +49,13 @@ SAMPLE = _rpl(["100 , 10 ; 20", "130 , 11 ; 21"])
 
 class TestParse:
     def test_header_and_rows(self):
-        hdr, rows = parse_rpl(SAMPLE)
+        hdr, gap, rows = parse_rpl(SAMPLE)
         assert len(hdr) == 20
+        assert gap == b""
         assert rows == [b"100 , 10 ; 20\n", b"130 , 11 ; 21\n"]
 
     def test_video_header_has_21_lines(self):
-        hdr, _ = parse_rpl(_rpl(["1 , 1 ; 1"], video="124"))
+        hdr, _, _ = parse_rpl(_rpl(["1 , 1 ; 1"], video="124"))
         assert len(hdr) == 21
 
     def test_not_rpl(self):
@@ -104,11 +107,11 @@ class TestMutate:
     # The 9.0.2-only overflow: offset + video_size in the index loop.
     def test_row_field(self):
         out = mutate_rpl(SAMPLE, rng=ScriptedRng(randints=[Op.ROW_FIELD, 1, 0], choice_idxs=[2]))
-        assert parse_rpl(out)[1][1] == ROW_EDGES[2] + b" , 11 ; 21\n"
+        assert parse_rpl(out)[2][1] == ROW_EDGES[2] + b" , 11 ; 21\n"
 
     def test_row_dup(self):
         out = mutate_rpl(SAMPLE, rng=ScriptedRng(randints=[Op.DUP, 0]))
-        assert parse_rpl(out)[1] == [b"100 , 10 ; 20\n"] * 2 + [b"130 , 11 ; 21\n"]
+        assert parse_rpl(out)[2] == [b"100 , 10 ; 20\n"] * 2 + [b"130 , 11 ; 21\n"]
 
     # Falsification: row ops decline with no index rows.
     @pytest.mark.parametrize("op", [Op.ROW_FIELD, Op.DUP, Op.DROP, Op.SWAP])
@@ -120,8 +123,65 @@ class TestMutate:
         assert mutate_rpl(b"\x00" * 64, rng=ScriptedRng()) is None
 
     def test_max_len_truncates(self):
+        full = mutate_rpl(SAMPLE, rng=ScriptedRng(randints=[Op.FPS], choice_idxs=[0]))
         out = mutate_rpl(SAMPLE, max_len=30, rng=ScriptedRng(randints=[Op.FPS], choice_idxs=[0]))
-        assert len(out) == 30
+        assert out == full[:30]
+        assert out != SAMPLE[:30]
+
+    # Rows are located by the catalog offset; bytes before it stay untouched.
+    def test_regression_rpl_catalog_after_gap(self):
+        data = _rpl(["100 , 10 ; 20"], gap="JUNK 1 , 2 ; 3\n")
+        assert parse_rpl(data)[1:] == (b"JUNK 1 , 2 ; 3\n", [b"100 , 10 ; 20\n"])
+
+        out = mutate_rpl(data, rng=ScriptedRng(randints=[Op.ROW_FIELD, 0, 1], choice_idxs=[1]))
+        assert out[_catalog(out) :] == b"100 , -1 ; 20\n"
+        assert b"JUNK 1 , 2 ; 3\n" in out
+
+    # Gap survives a header resize: catalog shifts by the header delta only.
+    def test_regression_rpl_gap_resize(self):
+        data = _rpl(["100 , 10 ; 20"], gap="JUNK\n")
+        out = mutate_rpl(data, rng=ScriptedRng(randints=[Op.INT_FIELD, 1], choice_idxs=[4]))
+        assert out[_catalog(out) :] == b"100 , 10 ; 20\n"
+
+    # Toggling video on adds the key frame list line; rows stay reachable.
+    @pytest.mark.parametrize(("video", "idx", "n_hdr"), [("0", 2, 21), ("124", 0, 20)])
+    def test_regression_rpl_video_toggle(self, video, idx, n_hdr):
+        data = _rpl(["100 , 10 ; 20"], video=video)
+        out = mutate_rpl(data, rng=ScriptedRng(randints=[Op.VIDEO_FMT], choice_idxs=[idx]))
+        hdr, gap, rows = parse_rpl(out)
+        assert (len(hdr), gap, rows) == (n_hdr, b"", [b"100 , 10 ; 20\n"])
+        assert out[_catalog(out) :] == b"100 , 10 ; 20\n"
+
+    # DUP/DROP keep "last chunk index" consistent with the row count.
+    @pytest.mark.parametrize(("op", "n_rows"), [(Op.DUP, 3), (Op.DROP, 1)])
+    def test_regression_rpl_count_follows_rows(self, op, n_rows):
+        out = mutate_rpl(SAMPLE, rng=ScriptedRng(randints=[op, 0]))
+        assert out.split(b"\n")[14] == str(n_rows - 1).encode()
+        rows = parse_rpl(out)[2]
+        assert len(rows) == n_rows
+        assert out[_catalog(out) :] == b"".join(rows)
+
+    # Falsification: a count that already disagreed with the rows is left alone.
+    def test_regression_rpl_stale_count_kept(self):
+        lines = SAMPLE.split(b"\n")
+        lines[14] = b"7"
+        out = mutate_rpl(b"\n".join(lines), rng=ScriptedRng(randints=[Op.DUP, 0]))
+        assert out.split(b"\n")[14] == b"7"
+
+    # Adversarial: a catalog offset past int()'s digit limit never raises.
+    # The floor limit (640) lets a header still fit the 4 KiB sniff window.
+    def test_regression_rpl_huge_catalog_digits(self):
+        lines = SAMPLE.split(b"\n")
+        lines[CATALOG_LINE] = b"9" * 1000
+        data = b"\n".join(lines)
+
+        saved = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(640)
+        try:
+            out = mutate_rpl(data, rng=ScriptedRng(randints=[Op.FPS], choice_idxs=[0]))
+        finally:
+            sys.set_int_max_str_digits(saved)
+        assert out.split(b"\n")[CATALOG_LINE] == b"9" * 1000
 
     # Adversarial: every op on every truncation never raises.
     def test_truncations_never_raise(self):

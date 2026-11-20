@@ -9,9 +9,11 @@ Text header, one field per line (leading decimal is the value):
   catalog (at offset):  "<offset> , <video_size> ; <audio_size>" per chunk
 
 FFmpeg 9.0.2 computes `offset + video_size` before its overflow check.
-Header ints overflow read_int's error guard past 214748363. When the
-catalog sat right after the header, a resized header gets the catalog
-offset rewritten so the index rows stay reachable.
+Header ints overflow read_int's error guard past 214748363. Rows are
+found at the catalog offset (bytes between header and catalog are kept).
+Repairs keep them reachable: a resized header shifts the offset, a video
+toggle adds/drops the key frame list line, and dup/drop moves a count
+that matched the rows.
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ BITS_LINE = 12
 COUNT_LINE = 14
 CATALOG_LINE = 17
 FIRST_INT_LINE = VIDEO_LINE
+KEYFRAME_LINE = HDR_LINES  # only present with video
+# read_int is int32: longer catalog offsets are garbage, and int() caps digits.
+MAX_OFF_DIGITS = 10
 
 VIDEO_FORMATS = (b"0", b"1", b"124", b"130", b"122", b"2147483647")
 FPS_EDGES = (b"0", b"1", b"25", b"29.97", b"0.000000000000000001", b"9223372036854775807.99")
@@ -100,39 +105,71 @@ def _lead_int(line: bytes) -> bytes:
     return m.group() if m else b""
 
 
-def parse_rpl(data: bytes) -> tuple[list[bytes], list[bytes]] | None:
-    """(header lines, catalog rows), or None if not RPL.
+def _has_video(line: bytes) -> bool:
+    return _lead_int(line).lstrip(b"0") != b""
 
-    Header is 20 lines, 21 when the video format is non-zero; every line
-    after it counts as a row.
+
+def _catalog_off(hdr: list[bytes]) -> int:
+    """Catalog offset from the header, -1 when absent or out of int32 range."""
+    digits = _lead_int(hdr[CATALOG_LINE])
+    if not digits or len(digits) > MAX_OFF_DIGITS:
+        return -1
+    return int(digits)
+
+
+def parse_rpl(data: bytes) -> tuple[list[bytes], bytes, list[bytes]] | None:
+    """(header lines, gap, catalog rows), or None if not RPL.
+
+    Header is 20 lines, 21 when the video format is non-zero. Rows start at
+    the catalog offset when it lies past the header (gap = bytes between);
+    otherwise every line after the header is a row.
     """
     if not sniff_rpl(data):
         return None
 
     lines = _lines(data)
-    hdr_n = HDR_LINES + (_lead_int(lines[VIDEO_LINE]).lstrip(b"0") != b"")
+    hdr_n = HDR_LINES + _has_video(lines[VIDEO_LINE])
     if len(lines) < hdr_n or not lines[hdr_n - 1].endswith(b"\n"):
         return None
-    return lines[:hdr_n], lines[hdr_n:]
+
+    hdr = lines[:hdr_n]
+    start = sum(map(len, hdr))
+    off = _catalog_off(hdr)
+    if off == start or not start <= off <= len(data):
+        return hdr, b"", lines[hdr_n:]
+    return hdr, data[start:off], _lines(data[off:])
 
 
-def _fix_catalog(hdr: list[bytes], old_len: int) -> None:
-    """Re-point the catalog at the rows if it pointed right after the header."""
-    line = hdr[CATALOG_LINE]
+def _set_lead(hdr: list[bytes], idx: int, old: int, new: int) -> None:
+    """Replace line *idx*'s leading int with *new* if it reads exactly *old*."""
+    line = hdr[idx]
     digits = _lead_int(line)
-    if not digits or int(digits) != old_len:
+    if digits != str(old).encode():
         return
+    hdr[idx] = str(new).encode() + line[len(digits) :]
 
+
+def _fix_catalog(hdr: list[bytes], old_len: int, gap: int) -> None:
+    """Re-point the catalog at the rows if it pointed there before the edit."""
     # new = base + digits(new): two passes settle a digit-count carry (99 -> 100).
-    base = sum(map(len, hdr)) - len(digits)
+    digits = _lead_int(hdr[CATALOG_LINE])
+    base = sum(map(len, hdr)) - len(digits) + gap
     new = base + len(str(base))
     new = base + len(str(new))
-    hdr[CATALOG_LINE] = str(new).encode() + line[len(digits) :]
+    _set_lead(hdr, CATALOG_LINE, old_len + gap, new)
 
 
-def _header_op(op: Op, hdr: list[bytes], rng: RandPool) -> None:
-    """Rewrite one header line; the catalog line follows a resized header."""
-    old_len = sum(map(len, hdr))
+def _sync_keyframe(hdr: list[bytes]) -> None:
+    """Add/drop the key frame list line so the layout matches the video flag."""
+    want = _has_video(hdr[VIDEO_LINE])
+    if want and len(hdr) == HDR_LINES:
+        hdr.append(b"0\n")
+    elif not want and len(hdr) > HDR_LINES:
+        del hdr[KEYFRAME_LINE]
+
+
+def _header_op(op: Op, hdr: list[bytes], rng: RandPool) -> int:
+    """Rewrite one header line; returns its index."""
     if op in _LINE_OPS:
         idx, edges = _LINE_OPS[op]
         hdr[idx] = rng.choice(edges) + b"\n"
@@ -141,8 +178,9 @@ def _header_op(op: Op, hdr: list[bytes], rng: RandPool) -> None:
         line = hdr[idx]
         hdr[idx] = rng.choice(INT_EDGES) + line[len(_lead_int(line)) :]
 
-    if idx != CATALOG_LINE:
-        _fix_catalog(hdr, old_len)
+    if idx == VIDEO_LINE:
+        _sync_keyframe(hdr)
+    return idx
 
 
 def _row_field(rows: list[bytes], rng: RandPool) -> list[bytes] | None:
@@ -169,18 +207,26 @@ def mutate_rpl(data: bytes, max_len: int = 65536, *, rng: RandPool) -> bytes | N
     parsed = parse_rpl(data)
     if parsed is None:
         return None
-    hdr, rows = parsed
+    hdr, gap, rows = parsed
+    old_len = sum(map(len, hdr))
 
     op = Op(rng.randint(0, len(Op) - 1))
+    idx = -1
     if op in _FRAME_OPS:
         new_rows = reframe(rows, _FRAME_OPS[op], rng)
     elif op is Op.ROW_FIELD:
         new_rows = _row_field(rows, rng)
     else:
-        _header_op(op, hdr, rng)
+        idx = _header_op(op, hdr, rng)
         new_rows = rows
 
     if new_rows is None:
         return None
-    out = b"".join(hdr) + b"".join(new_rows)
+
+    # The header stores the last chunk index (count - 1).
+    if len(new_rows) != len(rows):
+        _set_lead(hdr, COUNT_LINE, len(rows) - 1, len(new_rows) - 1)
+    if idx != CATALOG_LINE and sum(map(len, hdr)) != old_len:
+        _fix_catalog(hdr, old_len, len(gap))
+    out = b"".join(hdr) + gap + b"".join(new_rows)
     return out[:max_len]
