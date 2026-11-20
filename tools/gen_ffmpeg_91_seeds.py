@@ -171,13 +171,22 @@ SEEDS = {
 }
 
 
-def write_seeds(out):
-    """Write the crafted 9.0.2 crash seeds into ``<out>/seeds/``."""
+def write_seeds(seeds_dir):
+    """Write the crafted 9.0.2 crash seeds into ``seeds_dir``.
+
+    ``seeds_dir`` must already be the ``seeds/`` directory ``load_corpus`` reads
+    (``main`` appends it to ``--out``), not the pack root. Each seed is written
+    to a temp sibling and atomically renamed, so a reader never sees a partial
+    seed if generation is interrupted mid-write.
+    """
 
     for name, build in SEEDS.items():
         data = build()
-        with open(os.path.join(out, name), "wb") as f:
+        path = os.path.join(seeds_dir, name)
+        tmp = f"{path}.tmp"
+        with open(tmp, "wb") as f:
             f.write(data)
+        os.replace(tmp, path)  # atomic publish
         print(f"{name}: {len(data)}B")
 
 
