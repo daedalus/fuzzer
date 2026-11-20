@@ -2019,6 +2019,7 @@ Versioned trees (`ffmpeg-<ver>`, `--top=N`) build through the same function and 
 vendor_ffmpeg.sh --top=3   ->  $FUZZ_VENDOR_ROOT/ffmpeg-{9.0.2,8.1.3,8.0.3}   (sources only)
 build_targets.sh           ->  $FUZZ_BUILD_ROOT/ffmpeg-<ver>_asan/*.a -> ffmpeg_read_<ver>_asan{,.so}
                                $FUZZ_BUILD_ROOT/ffmpeg-<ver>/*.a      -> ffmpeg_read_<ver>_noasan{,.so}
+                               $FUZZ_BUILD_ROOT/ffmpeg-<ver>_ubsan/*.a -> ffmpeg_read_<ver>_ubsan{,.so}
 fuzzer-tool fuzz ~/fuzzing/builds/ffmpeg_read_*_asan -d <corpus>        (multi-target)
 ```
 
@@ -2026,7 +2027,9 @@ fuzzer-tool fuzz ~/fuzzing/builds/ffmpeg_read_*_asan -d <corpus>        (multi-t
 (`FFMPEG_GIT_URL`; dev tags dropped, `sort -V`). `FFMPEG_VERSIONS="a b c"` skips resolution.
 `build_ffmpeg_versions <suffix> <flags>` runs in the ASAN (`_asan`) and no-ASAN (`_noasan`) passes,
 reuses `build_vendored_ffmpeg_sancov` (its 2nd arg names the tree) and links an executable and a `.so`
-per version. Load one version's `.so` per process (libav* symbols collide); multi-target runs one
+per version. `_ubsan` links its own `-fsanitize=undefined` tree: on the coverage-only tree only the
+wrapper was checked, and libav* overflows (9.0.2 `cafdec.c:283`, `rpl.c:308`) went unreported.
+Load one version's `.so` per process (libav* symbols collide); multi-target runs one
 process per version, one SHM map each, shared corpus. A crash
 unique to one version is a regression or a silent fix. Test: `tests/test_regression_ffmpeg_multi_version.py`.
 

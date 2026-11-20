@@ -1713,13 +1713,14 @@ build_sanitizer_targets() {
 # Builds two variants:
 #   suffix=""      →  $FUZZ_BUILD_ROOT/ffmpeg/libav*/        (coverage only, no ASAN)
 #   suffix="_asan" →  $FUZZ_BUILD_ROOT/ffmpeg_asan/libav*/   (coverage + ASAN)
+#   suffix="_ubsan" → $FUZZ_BUILD_ROOT/ffmpeg_ubsan/libav*/  (coverage + UBSAN)
 # Source is copied from $FUZZ_VENDOR_ROOT/ffmpeg to a scratch dir under
 # $FUZZ_BUILD_ROOT so the read-only vendoring tree is never modified.
 # FFmpeg's configure needs a stub for __sanitizer_cov_trace_pc_guard
 # since those symbols are provided by cmplog_shim.o at final link.
 # $2 names the vendored tree: "ffmpeg" (default) or "ffmpeg-<ver>" (--top=N).
 build_vendored_ffmpeg_sancov() {
-    local asan_suffix="${1:-}"  # "" or "_asan"
+    local asan_suffix="${1:-}"  # "", "_asan" or "_ubsan"
     local src_name="${2:-ffmpeg}"
     [ "$WITH_FFMPEG_SANCOV" -eq 0 ] && return 0
     local SRC_DIR="$VENDOR/$src_name"
@@ -1831,6 +1832,11 @@ STUBEOF
         COV_FLAGS="$ASAN_CFLAGS $COV_FLAGS"
         LINK_FLAGS="-fsanitize=address"
         EXTRA_LIBS="-lsancov_stub"
+    fi
+    # UBSAN must instrument FFmpeg itself, not just the ffmpeg_read.c wrapper.
+    if [ "$asan_suffix" = "_ubsan" ]; then
+        COV_FLAGS="-fsanitize=undefined $COV_FLAGS"
+        LINK_FLAGS="-fsanitize=undefined"
     fi
     # --frontier: clang source coverage instead of sancov (tools/frontier.py).
     if [ "$asan_suffix" = "_cov" ]; then
@@ -1959,14 +1965,14 @@ STUBEOF
 #   OPTS     libs linked                 flags                       gate
 #   asan     ffmpeg-<ver>_asan/*.a       -fsanitize=address          ASAN pass
 #   noasan   ffmpeg-<ver>/*.a            (coverage only)             no-ASAN pass
-#   ubsan    ffmpeg-<ver>/*.a            -fsanitize=undefined        ASAN pass
+#   ubsan    ffmpeg-<ver>_ubsan/*.a      -fsanitize=undefined        ASAN pass
 #   ng2/ng3  ffmpeg-<ver>/*.a            trace-pc + __AFL_NGRAM_K=k  --ngram
 #   ijon     ffmpeg-<ver>/*.a            -DFUZZ_IJON (IJON_SET/STATE) no-ASAN pass
 #
-# ubsan and ng* reuse the coverage-only tree: UBSAN needs no ASAN-instrumented
-# archives (linking them without -fsanitize=address leaves __asan_* undefined),
-# and the unversioned ffmpeg_read_ng{2,3}.so does the same. Only asan and
-# noasan therefore cost a configure+make per version.
+# ubsan gets its own UBSAN-built tree: on the coverage-only tree only the
+# wrapper was checked, so overflows inside libav* went unreported. ng* and
+# ijon reuse the coverage-only tree; asan, noasan and ubsan each cost a
+# configure+make per version.
 # FFMPEG_OPTS=asan,ng2 (or --ffmpeg-opts=asan,ng2) restricts the matrix; unset
 # means every variant whose pass is running.
 # Load one version's .so per process: two libav* copies share one symbol
@@ -1983,6 +1989,7 @@ build_ffmpeg_versions() {
     local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
     local tree_suffix="" dir ver root libs inc
     [ "$suffix" = "_asan" ] && tree_suffix="_asan"
+    [ "$suffix" = "_ubsan" ] && tree_suffix="_ubsan"
     ffmpeg_opt_wanted "${suffix#_}" || return 0
     for dir in "$VENDOR"/ffmpeg-*/; do
         [ -f "$dir/configure" ] || continue
@@ -3285,7 +3292,7 @@ print_feature_matrix() {
     local ffvers
     ffvers=$(cd "$VENDOR" 2>/dev/null && ls -d ffmpeg-*/ 2>/dev/null | tr -d / | tr '\n' ' ')
     state=$([ -n "$ffvers" ] && [ $((BUILD_ASAN + BUILD_NOSAN)) -gt 0 ] && echo "BUILD" || echo "SKIP")
-    printf '  %-20s %-12s %s\n' "ffmpeg versions" "$state" "${ffvers:-none, run tools/vendor_ffmpeg.sh --top=3} (exe + .so, _asan/_noasan)"
+    printf '  %-20s %-12s %s\n' "ffmpeg versions" "$state" "${ffvers:-none, run tools/vendor_ffmpeg.sh --top=3} (exe + .so, _asan/_noasan/_ubsan)"
 
     state=$([ "$BUILD_ASAN" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ASAN variants" "$state" "executables + .so targets"
