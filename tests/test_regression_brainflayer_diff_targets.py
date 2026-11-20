@@ -84,12 +84,13 @@ class TestEcOracle:
         assert "secp256k1_ec_pubkey_create(ec_diff_ctx, &pk, seckey) != 1" in ec_src
         # the reject branch returns, it does not abort
         gate = ec_src.split("!= 1")[1].split("}")[0]
-        assert "return 0" in gate and "abort" not in gate
+        assert "return 0" in gate and "abort" not in gate and "SIGABRT" not in gate
 
     def test_mismatch_aborts_on_full_65_byte_compare(self, ec_src):
         assert "memcmp(ref, got, 65) != 0" in ec_src
         # the disagreement branch must abort (reported as a crash)
-        assert re.search(r"memcmp\(ref, got, 65\) != 0\)\s*\{[^}]*abort\(\)", ec_src, re.S)
+        # raise(SIGABRT), not abort(): the shim rewrites abort() into a return.
+        assert re.search(r"memcmp\(ref, got, 65\) != 0\)\s*\{[^}]*raise\(SIGABRT\)", ec_src, re.S)
 
     def test_serialized_as_uncompressed(self, ec_src):
         assert "SECP256K1_EC_UNCOMPRESSED" in ec_src
@@ -112,9 +113,15 @@ class TestHashOracle:
         assert "ripemd160_256_n(" in hash_src  # SIMD under test
 
     def test_each_family_aborts_on_mismatch(self, hash_src):
-        assert "memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9301); abort(); }" in hash_src
-        assert "memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9302); abort(); }" in hash_src
-        assert "memcmp(ref, simd[i], 20) != 0) { __afl_map_edge(0x9401); abort(); }" in hash_src
+        assert (
+            "memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9301); raise(SIGABRT); }" in hash_src
+        )
+        assert (
+            "memcmp(ref, simd[i], 32) != 0) { __afl_map_edge(0x9302); raise(SIGABRT); }" in hash_src
+        )
+        assert (
+            "memcmp(ref, simd[i], 20) != 0) { __afl_map_edge(0x9401); raise(SIGABRT); }" in hash_src
+        )
 
     def test_record_counts_are_bounded(self, hash_src):
         """direct_lite runs in-process, so an adversarial length must not be

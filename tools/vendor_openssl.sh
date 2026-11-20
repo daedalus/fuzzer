@@ -6,7 +6,7 @@
 # Usage:
 #   tools/vendor_openssl.sh                    # Download & verify
 #   tools/vendor_openssl.sh --fast             # Skip the Configure check
-#   tools/vendor_openssl.sh --version=3.5.4    # Specific version (default: 3.5.4, LTS)
+#   tools/vendor_openssl.sh --version=3.5.4    # Specific version (default: 4.1.0; 3.5.x is LTS)
 #
 # Requirements: curl, tar, perl, make, clang (or gcc)
 #
@@ -31,7 +31,7 @@ for arg in "$@"; do
     [ "$arg" = "--in-tree-vendor" ] && VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
 done
 
-OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.4}"
+OPENSSL_VERSION="${OPENSSL_VERSION:-4.1.0}"
 OPENSSL_DIR="$VENDOR_DIR/openssl"
 CONFIG_CHECK=1
 
@@ -83,6 +83,16 @@ else
     echo "[1/3] OpenSSL source already at $OPENSSL_DIR"
 fi
 
+# A tree of another version is never reused silently: targets would build
+# against code the caller did not ask for. Move it aside, never delete it.
+have="$(awk -F= '$1=="MAJOR"||$1=="MINOR"||$1=="PATCH"{printf "%s%s", sep, $2; sep="."}' \
+    "$OPENSSL_DIR/VERSION.dat" 2>/dev/null)"
+if [ "$have" != "$OPENSSL_VERSION" ]; then
+    echo "ERROR: $OPENSSL_DIR holds OpenSSL ${have:-unknown}, wanted $OPENSSL_VERSION"
+    echo "  mv $OPENSSL_DIR $OPENSSL_DIR-${have:-old}   # then re-run"
+    exit 1
+fi
+
 # Verify source structure
 if [ ! -f "$OPENSSL_DIR/Configure" ] || [ ! -f "$OPENSSL_DIR/crypto/x509/x_all.c" ]; then
     echo "ERROR: Invalid OpenSSL source tree at $OPENSSL_DIR"
@@ -100,6 +110,8 @@ if [ "$CONFIG_CHECK" -eq 1 ]; then
         cc="gcc"
     }
     tmpdir="$(mktemp -d)"
+    # 4.1.0 out-of-tree + no-apps writes apps/include/ without creating it.
+    mkdir -p "$tmpdir/apps/include"
     if (cd "$tmpdir" && CC="$cc" perl "$OPENSSL_DIR/Configure" no-shared no-asm \
             no-tests no-apps no-docs no-module no-dso no-threads >/dev/null 2>&1); then
         ok "Configure accepts $cc"

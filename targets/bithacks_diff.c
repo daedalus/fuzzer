@@ -2,6 +2,7 @@
 // ./bithacks_diff exh [lg]      : sweep, prints failing hacks
 // ./bithacks_diff [fuzz] [file]  : fuzz entry (default; stdin or file arg), aborts on mismatch/UB
 #define _GNU_SOURCE
+#include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -26,7 +27,7 @@ static void record(int id, const char *fmt, ...) {
         vsnprintf(first[id], sizeof first[id], fmt, ap);
         va_end(ap);
     }
-    if (fuzzmode && !strstr(names[id],"expect") && !strstr(names[id],"caveat") && !strstr(names[id],"VIOLATED") && !strstr(names[id],"OUTSIDE") && !strstr(names[id],"m&-((signed)")) { fprintf(stderr, "MISMATCH %s: %s\n", names[id], first[id]); abort(); }
+    if (fuzzmode && !strstr(names[id],"expect") && !strstr(names[id],"caveat") && !strstr(names[id],"VIOLATED") && !strstr(names[id],"OUTSIDE") && !strstr(names[id],"m&-((signed)")) { fprintf(stderr, "MISMATCH %s: %s\n", names[id], first[id]); raise(SIGABRT); }
 }
 #define CHK(nm, cond, ...) do { enum { ID = __COUNTER__ }; names[ID] = nm; if (ID + 1 > nids) nids = ID + 1; \
     if (!(cond)) record(ID, __VA_ARGS__); } while (0)

@@ -107,7 +107,8 @@ class TestSource:
         assert "MAP_NORESERVE" in src and "munmap(" in src
 
     def test_mismatches_abort(self, src):
-        assert src.count("abort()") >= 3
+        # raise(SIGABRT), not abort(): the shim rewrites abort() into a return.
+        assert src.count("raise(SIGABRT)") >= 3
 
 
 class TestWiring:

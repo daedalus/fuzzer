@@ -7,7 +7,8 @@
  * live. The `flags` argument of base64_encode/base64_decode forces a given
  * codec, so one exec can run the same input through every codec this CPU
  * supports and pit each against the plain codec. The first disagreement
- * calls abort(), reported by the runner as a crash.
+ * raises SIGABRT (the shim rewrites abort() into a return), reported by
+ * the runner as a crash.
  *
  * Modeled on hash_simd_diff.c (differential, abort on mismatch) and
  * lz4_read.c (same __afl_map_edge landmark scheme, same fuzz_shm_run entry
@@ -51,6 +52,7 @@
  * per codec (each needs its own -m flag) — same discipline as lz4_read.c.
  * See compile_libbase64_objects() in build_targets.sh.
  */
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -202,7 +204,7 @@ static void b64_ijon_bad(unsigned mode, const unsigned char *buf, size_t size, i
 
 static void b64_mismatch(unsigned edge) {
     __afl_map_edge(edge);
-    abort();
+    raise(SIGABRT);
 }
 
 /* ── Decode: every codec vs plain ─────────────────────────────────────── */
