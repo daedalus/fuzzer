@@ -5382,6 +5382,20 @@ class OperatorEngine:
         out = mutate_aac_asc(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("aac_asc_mutate", out, buf)
 
+    def _op_caf_chunk_mutate(self, buf, _byte_idx, _data):
+        """CAF header/desc/pakt fields (pakt overflow), chunk size/type, chunk order."""
+        from fuzzer_tool.core.mutations.caf import mutate_caf  # noqa: PLC0415
+
+        out = mutate_caf(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("caf_chunk_mutate", out, buf)
+
+    def _op_rpl_chunk_mutate(self, buf, _byte_idx, _data):
+        """ARMovie header fields, catalog row offset/size edges, row order."""
+        from fuzzer_tool.core.mutations.rpl import mutate_rpl  # noqa: PLC0415
+
+        out = mutate_rpl(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("rpl_chunk_mutate", out, buf)
+
     # ── Token-level text formats (core/mutations/{json_struct,sql_text}) ──
 
     def _op_json_mutate(self, buf, _byte_idx, _data):

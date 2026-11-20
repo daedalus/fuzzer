@@ -430,6 +430,18 @@ def _battery() -> list[bytes]:
         b"\x0b\x77" + bytes(3) + b"\x40" + bytes(122),
         # dca_frame_mutate: one 128-byte DTS core frame (FSIZE 127).
         b"\x7f\xfe\x80\x01\x80\x00\x07\xf0" + bytes(120),
+        # caf_chunk_mutate: caff v1 + 32-byte desc + pakt with a 2-byte table.
+        b"caff\x00\x01\x00\x00"
+        + b"desc"
+        + (32).to_bytes(8, "big")
+        + bytes(32)
+        + b"pakt"
+        + (26).to_bytes(8, "big")
+        + bytes(24)
+        + b"\x01\x02",
+        # rpl_chunk_mutate: 20-line ARMovie header (no video) + two catalog rows.
+        b"ARMovie\nt\nc\na\n0\n0\n0\n0\n1\n1\n1\n1\n8\n0\n1\n0\n0\n47\n0\n0\n"
+        + b"100 , 10 ; 20\n130 , 11 ; 21\n",
         # h264_ps_mutate: Annex B baseline SPS + PPS.
         b"\x00\x00\x00\x01\x67\x42\xc0\x1e\xed\x08\xf2\x00\x00\x00\x01\x68\xce\x0f\xc8",
         # flac_frame_mutate: one raw frame, CRC-8 and CRC-16 valid.
