@@ -51,6 +51,8 @@ from fuzzer_tool.core.mutations.montgomery import SECP256K1_FIELD_P
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.services.fuzzer import Fuzzer
 
+from .support.mp4_build import avcc, esds, mp4, stsd
+
 _REPS = 12
 _BASE_SEED = 4242
 
@@ -428,6 +430,14 @@ def _battery() -> list[bytes]:
         b"\x0b\x77" + bytes(3) + b"\x40" + bytes(122),
         # dca_frame_mutate: one 128-byte DTS core frame (FSIZE 127).
         b"\x7f\xfe\x80\x01\x80\x00\x07\xf0" + bytes(120),
+        # h264_ps_mutate: Annex B baseline SPS + PPS.
+        b"\x00\x00\x00\x01\x67\x42\xc0\x1e\xed\x08\xf2\x00\x00\x00\x01\x68\xce\x0f\xc8",
+        # flac_frame_mutate: one raw frame, CRC-8 and CRC-16 valid.
+        bytes.fromhex("fff8c908009510101010101010109c9c"),
+        # mp4_codec_cfg_mutate: moov > ... > stsd > avc1 > avcC.
+        mp4(stsd(b"avc1", avcc(b"\x67\x42\xc0\x1e\xed\x08\xf2", b"\x68\xce\x0f\xc8"))),
+        # aac_asc_mutate: moov > ... > stsd > mp4a > esds (AAC-LC ASC).
+        mp4(stsd(b"mp4a", esds(b"\x12\x10"))),
         bytes(8) + SECP256K1_FIELD_P + bytes(24),
         # montgomery_word_mutate: a known 32-bit modulus (NTT prime) literal.
         bytes(8) + (998244353).to_bytes(4, "little") + bytes(24),

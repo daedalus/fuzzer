@@ -29,7 +29,9 @@ from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.mutations.ac3 import sniff_ac3 as _sniff_ac3
 from fuzzer_tool.core.mutations.base64 import parse_base64
 from fuzzer_tool.core.mutations.dca import sniff_dca as _sniff_dca
+from fuzzer_tool.core.mutations.flac_frame import sniff_flac_frame as _sniff_flac_frame
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
+from fuzzer_tool.core.mutations.h264_ps import sniff_h264_ps as _sniff_h264_ps
 from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.ivf import sniff_ivf as _sniff_ivf
@@ -280,6 +282,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "ivf_chunk_mutate",
         "ac3_frame_mutate",
         "dca_frame_mutate",
+        "h264_ps_mutate",
+        "flac_frame_mutate",
+        "mp4_codec_cfg_mutate",
+        "aac_asc_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -765,6 +771,15 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "ivf_chunk_mutate": _sniff_ivf,
     "ac3_frame_mutate": _sniff_ac3,
     "dca_frame_mutate": _sniff_dca,
+    # Annex B at offset 0 holding an H.264 SPS/PPS unit.
+    "h264_ps_mutate": _sniff_h264_ps,
+    # Strict CRC-8-valid frame header at offset 0 or after fLaC metadata.
+    "flac_frame_mutate": _sniff_flac_frame,
+    # ISO-BMFF holding a decoder config box (substring scan, C speed).
+    "mp4_codec_cfg_mutate": lambda d: (
+        d[4:8] in _ISOBMFF_HEAD_TYPES and any(t in d for t in (b"avcC", b"hvcC", b"esds"))
+    ),
+    "aac_asc_mutate": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES and b"esds" in d,
     "json_mutate": _sniff_json,
     "sql_mutate": _sniff_sql,
     "ecdsa_field_mutate": _sniff_secp_payload,
