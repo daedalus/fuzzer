@@ -174,3 +174,21 @@ class TestAtomicPublish:
         # No staged temp survives, in the scanned dir or its parent.
         assert _stray(seeds) == []
         assert _stray(tmp_path) == []
+
+    def test_regression_tmp_symlink(self, tmp_path):
+        """Adversarial: planted temp-name symlinks must not be written through."""
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"keep")
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+
+        # Plant at the fixed names a non-exclusive writer would open.
+        for name in SEEDS:
+            (seeds / f"{name}.tmp").symlink_to(victim)
+            (tmp_path / f".{name}.part").symlink_to(victim)
+
+        write_seeds(str(seeds))
+
+        assert victim.read_bytes() == b"keep"
+        for name, build in SEEDS.items():
+            assert (seeds / name).read_bytes() == build()
