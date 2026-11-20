@@ -7,8 +7,10 @@
 #   tools/vendor_openssl.sh                    # Download & verify
 #   tools/vendor_openssl.sh --fast             # Skip the Configure check
 #   tools/vendor_openssl.sh --version=3.5.4    # Specific version (default: 4.1.0; 3.5.x is LTS)
+#   tools/vendor_openssl.sh --version=master   # git HEAD -> vendor/openssl-master/ (AVX2 decoder)
+#   tools/vendor_openssl.sh --version=master --commit=<sha>   # pin a master commit
 #
-# Requirements: curl, tar, perl, make, clang (or gcc)
+# Requirements: curl, tar, perl, make, clang (or gcc); git for master
 #
 # After vendoring, build the openssl fuzz target with:
 #   tools/build_targets.sh
@@ -40,8 +42,18 @@ for arg in "$@"; do
     [ "$arg" = "--fast" ] && CONFIG_CHECK=0
     case "$arg" in
         --version=*) OPENSSL_VERSION="${arg#*=}" ;;
+        --commit=*) OPENSSL_COMMIT="${arg#*=}" ;;
     esac
 done
+
+# master is a moving target with no tarball: shallow git clone into its own
+# tree, so release-built targets (vendor/openssl/) never change under it.
+# build_targets.sh stamps master builds with the commit (VERSION.dat stays
+# x.y.0-dev across commits).
+OPENSSL_GIT_URL="https://github.com/openssl/openssl.git"
+if [ "$OPENSSL_VERSION" = "master" ]; then
+    OPENSSL_DIR="$VENDOR_DIR/openssl-master"
+fi
 DOWNLOAD_URL="https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
 TARBALL="/tmp/openssl-${OPENSSL_VERSION}.tar.gz"
 
@@ -52,8 +64,23 @@ NC='\033[0m'
 ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
 
+# ── Step 1 (master): clone, optionally pin a commit ──────────────
+if [ "$OPENSSL_VERSION" = "master" ] && [ ! -d "$OPENSSL_DIR" ]; then
+    echo "[1/3] Cloning OpenSSL master..."
+    git clone -q --depth 1 "$OPENSSL_GIT_URL" "$OPENSSL_DIR"
+    if [ -n "${OPENSSL_COMMIT:-}" ]; then
+        git -C "$OPENSSL_DIR" fetch -q --depth 1 origin "$OPENSSL_COMMIT"
+        git -C "$OPENSSL_DIR" checkout -q FETCH_HEAD
+    fi
+    ok "master $(git -C "$OPENSSL_DIR" rev-parse --short HEAD) at $OPENSSL_DIR"
+elif [ "$OPENSSL_VERSION" = "master" ]; then
+    echo "[1/3] OpenSSL master already at $OPENSSL_DIR ($(git -C "$OPENSSL_DIR" rev-parse --short HEAD 2>/dev/null)); move it aside to refresh"
+fi
+
 # ── Step 1: Download, verify checksum, extract ───────────────────
-if [ ! -d "$OPENSSL_DIR" ]; then
+if [ "$OPENSSL_VERSION" = "master" ]; then
+    :  # cloned above
+elif [ ! -d "$OPENSSL_DIR" ]; then
     echo "[1/3] Downloading OpenSSL $OPENSSL_VERSION..."
     if [ ! -f "$TARBALL" ]; then
         echo "  Fetching $DOWNLOAD_URL..."
@@ -87,7 +114,7 @@ fi
 # against code the caller did not ask for. Move it aside, never delete it.
 have="$(awk -F= '$1=="MAJOR"||$1=="MINOR"||$1=="PATCH"{printf "%s%s", sep, $2; sep="."}' \
     "$OPENSSL_DIR/VERSION.dat" 2>/dev/null)"
-if [ "$have" != "$OPENSSL_VERSION" ]; then
+if [ "$OPENSSL_VERSION" != "master" ] && [ "$have" != "$OPENSSL_VERSION" ]; then
     echo "ERROR: $OPENSSL_DIR holds OpenSSL ${have:-unknown}, wanted $OPENSSL_VERSION"
     echo "  mv $OPENSSL_DIR $OPENSSL_DIR-${have:-old}   # then re-run"
     exit 1

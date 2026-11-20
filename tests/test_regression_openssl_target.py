@@ -103,7 +103,8 @@ class TestBuildWiring:
         """Vendor root stays read-only; build tree lives under the build root."""
         body = _compile_body(build_src)
         assert "$TARGETS/openssl/build" in body
-        assert '"$OPENSSL/Configure"' in body
+        assert '"$src/Configure"' in body
+        assert 'local src="$OPENSSL"' in body, "default variant must build the release tree"
 
     def test_library_coverage_gated_on_compiler(self, build_src):
         body = _compile_body(build_src)

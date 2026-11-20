@@ -11,6 +11,7 @@ asm-enabled build tree, not openssl_read's no-asm one.
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -187,3 +188,121 @@ def test_falsification_oracle_catches_corruption(tmp_path):
         [str(build("corrupt", "-DB64_DIFF_CORRUPT_SCALAR"))], capture_output=True, timeout=10
     )
     assert bad.returncode != 0, "corrupted scalar output was not detected"
+
+
+# ── OpenSSL master: AVX2 decoder (dec_b64_avx2.c, not in 4.1.0) ─────────
+MASTER_SO = BUILD_ROOT / "openssl_b64_diff_master_noasan.so"
+MASTER_TREE = BUILD_ROOT / "openssl" / "build_master_nosan"
+MODE_DECODE = 4  # byte 0 bit 2: payload is base64 text, diff the decoders
+
+
+class TestMasterWiring:
+    def test_decode_mode_bit(self, target_src):
+        assert "#define B64_MODE_DECODE 4u" in target_src
+
+    @pytest.mark.parametrize("api", ["EVP_DecodeBlock(", "EVP_DecodeUpdate(", "EVP_DecodeFinal("])
+    def test_decoders_diffed(self, target_src, api):
+        body = target_src.split("static void diff_decode", 1)
+        assert len(body) == 2, "diff_decode missing"
+        assert api in body[1].split("\nstatic int fuzz_b64", 1)[0]
+
+    def test_vendor_master_is_git_clone(self):
+        text = VENDOR_SCRIPT.read_text()
+        assert "openssl-master" in text
+        assert "git clone" in text
+
+    def test_master_variant_builds_master_source(self, build_src):
+        body = _compile_body(build_src)
+        assert "build_master" in body
+        assert "$OPENSSL_MASTER" in body
+        assert 'OPENSSL_MASTER="${OPENSSL_MASTER_DIR:-$VENDOR/openssl-master}"' in build_src
+
+    def test_stamp_includes_git_commit(self, build_src):
+        """master's VERSION.dat stays x.y.0-dev across commits."""
+        assert "rev-parse HEAD" in _compile_body(build_src)
+
+    def test_master_target_built_and_in_matrix(self, build_src):
+        assert '"$TARGETS/openssl_b64_diff_master${out_suffix}.so"' in build_src
+        assert '"openssl_b64_diff_master"' in build_src
+
+
+_DECODE_INPUTS = {
+    "valid_64": b"QUJD" * 16,
+    "valid_96_pad": b"QUJD" * 23 + b"QQ==",
+    "ws_inside": (b"QUJD" * 8 + b" \n\t") * 3,
+    "bad_char_at_63": b"QUJD" * 15 + b"QUJ!",
+    "pad_mid": b"QUJD" * 8 + b"QQ==" + b"QUJD" * 8,
+    "srp_chars": b"./09" * 20,
+    "trailing_ws": b"QUJD" * 16 + b"\r\n  ",
+    "len_mod_4_1": b"QUJD" * 16 + b"Q",
+}
+
+
+@pytest.mark.skipif(not MASTER_SO.is_file(), reason="openssl_b64_diff_master_noasan.so not built")
+class TestMasterBuiltAdversarial:
+    """Hostile base64 text around the 64-byte AVX2 decode threshold."""
+
+    @pytest.mark.parametrize("name", sorted(_DECODE_INPUTS))
+    @pytest.mark.parametrize("chunk", [0, 1, 63, 64])
+    def test_decoders_agree(self, name, chunk):
+        data = bytes((MODE_DECODE, chunk)) + _DECODE_INPUTS[name]
+        proc = subprocess.run(
+            [sys.executable, "-I", "-c", TestBuiltTargetAdversarial._RUNNER, str(MASTER_SO)],
+            input=data,
+            capture_output=True,
+            timeout=10,
+        )
+        assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+
+
+@pytest.mark.skipif(
+    not (MASTER_TREE / "libcrypto.a").is_file() or not shutil.which("clang"),
+    reason="master libcrypto not built",
+)
+def test_falsification_decode_oracle_catches_corruption(tmp_path):
+    """Decode mode, 128 chars (AVX2 decoder engages at >= 64): a corrupted
+    scalar output byte must kill the process; the clean build must not."""
+    if platform.machine() not in ("x86_64", "AMD64"):
+        pytest.skip("AVX2 path is x86-64 only")
+    stub = tmp_path / "stub.c"
+    stub.write_text(
+        "#include <stddef.h>\n#include <string.h>\n"
+        "int fuzz_shm_run(const unsigned char *, size_t);\n"
+        "int main(void) { unsigned char b[130] = {4, 0};\n"
+        "  memset(b + 2, 'Q', 128);\n"
+        "  return fuzz_shm_run(b, sizeof b); }\n"
+    )
+    stub_o = tmp_path / "stub.o"
+    subprocess.run(["clang", "-c", str(stub), "-o", str(stub_o)], check=True)
+    master_inc = Path.home() / "fuzzing" / "vendoring" / "openssl-master" / "include"
+
+    def build(name: str, *defines: str) -> Path:
+        exe = tmp_path / name
+        cmd = [
+            "clang",
+            "-O1",
+            *defines,
+            "-D__AFL_CMPLOG=1",
+            "-include",
+            str(ROOT / "src" / "fuzzer_tool" / "adapters" / "afl_shim.c"),
+        ]
+        cmd += [
+            f"-I{MASTER_TREE / 'include'}",
+            f"-I{master_inc}",
+            "-o",
+            str(exe),
+            str(TARGET),
+            str(stub_o),
+        ]
+        cmd += [str(MASTER_TREE / "libcrypto.a"), "-lpthread", "-ldl"]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return exe
+
+    # Control first (Hard Rule 46).
+    clean = subprocess.run([str(build("clean"))], capture_output=True, timeout=10)
+    assert clean.returncode == 0, clean.stderr.decode(errors="replace")
+
+    bad = subprocess.run(
+        [str(build("corrupt", "-DB64_DIFF_CORRUPT_SCALAR"))], capture_output=True, timeout=10
+    )
+    assert bad.returncode != 0, "corrupted scalar decode output was not detected"
