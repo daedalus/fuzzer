@@ -9,5 +9,13 @@
 # Executables are unaffected: their runtime default is still halt_on_error=1.
 ASAN_CFLAGS="-fsanitize=address -fsanitize-recover=address"
 
+# UBSAN is the mirror image: in-process (direct_lite) runs with halt_on_error=0,
+# and a recoverable site then only prints to stderr and returns (rc=0), so the
+# fuzzer never sees a crash -- a crafted ffmpeg cafdec.c:283 overflow went
+# uncaught. -fno-sanitize-recover=undefined makes every site abort (SIGABRT),
+# which the crash handler catches. abort_on_error=1 (ldpreload_wrapper.py) then
+# keeps it a SIGABRT rather than _exit.
+UBSAN_CFLAGS="-fsanitize=undefined -fno-sanitize-recover=undefined"
+
 # rustc's equivalent, for crates instrumented with -Z sanitizer=address.
 RUST_ASAN_FLAGS="-Z sanitizer=address -Z sanitizer-recover=address"
