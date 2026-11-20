@@ -34,6 +34,14 @@ from fuzzer_tool.core.mutations.covering_array_walk import (  # noqa: F401
     ZipEocdCoveringArrayMutator,
 )
 
+# Relation-polarity header operators: ZIP, WebP VP8X, ISO-BMFF ftyp, one broken
+# check at a time (self-registers)
+from fuzzer_tool.core.mutations.field_relation import (  # noqa: F401
+    IsobmffRelationMutator,
+    WebpRelationMutator,
+    ZipRelationMutator,
+)
+
 # Fractal jittered Voronoi spatial meta-mutator (self-registers on import)
 from fuzzer_tool.core.mutations.fractal_voronoi import FractalVoronoiMutator  # noqa: F401
 from fuzzer_tool.core.mutations.generic import *  # noqa: F401,F403

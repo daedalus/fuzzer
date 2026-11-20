@@ -321,7 +321,9 @@ class TestGlobalRegistryUnaffected:
         (core/mutations/covering_array_container.py) are the eighth to tenth;
         the eight walker operators in core/mutations/covering_array_walk.py
         (``_isobmff_tkhd``, ``_wav``, ``_avi``, ``_webp_vp8``, ``_webp_vp8l``,
-        ``_zip_eocd``, ``_zip_cd``, ``_zip_entry``) are the eleventh to eighteenth.
+        ``_zip_eocd``, ``_zip_cd``, ``_zip_entry``) are the eleventh to eighteenth;
+        ``field_relation_zip`` / ``_webp`` / ``_isobmff``
+        (core/mutations/field_relation.py) are the nineteenth to twenty-first.
         Anything else here is a surprise.
 
         Note the ``ff_*`` entries are registered at import, unconditionally,
@@ -351,6 +353,9 @@ class TestGlobalRegistryUnaffected:
             "ff_jpeg",
             "ff_png",
             "ff_zip",
+            "field_relation_isobmff",
+            "field_relation_webp",
+            "field_relation_zip",
             "fractal_voronoi",
             "perlin_noise",
             "weizz_chunk_mutate",

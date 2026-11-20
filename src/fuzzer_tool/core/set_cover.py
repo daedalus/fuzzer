@@ -21,6 +21,18 @@ dominated seeds] x MAX_ROUNDS -> lazy greedy -> drop redundant picks.
 Reductions are optional: capped rounds and scans only cost optimality,
 never correctness.
 
+Optional exact pass: ``min_cover(..., exact_nodes=N)`` / ``exact_min_cover``
+run a branch-and-bound over the reduced instance, seeded with the greedy
+result as incumbent. It is the N-Queens bitmask idiom applied to covering:
+state is the uncovered-edge mask plus an "excluded seeds" mask passed by value
+(so undo is free), the branching edge is the uncovered one with the fewest
+non-excluded holders (min-remaining-values, so sole holders are forced for
+free), candidates are peeled with ``mask & -mask``, and a sibling that was
+already tried is excluded from the later ones. The bound is
+``ceil(uncovered / best remaining gain)``. A node budget caps the work; the
+result is never worse than greedy and is proven optimal when the search
+finishes within budget.
+
 Representation: each seed's edges are one int bitmask over a dense edge
 index, so restrict / take / subset are big-int ops. Holder counts per edge
 are a bit-sliced counter (one int per count bit), which yields the
@@ -41,6 +53,10 @@ K = TypeVar("K", bound=Hashable)
 # Reduction rounds; each is O(sum |edges|). Cascades beyond this are rare.
 MAX_ROUNDS = 8
 
+# Default node budget of exact_min_cover. A node is one branch point; with the
+# per-node O(seeds + uncovered edges) scan this is a few seconds worst case.
+EXACT_NODE_BUDGET = 20_000
+
 # Dominators examined per seed. Bounds the pass on corpora where one rare
 # edge is shared by thousands of seeds.
 DOMINATOR_SCAN_CAP = 256
@@ -60,17 +76,47 @@ class Reduce(Enum):
     OFF = "off"
 
 
-def min_cover(seed_edges: Mapping[K, Collection[int]], size: Mapping[K, int]) -> list[K]:
+def min_cover(
+    seed_edges: Mapping[K, Collection[int]], size: Mapping[K, int], exact_nodes: int = 0
+) -> list[K]:
     """Return keys of a small cover of every edge in *seed_edges*.
 
     *size* must hold every seed that has edges (KeyError otherwise).
     Result order is selection order; deterministic for a given input order.
+    *exact_nodes* > 0 follows the greedy runs with a branch-and-bound of at
+    most that many nodes (see :func:`exact_min_cover`); 0 keeps greedy only.
     """
+    return _min_cover(seed_edges, size, exact_nodes)[0]
+
+
+def exact_min_cover(
+    seed_edges: Mapping[K, Collection[int]],
+    size: Mapping[K, int],
+    node_budget: int = EXACT_NODE_BUDGET,
+) -> tuple[list[K], bool]:
+    """``(cover, proven)``: min_cover refined by branch-and-bound.
+
+    The cover is never larger than greedy's (ties broken on total bytes).
+    *proven* is True when the search finished inside *node_budget* nodes, so
+    no cover with fewer seeds exists; False means the budget ran out first and
+    the cover is the best found.
+    """
+    return _min_cover(seed_edges, size, max(1, node_budget))
+
+
+def _min_cover(
+    seed_edges: Mapping[K, Collection[int]], size: Mapping[K, int], exact_nodes: int
+) -> tuple[list[K], bool]:
     order = {k: i for i, k in enumerate(seed_edges)}
     full = _to_masks({k: e for k, e in seed_edges.items() if len(e)})
     sizes = {k: size[k] for k in full}
     runs = [_Cover(order, full, sizes, tie, red).solve() for tie, red in product(Tie, Reduce)]
-    return min(runs, key=lambda keys: (len(keys), sum(sizes[k] for k in keys)))
+    best = min(runs, key=lambda keys: (len(keys), sum(sizes[k] for k in keys)))
+    if exact_nodes <= 0 or not best:
+        return best, False
+    bound = (len(best), sum(sizes[k] for k in best))
+    better, proven = _Cover(order, full, sizes, Tie.SIZE, Reduce.ON).exact(exact_nodes, bound)
+    return (better if better is not None else best), proven
 
 
 def quick_cover(seed_edges: Mapping[K, Collection[int]]) -> list[K]:
@@ -314,3 +360,94 @@ class _Cover:
             keep.discard(key)
             count[idx] -= 1
         return [k for k in self._chosen if k in keep]
+
+    def exact(self, node_budget: int, bound: tuple[int, int]) -> tuple[list | None, bool]:
+        """Branch-and-bound for a cover that beats *bound* = (seeds, bytes).
+
+        Runs after the forced / dominance reductions, whose forced picks are a
+        fixed prefix. Returns ``(cover or None, proven)``: the cover when one
+        strictly better than *bound* was found, and whether the search ran to
+        completion (then no better cover exists, if it returned None).
+        """
+        self._reduce_all()
+        self._restrict()
+        prefix = list(self._chosen)
+        prefix_bytes = sum(self._size[k] for k in prefix)
+        keys = list(self._live)
+        masks = [self._live[k] for k in keys]
+        sizes = [self._size[k] for k in keys]
+        ranks = [self._rank(k) for k in keys]
+        universe = self._uncovered
+        n = len(keys)
+
+        # hold[e] = mask over seed indices that cover edge e.
+        hold: dict[int, int] = {}
+        for i, m in enumerate(masks):
+            bit = 1 << i
+            while m:
+                low = m & -m
+                e = low.bit_length() - 1
+                hold[e] = hold.get(e, 0) | bit
+                m ^= low
+
+        best_len, best_bytes = bound
+        best_len -= len(prefix)  # budget for the search proper
+        best_bytes -= prefix_bytes
+        found: list[int] | None = None
+        nodes = 0
+        stopped = False
+
+        def rec(unc: int, excl: int, path: list[int], nbytes: int) -> None:
+            nonlocal best_len, best_bytes, found, nodes, stopped
+            nodes += 1
+            if nodes > node_budget or len(path) > 400:
+                stopped = True
+                return
+            if not unc:
+                if (len(path), nbytes) < (best_len, best_bytes):
+                    best_len, best_bytes, found = len(path), nbytes, list(path)
+                return
+            gain = [0] * n
+            top = 0
+            for i in range(n):
+                if not (excl >> i) & 1:
+                    g = (masks[i] & unc).bit_count()
+                    gain[i] = g
+                    if g > top:
+                        top = g
+            if not top:
+                return
+            reach = len(path) + -(-unc.bit_count() // top)
+            if reach > best_len or (reach == best_len and nbytes >= best_bytes):
+                return
+            # Branch on the uncovered edge with the fewest live holders.
+            pick, fewest, m = 0, n + 1, unc
+            while m:
+                low = m & -m
+                c = (hold[low.bit_length() - 1] & ~excl).bit_count()
+                if c < fewest:
+                    pick, fewest = low.bit_length() - 1, c
+                    if c <= 1:
+                        break
+                m ^= low
+            if not fewest:
+                return
+            cand, ids = hold[pick] & ~excl, []
+            while cand:
+                low = cand & -cand
+                ids.append(low.bit_length() - 1)
+                cand ^= low
+            ids.sort(key=lambda i: (-gain[i], ranks[i]))
+            for i in ids:
+                path.append(i)
+                rec(unc & ~masks[i], excl, path, nbytes + sizes[i])
+                path.pop()
+                if stopped:
+                    return
+                excl |= 1 << i
+
+        rec(universe, 0, [], 0)
+        if found is None:
+            return None, not stopped
+        self._chosen = prefix + [keys[i] for i in found]
+        return self._drop_redundant(), not stopped
