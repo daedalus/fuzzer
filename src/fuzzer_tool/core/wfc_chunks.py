@@ -62,7 +62,8 @@ from fuzzer_tool.core.mutations.webm import Element, _encode_size_vint, parse_we
 from fuzzer_tool.core.mutations.webp import parse_webp, serialize_webp
 from fuzzer_tool.core.mutations.zip import ZipDoc, parse_zip, serialize_zip
 from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
-from fuzzer_tool.core.wfc import AdjacencyTable, Tile, WaveGrid
+from fuzzer_tool.core.wfc import AdjacencyTable, Tile
+from fuzzer_tool.core.wfc_bits import BitWaveGrid
 
 # Per the cost-law learning: bound both the alphabet and the problem size a
 # caller can feed this module, rather than relying solely on WaveGrid's own
@@ -383,11 +384,11 @@ def _collapse_cells(
 ) -> list[bytes] | None:
     """One 1-D WFC collapse over ``len(chunks)`` cells; None if it fails.
 
-    A fresh ``WaveGrid`` each call: ``run`` snapshots the grid it is handed as
+    A fresh ``BitWaveGrid`` each call: ``run`` snapshots the grid it is handed as
     the state restarts return to, so a grid cannot be run twice.
     """
     tiles = [Tile(name=k) for k in kinds_present]
-    wave = WaveGrid(tiles, work_table, width=len(chunks), height=1)
+    wave = BitWaveGrid(tiles, work_table, width=len(chunks), height=1)
 
     def pin(cell: int, kind: bytes) -> None:
         kid = kinds_present.index(kind)

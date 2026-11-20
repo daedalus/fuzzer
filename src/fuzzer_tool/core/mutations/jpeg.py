@@ -459,7 +459,8 @@ class JpegMutator:
         if len(markers) < 3:
             return markers
 
-        from fuzzer_tool.core.wfc import ConstraintSet, Tile, WaveGrid
+        from fuzzer_tool.core.wfc import ConstraintSet, Tile
+        from fuzzer_tool.core.wfc_bits import BitWaveGrid
 
         adjacency = ConstraintSet.jpeg_markers()
         names = [_marker_name(m.marker).encode() for m in markers]
@@ -471,7 +472,7 @@ class JpegMutator:
             return self._random_swap_markers(markers)
 
         tiles = [Tile(name=t) for t in type_names]
-        wave = WaveGrid(tiles, adjacency, width=len(markers), height=1)
+        wave = BitWaveGrid(tiles, adjacency, width=len(markers), height=1)
 
         for anchor, cell in ((b"SOI", 0), (b"EOI", -1)):
             if anchor in type_names:

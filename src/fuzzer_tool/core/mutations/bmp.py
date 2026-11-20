@@ -376,7 +376,8 @@ class BmpMutator:
         if tiles_per_row < 2:
             return info
 
-        from fuzzer_tool.core.wfc import Tile, WaveGrid
+        from fuzzer_tool.core.wfc import Tile
+        from fuzzer_tool.core.wfc_bits import BitWaveGrid
 
         # Build tiles from the first row (used as tile alphabet)
         pixels = info.pixel_data
@@ -403,7 +404,7 @@ class BmpMutator:
         # adjacency are fixed, and run(seed) reseeds, so clearing between
         # rows matches a fresh grid without rebuilding its adjacency matrix.
         new_pixels = bytearray()
-        wave = WaveGrid(tile_list, adj, width=tiles_per_row, height=1)
+        wave = BitWaveGrid(tile_list, adj, width=tiles_per_row, height=1)
         for row_y in range(h):
             wave.clear()
             row_result = wave.run(

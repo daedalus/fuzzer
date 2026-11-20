@@ -284,7 +284,8 @@ class PngChunkMutator:
         if len(chunks) < 3:
             return serialize_png_chunks(chunks)[:max_len]
 
-        from fuzzer_tool.core.wfc import ConstraintSet, Tile, WaveGrid
+        from fuzzer_tool.core.wfc import ConstraintSet, Tile
+        from fuzzer_tool.core.wfc_bits import BitWaveGrid
 
         # Extract unique chunk types present, preserving critical anchors
         type_names = list(dict.fromkeys(c.chunk_type for c in chunks))
@@ -296,7 +297,7 @@ class PngChunkMutator:
         tiles = [Tile(name=t) for t in type_names]
 
         # Create 1D wave with same number of cells as we have chunks
-        wave = WaveGrid(tiles, adjacency, width=len(chunks), height=1)
+        wave = BitWaveGrid(tiles, adjacency, width=len(chunks), height=1)
 
         # Seed the first cell to IHDR and last cell to IEND (if present)
         if has_ihdr:
