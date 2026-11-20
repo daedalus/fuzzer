@@ -128,6 +128,11 @@ SANITIZER_SHADOW_RE = re.compile(
     r"(0x[0-9a-f]+,\s*(?:heap-.*|stack-.*|global-.*|freed|allocated|addressable|partial)\b[^\n]*)",
     re.IGNORECASE,
 )
+# ASAN's "<addr> is located N bytes {to the right of,to the left of,inside of,
+# after} M-byte region [...]" line. M is the allocator's usable size for the
+# request that produced the region -- what core.glibc_version.chunksize_from_region
+# converts to a glibc chunksize for the severity multiplier (core.sanitizer.glibc_severity).
+SANITIZER_REGION_RE = re.compile(r"(\d{1,18})-byte region", re.IGNORECASE)
 SANITIZER_ALLOC_RE = re.compile(
     r"allocated by thread (?:T\d+ )?(?:here|C\d+)\s*:?\s*\n(.*?)(?=\n\n|SUMMARY|\Z)",
     re.DOTALL | re.IGNORECASE,
@@ -569,6 +574,9 @@ class SanitizerReport:
         signature: Unique crash signature string.
         access_type: "READ", "WRITE", or "FREE" if detected.
         access_size: Memory access size in bytes if detected.
+        region_size: Usable size (bytes) of the allocator region the fault
+            addressed, if ASAN reported one ("N-byte region"). The allocator's
+            usable size for the request, not the raw malloc(n) argument.
         shadow_info: Shadow memory description string.
         alloc_frames: Stack frames from allocation site.
         dealloc_frames: Stack frames from deallocation site.
@@ -584,6 +592,7 @@ class SanitizerReport:
         "signature",
         "access_type",
         "access_size",
+        "region_size",
         "shadow_info",
         "alloc_frames",
         "dealloc_frames",
@@ -614,6 +623,7 @@ class SanitizerReport:
         # Enriched fields
         self.access_type: str | None = None
         self.access_size: int | None = None
+        self.region_size: int | None = None
         self.shadow_info: str = ""
         self.alloc_frames: list[str] | None = None
         self.dealloc_frames: list[str] | None = None
@@ -630,6 +640,11 @@ class SanitizerReport:
         if m:
             self.access_type = m.group(1).upper()
             self.access_size = int(m.group(2))
+
+        # Region size ("N bytes to the right of M-byte region")
+        m = SANITIZER_REGION_RE.search(self.raw)
+        if m:
+            self.region_size = int(m.group(1))
 
         # Shadow memory info
         m = SANITIZER_SHADOW_RE.search(self.raw)
@@ -733,6 +748,7 @@ class SanitizerReport:
             "fault_addr": self.fault_addr,
             "access_type": self.access_type,
             "access_size": self.access_size,
+            "region_size": self.region_size,
             "frames": self.frames,
             "signature": self.signature,
             "exploitability": self.exploitability,

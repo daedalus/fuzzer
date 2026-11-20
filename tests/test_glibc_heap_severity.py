@@ -335,3 +335,48 @@ def test_regression_fill_report_no_glibc_is_noop():
     # Default (feature off): glibc_runtime empty -> base tier preserved.
     _report, meta = _uaf_meta("")
     assert meta.exploitability == "HIGH"
+
+
+# ── size-exact gate wired through _fill_report (region_size -> chunk_size) ──
+#
+# Same base crash and runtime glibc as test_regression_fill_report_bumps_on_
+# regressed_glibc above, but ASAN's stderr now names a region size. This is
+# the gap test_glibc_version.md flagged: without it, _fill_report always took
+# the size-unaware path (chunk_size never reaches glibc_severity).
+
+_FASTBIN_UAF_STDERR = (
+    "==123==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010\n"
+    "READ of size 4 at 0x602000000010 thread T0\n"
+    "0x602000000010 is located 0 bytes inside of 32-byte region\n"
+    "    #0 0x4011d6 in use_it /src/a.c:5\n"
+)
+
+
+def _fastbin_meta(glibc: str):
+    from fuzzer_tool.adapters.filesystem import _fill_report
+    from fuzzer_tool.core.crash_metadata import CrashMetadata
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    report = SanitizerReport.parse(_FASTBIN_UAF_STDERR)
+    meta = CrashMetadata()
+    meta.raw_stderr = _FASTBIN_UAF_STDERR
+    meta.glibc_runtime = glibc
+    _fill_report(meta, report, 0)
+    return report, meta
+
+
+def test_region_size_makes_the_gate_size_exact():
+    # 32-byte region -> chunksize 0x30 (request2size(32) = align_up(40,16)):
+    # a fastbin-class size, still fenced on 2.41 (fastbin dies at 2.43). The
+    # size-unaware gate (no region line) bumps on *any* >=2.41 glibc -- this
+    # must NOT, because chunksize_from_region now gives glibc_severity the
+    # size it needs to tell the two little-chunk classes apart.
+    report, meta = _fastbin_meta("2.41")
+    assert report.region_size == 32
+    assert meta.exploitability == "HIGH"  # unchanged: this chunk isn't exposed yet
+
+
+def test_region_size_still_bumps_once_fastbin_is_gone():
+    # Same 0x30 chunk, but fastbin itself is gone at 2.43 -> exposed.
+    _report, meta = _fastbin_meta("2.43")
+    assert meta.exploitability == "CRITICAL"

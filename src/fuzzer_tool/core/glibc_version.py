@@ -144,6 +144,34 @@ def little_chunk_exposure(size: int, version: tuple[int, int] | None) -> LittleC
     )
 
 
+# request2size(req) from glibc's malloc.c, 64-bit (SIZE_SZ=8, MALLOC_ALIGNMENT=16):
+# chunksize = align_up(req + SIZE_SZ, MALLOC_ALIGNMENT), floored at MINSIZE (0x20).
+_SIZE_SZ = 8
+_MALLOC_ALIGNMENT = 16
+_MINSIZE = 0x20
+
+
+def chunksize_from_region(region_size: int) -> int:
+    """glibc chunksize for an allocator region of *region_size* usable bytes.
+
+    *region_size* is ASAN's reported usable size for the region a fault
+    addressed (the "M" in "N bytes to the right of M-byte region") -- the
+    allocator's usable size for the request, which is exactly what glibc's
+    ``request2size`` computes chunksize from, so for an ordinary
+    malloc/free/calloc/realloc this recovers the real chunksize.
+
+    Heuristic, not exact: a request made through memalign/posix_memalign
+    carries extra alignment padding this can't see, and a request past the
+    mmap threshold (~128 KiB) was never bin-involved at all -- ASAN's report
+    doesn't say which allocator call produced the region, so those cases
+    aren't distinguishable here. 64-bit (SIZE_SZ=8) only; wrong on 32-bit.
+    """
+    if region_size < 0:
+        raise ValueError("region_size must be >= 0")
+    aligned = (region_size + _SIZE_SZ + _MALLOC_ALIGNMENT - 1) // _MALLOC_ALIGNMENT * _MALLOC_ALIGNMENT
+    return max(_MINSIZE, aligned)
+
+
 def version_note(version: tuple[int, int] | None) -> str:
     """One-line, size-unaware summary of this glibc's little-chunk exposure.
 

@@ -16,6 +16,7 @@ from fuzzer_tool.core.glibc_version import (
     FASTBIN_KILLED,
     UNSORTED_CHECKS_DROPPED,
     LittleChunkExposure,
+    chunksize_from_region,
     detect,
     little_chunk_exposure,
     version_note,
@@ -127,3 +128,32 @@ def test_version_note_2_43_both_classes():
     note = version_note((2, 43))
     assert "0x20-0x80" in note
     assert "0x90-0x3F0" in note
+
+
+# ── chunksize_from_region: ASAN's usable-size -> glibc chunksize ──────────
+#
+# request2size(req), 64-bit: align_up(req + SIZE_SZ(8), MALLOC_ALIGNMENT(16)),
+# floored at MINSIZE (0x20). Verified against glibc's own formula by hand,
+# not derived from the code under test (Hard Rule 46).
+
+
+@pytest.mark.parametrize(
+    "region_size,expected",
+    [
+        (0, 0x20),  # floored at MINSIZE
+        (8, 0x20),
+        (24, 0x20),  # req+8=32, already 16-aligned, still <= MINSIZE
+        (25, 0x30),  # req+8=33 -> align_up 48
+        (32, 0x30),
+        (40, 0x30),  # req+8=48, exact fit
+        (41, 0x40),
+        (0x3E8 - 8, 0x3F0),  # exact fastbin/middle boundary round-trip
+    ],
+)
+def test_chunksize_from_region(region_size, expected):
+    assert chunksize_from_region(region_size) == expected
+
+
+def test_chunksize_from_region_rejects_negative():
+    with pytest.raises(ValueError):
+        chunksize_from_region(-1)

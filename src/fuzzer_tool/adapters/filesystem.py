@@ -29,6 +29,7 @@ from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.crash_symbols import sidecar_pcs
+from fuzzer_tool.core.glibc_version import chunksize_from_region
 from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.ltl import violation_signature
 from fuzzer_tool.core.sanitizer import (
@@ -1794,12 +1795,25 @@ def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, return
     # runtime host glibc has dropped the little-chunk fence. Gated on the
     # runtime glibc (the allocator that ran the target), not the build-time
     # minimum. No-op unless --glibc-heap-severity populated glibc_runtime.
+    #
+    # Size-exact when ASAN reported a region size ("N-byte region"):
+    # chunksize_from_region recovers the glibc chunksize, so a chunk outside
+    # the little-chunk class (or in a class this glibc hasn't exposed) is not
+    # bumped just because *some* little-chunk class is exposed on this host.
+    # Falls back to the size-unaware (whole-glibc) gate otherwise -- a crash
+    # with no sanitizer report, or an ASAN report with no region line.
+    chunk_size = (
+        chunksize_from_region(report.region_size)
+        if report is not None and report.region_size is not None
+        else None
+    )
     metadata.exploitability = glibc_severity(
         metadata.exploitability,
         metadata.sanitizer,
         metadata.error_type,
         metadata.raw_stderr,
         metadata.glibc_runtime,
+        chunk_size,
     )
 
 

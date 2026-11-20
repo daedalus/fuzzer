@@ -153,6 +153,31 @@ class TestSanitizerReportEnriched:
         # The important thing is the report parses without error
         assert report.sanitizer == "AddressSanitizer"
 
+    def test_region_size(self):
+        stderr = (
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "0x602000000010 is located 0 bytes to the right of 16-byte region\n"
+        )
+        report = SanitizerReport.parse(stderr)
+        assert report is not None
+        assert report.region_size == 16
+
+    def test_region_size_after_variant(self):
+        # ASAN's global/stack-overflow phrasing ("N bytes after M-byte region")
+        stderr = (
+            "==1==ERROR: AddressSanitizer: global-buffer-overflow\n"
+            "0x602000000010 is located 4 bytes after 4-byte region\n"
+        )
+        report = SanitizerReport.parse(stderr)
+        assert report is not None
+        assert report.region_size == 4
+
+    def test_region_size_absent_when_not_reported(self):
+        stderr = "==1==ERROR: AddressSanitizer: heap-use-after-free\n"
+        report = SanitizerReport.parse(stderr)
+        assert report is not None
+        assert report.region_size is None
+
     def test_alloc_dealloc_stacks(self):
         stderr = (
             "==1==ERROR: AddressSanitizer: heap-use-after-free\n"
