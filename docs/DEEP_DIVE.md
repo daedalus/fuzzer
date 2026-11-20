@@ -2173,6 +2173,21 @@ changed) dies, its uncorrupted control passes. Campaign (no-ASAN, 30k execs,
 in-process): 0 mismatches, 0.29 ms/exec, RSS flat 390 MB. Decode has no AVX2
 path in 4.1.0 (master only). `tests/test_regression_openssl_b64_diff.py`.
 
+**Master: AVX2 decoder** (`openssl_b64_diff_master.so`). `tools/vendor_openssl.sh
+--version=master [--commit=<sha>]` shallow-clones into `openssl-master/`
+(4.1.0 stays the default tree); `compile_openssl_objects ... master` builds it
+with asm into `build_master<suffix>/`, stamped with the commit (master's
+`VERSION.dat` stays `x.y.0-dev`; only trees with their own `.git` are stamped,
+so an in-tree `vendor/` does not rebuild on every fuzzer commit). Same target
+source: byte 0 bit 2 selects decode mode, where the payload is base64 text and
+`EVP_DecodeBlock` plus chunked `EVP_DecodeUpdate`/`Final` (SRP flag honoured)
+run on two contexts in lockstep, bit cleared vs set; return codes, lengths and
+bytes must match per call. The AVX2 decoder engages at >= 64 chars. On 4.1.x
+the mode runs scalar twice. Verified: `--wrap=decode_base64_avx2` counts 2
+calls per 128-char exec; a `-DB64_DIFF_CORRUPT_SCALAR` build dies on decode,
+its control passes. Campaign (master 159cdbc, no-ASAN, 50k execs): 0
+mismatches, corpus 8 -> 1869, 0.16 ms/exec, RSS flat 463 MB.
+
 ### Vendored libbase64 differential target (libbase64_read)
 
 `targets/libbase64_read.so` wraps aklomp/base64 v0.5.3

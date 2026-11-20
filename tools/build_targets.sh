@@ -38,6 +38,7 @@
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
 #   tools/vendor_openssl.sh   -> $FUZZ_VENDOR_ROOT/openssl    (openssl_read.so, openssl_b64_diff.so)
+#   tools/vendor_openssl.sh --version=master -> $FUZZ_VENDOR_ROOT/openssl-master (openssl_b64_diff_master.so)
 #   tools/vendor_brainflayer.sh -> $FUZZ_VENDOR_ROOT/brainflayer (ec_pubkey_diff.so, hash_simd_diff.so, brainflayer_read.so)
 #
 # Layout (2026-09-03, see session notes):
@@ -253,6 +254,8 @@ BRAINFLAYER="${BRAINFLAYER_DIR:-$VENDOR/brainflayer}"
 BRAINFLAYER_SECP256K1="$BRAINFLAYER/secp256k1"
 SQLITE="${SQLITE_DIR:-$VENDOR/sqlite}"
 OPENSSL="${OPENSSL_DIR:-$VENDOR/openssl}"
+# OpenSSL master (tools/vendor_openssl.sh --version=master): AVX2 decoder.
+OPENSSL_MASTER="${OPENSSL_MASTER_DIR:-$VENDOR/openssl-master}"
 # Shared by compile_sqlite_objects and the sqlite_read.so link: the wrapper
 # includes sqlite3.h, and a header parsed under different SQLITE_* defines
 # than the library it links against is the classic silent-ABI-mismatch bug
@@ -1364,17 +1367,19 @@ compile_sqlite_objects() {
 #   noasm  build<suffix>/      openssl_read: asm hides edges, so C everywhere
 #   asm    build_asm<suffix>/  openssl_b64_diff: encode.c's AVX2 dispatch
 #                              exists only with OPENSSL_CPUID_OBJ (asm on)
-# Rebuilt when the Configure command or the vendored version changes.
+#   master build_master<suffix>/  asm, from $OPENSSL_MASTER (AVX2 decoder)
+# Rebuilt when the Configure command, the vendored version or (git trees)
+# the commit changes: master's VERSION.dat stays x.y.0-dev across commits.
 OPENSSL_CONFIG_BASE="no-shared no-tests no-apps no-docs no-module no-dso no-threads"
 compile_openssl_objects() {
     local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}" variant="${5:-noasm}"
-    [ -f "$OPENSSL/Configure" ] || return 1
 
-    local bdir="$TARGETS/openssl/build${suffix}" opts="$OPENSSL_CONFIG_BASE no-asm"
-    if [ "$variant" = "asm" ]; then
-        bdir="$TARGETS/openssl/build_asm${suffix}"
-        opts="$OPENSSL_CONFIG_BASE"
-    fi
+    local src="$OPENSSL" bdir="$TARGETS/openssl/build${suffix}" opts="$OPENSSL_CONFIG_BASE no-asm"
+    case "$variant" in
+        asm)    bdir="$TARGETS/openssl/build_asm${suffix}"; opts="$OPENSSL_CONFIG_BASE" ;;
+        master) src="$OPENSSL_MASTER"; bdir="$TARGETS/openssl/build_master${suffix}"; opts="$OPENSSL_CONFIG_BASE" ;;
+    esac
+    [ -f "$src/Configure" ] || return 1
     local label="openssl libcrypto ${variant}${suffix:+ ($suffix)}"
 
     local cov_flag cmplog_cflags=""
@@ -1382,7 +1387,9 @@ compile_openssl_objects() {
     [ "$WITH_CMPLOG" -eq 1 ] && cmplog_cflags="-fsanitize-coverage=trace-cmp"
     local cflags="$flags $cov_flag $cmplog_cflags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
     local version
-    version="$(tr '\n' ' ' < "$OPENSSL/VERSION.dat" 2>/dev/null)"
+    version="$(tr '\n' ' ' < "$src/VERSION.dat" 2>/dev/null)"
+    # Own checkout only: an in-tree vendor/ would resolve the fuzzer's HEAD.
+    [ -e "$src/.git" ] && version="$version $(git -C "$src" rev-parse HEAD)"
     local stamp="CC=$cc CFLAGS=$cflags $opts VERSION=$version"
 
     # Up to date: same Configure command and source version, archive present.
@@ -1397,7 +1404,7 @@ compile_openssl_objects() {
     mkdir -p "$bdir/apps/include"
     local rc=0
     # shellcheck disable=SC2086
-    (cd "$bdir" && CC="$cc" CFLAGS="$cflags" perl "$OPENSSL/Configure" $opts \
+    (cd "$bdir" && CC="$cc" CFLAGS="$cflags" perl "$src/Configure" $opts \
         && make -j"$(nproc)" build_generated \
         && make -j"$(nproc)" libcrypto.a) >>"$BUILD_LOG" 2>&1 || rc=$?
     if [ $rc -ne 0 ]; then
@@ -2303,6 +2310,19 @@ build_standalone_so_targets() {
         build_so_target "${TARGETS_SRC:-$TARGETS}/openssl_b64_diff.c" "$TARGETS/openssl_b64_diff${out_suffix}.so" "$OPENSSL_ASM_LIBS" "$flags $OPENSSL_ASM_INC"
     else
         warn "openssl_b64_diff${out_suffix}.so: asm libcrypto failed to build, skipping"
+    fi
+
+    # openssl_b64_diff_master — same source against OpenSSL master, whose
+    # AVX2 decoder (dec_b64_avx2.c) is not in any release yet.
+    local OPENSSL_MASTER_BDIR="$TARGETS/openssl/build_master${suffix}"
+    local OPENSSL_MASTER_INC="-I$OPENSSL_MASTER_BDIR/include -I$OPENSSL_MASTER/include"
+    local OPENSSL_MASTER_LIBS="$OPENSSL_MASTER_BDIR/libcrypto.a -lpthread -Wl,--export-dynamic"
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/openssl_b64_diff.c" ] || [ ! -f "$OPENSSL_MASTER/Configure" ]; then
+        :  # optional: vendored only with tools/vendor_openssl.sh --version=master
+    elif compile_openssl_objects "$suffix" "$flags" "$DEFAULT_CC" "" master; then
+        build_so_target "${TARGETS_SRC:-$TARGETS}/openssl_b64_diff.c" "$TARGETS/openssl_b64_diff_master${out_suffix}.so" "$OPENSSL_MASTER_LIBS" "$flags $OPENSSL_MASTER_INC"
+    else
+        warn "openssl_b64_diff_master${out_suffix}.so: master libcrypto failed to build, skipping"
     fi
 }
 
@@ -3294,6 +3314,8 @@ print_feature_matrix() {
     state=$([ -f "$OPENSSL/Configure" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "openssl_read" "$state" "$([ -f "$OPENSSL/Configure" ] && echo "found at $OPENSSL" || echo "not vendored — run tools/vendor_openssl.sh")"
     printf '  %-20s %-12s %s\n' "openssl_b64_diff" "$state" "$([ -f "$OPENSSL/Configure" ] && echo "AVX2 vs scalar base64 (asm libcrypto)" || echo "not vendored — run tools/vendor_openssl.sh")"
+    state=$([ -f "$OPENSSL_MASTER/Configure" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "openssl_b64_diff_master" "$state" "$([ -f "$OPENSSL_MASTER/Configure" ] && echo "AVX2 encoder + decoder, master $(git -C "$OPENSSL_MASTER" rev-parse --short HEAD 2>/dev/null)" || echo "optional — tools/vendor_openssl.sh --version=master")"
     state=$([ -f "$BRAINFLAYER_SECP256K1/src/secp256k1.c" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "ec_pubkey_diff" "$state" "$([ -f "$BRAINFLAYER/ec_pubkey_fast.c" ] && echo "found at $BRAINFLAYER" || echo "not vendored — run tools/vendor_brainflayer.sh")"
     state=$([ -f "$BRAINFLAYER/sha256_pub.c" ] && echo "BUILD" || echo "SKIP")
