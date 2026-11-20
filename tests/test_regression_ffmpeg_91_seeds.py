@@ -10,14 +10,19 @@ seed that no longer lands on the bug.
 from __future__ import annotations
 
 import io
+import os
 import struct
 
+import pytest
+import tools.gen_ffmpeg_91_seeds as gen
 from tools.gen_ffmpeg_91_seeds import (
     BEXT_FIXED_SIZE,
     INT64_MAX,
+    SEEDS,
     caf_pakt_overflow,
     rpl_idx_overflow,
     wav_bext_bigalloc,
+    write_seeds,
 )
 
 # version field offset inside the 602-byte BEXT prologue (wav_parse_bext_tag)
@@ -112,3 +117,60 @@ class TestWavBextBigalloc:
         assert len(data) > 32
         assert data[0:4] == b"RIFF"
         assert data[8:12] == b"WAVE"
+
+
+def _stray(dir_path):
+    """Temp-staging leftovers that load_corpus must never see."""
+    return [n for n in os.listdir(dir_path) if n.endswith(".part") or ".part." in n]
+
+
+class TestAtomicPublish:
+    def test_publishes_clean(self, tmp_path):
+        """Falsification: every seed lands in seeds/ with exact bytes, no temp left.
+
+        A temp staged inside seeds/ (the scanned tree) would show up here as a
+        .part leftover or an extra file; load_corpus would then ingest it.
+        """
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+
+        write_seeds(str(seeds))
+
+        for name, build in SEEDS.items():
+            assert (seeds / name).read_bytes() == build()
+
+        # Exactly the published seeds in seeds/, and no temp in it or its parent.
+        assert sorted(os.listdir(seeds)) == sorted(SEEDS)
+        assert _stray(seeds) == []
+        assert _stray(tmp_path) == []
+
+    def test_interrupt_leaves_no_temp(self, tmp_path, monkeypatch):
+        """Adversarial: a failed publish leaves no temp and no partial in seeds/.
+
+        os.replace raises on the 2nd seed; the first stays published, the failed
+        temp is cleaned up, and nothing half-written sits where load_corpus scans.
+        """
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky_replace(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("boom")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(gen.os, "replace", flaky_replace)
+
+        with pytest.raises(OSError, match="boom"):
+            write_seeds(str(seeds))
+
+        names = list(SEEDS)
+        # First seed published; the one that failed and the rest are absent.
+        assert (seeds / names[0]).exists()
+        assert not (seeds / names[1]).exists()
+        # No staged temp survives, in the scanned dir or its parent.
+        assert _stray(seeds) == []
+        assert _stray(tmp_path) == []
