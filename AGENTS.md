@@ -149,7 +149,7 @@ fuzzer, not just the target.
 | `ruff format src/ tests/` / `ruff check src/ tests/` | Format / lint |
 | `fuzzer-tool --help` | Show CLI help |
 | `tools/build_targets.sh` | Build all fuzz targets (ASAN + cmplog by default; see the script's flag list) |
-| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` / `vendor_fuzzgoat.sh` / `vendor_libpng.sh` | Fetch vendored library sources into `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/`; legacy `vendor/` via `--in-tree-vendor`); required before building the matching targets |
+| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` / `vendor_fuzzgoat.sh` / `vendor_libpng.sh` / `vendor_openssl.sh` | Fetch vendored library sources into `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/`; legacy `vendor/` via `--in-tree-vendor`); required before building the matching targets |
 | `FUZZ_VENDOR_ROOT=...` / `FUZZ_BUILD_ROOT=...` | Env-var knobs; defaults are `~/fuzzing/vendoring/` (sources) and `~/fuzzing/builds/` (build artifacts). Both have legacy `--in-tree-*` flags. |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
 | `python tools/gen_ffmpeg_803_seeds.py [--out DIR]` | Write the 8.0.3 version-diff crash seeds (14 crafted) into `<out>/seeds/` (default `~/fuzzing/ffmpeg_803_potential_crashes`) |
@@ -178,7 +178,7 @@ src/fuzzer_tool/
 │                 #   stats.py, corpus_manager.py, report.py
 └── cli/          # CLI entry point (commands.py, ldpreload_wrapper.py)
 
-tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/fuzzgoat/grep/libpng/lz4/secp256k1/sqlite), corpus_png.py,
+tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/fuzzgoat/grep/libpng/lz4/openssl/secp256k1/sqlite), corpus_png.py,
                   #   benchmark.py (entry point), release.sh
 tools/lib/        # Benchmark harnesses (bench*.sh/py, noise_probe, lineage_benchmark) + shared helpers
 targets/          # Fuzz target sources (*.c) + built artifacts (.so/.bin) under legacy layout.

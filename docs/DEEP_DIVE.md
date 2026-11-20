@@ -1914,7 +1914,7 @@ The build script compiles every target as both an executable and a `.so` shared 
 - `*_noasan.so` — No-ASAN, directly loadable via `ctypes.CDLL()` for high-throughput in-process fuzzing
 - `*_asan.so` — ASAN-instrumented, requires libasan (falls back to subprocess mode automatically)
 - `*_ubsan.so` — UBSAN, built with the ASAN pass
-- `*_nosan.so` — legacy no-ASAN name, still emitted by secp256k1_read and sqlite_read
+- `*_nosan.so` — legacy no-ASAN name, still emitted by secp256k1_read and sqlite_read (openssl_read uses `_noasan`)
 
 Every invocation prints a **build feature matrix** before compiling: an always-on text table
 listing each feature flag (`cmplog`, `tracecmp`, `clang-scov`, `gcc-scov`, `vendor-tracecmp`, `distance`,
@@ -2111,6 +2111,30 @@ an authorizer denying ATTACH/DETACH/PRAGMA on the SQL path, a
 progress-handler opcode budget, and `sqlite3_hard_heap_limit64`. A corrupt
 file returning `SQLITE_CORRUPT`/`SQLITE_NOTADB` is the expected outcome and
 not a finding; a segfault or an assertion failure is.
+
+### Vendored OpenSSL target (openssl_read)
+
+`targets/openssl_read.so` wraps libcrypto from vendored OpenSSL 3.5.x LTS
+(`tools/vendor_openssl.sh` → `$FUZZ_VENDOR_ROOT/openssl/`, sha256-checked).
+`.so`-only, from `build_standalone_so_targets()`.
+
+Not a source drop: `compile_openssl_objects()` runs `Configure` out of tree in
+`$FUZZ_BUILD_ROOT/openssl/build<suffix>/` (one tree per sanitizer; vendor root
+stays read-only) and builds `libcrypto.a` without the shim. `CFLAGS` replace
+Configure's defaults: `-fPIC`, `cov_flag_for_cc`, `trace-cmp` under cmplog, and
+`-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION` (deterministic RNG). Options:
+`no-shared no-asm no-tests no-apps no-docs no-module no-dso no-threads`.
+Rebuilt only when the Configure command changes (`.fuzz_stamp`); first build
+~1.5 min on 4 cores. Generated headers (`x509.h`) come from the build tree,
+so its `include/` precedes the vendor one.
+
+**No mode byte**: the whole input goes to `d2i_X509`, `d2i_X509_CRL`,
+`d2i_X509_REQ`, `d2i_PKCS7`, `d2i_AutoPrivateKey`, `d2i_PUBKEY`, so `_sniff_der`
+(leading `30`/`31`) arms the DER mutators. Parsed objects are printed to a null
+BIO and re-encoded with `i2d_*`. Input capped at 16 KiB; objects freed and the
+error queue cleared per exec. Measured (no-ASAN, clang 18): 63.7k guard sites,
+0.2–1.4 ms/exec standalone, no RSS growth over 100 execs per seed.
+`tests/test_regression_openssl_target.py` pins sniffer agreement and wiring.
 
 ### Vendored libbase64 differential target (libbase64_read)
 
