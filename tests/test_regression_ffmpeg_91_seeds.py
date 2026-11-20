@@ -25,7 +25,7 @@ BEXT_VERSION_OFF = 346
 
 
 class TestCafPaktOverflow:
-    def test_reaches_nb_frames_overflow(self):
+    def test_nb_frames_overflow(self):
         """read_pakt_chunk does `nb_frames += priming`; the add must overflow int64."""
         p = io.BytesIO(caf_pakt_overflow())
 
@@ -48,7 +48,7 @@ class TestCafPaktOverflow:
         # Falsification: the unguarded add must exceed the signed int64 range.
         assert nb_frames + priming > INT64_MAX
 
-    def test_adversarial_priming_nonzero(self):
+    def test_priming_nonzero(self):
         """Adversarial: priming==0 would make the add a no-op; it must be positive."""
         p = io.BytesIO(caf_pakt_overflow())
         p.read(20 + 32)  # magic/version/flags + desc tag/size + desc payload
@@ -58,7 +58,7 @@ class TestCafPaktOverflow:
 
 
 class TestRplIdxOverflow:
-    def test_catalog_offset_lands_on_index_row(self):
+    def test_offset_on_index_row(self):
         """The seek target must equal the header length so the index row is read."""
         data = rpl_idx_overflow()
         lines = data.split(b"\n")
@@ -74,7 +74,7 @@ class TestRplIdxOverflow:
         # Falsification: a drifted offset would seek away from the crafted row.
         assert catalog_off == len(header)
 
-    def test_adversarial_offset_plus_video_size_overflows(self):
+    def test_offset_size_overflows(self):
         """Adversarial: offset+video_size (pre-9.1-guard) must overflow int64."""
         data = rpl_idx_overflow()
         catalog_off = int(data.split(b"\n")[17])
@@ -85,7 +85,7 @@ class TestRplIdxOverflow:
 
 
 class TestWavBextBigalloc:
-    def test_reaches_large_coding_history_alloc(self):
+    def test_large_history_alloc(self):
         """bext size - 602 is the coding_history allocation; it must be large."""
         p = io.BytesIO(wav_bext_bigalloc())
 
@@ -106,7 +106,7 @@ class TestWavBextBigalloc:
         # Falsification: history must exceed 9.1's 1 MiB cap to be 9.0.2-only.
         assert history > 1024 * 1024
 
-    def test_adversarial_probe_header_valid(self):
+    def test_probe_header_valid(self):
         """Adversarial: wav_probe needs >32 bytes and RIFF..WAVE, else no demux."""
         data = wav_bext_bigalloc()
         assert len(data) > 32
