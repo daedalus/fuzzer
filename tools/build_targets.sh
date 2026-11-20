@@ -37,6 +37,7 @@
 # against whichever versioned ffmpeg_read_*.so targets got built.
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
+#   tools/vendor_openssl.sh   -> $FUZZ_VENDOR_ROOT/openssl    (openssl_read.so)
 #   tools/vendor_brainflayer.sh -> $FUZZ_VENDOR_ROOT/brainflayer (ec_pubkey_diff.so, hash_simd_diff.so, brainflayer_read.so)
 #
 # Layout (2026-09-03, see session notes):
@@ -251,6 +252,7 @@ SECP256K1="${SECP256K1_DIR:-$VENDOR/secp256k1}"
 BRAINFLAYER="${BRAINFLAYER_DIR:-$VENDOR/brainflayer}"
 BRAINFLAYER_SECP256K1="$BRAINFLAYER/secp256k1"
 SQLITE="${SQLITE_DIR:-$VENDOR/sqlite}"
+OPENSSL="${OPENSSL_DIR:-$VENDOR/openssl}"
 # Shared by compile_sqlite_objects and the sqlite_read.so link: the wrapper
 # includes sqlite3.h, and a header parsed under different SQLITE_* defines
 # than the library it links against is the classic silent-ABI-mismatch bug
@@ -1335,6 +1337,62 @@ compile_sqlite_objects() {
     fi
 }
 
+# ── Build the OpenSSL libcrypto archive ────────────────────────────
+# Vendored via tools/vendor_openssl.sh (extracts to vendor/openssl/).
+#
+# Not a plain source drop: Configure generates headers and the Makefile, so
+# the build runs out of tree in $TARGETS/openssl/build<suffix>/ and the
+# vendor root stays read-only. One tree per suffix: ASAN, UBSAN and no-san
+# objects must not share an archive.
+#
+# Same shim discipline as lz4/sqlite (Hard Rule 9): libcrypto is built
+# WITHOUT `-include $SHIM`; only openssl_read.c gets it.
+#
+# CFLAGS replace Configure's defaults, so they carry everything:
+#   -fPIC        libcrypto.a is linked into a .so
+#   cov_flag     every libcrypto basic block on the edge map (clang:
+#                trace-pc-guard, gcc: trace-pc), as in compile_sqlite_objects
+#   trace-cmp    cmplog operands come from the library, not the wrapper
+#                (same reason as compile_libbase64_objects)
+#   FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+#                OpenSSL's own fuzz define: deterministic RNG, so one input
+#                replays to one path
+# Options drop everything a DER decoder never reaches (asm hides edges,
+# apps/tests/docs/modules cost build time only).
+# Rebuilt only when the Configure command changes (stamp file).
+OPENSSL_CONFIG_OPTS="no-shared no-asm no-tests no-apps no-docs no-module no-dso no-threads"
+compile_openssl_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -f "$OPENSSL/Configure" ] || return 1
+    local bdir="$TARGETS/openssl/build${suffix}"
+    local cov_flag cmplog_cflags=""
+    cov_flag="$(cov_flag_for_cc "$cc")"
+    [ "$WITH_CMPLOG" -eq 1 ] && cmplog_cflags="-fsanitize-coverage=trace-cmp"
+    local cflags="$flags $cov_flag $cmplog_cflags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
+    local stamp="CC=$cc CFLAGS=$cflags $OPENSSL_CONFIG_OPTS"
+
+    # Up to date: same Configure command, archive present.
+    if [ -f "$bdir/libcrypto.a" ] && [ "$(cat "$bdir/.fuzz_stamp" 2>/dev/null)" = "$stamp" ]; then
+        ok "openssl libcrypto${suffix:+ ($suffix)} (up to date)"
+        return 0
+    fi
+
+    echo "Building openssl libcrypto${suffix:+ ($suffix)} (this takes a few minutes)..."
+    rm -rf "$bdir"
+    mkdir -p "$bdir"
+    local rc=0
+    # shellcheck disable=SC2086
+    (cd "$bdir" && CC="$cc" CFLAGS="$cflags" perl "$OPENSSL/Configure" $OPENSSL_CONFIG_OPTS \
+        && make -j"$(nproc)" build_generated \
+        && make -j"$(nproc)" libcrypto.a) >>"$BUILD_LOG" 2>&1 || rc=$?
+    if [ $rc -ne 0 ]; then
+        warn "openssl libcrypto${suffix:+ ($suffix)} failed"
+        return 1
+    fi
+    printf '%s' "$stamp" > "$bdir/.fuzz_stamp"
+    ok "openssl libcrypto${suffix:+ ($suffix)}"
+}
+
 # ── Compile fuzzgoat library object ────────────────────────────────
 # Fuzzgoat is vendored as source. To avoid multiple-definition errors with
 # the AFL shim (which is injected via `-include $SHIM` into the wrapper TU
@@ -2199,6 +2257,22 @@ build_standalone_so_targets() {
         fi
     else
         warn "sqlite_read${out_suffix}.so: amalgamation failed to compile, skipping"
+    fi
+
+    # openssl_read — vendored OpenSSL (tools/vendor_openssl.sh extracts to
+    # vendor/openssl). libcrypto.a built out of tree, without -include $SHIM.
+    # Generated headers (x509.h, ...) live in the build tree: it goes first.
+    local OPENSSL_BDIR="$TARGETS/openssl/build${suffix}"
+    local OPENSSL_INC="-I$OPENSSL_BDIR/include -I$OPENSSL/include"
+    local OPENSSL_LIBS="$OPENSSL_BDIR/libcrypto.a -lpthread -Wl,--export-dynamic"
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/openssl_read.c" ]; then
+        :  # target source absent — nothing to build
+    elif [ ! -f "$OPENSSL/Configure" ]; then
+        warn "openssl_read${out_suffix}.so: vendor/openssl not found, skipping (run tools/vendor_openssl.sh)"
+    elif compile_openssl_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+        build_so_target "${TARGETS_SRC:-$TARGETS}/openssl_read.c" "$TARGETS/openssl_read${out_suffix}.so" "$OPENSSL_LIBS" "$flags $OPENSSL_INC"
+    else
+        warn "openssl_read${out_suffix}.so: libcrypto failed to build, skipping"
     fi
 }
 
@@ -3187,6 +3261,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "secp256k1_read" "$state" "$([ -d "$SECP256K1/src" ] && echo "found at $SECP256K1" || echo "not vendored — run tools/vendor_secp256k1.sh")"
     state=$([ -f "$SQLITE/sqlite3.c" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "sqlite_read" "$state" "$([ -f "$SQLITE/sqlite3.c" ] && echo "found at $SQLITE" || echo "not vendored — run tools/vendor_sqlite.sh")"
+    state=$([ -f "$OPENSSL/Configure" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "openssl_read" "$state" "$([ -f "$OPENSSL/Configure" ] && echo "found at $OPENSSL" || echo "not vendored — run tools/vendor_openssl.sh")"
     state=$([ -f "$BRAINFLAYER_SECP256K1/src/secp256k1.c" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "ec_pubkey_diff" "$state" "$([ -f "$BRAINFLAYER/ec_pubkey_fast.c" ] && echo "found at $BRAINFLAYER" || echo "not vendored — run tools/vendor_brainflayer.sh")"
     state=$([ -f "$BRAINFLAYER/sha256_pub.c" ] && echo "BUILD" || echo "SKIP")

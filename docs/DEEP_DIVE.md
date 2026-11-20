@@ -32,6 +32,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
   - `json_mutate` (`core/mutations/json_struct.py`, `fuzzgoat_read.c`): regex-lexed JSON tokens; type swap, number/string edge values (`1e309`, `\ud800`), duplicate member, trailing comma, dropped separator, mid-token truncation. Sniffs `{`/`[` after whitespace.
   - `sql_mutate` (`core/mutations/sql_text.py`, `sqlite_read.c` SQL path): keyword swap, literal edges (`zeroblob(2147483647)`, int64 limits, blobs), subquery wrap, clause insert, recursive CTE prefix, statement dup. Sniffs a leading statement keyword; never a DB image.
   - `ecdsa_field_mutate` (`core/mutations/secp_fields.py`, `secp256k1_read.c`): 32-byte payload slots set to 0/n/p/high-S boundary, pubkey prefix 00/05/06/07, `s := n - s`, payload resized to 32/33/64/65/72±1.
+  - `x509_field_mutate` (`core/mutations/x509_fields.py`, `openssl_read.c`): RFC 5280 field edits on the parsed DER tree — `[0]` version 0..3/ff/empty, serial empty/negative/21 octets, OID swap (sig/key algs, curves, extensions, name attrs, malformed arcs), UTCTime/GeneralizedTime edges (pivot years, Feb 30, tag/body mismatch), name string-type swap, BIT STRING unused bits 1/7/8/ff, critical extension injection (creates `[3]`). Sniffs a SEQUENCE whose first child is a SEQUENCE; version/serial/extension modes decline on non-certificate trees. 78% of mutants of a real cert still parse with system OpenSSL; 87 us/call.
   - `tlul_mutate` (`core/mutations/tlul.py`; no in-tree target yet): TL-UL Hardware Fuzzing instruction streams (Trippel et al. 2021; hw-fuzzing `tlul_fuzz_instr.py` defaults: `01` wait, `02 <addr>` read, `03 <addr> <data>` write, LE, variable frames). Insert/delete/dup/swap instructions, address := seen register or edge, address += ±4/1..3/±0x40/0x1000, write data edges and bit flip, wait runs (2..512, core latency), read <-> write. Output always re-decodes. Sniffs the first 256 bytes: all frames valid, >= 1 read/write. Pure Python: numpy frame/address gathers win only at ~600 instructions (bus scan 55 -> 10 us) and lose 3-10x at <= 20 (0.26 -> 2.5 us), so not shipped (Hard Rule 58).
   - `recompress_lz4` / `recompress_png_idat` (`core/mutations/recompress.py`): decode the LZ4 frame or inflate all IDATs, mutate the plaintext, re-encode with every checksum repaired (xxh32/HC/content size; Adler-32 + chunk CRC), so the edit reaches the parser behind the codec.
   - `g711_mutate` (`core/mutations/g711.py`, `ffmpeg_read.c`): A-law/µ-law WAV (fmt tag 6/7) or AU (`.snd` enc 27/1). Decodes one span to linear int16, applies gain/inversion, DC offset, saturating square wave, silence, reverse or noise, clips, re-encodes (nearest-level quantizer, ties up). Length-preserving: headers untouched. Raw headerless G.711 is not sniffed (needs `FUZZ_FFMPEG_EXT=al|ul`).
@@ -1914,7 +1915,7 @@ The build script compiles every target as both an executable and a `.so` shared 
 - `*_noasan.so` — No-ASAN, directly loadable via `ctypes.CDLL()` for high-throughput in-process fuzzing
 - `*_asan.so` — ASAN-instrumented, requires libasan (falls back to subprocess mode automatically)
 - `*_ubsan.so` — UBSAN, built with the ASAN pass
-- `*_nosan.so` — legacy no-ASAN name, still emitted by secp256k1_read and sqlite_read
+- `*_nosan.so` — legacy no-ASAN name, still emitted by secp256k1_read and sqlite_read (openssl_read uses `_noasan`)
 
 Every invocation prints a **build feature matrix** before compiling: an always-on text table
 listing each feature flag (`cmplog`, `tracecmp`, `clang-scov`, `gcc-scov`, `vendor-tracecmp`, `distance`,
@@ -2111,6 +2112,31 @@ an authorizer denying ATTACH/DETACH/PRAGMA on the SQL path, a
 progress-handler opcode budget, and `sqlite3_hard_heap_limit64`. A corrupt
 file returning `SQLITE_CORRUPT`/`SQLITE_NOTADB` is the expected outcome and
 not a finding; a segfault or an assertion failure is.
+
+### Vendored OpenSSL target (openssl_read)
+
+`targets/openssl_read.so` wraps libcrypto from vendored OpenSSL 3.5.x LTS
+(`tools/vendor_openssl.sh` → `$FUZZ_VENDOR_ROOT/openssl/`, sha256-checked).
+`.so`-only, from `build_standalone_so_targets()`.
+
+Not a source drop: `compile_openssl_objects()` runs `Configure` out of tree in
+`$FUZZ_BUILD_ROOT/openssl/build<suffix>/` (one tree per sanitizer; vendor root
+stays read-only) and builds `libcrypto.a` without the shim. `CFLAGS` replace
+Configure's defaults: `-fPIC`, `cov_flag_for_cc`, `trace-cmp` under cmplog, and
+`-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION` (deterministic RNG). Options:
+`no-shared no-asm no-tests no-apps no-docs no-module no-dso no-threads`.
+Rebuilt only when the Configure command changes (`.fuzz_stamp`); first build
+~1.5 min on 4 cores. Generated headers (`x509.h`) come from the build tree,
+so its `include/` precedes the vendor one.
+
+**No mode byte**: the whole input goes to `d2i_X509`, `d2i_X509_CRL`,
+`d2i_X509_REQ`, `d2i_PKCS7`, `d2i_AutoPrivateKey`, `d2i_PUBKEY`, so `_sniff_der`
+(leading `30`/`31`) arms the DER mutators. Parsed objects are printed to a null
+BIO and re-encoded with `i2d_*`. Input capped at 16 KiB; objects freed and the
+error queue cleared per exec. Measured (no-ASAN, clang 18): 63.7k guard sites,
+0.2–1.4 ms/exec standalone, no RSS growth over 100 execs per seed.
+`tests/test_regression_openssl_target.py` pins sniffer agreement and wiring.
+`x509_field_mutate` (above) adds certificate-aware edits on top of the generic DER operators.
 
 ### Vendored libbase64 differential target (libbase64_read)
 

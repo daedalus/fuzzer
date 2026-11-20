@@ -252,6 +252,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "der_tag_mutate",
         "der_tlv_reorder",
         "der_tlv_insert",
+        "x509_field_mutate",
         "jpeg2000_chunk_mutate",
         "magicyuv_chunk_mutate",
         "av1_rtp_chunk_mutate",
@@ -474,6 +475,25 @@ def _sniff_der(d: bytes) -> bool:
         and d[0] in (0x30, 0x31)
         and (d[1] < 0x80 or d[1] in (0x80, 0x81, 0x82, 0x83, 0x84))
     )
+
+
+# DER long-form length bytes allowed for a certificate's outer SEQUENCE (<= 16 MiB).
+_X509_LONG_FORMS = (0x81, 0x82, 0x83)
+
+
+def _sniff_x509(d: bytes) -> bool:
+    """True when d opens like X.509 (cert/CRL/CSR): a definite-length
+    SEQUENCE whose first child is another SEQUENCE (tbsCertificate).
+    Example: ``30 82 03 a1 30 82 02 89 ...``."""
+    if len(d) < 4 or d[0] != 0x30:
+        return False
+
+    first = d[1]
+    if first >= 0x80 and first not in _X509_LONG_FORMS:
+        return False
+
+    hdr = 2 if first < 0x80 else 2 + (first & 0x7F)
+    return len(d) > hdr + 1 and d[hdr] == 0x30
 
 
 # ── Format gating for the "regularity" (statistical) mutation band ───────
@@ -718,6 +738,8 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "der_tag_mutate": _sniff_der,
     "der_tlv_reorder": _sniff_der,
     "der_tlv_insert": _sniff_der,
+    # X.509 cert/CRL/CSR: SEQUENCE whose first child is a SEQUENCE (tbs).
+    "x509_field_mutate": _sniff_x509,
     # regularity band: format-shaped ops (see comment above their sniffers)
     "spectral_peak": _sniff_dct_transform_coded,
     "degenerate_geometry": _sniff_mesh_or_vector_geometry,
