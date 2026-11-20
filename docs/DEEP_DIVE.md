@@ -2027,9 +2027,12 @@ fuzzer-tool fuzz ~/fuzzing/builds/ffmpeg_read_*_asan -d <corpus>        (multi-t
 (`FFMPEG_GIT_URL`; dev tags dropped, `sort -V`). `FFMPEG_VERSIONS="a b c"` skips resolution.
 `build_ffmpeg_versions <suffix> <flags>` runs in the ASAN (`_asan`) and no-ASAN (`_noasan`) passes,
 reuses `build_vendored_ffmpeg_sancov` (its 2nd arg names the tree) and links an executable and a `.so`
-per version. `_ubsan` links its own `-fsanitize=undefined` tree: on the coverage-only tree only the
-wrapper was checked, and libav* overflows (9.0.2 `cafdec.c:283`, `rpl.c:308`) went unreported.
-Load one version's `.so` per process (libav* symbols collide); multi-target runs one
+per version. `_ubsan` links its own tree built with `$UBSAN_CFLAGS`
+(`-fsanitize=undefined -fno-sanitize-recover=undefined`, `tools/lib/asan_flags.sh`): on the
+coverage-only tree only the wrapper was checked, and libav* overflows (9.0.2 `cafdec.c:283`,
+`rpl.c:308`) went unreported. `-fno-sanitize-recover` makes each site fatal (the archive carries
+`__ubsan_handle_*_abort`); with the fuzzer's `abort_on_error=1` the overflow is a SIGABRT (rc=134)
+rather than a recoverable print that returns rc=0 and is never seen. Load one version's `.so` per process (libav* symbols collide); multi-target runs one
 process per version, one SHM map each, shared corpus. A crash
 unique to one version is a regression or a silent fix. Test: `tests/test_regression_ffmpeg_multi_version.py`.
 

@@ -1835,7 +1835,7 @@ STUBEOF
     fi
     # UBSAN must instrument FFmpeg itself, not just the ffmpeg_read.c wrapper.
     if [ "$asan_suffix" = "_ubsan" ]; then
-        COV_FLAGS="-fsanitize=undefined $COV_FLAGS"
+        COV_FLAGS="$UBSAN_CFLAGS $COV_FLAGS"
         LINK_FLAGS="-fsanitize=undefined"
     fi
     # --frontier: clang source coverage instead of sancov (tools/frontier.py).
@@ -2024,7 +2024,7 @@ build_ffmpeg_versions() {
 # clang for -fsanitize-coverage=trace-pc and runs only under --ngram.
 build_ffmpeg_version_ubsan() {
     command -v clang &>/dev/null || { warn "clang not found — skipping ffmpeg_read_<ver>_ubsan"; return 0; }
-    build_ffmpeg_versions "_ubsan" "-fsanitize=undefined" "clang"
+    build_ffmpeg_versions "_ubsan" "$UBSAN_CFLAGS" "clang"
 }
 # IJON_SET / IJON_STATE annotations in ffmpeg_read.c change coverage even
 # without --ijon (synthetic edges; IJON_STATE moves edge ids), so they live
@@ -3405,9 +3405,9 @@ fi
 # Uses nosan (coverage-only) FFmpeg libs — UBSAN doesn't need ASAN instrumentation.
 if [ "$BUILD_ASAN" -eq 1 ]; then
     echo "  Building UBSAN targets..."
-    build_ffmpeg_versions "_ubsan" "-fsanitize=undefined" "clang"
-    build_simple_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
-    build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
+    build_ffmpeg_versions "_ubsan" "$UBSAN_CFLAGS" "clang"
+    build_simple_so_targets "_ubsan" "$UBSAN_CFLAGS" "UBSAN" "clang"
+    build_standalone_so_targets "_ubsan" "$UBSAN_CFLAGS" "UBSAN" "clang"
 fi
 # MSAN / TSAN: opt-in, executables only (see build_sanitizer_targets).
 if [ "$WITH_MSAN" -eq 1 ]; then
@@ -3471,8 +3471,8 @@ if [ "$WITH_CLANG_SCOV" -eq 1 ]; then
         # them; without that guard this would build UBSAN targets that the
         # rest of the run never asked for.
         if [ "$BUILD_ASAN" -eq 1 ]; then
-            build_simple_so_targets "_ubsan" "-fsanitize=undefined" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
-            build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+            build_simple_so_targets "_ubsan" "$UBSAN_CFLAGS" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+            build_standalone_so_targets "_ubsan" "$UBSAN_CFLAGS" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         fi
     fi
 fi
@@ -3497,8 +3497,8 @@ if [ "$WITH_GCC_SCOV" -eq 1 ]; then
         build_standalone_so_targets "_nosan" "" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
         # UBSAN .so variants carry fuzz_shm_run too; same gate as the clang pass.
         if [ "$BUILD_ASAN" -eq 1 ]; then
-            build_simple_so_targets "_ubsan" "-fsanitize=undefined" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
-            build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+            build_simple_so_targets "_ubsan" "$UBSAN_CFLAGS" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+            build_standalone_so_targets "_ubsan" "$UBSAN_CFLAGS" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
         fi
     fi
 fi

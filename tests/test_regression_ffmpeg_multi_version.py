@@ -348,8 +348,10 @@ def _configure_args(tmp_path: Path, tree_suffix: str) -> str:
         f"{name}() {{ :; }}"
         for name in ["ok", "warn", "warn_failed", "log_section", "warn_if_frame_pointer_omitted"]
     )
+    # Source the real sanitizer-flags file so UBSAN_CFLAGS carries its true value.
+    flags_sh = BUILD_SCRIPT.parent / "lib" / "asan_flags.sh"
     script = (
-        f'{stubs}\ncow_copy_tree() {{ cp -a "$1"/. "$2"/; }}\n{fn.group(0)}\n'
+        f'{stubs}\ncow_copy_tree() {{ cp -a "$1"/. "$2"/; }}\n. "{flags_sh}"\n{fn.group(0)}\n'
         f'VENDOR="{vendor}"; FUZZ_BUILD_ROOT="{build}"; REPO_ROOT="{tmp_path}"\n'
         f'BUILD_LOG="{tmp_path}/build.log"; WITH_FFMPEG_SANCOV=1; FORCE_REBUILD=0; USE_CCACHE=0\n'
         'ASAN_CFLAGS="-fsanitize=address"\n'
@@ -369,6 +371,17 @@ def test_regression_ubsan_tree_configured_with_ubsan(tmp_path):
     assert "-fsanitize=undefined" in cflags
     assert "-fsanitize=undefined" in ldflags
     assert "-fsanitize=address" not in argv
+
+
+def test_regression_ubsan_tree_no_recover(tmp_path):
+    """_ubsan errors must abort, not print-and-continue: the fuzzer catches a
+    SIGABRT, never a recoverable report (rc=0) on the in-process path."""
+    cflags = next(
+        a
+        for a in _configure_args(tmp_path, "_ubsan").splitlines()
+        if a.startswith("--extra-cflags=")
+    )
+    assert "-fno-sanitize-recover=undefined" in cflags
 
 
 def test_falsify_plain_tree_has_no_ubsan(tmp_path):
@@ -396,6 +409,28 @@ def test_regression_versions_matrix_wired_in_main():
     )
     assert re.search(r"build_ngram_so_targets\n\s+build_ffmpeg_version_ngram", main)
     assert "--ffmpeg-opts=*) FFMPEG_OPTS=" in text
+
+
+def test_regression_ubsan_cflags_constant_no_recover():
+    """The shared UBSAN_CFLAGS constant carries -fno-sanitize-recover=undefined,
+    the single source of truth for every _ubsan build site."""
+    flags_sh = (BUILD_SCRIPT.parent / "lib" / "asan_flags.sh").read_text()
+    m = re.search(r'^UBSAN_CFLAGS="([^"]*)"', flags_sh, re.M)
+    assert m
+    assert "-fno-sanitize-recover=undefined" in m.group(1)
+
+
+def test_regression_ubsan_wrapper_uses_cflags_constant():
+    """The wrapper (ffmpeg_read.c) is built through UBSAN_CFLAGS, so it inherits
+    the non-recover flag rather than a stale literal -fsanitize=undefined."""
+    body = re.search(
+        r"^build_ffmpeg_version_ubsan\(\) \{.*?^\}",
+        BUILD_SCRIPT.read_text(),
+        re.M | re.S,
+    )
+    assert body
+    assert '"$UBSAN_CFLAGS"' in body.group(0)
+    assert '"-fsanitize=undefined"' not in body.group(0)
 
 
 def test_ijon_variant_links_coverage_tree_with_define(tmp_path):
