@@ -5408,6 +5408,36 @@ class OperatorEngine:
         out = x509_field_mutate(bytes(buf), self.ctx._rng, self._max_len())
         return self._or_declined("x509_field_mutate", out, buf)
 
+    def _op_ber_form_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.ber_forms import ber_form_mutate  # noqa: PLC0415
+
+        out = ber_form_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("ber_form_mutate", out, buf)
+
+    def _op_cer_form_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.cer_forms import cer_form_mutate  # noqa: PLC0415
+
+        out = cer_form_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("cer_form_mutate", out, buf)
+
+    def _op_der_canon_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.der_canon import der_canon_mutate  # noqa: PLC0415
+
+        out = der_canon_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("der_canon_mutate", out, buf)
+
+    def _op_asn1_value_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.asn1_values import asn1_value_mutate  # noqa: PLC0415
+
+        out = asn1_value_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("asn1_value_mutate", out, buf)
+
+    def _op_per_len_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.per import per_len_mutate  # noqa: PLC0415
+
+        out = per_len_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("per_len_mutate", out, buf)
+
     def _op_tlul_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.tlul import tlul_mutate  # noqa: PLC0415
 
