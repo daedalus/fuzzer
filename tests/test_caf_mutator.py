@@ -129,10 +129,12 @@ class TestMutate:
         assert mutate_caf(b"\x00" * 64, rng=ScriptedRng()) is None
 
     def test_max_len_truncates(self):
+        full = mutate_caf(SAMPLE, rng=ScriptedRng(randints=[Op.VERSION], choice_idxs=[0]))
         out = mutate_caf(
             SAMPLE, max_len=20, rng=ScriptedRng(randints=[Op.VERSION], choice_idxs=[0])
         )
-        assert len(out) == 20
+        assert out == full[:20]
+        assert out != SAMPLE[:20]
 
     # Adversarial: every op on every truncation never raises.
     def test_truncations_never_raise(self):
