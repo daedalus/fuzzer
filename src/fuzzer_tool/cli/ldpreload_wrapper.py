@@ -170,7 +170,11 @@ def asan_strict_enabled() -> bool:
     return os.environ.get("FUZZER_ASAN_STRICT") == "1"
 
 
-_UBSAN_DEFAULTS = ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1")
+# Recover mode, as ASAN: in direct_lite a halting report's Die() left UBSAN's
+# report lock held after the guard recovered it, and the next report killed
+# the fuzzer ("nested bug in the same thread"). Reports reach the classifier
+# via stderr. abort_on_error=1 keeps -fno-sanitize-recover sites a SIGABRT.
+_UBSAN_DEFAULTS = ("halt_on_error=0", "abort_on_error=1", "print_stacktrace=1")
 # MSan aborts via exit(), not abort(): a distinct exit code (OSS-Fuzz uses 86)
 # separates a use-of-uninitialized-value report from a normal target exit.
 _MSAN_DEFAULTS = ("exit_code=86", "symbolize=0")
