@@ -43,6 +43,7 @@ defaults to ~/fuzzing/ffmpeg_91_potential_crashes. Offline; not wired into `fuzz
 import argparse
 import os
 import struct
+import tempfile
 
 DEFAULT_OUT = os.path.expanduser("~/fuzzing/ffmpeg_91_potential_crashes")
 
@@ -183,10 +184,18 @@ def write_seeds(seeds_dir):
     for name, build in SEEDS.items():
         data = build()
         path = os.path.join(seeds_dir, name)
-        tmp = f"{path}.tmp"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)  # atomic publish
+
+        # mkstemp: unique O_EXCL name, so no symlink follow or concurrent clash;
+        # `.tmp` is in load_corpus's skip list.
+        fd, tmp = tempfile.mkstemp(dir=seeds_dir, prefix=f".{name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)  # atomic publish
+        except BaseException:
+            os.unlink(tmp)
+            raise
+
         print(f"{name}: {len(data)}B")
 
 

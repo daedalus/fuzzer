@@ -10,14 +10,19 @@ seed that no longer lands on the bug.
 from __future__ import annotations
 
 import io
+import os
 import struct
 
+import pytest
+from tools import gen_ffmpeg_91_seeds as gen
 from tools.gen_ffmpeg_91_seeds import (
     BEXT_FIXED_SIZE,
     INT64_MAX,
+    SEEDS,
     caf_pakt_overflow,
     rpl_idx_overflow,
     wav_bext_bigalloc,
+    write_seeds,
 )
 
 # version field offset inside the 602-byte BEXT prologue (wav_parse_bext_tag)
@@ -112,3 +117,39 @@ class TestWavBextBigalloc:
         assert len(data) > 32
         assert data[0:4] == b"RIFF"
         assert data[8:12] == b"WAVE"
+
+
+class TestWriteSeeds:
+    def test_publishes_exact_seeds(self, tmp_path):
+        """Falsification: every seed lands with builder bytes, no temp left."""
+        write_seeds(str(tmp_path))
+
+        assert sorted(os.listdir(tmp_path)) == sorted(SEEDS)
+        for name, build in SEEDS.items():
+            assert (tmp_path / name).read_bytes() == build()
+
+    def test_regression_tmp_symlink(self, tmp_path):
+        """Adversarial: a planted `<seed>.tmp` symlink must not be written through."""
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"keep")
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        for name in SEEDS:
+            (seeds / f"{name}.tmp").symlink_to(victim)
+
+        write_seeds(str(seeds))
+
+        assert victim.read_bytes() == b"keep"
+
+    def test_regression_replace_fails(self, tmp_path, monkeypatch):
+        """Adversarial: a failed rename leaves neither seed nor temp behind."""
+
+        def boom(_src, _dst):
+            raise OSError("replace failed")
+
+        monkeypatch.setattr(gen.os, "replace", boom)
+
+        with pytest.raises(OSError):
+            write_seeds(str(tmp_path))
+
+        assert os.listdir(tmp_path) == []
