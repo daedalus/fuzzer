@@ -27,6 +27,7 @@ Returns None to decline: unparseable input, no site, no-op, or over budget.
 from __future__ import annotations
 
 from fuzzer_tool.core.mutations.der import DerNode, parse_der, serialize_der
+from fuzzer_tool.core.mutations.der import tag_sites as _tag_sites
 
 # ASN.1 universal tags (X.680).
 TAG_BOOLEAN = 0x01
@@ -129,21 +130,6 @@ EXTENSIONS = (
     # authorityKeyIdentifier: keyIdentifier + serial without issuer
     (bytes.fromhex("551d23"), b"\x30\x07\x80\x01\x00\x82\x02\x00\x01"),
 )
-
-
-def _walk(nodes: list[DerNode]) -> list[DerNode]:
-    """Pre-order (document-order) node list."""
-    out: list[DerNode] = []
-    stack = list(reversed(nodes))
-    while stack:
-        n = stack.pop()
-        out.append(n)
-        stack.extend(reversed(n.children))
-    return out
-
-
-def _tag_sites(nodes: list[DerNode], tags) -> list[DerNode]:
-    return [n for n in _walk(nodes) if len(n.tag) == 1 and n.tag[0] in tags]
 
 
 def _tbs(nodes: list[DerNode]) -> DerNode | None:

@@ -175,6 +175,27 @@ def parse_der(data: bytes) -> list[DerNode] | None:
     return nodes
 
 
+def walk_der(nodes: list[DerNode]) -> list[DerNode]:
+    """Pre-order (document-order) node list."""
+    out: list[DerNode] = []
+    stack = list(reversed(nodes))
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        stack.extend(reversed(n.children))
+    return out
+
+
+def tag_sites(nodes: list[DerNode], tags) -> list[DerNode]:
+    """Single-byte-tag nodes whose tag byte is in *tags*, document order."""
+    return [n for n in walk_der(nodes) if len(n.tag) == 1 and n.tag[0] in tags]
+
+
+def encode_tlv(tag: bytes, value: bytes) -> bytes:
+    """Tag + DER-minimal length + value."""
+    return tag + _encode_length(len(value)) + value
+
+
 def _serialize_node(node, target, tvalue, tlength, ttag) -> bytes:
     """Serialize one node; byte-minimal for untouched subtrees."""
     if node is target:

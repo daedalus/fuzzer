@@ -35,6 +35,7 @@ from fuzzer_tool.core.mutations.h264_ps import sniff_h264_ps as _sniff_h264_ps
 from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.ivf import sniff_ivf as _sniff_ivf
+from fuzzer_tool.core.mutations.per import parse_per
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
@@ -258,6 +259,11 @@ _CATEGORIES: dict[str, set[str]] = {
         "der_tlv_reorder",
         "der_tlv_insert",
         "x509_field_mutate",
+        "ber_form_mutate",
+        "cer_form_mutate",
+        "der_canon_mutate",
+        "asn1_value_mutate",
+        "per_len_mutate",
         "jpeg2000_chunk_mutate",
         "magicyuv_chunk_mutate",
         "av1_rtp_chunk_mutate",
@@ -487,6 +493,12 @@ def _sniff_der(d: bytes) -> bool:
         and d[0] in (0x30, 0x31)
         and (d[1] < 0x80 or d[1] in (0x80, 0x81, 0x82, 0x83, 0x84))
     )
+
+
+def _sniff_per(d: bytes) -> bool:
+    """True when d is exactly a chain of PER length-prefixed fields
+    (``02 ab 03 xyz``). Rejects on the first bad determinant."""
+    return parse_per(d) is not None
 
 
 # DER long-form length bytes allowed for a certificate's outer SEQUENCE (<= 16 MiB).
@@ -752,6 +764,13 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "der_tlv_insert": _sniff_der,
     # X.509 cert/CRL/CSR: SEQUENCE whose first child is a SEQUENCE (tbs).
     "x509_field_mutate": _sniff_x509,
+    # ASN.1 encoding-rule ops: BER/CER/DER encodings and values ride on TLV.
+    "ber_form_mutate": _sniff_der,
+    "cer_form_mutate": _sniff_der,
+    "der_canon_mutate": _sniff_der,
+    "asn1_value_mutate": _sniff_der,
+    # PER: no tags; input is an exact chain of length-prefixed fields.
+    "per_len_mutate": _sniff_per,
     # regularity band: format-shaped ops (see comment above their sniffers)
     "spectral_peak": _sniff_dct_transform_coded,
     "degenerate_geometry": _sniff_mesh_or_vector_geometry,
