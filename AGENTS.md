@@ -188,7 +188,7 @@ dictionaries/     # Format token dicts (png.dict)
 vendor/           # Vendored library sources — gitignored, fetched by tools/vendor_<lib>.sh.
                   #   Default location is $FUZZ_VENDOR_ROOT (~/fuzzing/vendoring/); this in-tree
                   #   `vendor/` is the legacy path (use --in-tree-vendor for back-compat).
-                  #   FFmpeg (default 9.0.1), fuzzgoat, grep, lz4, secp256k1, sqlite (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
+                  #   FFmpeg (default 9.1), fuzzgoat, grep, lz4, secp256k1, sqlite (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
 docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agent reference files), per-feature docs
 
 ~/fuzzing/        # OUT-OF-TREE build + cache roots (default layout; override via env vars)
