@@ -97,6 +97,10 @@ class _HeaderCoveringMutator(MutatorBase):
     def _gate(self, data: bytes) -> bool:
         raise NotImplementedError
 
+    def _build_rows(self, rng: Any) -> list[tuple[int, ...]]:
+        vs = tuple(f.values for f in self.fields)
+        return covering_array.generate(vs, t=2, rng=rng, strategy=covering_array.OPERATOR_STRATEGY)
+
     def _ok(self, data: bytes) -> bool:
         return len(data) >= self._header_len and self._gate(data)
 
@@ -118,10 +122,7 @@ class _HeaderCoveringMutator(MutatorBase):
         # Built once from the fuzzer's rng (reproducible under --seed), then
         # round-robin: redrawing per call would drop the coverage guarantee.
         if self._rows is None:
-            vs = tuple(f.values for f in self.fields)
-            self._rows = covering_array.generate(
-                vs, t=2, rng=rng, strategy=covering_array.OPERATOR_STRATEGY
-            )
+            self._rows = self._build_rows(rng)
 
         row = self._rows[self._idx % len(self._rows)]
         self._idx += 1
