@@ -214,7 +214,7 @@ def _versions(tmp_path: Path, variant: str, stale: str = "", opts: str = "") -> 
     """Run build_ffmpeg_versions for one variant against stubbed builders; return their calls."""
     vendor, build = tmp_path / "vendor", tmp_path / "build"
     _tree(vendor, "9.0.2")
-    for root in ["ffmpeg-9.0.2", "ffmpeg-9.0.2_asan"]:
+    for root in ["ffmpeg-9.0.2", "ffmpeg-9.0.2_asan", "ffmpeg-9.0.2_ubsan"]:
         (build / root / "libavformat").mkdir(parents=True)
         (build / root / "libavformat" / "libavformat.a").write_text("")
     if stale:
@@ -292,9 +292,8 @@ def test_regression_versions_wired_into_both_passes():
     assert re.search(r'build_ffmpeg_versions "_noasan" ""', main)
 
 
-def test_regression_versions_ubsan_and_ngram_variants(tmp_path):
-    """ubsan / ng<k> link the coverage-only tree and carry their own flags, exe and .so."""
-    ubsan = "\n".join(_versions(tmp_path / "u", '"_ubsan" "-fsanitize=undefined" "clang"'))
+def test_regression_versions_ngram_variant(tmp_path):
+    """ng<k> links the coverage-only tree and carries its own flags, exe and .so."""
     ng = "\n".join(
         _versions(
             tmp_path / "g",
@@ -302,18 +301,80 @@ def test_regression_versions_ubsan_and_ngram_variants(tmp_path):
         )
     )
 
-    # coverage-only tree (no _asan suffix): ASAN archives would leave __asan_* undefined
-    assert "build_vendored_ffmpeg_sancov  ffmpeg-9.0.2" in ubsan
-    assert re.search(
-        r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_ubsan .*-fsanitize=undefined clang -I\S+/ffmpeg-9\.0\.2$",
-        ubsan,
-        re.M,
-    )
-    assert re.search(r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_ubsan\.so ", ubsan)
-
     assert re.search(r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_ng2 .*__AFL_NGRAM_K=2", ng)
     assert re.search(r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_ng2\.so .*__AFL_NGRAM_K=2", ng)
     assert "_asan" not in ng
+
+
+def test_regression_ubsan_links_ubsan_tree(tmp_path):
+    """_ubsan linked the coverage-only tree: FFmpeg itself had no UBSAN checks."""
+    ubsan = "\n".join(_versions(tmp_path, '"_ubsan" "-fsanitize=undefined" "clang"'))
+
+    assert "build_vendored_ffmpeg_sancov _ubsan ffmpeg-9.0.2" in ubsan
+    assert re.search(
+        r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_ubsan .*-fsanitize=undefined clang -I\S+/ffmpeg-9\.0\.2_ubsan$",
+        ubsan,
+        re.M,
+    )
+    assert re.search(
+        r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_ubsan\.so .*-I\S+/ffmpeg-9\.0\.2_ubsan( |$)",
+        ubsan,
+        re.M,
+    )
+
+
+def test_regression_ubsan_stale_tree_no_fallback(tmp_path):
+    """Adversarial: stale UBSAN tree, current coverage-only tree -> link nothing."""
+    calls = _versions(
+        tmp_path, '"_ubsan" "-fsanitize=undefined" "clang"', stale="ffmpeg-9.0.2_ubsan"
+    )
+
+    assert not any(c.startswith(("build_target", "build_so_target")) for c in calls)
+    assert any(c.startswith("warn_failed") for c in calls)
+
+
+def _configure_args(tmp_path: Path, tree_suffix: str) -> str:
+    """Run build_vendored_ffmpeg_sancov with a recording configure; return its argv."""
+    vendor, build, argv = tmp_path / "vendor", tmp_path / "build", tmp_path / "argv"
+    src = vendor / "ffmpeg-9.0.2"
+    src.mkdir(parents=True)
+    (src / "configure").write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{argv}"\nexit 1\n')
+    (src / "configure").chmod(0o755)
+
+    text = BUILD_SCRIPT.read_text()
+    fn = re.search(r"^build_vendored_ffmpeg_sancov\(\) \{.*?^\}", text, re.M | re.S)
+    assert fn
+    stubs = "\n".join(
+        f"{name}() {{ :; }}"
+        for name in ["ok", "warn", "warn_failed", "log_section", "warn_if_frame_pointer_omitted"]
+    )
+    script = (
+        f'{stubs}\ncow_copy_tree() {{ cp -a "$1"/. "$2"/; }}\n{fn.group(0)}\n'
+        f'VENDOR="{vendor}"; FUZZ_BUILD_ROOT="{build}"; REPO_ROOT="{tmp_path}"\n'
+        f'BUILD_LOG="{tmp_path}/build.log"; WITH_FFMPEG_SANCOV=1; FORCE_REBUILD=0; USE_CCACHE=0\n'
+        'ASAN_CFLAGS="-fsanitize=address"\n'
+        f'build_vendored_ffmpeg_sancov "{tree_suffix}" ffmpeg-9.0.2\n'
+    )
+    r = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return argv.read_text()
+
+
+def test_regression_ubsan_tree_configured_with_ubsan(tmp_path):
+    """_ubsan tree: FFmpeg compiled and linked with -fsanitize=undefined."""
+    argv = _configure_args(tmp_path, "_ubsan")
+
+    cflags = next(a for a in argv.splitlines() if a.startswith("--extra-cflags="))
+    ldflags = next(a for a in argv.splitlines() if a.startswith("--extra-ldflags="))
+    assert "-fsanitize=undefined" in cflags
+    assert "-fsanitize=undefined" in ldflags
+    assert "-fsanitize=address" not in argv
+
+
+def test_falsify_plain_tree_has_no_ubsan(tmp_path):
+    """Falsification: the coverage-only tree stays sanitizer-free."""
+    argv = _configure_args(tmp_path, "")
+    assert "-fsanitize=" not in argv.replace("-fsanitize-coverage=", "")
 
 
 def test_regression_versions_opts_filter_skips_unlisted(tmp_path):
