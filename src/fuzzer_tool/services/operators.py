@@ -5333,6 +5333,55 @@ class OperatorEngine:
         out = mutate_g711(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("g711_mutate", out, buf)
 
+    def _op_ivf_chunk_mutate(self, buf, _byte_idx, _data):
+        """IVF header fields (fourcc, dims, time base), frame size/pts, frame order."""
+        from fuzzer_tool.core.mutations.ivf import mutate_ivf  # noqa: PLC0415
+
+        out = mutate_ivf(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("ivf_chunk_mutate", out, buf)
+
+    def _op_ac3_frame_mutate(self, buf, _byte_idx, _data):
+        """AC-3/E-AC-3 header fields or payload bits, CRC repaired; frame order."""
+        from fuzzer_tool.core.mutations.ac3 import mutate_ac3  # noqa: PLC0415
+
+        out = mutate_ac3(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("ac3_frame_mutate", out, buf)
+
+    def _op_dca_frame_mutate(self, buf, _byte_idx, _data):
+        """DTS core header fields (NBLKS, FSIZE, AMODE, ...); frame order."""
+        from fuzzer_tool.core.mutations.dca import mutate_dca  # noqa: PLC0415
+
+        out = mutate_dca(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("dca_frame_mutate", out, buf)
+
+    def _op_h264_ps_mutate(self, buf, _byte_idx, _data):
+        """Rewrite one exp-Golomb-aware H.264 SPS/PPS field (Annex B)."""
+        from fuzzer_tool.core.mutations.h264_ps import mutate_h264_ps  # noqa: PLC0415
+
+        out = mutate_h264_ps(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("h264_ps_mutate", out, buf)
+
+    def _op_flac_frame_mutate(self, buf, _byte_idx, _data):
+        """FLAC frame header fields or subframe bits, CRC-8/CRC-16 repaired; frame order."""
+        from fuzzer_tool.core.mutations.flac_frame import mutate_flac_frame  # noqa: PLC0415
+
+        out = mutate_flac_frame(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("flac_frame_mutate", out, buf)
+
+    def _op_mp4_codec_cfg_mutate(self, buf, _byte_idx, _data):
+        """avcC/hvcC/esds fields, or an avcC SPS/PPS field with boxes resized."""
+        from fuzzer_tool.core.mutations.mp4_codec_cfg import mutate_mp4_cfg  # noqa: PLC0415
+
+        out = mutate_mp4_cfg(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("mp4_codec_cfg_mutate", out, buf)
+
+    def _op_aac_asc_mutate(self, buf, _byte_idx, _data):
+        """One AAC AudioSpecificConfig field inside an MP4 esds."""
+        from fuzzer_tool.core.mutations.aac_asc import mutate_aac_asc  # noqa: PLC0415
+
+        out = mutate_aac_asc(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("aac_asc_mutate", out, buf)
+
     # ── Token-level text formats (core/mutations/{json_struct,sql_text}) ──
 
     def _op_json_mutate(self, buf, _byte_idx, _data):

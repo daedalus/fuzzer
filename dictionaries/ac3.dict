@@ -1,0 +1,3 @@
+# AC-3 / E-AC-3 sync word (A/52), big- and byte-swapped.
+sync = "\x0B\x77"
+sync_swapped = "\x77\x0B"
