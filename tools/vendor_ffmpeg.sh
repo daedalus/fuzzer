@@ -10,9 +10,9 @@
 #   tools/vendor_ffmpeg.sh --fast       # gcc, no instrumentation (fastest build, no coverage)
 #                                       #   -> vendor/ffmpeg_fast
 #   tools/vendor_ffmpeg.sh --top=3      # sources only, newest patch of the 3 newest release
-#                                       #   lines -> vendor/ffmpeg-<ver> (e.g. 9.0.2, 8.1.3, 8.0.3);
+#                                       #   lines -> vendor/ffmpeg-<ver> (e.g. 9.1, 9.0.2, 8.1.3);
 #                                       #   build_targets.sh builds ffmpeg_read_<ver>_{asan,noasan,ubsan,ng2,ng3}{,.so} from each.
-#                                       #   FFMPEG_VERSIONS="9.0.2 8.1.3" skips tag resolution.
+#                                       #   FFMPEG_VERSIONS="9.1 9.0.2" skips tag resolution.
 #
 # Component set:
 #   default            = full (all demuxers/decoders/parsers/bsfs) — matches upstream fuzzing
@@ -49,7 +49,7 @@ else
 fi
 mkdir -p "$VENDOR_DIR"
 
-FFMPEG_VERSION="${FFMPEG_VERSION:-9.0.1}"
+FFMPEG_VERSION="${FFMPEG_VERSION:-9.1}"
 FFMPEG_UPSTREAM="https://github.com/FFmpeg/FFmpeg"
 FFMPEG_GIT_URL="${FFMPEG_GIT_URL:-$FFMPEG_UPSTREAM}"
 # Configure flags shared with build_targets.sh (asm off, explicit deps).
@@ -243,7 +243,7 @@ apply_patches() {
             return 1
         fi
     else
-        # Already applied iff it reverses cleanly (upstream in 9.0.2+).
+        # Already applied iff it reverses cleanly (upstream in 9.0.2+, 9.1).
         if (cd "$FFMPEG_DIR" && git apply --check -R "$patch_file" 2>/dev/null); then
             echo "  OK: Patch already applied"
         else

@@ -260,7 +260,7 @@ What the counters buy:
 |---|---|---|
 | `png_read`, `jpeg_read` | libpng + zlib, libjpeg | `--ngram` adds `_ng2`/`_ng3` flavors here and for most other targets |
 | `zlib_read`, `gzip_read` | zlib | |
-| `ffmpeg_read` | FFmpeg (default 9.0.1) | built only as `ffmpeg_read_<ver>_<opts>`; full demux→decode chain; link libraries derived from `ffbuild/config.mak` rather than hardcoded |
+| `ffmpeg_read` | FFmpeg (default 9.1) | built only as `ffmpeg_read_<ver>_<opts>`; full demux→decode chain; link libraries derived from `ffbuild/config.mak` rather than hardcoded |
 | `sqlite_read` | SQLite amalgamation | `deserialize` + `integrity_check` + full table scan, sandboxed to `:memory:` with an authorizer and a hard heap limit; **no mode byte**, so the 16-byte magic stays at offset 0 for the mutator sniffer |
 | `lz4_read` | LZ4 | block and frame APIs |
 | `libbase64_read` | libbase64 | differential: every SIMD codec (SSSE3→AVX-512 VBMI) vs the plain codec, encode/decode/stream |
