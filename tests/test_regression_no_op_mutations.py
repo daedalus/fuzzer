@@ -422,6 +422,12 @@ def _battery() -> list[bytes]:
         + (1).to_bytes(4, "big")
         + bytes(8)
         + bytes(range(0, 256, 8)),
+        # ivf_chunk_mutate: 32-byte DKIF header + one 3-byte frame.
+        b"DKIF" + bytes(4) + b"VP80" + bytes(20) + (3).to_bytes(4, "little") + bytes(8) + b"abc",
+        # ac3_frame_mutate: one 128-byte AC-3 frame (fscod 0, frmsizecod 0, bsid 8).
+        b"\x0b\x77" + bytes(3) + b"\x40" + bytes(122),
+        # dca_frame_mutate: one 128-byte DTS core frame (FSIZE 127).
+        b"\x7f\xfe\x80\x01\x80\x00\x07\xf0" + bytes(120),
         bytes(8) + SECP256K1_FIELD_P + bytes(24),
         # montgomery_word_mutate: a known 32-bit modulus (NTT prime) literal.
         bytes(8) + (998244353).to_bytes(4, "little") + bytes(24),

@@ -1,0 +1,6 @@
+# DTS sync words (ETSI TS 102 114): core BE/LE, 14-bit BE/LE, substream.
+core_be = "\x7F\xFE\x80\x01"
+core_le = "\xFE\x7F\x01\x80"
+core_14_be = "\x1F\xFF\xE8\x00"
+core_14_le = "\xFF\x1F\x00\xE8"
+substream = "\x64\x58\x20\x25"

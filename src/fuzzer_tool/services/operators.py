@@ -5333,6 +5333,27 @@ class OperatorEngine:
         out = mutate_g711(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("g711_mutate", out, buf)
 
+    def _op_ivf_chunk_mutate(self, buf, _byte_idx, _data):
+        """IVF header fields (fourcc, dims, time base), frame size/pts, frame order."""
+        from fuzzer_tool.core.mutations.ivf import mutate_ivf  # noqa: PLC0415
+
+        out = mutate_ivf(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("ivf_chunk_mutate", out, buf)
+
+    def _op_ac3_frame_mutate(self, buf, _byte_idx, _data):
+        """AC-3/E-AC-3 header fields or payload bits, CRC repaired; frame order."""
+        from fuzzer_tool.core.mutations.ac3 import mutate_ac3  # noqa: PLC0415
+
+        out = mutate_ac3(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("ac3_frame_mutate", out, buf)
+
+    def _op_dca_frame_mutate(self, buf, _byte_idx, _data):
+        """DTS core header fields (NBLKS, FSIZE, AMODE, ...); frame order."""
+        from fuzzer_tool.core.mutations.dca import mutate_dca  # noqa: PLC0415
+
+        out = mutate_dca(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("dca_frame_mutate", out, buf)
+
     # ── Token-level text formats (core/mutations/{json_struct,sql_text}) ──
 
     def _op_json_mutate(self, buf, _byte_idx, _data):

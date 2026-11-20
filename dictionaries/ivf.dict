@@ -1,0 +1,9 @@
+# IVF magic and the codec fourccs ivfdec resolves.
+magic = "DKIF"
+vp8 = "VP80"
+vp9 = "VP90"
+av1 = "AV01"
+h264 = "H264"
+hevc = "HEVC"
+mjpeg = "MJPG"
+hdr_len = "\x20\x00"

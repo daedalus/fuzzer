@@ -26,10 +26,13 @@ from dataclasses import dataclass, field
 from itertools import compress
 
 from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.mutations.ac3 import sniff_ac3 as _sniff_ac3
 from fuzzer_tool.core.mutations.base64 import parse_base64
+from fuzzer_tool.core.mutations.dca import sniff_dca as _sniff_dca
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
 from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
+from fuzzer_tool.core.mutations.ivf import sniff_ivf as _sniff_ivf
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
@@ -274,6 +277,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "recompress_png_idat",
         "base64_chunk_mutate",
         "g711_mutate",
+        "ivf_chunk_mutate",
+        "ac3_frame_mutate",
+        "dca_frame_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -754,6 +760,11 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "recompress_png_idat": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
     # A-law/µ-law WAV (fmt tag 6/7) or AU (.snd enc 27/1) with a sample payload.
     "g711_mutate": lambda d: _g711_payload(d) is not None,
+    # IVF magic + 32-byte header; AC-3 / DTS sync with a whole first frame
+    # (two chained frames when the sync is not at offset 0).
+    "ivf_chunk_mutate": _sniff_ivf,
+    "ac3_frame_mutate": _sniff_ac3,
+    "dca_frame_mutate": _sniff_dca,
     "json_mutate": _sniff_json,
     "sql_mutate": _sniff_sql,
     "ecdsa_field_mutate": _sniff_secp_payload,
