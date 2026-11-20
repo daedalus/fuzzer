@@ -1,9 +1,10 @@
-"""--abort-is-crash: the shim's abort() override raises SIGABRT instead of returning.
+"""abort() in shim-compiled code is a crash the fuzzer sees.
 
-By default the shim turns abort() into a stderr marker and a return (FFmpeg's
-~1600 av_assert0 sites would flood the crash set), so an assertion failure in
-shim-compiled code was never a crash. The flag (env ``__AFL_ABORT_CRASH=1``)
-makes it one.
+Inside __afl_guarded_call (in-process / persistent harness) the override
+raises SIGABRT, which the guard recovers: the fuzzer records the crash and
+the campaign continues. A returned abort was invisible -- UBSAN aborts were
+never classified. Outside a guard (one-shot, forkserver) the override still
+writes a marker and returns unless --abort-is-crash (``__AFL_ABORT_CRASH=1``).
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from fuzzer_tool.adapters.inprocess import InProcessRunner
 from fuzzer_tool.adapters.persistent_subprocess import PersistentLoader
 from fuzzer_tool.adapters.process import signal_number
 from fuzzer_tool.services import fuzzer as fuzzer_mod
@@ -26,11 +28,19 @@ ENV = "__AFL_ABORT_CRASH"
 _PAST_ABORT_RC = 7
 
 _SO_SRC = rf"""
+#include <signal.h>
 #include <stddef.h>
 #include <stdlib.h>
 int LLVMFuzzerTestOneInput(const unsigned char *d, size_t n) {{
+    if (n && d[0] == 'B') {{               /* target blocks SIGABRT first */
+        sigset_t s;
+        sigemptyset(&s);
+        sigaddset(&s, SIGABRT);
+        sigprocmask(SIG_BLOCK, &s, NULL);
+        abort();
+    }}
     if (n && d[0] == 'A') abort();
-    return n && d[0] == 'A' ? {_PAST_ABORT_RC} : 0;
+    return n && (d[0] == 'A' || d[0] == 'B') ? {_PAST_ABORT_RC} : 0;
 }}
 """
 
@@ -68,11 +78,57 @@ def test_regression_abort_is_crash(so, monkeypatch) -> None:
     assert signal_number(_run(so, b"A")) == signal.SIGABRT
 
 
-def test_default_abort_returns(so, monkeypatch) -> None:
-    # Falsification: without the flag the override still returns.
+def test_regression_guarded_abort_is_crash(so, monkeypatch) -> None:
+    # Without the flag: a guarded abort() is still a crash, not a return.
     monkeypatch.delenv(ENV, raising=False)
 
-    assert _run(so, b"A") == _PAST_ABORT_RC
+    assert signal_number(_run(so, b"A")) == signal.SIGABRT
+
+
+def test_inprocess_abort_reported_then_continues(so, monkeypatch) -> None:
+    # direct_lite: the abort reaches the fuzzer as -SIGABRT, and the host
+    # survives to run the next input.
+    monkeypatch.delenv(ENV, raising=False)
+    runner = InProcessRunner(so, direct_lite=True, capture_stderr=True)
+    try:
+        crash_rc, err = runner.run_one(b"A")
+        after_rc, _ = runner.run_one(b"q")
+    finally:
+        runner.stop()
+
+    assert signal_number(crash_rc) == signal.SIGABRT
+    assert "[shim] abort() intercepted" in err
+    assert after_rc == 0
+
+
+def test_guarded_abort_with_sigabrt_blocked(so, monkeypatch) -> None:
+    # Adversarial: the target blocks SIGABRT before aborting; the guard keeps
+    # its signals deliverable, so the abort still cannot run on.
+    monkeypatch.delenv(ENV, raising=False)
+
+    assert signal_number(_run(so, b"B")) == signal.SIGABRT
+
+
+def test_default_abort_returns(so, monkeypatch) -> None:
+    # Falsification: outside a guard (one-shot binary) the override still
+    # returns without the flag, so only the guard changed.
+    monkeypatch.delenv(ENV, raising=False)
+    tmp_path = Path(so).parent
+    src = tmp_path / "m.c"
+    src.write_text(
+        "#include <stdlib.h>\nint main(void) { abort(); return " + str(_PAST_ABORT_RC) + "; }\n"
+    )
+    exe = tmp_path / "m"
+    subprocess.run(
+        ["clang", "-O1", "-include", str(SHIM), "-o", str(exe), str(src)],
+        check=True,
+        capture_output=True,
+    )
+
+    r = subprocess.run([str(exe)], capture_output=True, timeout=10)
+
+    assert r.returncode == _PAST_ABORT_RC
+    assert b"[shim] abort() intercepted" in r.stderr
 
 
 def test_abort_crash_flag_no_effect_without_abort(so, monkeypatch) -> None:

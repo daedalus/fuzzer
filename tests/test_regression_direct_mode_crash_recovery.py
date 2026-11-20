@@ -124,10 +124,10 @@ class TestDirectModeCrashRecovery:
         assert "RC=139" in result.stdout, result.stdout
 
     def test_abort_trigger_recovers(self, target_so):
-        """CRASHA hits abort(), intercepted by afl_shim.c's override — rc=0."""
+        """CRASHA hits abort(): a guarded SIGABRT, 128+SIGABRT (134), host survives."""
         result = _run_probe(str(Path(__file__).parent.parent / "src"), str(target_so), b"CRASHA")
         assert result.returncode == 0, result.stderr
-        assert "RC=0" in result.stdout
+        assert "RC=134" in result.stdout
 
 
 class TestPreFixSourceActuallyHung:

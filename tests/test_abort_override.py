@@ -13,7 +13,8 @@ Three test cases:
   1. CRASHA through shim.bin via run_target_stdin → rc=0, "[shim] abort()" in stderr
   2. CRASHA through noshim.bin via run_target_stdin → rc=-6 (SIGABRT), no shim message
   3. CRASHS through shim.bin via run_target_stdin → rc=-11 (SIGSEGV still propagates)
-  4. CRASHA through shim.so via InProcessRunner (direct_lite) → rc=0 (stderr not captured in-process)
+  4. CRASHA through shim.so via InProcessRunner (direct_lite) → rc=-6: inside the guard
+     the abort is a recovered SIGABRT crash
 """
 
 import subprocess
@@ -137,8 +138,8 @@ class TestAbortOverride:
         )
 
     def test_shim_so_inprocess_abort_does_not_crash(self, abort_test_binaries):
-        """With shim .so via InProcessRunner: CRASHA does not crash (rc=0).
-        stderr is not captured in direct_lite mode; only rc is checked."""
+        """With shim .so via InProcessRunner: CRASHA is a guarded SIGABRT (rc=-6);
+        the host does not crash and runs the next input."""
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         runner = InProcessRunner(
@@ -153,4 +154,7 @@ class TestAbortOverride:
         )
 
         rc, _ = runner.run_one(b"CRASHA")
-        assert rc == 0, f"Expected rc=0 (abort intercepted via .so), got rc={rc}"
+        after, _ = runner.run_one(b"safe")
+        runner.stop()
+        assert rc == -6, f"Expected rc=-6 (guarded abort), got rc={rc}"
+        assert after == 0
