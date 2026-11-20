@@ -2121,8 +2121,12 @@ not a finding; a segfault or an assertion failure is.
 
 ### Vendored OpenSSL target (openssl_read)
 
-`targets/openssl_read.so` wraps libcrypto from vendored OpenSSL 3.5.x LTS
-(`tools/vendor_openssl.sh` → `$FUZZ_VENDOR_ROOT/openssl/`, sha256-checked).
+`targets/openssl_read.so` wraps libcrypto from vendored OpenSSL 4.1.0
+(`tools/vendor_openssl.sh` → `$FUZZ_VENDOR_ROOT/openssl/`, sha256-checked;
+`--version=3.5.4` for the LTS). A tree of another version is refused, not
+reused (`VERSION.dat`); the build stamp carries the version, so re-vendoring
+rebuilds libcrypto. 4.1.0 out-of-tree + `no-apps` needs `apps/include/`
+pre-created (upstream Configure bug).
 `.so`-only, from `build_standalone_so_targets()`.
 
 Not a source drop: `compile_openssl_objects()` runs `Configure` out of tree in
@@ -2143,6 +2147,31 @@ error queue cleared per exec. Measured (no-ASAN, clang 18): 63.7k guard sites,
 0.2–1.4 ms/exec standalone, no RSS growth over 100 execs per seed.
 `tests/test_regression_openssl_target.py` pins sniffer agreement and wiring.
 `x509_field_mutate` (above) adds certificate-aware edits on top of the generic DER operators.
+
+### OpenSSL base64 differential target (openssl_b64_diff)
+
+`targets/openssl_b64_diff.so`: OpenSSL 4.x AVX2 base64 encoder
+(`enc_b64_avx2.c`) vs scalar, through the public API. Prompted by
+openssl/openssl#33652 (CVE-2026-121481, length bugs around that encoder).
+Each input runs twice, `OPENSSL_ia32cap_P[2]` bit 5 cleared then set (only
+when `__builtin_cpu_supports("avx2")`, decided once); `EVP_EncodeBlock` and
+chunked `EVP_EncodeUpdate`/`Final` (ctx flags: no-newlines, SRP alphabet)
+outputs must match byte for byte. Second oracle: `EVP_DecodeBlock` /
+`EVP_DecodeUpdate` of the scalar output gives the input back; block length
+must equal `4·ceil(n/3)`. Input and output buffers are malloc'd at the exact
+contract size per exec, so an AVX2 over-read/over-write is an ASAN report.
+Layout: byte 0 ctx flags, byte 1 stream chunk size, payload ≤ 4 KiB.
+
+The dispatch exists only with asm on (`encode.c`: `OPENSSL_CPUID_OBJ &&
+!OPENSSL_NO_ASM`), so `compile_openssl_objects ... asm` builds a second tree,
+`$FUZZ_BUILD_ROOT/openssl/build_asm<suffix>/`; openssl_read keeps the no-asm
+one. Mismatch → `raise(SIGABRT)`, not `abort()`: the shim rewrites `abort()`
+in the wrapper TU into a logged return unless `--abort-is-crash`.
+Verified: `--wrap=encode_base64_avx2` counts 2 AVX2 calls per exec with the
+bit set, 0 cleared; a build with `-DB64_DIFF_CORRUPT_SCALAR` (one output byte
+changed) dies, its uncorrupted control passes. Campaign (no-ASAN, 30k execs,
+in-process): 0 mismatches, 0.29 ms/exec, RSS flat 390 MB. Decode has no AVX2
+path in 4.1.0 (master only). `tests/test_regression_openssl_b64_diff.py`.
 
 ### Vendored libbase64 differential target (libbase64_read)
 

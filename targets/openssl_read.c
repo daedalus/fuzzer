@@ -1,4 +1,4 @@
-/* Fuzz target for OpenSSL libcrypto (vendored, 3.5.x LTS) — DER decoders
+/* Fuzz target for OpenSSL libcrypto (vendored, 4.1.x) — DER decoders
  * for X.509 certificates, CRLs, CSRs, PKCS#7 and keys, plus the printers
  * and re-encoders reachable from a parsed object.
  *

@@ -37,7 +37,7 @@
 # against whichever versioned ffmpeg_read_*.so targets got built.
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
-#   tools/vendor_openssl.sh   -> $FUZZ_VENDOR_ROOT/openssl    (openssl_read.so)
+#   tools/vendor_openssl.sh   -> $FUZZ_VENDOR_ROOT/openssl    (openssl_read.so, openssl_b64_diff.so)
 #   tools/vendor_brainflayer.sh -> $FUZZ_VENDOR_ROOT/brainflayer (ec_pubkey_diff.so, hash_simd_diff.so, brainflayer_read.so)
 #
 # Layout (2026-09-03, see session notes):
@@ -1357,40 +1357,55 @@ compile_sqlite_objects() {
 #   FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
 #                OpenSSL's own fuzz define: deterministic RNG, so one input
 #                replays to one path
-# Options drop everything a DER decoder never reaches (asm hides edges,
-# apps/tests/docs/modules cost build time only).
-# Rebuilt only when the Configure command changes (stamp file).
-OPENSSL_CONFIG_OPTS="no-shared no-asm no-tests no-apps no-docs no-module no-dso no-threads"
+# Options drop what no target reaches (apps/tests/docs/modules cost build
+# time only).
+#
+# Variant (5th arg), one tree each so objects never mix:
+#   noasm  build<suffix>/      openssl_read: asm hides edges, so C everywhere
+#   asm    build_asm<suffix>/  openssl_b64_diff: encode.c's AVX2 dispatch
+#                              exists only with OPENSSL_CPUID_OBJ (asm on)
+# Rebuilt when the Configure command or the vendored version changes.
+OPENSSL_CONFIG_BASE="no-shared no-tests no-apps no-docs no-module no-dso no-threads"
 compile_openssl_objects() {
-    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}" variant="${5:-noasm}"
     [ -f "$OPENSSL/Configure" ] || return 1
-    local bdir="$TARGETS/openssl/build${suffix}"
+
+    local bdir="$TARGETS/openssl/build${suffix}" opts="$OPENSSL_CONFIG_BASE no-asm"
+    if [ "$variant" = "asm" ]; then
+        bdir="$TARGETS/openssl/build_asm${suffix}"
+        opts="$OPENSSL_CONFIG_BASE"
+    fi
+    local label="openssl libcrypto ${variant}${suffix:+ ($suffix)}"
+
     local cov_flag cmplog_cflags=""
     cov_flag="$(cov_flag_for_cc "$cc")"
     [ "$WITH_CMPLOG" -eq 1 ] && cmplog_cflags="-fsanitize-coverage=trace-cmp"
     local cflags="$flags $cov_flag $cmplog_cflags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
-    local stamp="CC=$cc CFLAGS=$cflags $OPENSSL_CONFIG_OPTS"
+    local version
+    version="$(tr '\n' ' ' < "$OPENSSL/VERSION.dat" 2>/dev/null)"
+    local stamp="CC=$cc CFLAGS=$cflags $opts VERSION=$version"
 
-    # Up to date: same Configure command, archive present.
+    # Up to date: same Configure command and source version, archive present.
     if [ -f "$bdir/libcrypto.a" ] && [ "$(cat "$bdir/.fuzz_stamp" 2>/dev/null)" = "$stamp" ]; then
-        ok "openssl libcrypto${suffix:+ ($suffix)} (up to date)"
+        ok "$label (up to date)"
         return 0
     fi
 
-    echo "Building openssl libcrypto${suffix:+ ($suffix)} (this takes a few minutes)..."
-    rm -rf "$bdir"
-    mkdir -p "$bdir"
+    echo "Building $label (this takes a few minutes)..."
+    rm -rf "${bdir:?}"
+    # 4.1.0 out-of-tree + no-apps writes apps/include/ without creating it.
+    mkdir -p "$bdir/apps/include"
     local rc=0
     # shellcheck disable=SC2086
-    (cd "$bdir" && CC="$cc" CFLAGS="$cflags" perl "$OPENSSL/Configure" $OPENSSL_CONFIG_OPTS \
+    (cd "$bdir" && CC="$cc" CFLAGS="$cflags" perl "$OPENSSL/Configure" $opts \
         && make -j"$(nproc)" build_generated \
         && make -j"$(nproc)" libcrypto.a) >>"$BUILD_LOG" 2>&1 || rc=$?
     if [ $rc -ne 0 ]; then
-        warn "openssl libcrypto${suffix:+ ($suffix)} failed"
+        warn "$label failed"
         return 1
     fi
     printf '%s' "$stamp" > "$bdir/.fuzz_stamp"
-    ok "openssl libcrypto${suffix:+ ($suffix)}"
+    ok "$label"
 }
 
 # ── Compile fuzzgoat library object ────────────────────────────────
@@ -2273,6 +2288,21 @@ build_standalone_so_targets() {
         build_so_target "${TARGETS_SRC:-$TARGETS}/openssl_read.c" "$TARGETS/openssl_read${out_suffix}.so" "$OPENSSL_LIBS" "$flags $OPENSSL_INC"
     else
         warn "openssl_read${out_suffix}.so: libcrypto failed to build, skipping"
+    fi
+
+    # openssl_b64_diff — AVX2 vs scalar base64 encoder, same vendored tree.
+    # Links the asm libcrypto: encode.c's AVX2 dispatch needs asm on.
+    local OPENSSL_ASM_BDIR="$TARGETS/openssl/build_asm${suffix}"
+    local OPENSSL_ASM_INC="-I$OPENSSL_ASM_BDIR/include -I$OPENSSL/include"
+    local OPENSSL_ASM_LIBS="$OPENSSL_ASM_BDIR/libcrypto.a -lpthread -Wl,--export-dynamic"
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/openssl_b64_diff.c" ]; then
+        :  # target source absent — nothing to build
+    elif [ ! -f "$OPENSSL/Configure" ]; then
+        warn "openssl_b64_diff${out_suffix}.so: vendor/openssl not found, skipping (run tools/vendor_openssl.sh)"
+    elif compile_openssl_objects "$suffix" "$flags" "$DEFAULT_CC" "" asm; then
+        build_so_target "${TARGETS_SRC:-$TARGETS}/openssl_b64_diff.c" "$TARGETS/openssl_b64_diff${out_suffix}.so" "$OPENSSL_ASM_LIBS" "$flags $OPENSSL_ASM_INC"
+    else
+        warn "openssl_b64_diff${out_suffix}.so: asm libcrypto failed to build, skipping"
     fi
 }
 
@@ -3263,6 +3293,7 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "sqlite_read" "$state" "$([ -f "$SQLITE/sqlite3.c" ] && echo "found at $SQLITE" || echo "not vendored — run tools/vendor_sqlite.sh")"
     state=$([ -f "$OPENSSL/Configure" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "openssl_read" "$state" "$([ -f "$OPENSSL/Configure" ] && echo "found at $OPENSSL" || echo "not vendored — run tools/vendor_openssl.sh")"
+    printf '  %-20s %-12s %s\n' "openssl_b64_diff" "$state" "$([ -f "$OPENSSL/Configure" ] && echo "AVX2 vs scalar base64 (asm libcrypto)" || echo "not vendored — run tools/vendor_openssl.sh")"
     state=$([ -f "$BRAINFLAYER_SECP256K1/src/secp256k1.c" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "ec_pubkey_diff" "$state" "$([ -f "$BRAINFLAYER/ec_pubkey_fast.c" ] && echo "found at $BRAINFLAYER" || echo "not vendored — run tools/vendor_brainflayer.sh")"
     state=$([ -f "$BRAINFLAYER/sha256_pub.c" ] && echo "BUILD" || echo "SKIP")
