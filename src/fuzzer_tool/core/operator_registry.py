@@ -28,6 +28,7 @@ from itertools import compress
 from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.mutations.ac3 import sniff_ac3 as _sniff_ac3
 from fuzzer_tool.core.mutations.base64 import parse_base64
+from fuzzer_tool.core.mutations.caf import sniff_caf as _sniff_caf
 from fuzzer_tool.core.mutations.dca import sniff_dca as _sniff_dca
 from fuzzer_tool.core.mutations.flac_frame import sniff_flac_frame as _sniff_flac_frame
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
@@ -36,6 +37,7 @@ from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.ivf import sniff_ivf as _sniff_ivf
 from fuzzer_tool.core.mutations.per import parse_per
+from fuzzer_tool.core.mutations.rpl import sniff_rpl as _sniff_rpl
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
@@ -293,6 +295,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "flac_frame_mutate",
         "mp4_codec_cfg_mutate",
         "aac_asc_mutate",
+        "caf_chunk_mutate",
+        "rpl_chunk_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -821,6 +825,9 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
         d[4:8] in _ISOBMFF_HEAD_TYPES and any(t in d for t in (b"avcC", b"hvcC", b"esds"))
     ),
     "aac_asc_mutate": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES and b"esds" in d,
+    # CAF magic + one chunk header; ARMovie signature + 20 header lines.
+    "caf_chunk_mutate": _sniff_caf,
+    "rpl_chunk_mutate": _sniff_rpl,
     "json_mutate": _sniff_json,
     "sql_mutate": _sniff_sql,
     "ecdsa_field_mutate": _sniff_secp_payload,

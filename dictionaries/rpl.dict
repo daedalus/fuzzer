@@ -1,0 +1,12 @@
+# ARMovie signature, codec ids rpl.c resolves, audio type keywords, catalog row syntax.
+magic = "ARMovie\x0a"
+escape124 = "124"
+escape130 = "130"
+pcm = "101"
+adpcm = "adpcm"
+unsigned = "unsigned"
+linear = "linear"
+row_sep = " , "
+row_audio = " ; "
+int64_max = "9223372036854775807"
+int64_min = "-9223372036854775808"
