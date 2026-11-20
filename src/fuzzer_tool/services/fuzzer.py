@@ -5544,15 +5544,17 @@ class Fuzzer:
                 finally:
                     with contextlib.suppress(OSError):
                         os.unlink(_shim_path)
-            # UBSAN detection — set UBSAN_OPTIONS so errors abort the
-            # target for crash detection.  The UBSAN runtime was already
-            # preloaded via LD_PRELOAD by ldpreload_wrapper.py.
+            # UBSAN detection — set UBSAN_OPTIONS (recover mode, see
+            # _UBSAN_DEFAULTS) for crash detection.  The UBSAN runtime was
+            # already preloaded via LD_PRELOAD by ldpreload_wrapper.py.
             target_is_ubsan = any(_detect_ubsan(t) for t in san_targets)
             if target_is_ubsan:
+                from fuzzer_tool.cli.ldpreload_wrapper import _UBSAN_DEFAULTS
+
                 ubsan_opts = os.environ.get("UBSAN_OPTIONS", "")
                 opt_parts = [p for p in ubsan_opts.split(":") if p] if ubsan_opts else []
                 seen = {p.split("=")[0] for p in opt_parts}
-                for opt in ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1"):
+                for opt in _UBSAN_DEFAULTS:
                     key = opt.split("=")[0]
                     if key not in seen:
                         opt_parts.append(opt)
