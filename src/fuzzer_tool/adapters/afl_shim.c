@@ -8474,14 +8474,14 @@ __AFL_GCC_NO_COV void __afl_signals_claim(void) {
     if (__afl_timer_state > 0) __afl_install_timeout_handler();
 }
 
-/* Hand *status* to the owner and end this thread; returns only when no
- * guard runs (the caller then exits for real). */
-__AFL_GCC_NO_COV static void __afl_worker_exit(int status) {
+/* Hand escape *code* (a signal number, or __AFL_JMP_EXIT | status) to the
+ * owner and end this thread; returns only when no guard runs. */
+__AFL_GCC_NO_COV static void __afl_worker_jump(int code) {
     if (!__afl_guards_active || !__afl_exit_sig_ready()) return;
     __afl_exit_tries = 0;
     __afl_exit_parked = 0;
     __afl_exit_pc = 0;
-    __afl_exit_pending = __AFL_JMP_EXIT | (status & 0xFF);
+    __afl_exit_pending = code;
     pthread_detach(pthread_self());
 
     /* Re-sent while the owner defers (see __afl_exit_defer). */
@@ -8492,6 +8492,11 @@ __AFL_GCC_NO_COV static void __afl_worker_exit(int status) {
         usleep(__AFL_TIMEOUT_FAST_TICK_US);
     }
     pthread_exit(NULL);
+}
+
+/* Hand *status* to the owner (the caller then exits for real if none). */
+__AFL_GCC_NO_COV static void __afl_worker_exit(int status) {
+    __afl_worker_jump(__AFL_JMP_EXIT | (status & 0xFF));
 }
 
 /* ── Guarded call wrapper ─────────────────────────────────────────────
@@ -8754,14 +8759,17 @@ __AFL_GCC_NO_COV void exit(int status) {
  * replaces the abort() calls after it with __afl_shim_abort() before the compiler
  * sees the declaration mismatch.                                           */
 /* --abort-is-crash (__AFL_ABORT_CRASH=1): abort() raises SIGABRT, a real
- * crash, for targets whose assertions are bugs. Read once, on first abort. */
+ * crash, for targets whose assertions are bugs. Read once, on first abort;
+ * atomic, since first aborts on several threads raced on the cache. */
 __AFL_GCC_NO_COV static int __afl_abort_is_crash(void) {
     static int mode = -1;
-    if (mode < 0) {
-        const char *v = getenv("__AFL_ABORT_CRASH");
-        mode = v && v[0] == '1';
-    }
-    return mode;
+    int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
+    if (m >= 0) return m;
+
+    const char *v = getenv("__AFL_ABORT_CRASH");
+    m = v && v[0] == '1';
+    __atomic_store_n(&mode, m, __ATOMIC_RELAXED);
+    return m;
 }
 
 /* Inside __afl_guarded_call, on the thread that owns the frame: a SIGABRT
@@ -8772,11 +8780,36 @@ __AFL_GCC_NO_COV static int __afl_abort_guarded(void) {
     return __afl_guard_jmp && __afl_guard_mine();
 }
 
+__AFL_GCC_NO_COV static int __afl_abort_handler_ours(void) {
+    struct sigaction cur;
+    if (sigaction(SIGABRT, NULL, &cur) != 0) return 0;
+    return (cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == __afl_crash_handler;
+}
+
+/* Deliver SIGABRT to the guard whatever the target or host left: a handler
+ * set past the sigaction wrapper (sigset) returned into the target, and a
+ * SIGABRT blocked on entry stayed pending. The guard's siglongjmp restores
+ * the mask sigsetjmp saved, so the unblock ends with the call. */
+__AFL_GCC_NO_COV static void __afl_abort_to_guard(void) {
+    if (!__afl_abort_handler_ours()) __afl_install_crash_handlers();
+
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGABRT);
+    pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+    raise(SIGABRT);
+}
+
+/*   owner thread        -> SIGABRT into its guard
+ *   worker of a guard   -> handed to the owner, which leaves as SIGABRT
+ *   no guard            -> marker + return (raise with --abort-is-crash) */
 __AFL_GCC_NO_COV __attribute__((unused)) static void __afl_shim_abort(void) {
     static const char msg[] = "[shim] abort() intercepted\n";
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
-    if (__afl_abort_is_crash() || __afl_abort_guarded())
-        raise(SIGABRT);   /* returns only if SIGABRT is blocked */
+    if (__afl_abort_guarded()) __afl_abort_to_guard();
+    __afl_worker_jump(SIGABRT);   /* returns only when no guard runs */
+
+    if (__afl_abort_is_crash()) raise(SIGABRT);   /* returns only if SIGABRT is blocked */
     __afl_health[__AFL_HEALTH_ABORTS_INTERCEPTED]++;
 }
 #define abort() __afl_shim_abort()

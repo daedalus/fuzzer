@@ -343,6 +343,8 @@ class InProcessRunner:
         # Globals copy-back before each direct exec, bound once per load.
         self._restore_mode = restore
         self._restore = _no_restore
+        # Globals copy-back after a call the guard abandoned (off mode).
+        self._after_abandon = _no_restore
         # -F: each input is also written to a MemfdInput the harness opens
         # via $FUZZ_INPUT_PATH (wtf fshooks port).
         self._input_file = input_file
@@ -533,6 +535,7 @@ class InProcessRunner:
         post-load state (wtf-style snapshot, globals only).
         """
         if self._restore_mode is StateRestore.OFF:
+            self._bind_abandon_restore()
             return
         snap = GlobalSnapshot.capture(self._lib, self.target, self._func_ptr)
         if snap is None:
@@ -544,6 +547,17 @@ class InProcessRunner:
             # (a copy over a redzone) would flood the terminal.
             self._pre = _pre_captured(self._pre, self._stderr, self._throttle)
         log.info("snapshot-restore: %d bytes of globals per exec", snap.size)
+
+    def _bind_abandon_restore(self) -> None:
+        """Off mode: restore globals only after a call the guard abandoned.
+
+        The guard's siglongjmp skips whatever the target would have undone:
+        a static mutex locked at an abort stayed locked and every later input
+        timed out. Clean inputs keep their cross-input state; no per-exec cost.
+        """
+        snap = GlobalSnapshot.capture(self._lib, self.target, self._func_ptr, logging.DEBUG)
+        if snap is not None:
+            self._after_abandon = snap.restore
 
     def _bind_fault(self) -> None:
         """Bind ``__afl_last_fault_addr`` for guard placement; warn if absent."""
@@ -559,6 +573,7 @@ class InProcessRunner:
 
     def _unbind_guard(self) -> None:
         self._restore = _no_restore
+        self._after_abandon = _no_restore
         self._pre = _pre_exec(self._restore, self._stage)
         self._guard_call = _call_unguarded
         self._guard_fn = None
@@ -911,10 +926,10 @@ class InProcessRunner:
                 rc = self._func_ptr(buf, len(data))
             elif self._guard_timed_out:
                 timed_out = True
-                self._note_shared_heap_abort(0)
+                self._abandoned(0)
             elif rc < 0:
                 self._on_crash(self, -rc)
-                self._note_shared_heap_abort(-rc)
+                self._abandoned(-rc)
                 # __afl_guarded_call siglongjmp'd back with -sig. Convert to
                 # the 128+sig convention used elsewhere in this module.
                 rc = 128 + (-rc)
@@ -984,10 +999,10 @@ class InProcessRunner:
                 rc = self._func_ptr(self._c_buf, n)
             elif self._guard_timed_out:
                 self._timed_out = True
-                self._note_shared_heap_abort(0)
+                self._abandoned(0)
             elif rc < 0:
                 self._on_crash(self, -rc)
-                self._note_shared_heap_abort(-rc)
+                self._abandoned(-rc)
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             if self.capture_stderr:
@@ -1002,6 +1017,11 @@ class InProcessRunner:
         # accumulators never flush on their own — write the SHM tail now.
         self._flush_distance_tail()
         return rc, _captured_stderr
+
+    def _abandoned(self, sig: int) -> None:
+        """A guarded call was abandoned (sig 0: timeout): flag heap, reset globals."""
+        self._note_shared_heap_abort(sig)
+        self._after_abandon()
 
     def _note_shared_heap_abort(self, sig: int) -> None:
         """Flag the host heap after a call the guard abandoned (sig 0: timeout).

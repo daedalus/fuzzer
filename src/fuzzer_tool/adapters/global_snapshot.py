@@ -95,21 +95,25 @@ class GlobalSnapshot:
         self.size = sum(size for _, size in spans)
 
     @classmethod
-    def capture(cls, lib: ctypes.CDLL, path: str, entry) -> "GlobalSnapshot | None":
+    def capture(
+        cls, lib: ctypes.CDLL, path: str, entry, level: int = logging.WARNING
+    ) -> "GlobalSnapshot | None":
         """Snapshot *lib*'s globals; None when unsafe or unknown.
 
         *entry* is a function of *lib* (its module base comes from dladdr).
         Refuses a linked shim without isolated sections: its state shares
-        .data/.bss and restoring it would clobber the shim.
+        .data/.bss and restoring it would clobber the shim. *level* logs the
+        refusal (DEBUG when nobody asked for a restore).
         """
         with open(path, "rb") as f:
             ranges = data_ranges(f.read())
         base = module_base(ctypes.cast(entry, ctypes.c_void_p).value or 0)
         if ranges is None or not base:
-            log.warning("snapshot-restore: cannot map globals of %s, restore off", path)
+            log.log(level, "snapshot-restore: cannot map globals of %s, restore off", path)
             return None
         if not ranges.shim_isolated and getattr(lib, _SHIM_MARK, None) is not None:
-            log.warning(
+            log.log(
+                level,
                 "snapshot-restore: %s predates afl_shim_{data,bss}; rebuild with clang. Restore off.",
                 path,
             )
