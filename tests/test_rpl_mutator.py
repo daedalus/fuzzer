@@ -25,18 +25,23 @@ from .support.scripted_rng import ScriptedRng
 CATALOG_LINE = 17
 
 
-def _rpl(rows: list[str], video: str = "0", gap: str = "") -> bytes:
-    """Header (20 lines, 21 with video) + gap + index rows; catalog points at the rows."""
+def _rpl(rows: list[str], video: str = "0", gap: str = "", pad: int = 0) -> bytes:
+    """Header (20 lines, 21 with video) + gap + index rows; catalog points at the rows.
+
+    *pad* zero-pads the last-chunk index and the catalog offset to that width.
+    """
     lines = ["ARMovie", "t", "c", "a", video, "0", "0", "0", "1", "1", "1", "1", "8"]
-    lines += ["0", str(len(rows) - 1), "0", "0", "@", "0", "0"]
+    lines += ["0", str(len(rows) - 1).zfill(pad), "0", "0", "@", "0", "0"]
     if video != "0":
         lines.append("0")
 
     head = "".join(f"{s}\n" for s in lines)
     base = len(head) - 1  # "@" is one byte; the offset's digits replace it
-    off = base + len(str(base + len(str(base))))
-    head = head.replace("@", str(off + len(gap)))
-    assert len(head) == off
+    width = max(pad, 1)
+    while len(str(base + width + len(gap))) > width:
+        width += 1
+    head = head.replace("@", str(base + width + len(gap)).zfill(width))
+    assert len(head) == base + width
     return (head + gap + "".join(f"{r}\n" for r in rows)).encode()
 
 
@@ -124,6 +129,8 @@ class TestMutate:
 
     def test_max_len_truncates(self):
         full = mutate_rpl(SAMPLE, rng=ScriptedRng(randints=[Op.FPS], choice_idxs=[0]))
+        again = mutate_rpl(SAMPLE, rng=ScriptedRng(randints=[Op.FPS], choice_idxs=[0]))
+        assert again == full  # control: the reference reproduces itself
         out = mutate_rpl(SAMPLE, max_len=30, rng=ScriptedRng(randints=[Op.FPS], choice_idxs=[0]))
         assert out == full[:30]
         assert out != SAMPLE[:30]
@@ -141,7 +148,33 @@ class TestMutate:
     def test_regression_rpl_gap_resize(self):
         data = _rpl(["100 , 10 ; 20"], gap="JUNK\n")
         out = mutate_rpl(data, rng=ScriptedRng(randints=[Op.INT_FIELD, 1], choice_idxs=[4]))
+        cat = _catalog(out)
+        assert out[cat - len(b"JUNK\n") :] == b"JUNK\n100 , 10 ; 20\n"
+
+    # Zero-padded fields (gen_ffmpeg_91_seeds writes the offset as %06d) still
+    # get repaired, keeping their width.
+    def test_regression_rpl_padded_catalog_resize(self):
+        data = _rpl(["100 , 10 ; 20"], pad=6)
+        out = mutate_rpl(data, rng=ScriptedRng(randints=[Op.INT_FIELD, 1], choice_idxs=[4]))
+        assert len(out.split(b"\n")[CATALOG_LINE]) == 6
         assert out[_catalog(out) :] == b"100 , 10 ; 20\n"
+
+    def test_regression_rpl_padded_count_follows_rows(self):
+        data = _rpl(["100 , 10 ; 20", "130 , 11 ; 21"], pad=6)
+        out = mutate_rpl(data, rng=ScriptedRng(randints=[Op.DUP, 0]))
+        assert out.split(b"\n")[14] == b"000002"
+        assert out[_catalog(out) :] == b"".join(parse_rpl(out)[2])
+
+    # Leading zeros do not count toward the int32 digit cap.
+    def test_regression_rpl_padded_catalog_long(self):
+        data = _rpl(["100 , 10 ; 20"], gap="JUNK\n", pad=12)
+        assert parse_rpl(data)[1:] == (b"JUNK\n", [b"100 , 10 ; 20\n"])
+
+    # Adversarial: a DUP cut off by max_len would leave the count claiming a
+    # row that is not there; decline instead.
+    def test_regression_rpl_dup_past_max_len(self):
+        out = mutate_rpl(SAMPLE, max_len=len(SAMPLE), rng=ScriptedRng(randints=[Op.DUP, 1]))
+        assert out is None
 
     # Toggling video on adds the key frame list line; rows stay reachable.
     @pytest.mark.parametrize(("video", "idx", "n_hdr"), [("0", 2, 21), ("124", 0, 20)])

@@ -56,7 +56,7 @@ ROW_EDGES = (
     b"4611686018427387904",
 )
 
-_LEAD_INT = re.compile(rb"\d*")
+_DIGITS = b"0123456789"
 _ROW = re.compile(rb"\s*(-?\d+)\s*,\s*(-?\d+)\s*;\s*(-?\d+)")
 _ROW_FIELDS = 3
 
@@ -101,20 +101,28 @@ def _lines(data: bytes) -> list[bytes]:
 
 
 def _lead_int(line: bytes) -> bytes:
-    m = _LEAD_INT.match(line)
-    return m.group() if m else b""
+    """Leading decimal digits; lstrip runs in C, ~2x a regex match."""
+    return line[: len(line) - len(line.lstrip(_DIGITS))]
 
 
 def _has_video(line: bytes) -> bool:
     return _lead_int(line).lstrip(b"0") != b""
 
 
+def _lead_val(digits: bytes) -> int:
+    """Value of a leading-digit span, -1 when empty or past int32 width.
+
+    Leading zeros are free: "000123" is 123 (seed generators pad fields).
+    """
+    sig = digits.lstrip(b"0")
+    if not digits or len(sig) > MAX_OFF_DIGITS:
+        return -1
+    return int(sig or b"0")
+
+
 def _catalog_off(hdr: list[bytes]) -> int:
     """Catalog offset from the header, -1 when absent or out of int32 range."""
-    digits = _lead_int(hdr[CATALOG_LINE])
-    if not digits or len(digits) > MAX_OFF_DIGITS:
-        return -1
-    return int(digits)
+    return _lead_val(_lead_int(hdr[CATALOG_LINE]))
 
 
 def parse_rpl(data: bytes) -> tuple[list[bytes], bytes, list[bytes]] | None:
@@ -141,22 +149,27 @@ def parse_rpl(data: bytes) -> tuple[list[bytes], bytes, list[bytes]] | None:
 
 
 def _set_lead(hdr: list[bytes], idx: int, old: int, new: int) -> None:
-    """Replace line *idx*'s leading int with *new* if it reads exactly *old*."""
+    """Replace line *idx*'s leading int with *new* if it reads *old*.
+
+    Zero padding is kept: "000046" -> "000051".
+    """
     line = hdr[idx]
     digits = _lead_int(line)
-    if digits != str(old).encode():
+    if _lead_val(digits) != old:
         return
-    hdr[idx] = str(new).encode() + line[len(digits) :]
+    hdr[idx] = str(new).zfill(len(digits)).encode() + line[len(digits) :]
 
 
 def _fix_catalog(hdr: list[bytes], old_len: int, gap: int) -> None:
     """Re-point the catalog at the rows if it pointed there before the edit."""
-    # new = base + digits(new): two passes settle a digit-count carry (99 -> 100).
+    # new = base + width, width = max(padded width, digits(new)); a carry
+    # (99 -> 100) widens it at most once more.
     digits = _lead_int(hdr[CATALOG_LINE])
     base = sum(map(len, hdr)) - len(digits) + gap
-    new = base + len(str(base))
-    new = base + len(str(new))
-    _set_lead(hdr, CATALOG_LINE, old_len + gap, new)
+    width = len(digits)
+    while len(str(base + width)) > width:
+        width = len(str(base + width))
+    _set_lead(hdr, CATALOG_LINE, old_len + gap, base + width)
 
 
 def _sync_keyframe(hdr: list[bytes]) -> None:
@@ -208,15 +221,16 @@ def mutate_rpl(data: bytes, max_len: int = 65536, *, rng: RandPool) -> bytes | N
     if parsed is None:
         return None
     hdr, gap, rows = parsed
-    old_len = sum(map(len, hdr))
 
     op = Op(rng.randint(0, len(Op) - 1))
     idx = -1
+    old_len = 0
     if op in _FRAME_OPS:
         new_rows = reframe(rows, _FRAME_OPS[op], rng)
     elif op is Op.ROW_FIELD:
         new_rows = _row_field(rows, rng)
     else:
+        old_len = sum(map(len, hdr))
         idx = _header_op(op, hdr, rng)
         new_rows = rows
 
@@ -224,9 +238,15 @@ def mutate_rpl(data: bytes, max_len: int = 65536, *, rng: RandPool) -> bytes | N
         return None
 
     # The header stores the last chunk index (count - 1).
-    if len(new_rows) != len(rows):
+    recount = len(new_rows) != len(rows)
+    if recount:
+        old_len = sum(map(len, hdr))
         _set_lead(hdr, COUNT_LINE, len(rows) - 1, len(new_rows) - 1)
-    if idx != CATALOG_LINE and sum(map(len, hdr)) != old_len:
+    if (recount or idx >= 0) and idx != CATALOG_LINE and sum(map(len, hdr)) != old_len:
         _fix_catalog(hdr, old_len, len(gap))
+
     out = b"".join(hdr) + gap + b"".join(new_rows)
+    # A cut row would contradict the repaired count.
+    if recount and len(out) > max_len:
+        return None
     return out[:max_len]

@@ -130,6 +130,8 @@ class TestMutate:
 
     def test_max_len_truncates(self):
         full = mutate_caf(SAMPLE, rng=ScriptedRng(randints=[Op.VERSION], choice_idxs=[0]))
+        again = mutate_caf(SAMPLE, rng=ScriptedRng(randints=[Op.VERSION], choice_idxs=[0]))
+        assert again == full  # control: the reference reproduces itself
         out = mutate_caf(
             SAMPLE, max_len=20, rng=ScriptedRng(randints=[Op.VERSION], choice_idxs=[0])
         )
