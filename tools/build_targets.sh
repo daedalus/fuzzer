@@ -1512,6 +1512,17 @@ build_so_target() {
     if [[ "$extra_flags" == *-fsanitize=address* ]]; then
         libs="$libs -lasan"
     fi
+    # Same problem, UBSAN flavor: clang -shared -fsanitize=undefined does not
+    # pull in a runtime providing __ubsan_handle_*_abort either (confirmed:
+    # ctypes.CDLL fails with "undefined symbol: __ubsan_handle_..._abort" even
+    # with -static-libsan). The system libubsan.so.1 (GCC's runtime, ABI-compatible
+    # with clang's UBSAN instrumentation) resolves it and still aborts correctly
+    # on a real check failure (verified: SIGABRT before any further code runs).
+    # Skip when ASAN is also on (combined asan+ubsan already gets a runtime via
+    # libasan above; double-linking both runtimes is unnecessary).
+    if [[ "$extra_flags" == *-fsanitize=undefined* && "$extra_flags" != *-fsanitize=address* ]]; then
+        libs="$libs -lubsan"
+    fi
     local rc=0
     # Do NOT add -fsanitize-coverage=trace-cmp to the target's own code —
     # the target wrapper (png_read.c etc.) has almost no comparisons; all
