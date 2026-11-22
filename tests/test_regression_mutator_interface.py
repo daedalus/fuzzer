@@ -359,6 +359,7 @@ class TestGlobalRegistryUnaffected:
             "fractal_voronoi",
             "perlin_noise",
             "weizz_chunk_mutate",
+            "weizz_chunk_splice",
             "weizz_field_mutate",
             "wfc_reorder_learned",
         ]

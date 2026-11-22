@@ -653,3 +653,58 @@ class TestComputeMeanLogNFuzz:
         vals = [0, 0, 4, 16]
         expected = (math.log2(4) + math.log2(16)) / 2
         assert compute_mean_log_n_fuzz(vals) == pytest.approx(expected)
+
+
+class TestAFLFastExact:
+    """The exact AFLFast (CCS'16) formulas, not AFL++'s log2 buckets."""
+
+    def _score(self, sc, **kw):
+        base = dict(
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=10,
+            avg_bitmap_size=10,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+        )
+        base.update(kw)
+        return sc.score(**base)
+
+    def test_fast_exp_factor_is_two_pow_s_over_f(self):
+        sc = SeedScorer("fast_exp")
+        assert sc._fast_exp_cap(3, 4) == 2.0  # 2^3 / 4
+        assert sc._fast_exp_cap(0, 0) == 1.0  # f floored at 1, no level-0 shortcut
+        assert sc._fast_exp_cap(10, 1) == 1024.0  # the M cap is applied in score()
+
+    def test_fast_exp_large_level_uses_next_pow2(self):
+        sc = SeedScorer("fast_exp")
+        assert sc._fast_exp_cap(16, 5) == 32.0 / 8  # M / next_pow2(5)
+        assert sc._fast_exp_cap(20, 1) == 32.0
+
+    def test_fast_exp_rare_path_outscores_frequent(self):
+        sc = SeedScorer("fast_exp")
+        rare = self._score(sc, fuzz_level=4, n_fuzz=1)
+        common = self._score(sc, fuzz_level=4, n_fuzz=64)
+        assert rare > common
+
+    def test_fast_exp_capped_at_max_factor(self):
+        sc = SeedScorer("fast_exp", max_mult=10**6)
+        capped = self._score(sc, fuzz_level=12, n_fuzz=1)
+        also = self._score(sc, fuzz_level=14, n_fuzz=1)
+        assert capped == also  # both hit M = 32
+
+    def test_coe_exp_skips_above_mean_and_caps_below(self):
+        sc = SeedScorer("coe_exp")
+        assert self._score(sc, fuzz_level=3, n_fuzz=1024, mean_log_n_fuzz=4.0) == 1.0
+        low = self._score(sc, fuzz_level=3, n_fuzz=2, mean_log_n_fuzz=4.0)
+        assert low > 1.0
+        assert self._score(sc, fuzz_level=12, n_fuzz=2, mean_log_n_fuzz=4.0) == self._score(
+            sc, fuzz_level=14, n_fuzz=2, mean_log_n_fuzz=4.0
+        )  # 2^s capped at M
+
+    def test_coe_exp_without_mean_never_skips(self):
+        sc = SeedScorer("coe_exp")
+        assert self._score(sc, fuzz_level=3, n_fuzz=10**6, mean_log_n_fuzz=0.0) > 1.0

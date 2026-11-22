@@ -595,3 +595,11 @@ reproduces the EBADF by exiting a subprocess child without calling `stop()`.
 - [ ] **--hw-perf follow-ups** (2026-11-11) — (a) in-run cost on fuzzgoat (clang) master vs branch, Hard Rule 58: microbench only so far (1 counter +0.55 us/read, >= 3 counters faster); (b) in-process per-call loader (`_run_c_subprocess`) uncounted; (c) multi-target in-process: one counter set, reattached per target switch; (d) relational leak oracle (branch-miss histograms, below) still unbuilt; (e) `PerfShim`/`perf_shim.c` has no caller: `PerfCounters` covers it -- wire or remove.
 - [x] **Vendored libbase64 differential target** (2026-11-18) — `targets/libbase64_read.c` + `tools/vendor_libbase64.sh` + `compile_libbase64_objects()`; every x86 SIMD codec vs the plain codec in one exec (decode, encode+round trip, chunked stream decode/encode). `tests/test_regression_libbase64_target.py` covers the wiring and the oracle (LUT fault must abort, control first).
 - [ ] **ASAN .so + `--snapshot-restore globals` floods ASAN reports** (2026-11-18) — pre-existing, reproduces on untouched `png_read_asan.so`: `GlobalSnapshot.capture()` snapshots whole `.data`/`.bss` spans, which include ASAN's poisoned global redzones, so each restore/capture memcpy raises `global-buffer-overflow` from `PyBytes_FromStringAndSize` (83k reports / 40k execs, 291 MB of log). `--no-snapshot-restore` is clean. Options: span per symbol from the symtab, skip ASAN guard sections, or turn globals restore off for ASAN-instrumented targets.
+
+## AFLFast / AFLSmart port follow-ups (2026-11-21)
+
+- [ ] Paired A/B `--schedule fast_exp|coe_exp` vs `fast|coe` on a real clang target (`bench_paired.py`); record in `docs/AB_LEDGER.md`.
+- [ ] Paired A/B of `weizz_chunk_splice` (`--weizz-tags`) on a chunked format (PNG/ZIP/ISOBMFF).
+- [ ] AFLSmart graded validity energy: parsed-byte fraction of the Weizz map as a seed multiplier (today only binary Zest `--reject-code`).
+- [ ] Nested chunk ops (`chunk_spans(parent=id)`) for splice/swap/delete.
+- [ ] Persist the Weizz map on seed meta (`attach_tags_to_meta`) once splice shows signal; today it is an in-process LRU.

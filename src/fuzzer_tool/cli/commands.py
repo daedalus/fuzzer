@@ -7498,9 +7498,13 @@ def main() -> int:
             "doppler",
             "seek",
             "exploit",
+            "fast_exp",
+            "coe_exp",
         ),
         help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic|doppler|"
-        "seek|exploit (seek = base ignoring exec time; exploit = AFL's x32 constant) "
+        "seek|exploit|fast_exp|coe_exp (fast_exp/coe_exp = the exact AFLFast CCS'16 "
+        "formulas, min(2^s/f, 32) and cut-off 2^s; fast/coe are AFL++'s log2 buckets) "
+        "(seek = base ignoring exec time; exploit = AFL's x32 constant) "
         "(aflgo = exact AFLGo distance annealing, see --t-x; "
         "entropic = libFuzzer -entropic, log-scaled rare-feature energy; "
         "doppler = power Doppler flow energy, SHM coverage only)",

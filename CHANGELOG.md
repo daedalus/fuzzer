@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fast_exp` / `coe_exp` power schedules** (`--schedule fast_exp|coe_exp`, `core/schedules.py`): the exact AFLFast (CCS'16) formulas. `fast_exp` = `min(2^s/f, 32)` (`M / next_pow2(f)` from level 16), `coe_exp` = `2^s` for seeds at or below the mean log path frequency, floor energy above it; no favored bonus, no level-0 shortcut. `fast`/`coe` stay AFL++'s log2 buckets. `tests/test_schedules.py::TestAFLFastExact`.
+- **`weizz_chunk_splice`** (`core/mutations/weizz_structural.py`): AFLSmart cross-seed chunk edit, replacing or inserting after a top-level chunk with a same-`cmp_id` chunk from another corpus entry. Gated by `--weizz-tags`. Structure maps for all Weizz ops now come from a 128-entry LRU (`_smap_for`). `tests/test_weizz_structural.py`.
 - **NAL emulation-prevention op** (`NalMutator._mutate_emulation`) and **AVCC/HVCC length op** (`IsobmffMutator._mutate_nal_length`, `avcc_length_size`). `tests/test_nal_emulation_avcc.py`.
 - **`mpegps_chunk_mutate`** (`core/mutations/mpegps.py`): MPEG Program Stream unit mutator (PES/pack/system header fields, DVD substream ids). `tests/test_mpegps_mutator.py`.
 - **ISOBMFF sample-table op** (`IsobmffMutator._mutate_sample_table`): edge values into `stts`/`stsc`/`stsz`/`stco`/`co64`/`elst` counts and entry fields (elst v0/v1 layouts); entries indexed by bytes present. `tests/test_isobmff_sample_tables.py`.

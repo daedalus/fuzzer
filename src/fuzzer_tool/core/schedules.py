@@ -6,7 +6,11 @@ complementing operator-level schedules like Thompson sampling and MOpt.
 
 Schedules:
 - BASE: AFL's default speed/size/depth scoring (no frequency adjustment)
-- FAST: AFLFast's frequency-based energy (rare seeds get more energy)
+- FAST: AFLFast's frequency-based energy (rare seeds get more energy);
+  AFL++'s log2-bucket form
+- FAST_EXP / COE_EXP: the exact AFLFast (CCS'16) formulas -- FAST_EXP is
+  min(2^s(i) / f(i), M), COE_EXP gives 2^s(i) to seeds at or below the mean
+  path frequency and skips the rest (s = times fuzzed, f = path frequency)
 - COE: Cut-Off Exponential (skip over-fuzzed seeds entirely)
 - RARE: tc_ref-based scoring (seeds owning rare edges get boosted)
 - MMOPT: Depth-based boost for recent entries
@@ -162,7 +166,7 @@ class SeedScorer:
 
     Args:
         schedule: One of 'base', 'fast', 'coe', 'rare', 'mopt', 'lin', 'quad',
-            'go', 'aflgo', 'entropic'.
+            'go', 'aflgo', 'entropic', 'fast_exp', 'coe_exp'.
         max_mult: Maximum havoc multiplier (default 16).
         aflgo_cooling: Cooling schedule for the 'aflgo' power factor:
             'exp', 'log', 'lin' or 'quad'.
@@ -184,6 +188,8 @@ class SeedScorer:
         "doppler",
         "seek",
         "exploit",
+        "fast_exp",
+        "coe_exp",
     )
     COOLING = ("exp", "log", "lin", "quad")
 
@@ -300,7 +306,7 @@ class SeedScorer:
             perf_score += self.rare_bonus(tc_ref)
             penalty = self._rare_factor(n_fuzz, total_execs, tc_ref)
             perf_score *= penalty
-        elif self.schedule in ("fast", "lin", "quad"):
+        elif self.schedule in ("fast", "lin", "quad", "fast_exp"):
             factor = self._schedule_factor(
                 fuzz_level=fuzz_level,
                 n_fuzz=n_fuzz,
@@ -328,6 +334,11 @@ class SeedScorer:
             factor = self._fast_factor(fuzz_level, n_fuzz, favored)
             if factor > self.max_factor:
                 factor = self.max_factor
+            perf_score *= factor / self.power_beta
+        elif self.schedule == "coe_exp":
+            if mean_log_n_fuzz > 0 and self.coe_skip(n_fuzz, mean_log_n_fuzz, favored=False):
+                return 1.0  # same floor as "coe": a skipped seed never gets the max
+            factor = min(self._fast_exp_cap(fuzz_level, 1), self.max_factor)
             perf_score *= factor / self.power_beta
         elif self.schedule == "go":
             perf_score *= self._go_factor(avg_distance, max_distance, anneal_progress)
@@ -572,6 +583,9 @@ class SeedScorer:
         if self.schedule == "coe":
             return self._coe_factor(fuzz_level, n_fuzz, favored)
 
+        if self.schedule == "fast_exp":
+            return self._fast_exp_cap(fuzz_level, n_fuzz)
+
         if self.schedule == "rare":
             return self._rare_factor(n_fuzz, total_execs, tc_ref)
 
@@ -589,6 +603,19 @@ class SeedScorer:
             return (fuzz_level * fuzz_level) / (n_fuzz + 1)
 
         return 1.0
+
+    def _fast_exp_cap(self, fuzz_level: int, n_fuzz: int) -> float:
+        """AFLFast's own FAST factor (aflfast ``calculate_score``), uncapped by M here.
+
+        ``2^s / f`` below 16 fuzz levels, then ``M / next_pow2(f)`` so the
+        shift never overflows. ``score()`` applies the M (``max_factor``) cap.
+        Unlike ``_fast_factor`` there is no ``fuzz_level == 0`` shortcut and
+        no favored bonus: the original has neither.
+        """
+        f = n_fuzz if n_fuzz > 0 else 1
+        if fuzz_level < 16:
+            return float(1 << max(fuzz_level, 0)) / f
+        return self.max_factor / (1 << (f - 1).bit_length())
 
     def _fast_factor(self, fuzz_level: int, n_fuzz: int, favored: bool) -> float:
         """AFLFast's frequency-based energy.
