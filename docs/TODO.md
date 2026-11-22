@@ -600,6 +600,6 @@ reproduces the EBADF by exiting a subprocess child without calling `stop()`.
 
 - [ ] Paired A/B `--schedule fast_exp|coe_exp` vs `fast|coe` on a real clang target (`bench_paired.py`); record in `docs/AB_LEDGER.md`.
 - [ ] Paired A/B of `weizz_chunk_splice` (`--weizz-tags`) on a chunked format (PNG/ZIP/ISOBMFF).
-- [ ] AFLSmart graded validity energy: parsed-byte fraction of the Weizz map as a seed multiplier (today only binary Zest `--reject-code`).
+- [ ] Paired A/B of `--validity-energy --weizz-tags` vs `--weizz-tags` on a chunked format; if `f` is flat across the corpus, try a gain sweep (g = 0.5/2) or a grammar-backed `f` (FormatFuzzer) before dropping it.
 - [ ] Nested chunk ops (`chunk_spans(parent=id)`) for splice/swap/delete.
-- [ ] Persist the Weizz map on seed meta (`attach_tags_to_meta`) once splice shows signal; today it is an in-process LRU.
+- [ ] Feed `weizz_chunk_splice` donors from `seed_meta` RLE (`load_tags_from_meta`) instead of rebuilding donor maps through the in-process LRU.

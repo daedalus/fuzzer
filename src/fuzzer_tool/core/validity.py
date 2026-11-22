@@ -28,6 +28,21 @@ log = logging.getLogger(__name__)
 # validity ranks the corpus and never excludes from it.
 VALID_SEED_BONUS = 1.5
 
+# Graded validity energy (``--validity-energy``): AFLSmart's validity-based
+# power schedule, with the parsed-byte fraction of the seed's Weizz structure
+# map as the validity measure. Energy x (1 + GAIN * fraction), so a seed whose
+# bytes are all explained by comparisons gets 1 + GAIN and an unexplained one
+# stays at 1.0. A boost, not a gate, same stance as VALID_SEED_BONUS.
+VALIDITY_ENERGY_GAIN = 1.0
+
+
+def graded_validity_factor(fraction: float | None, gain: float = VALIDITY_ENERGY_GAIN) -> float:
+    """Energy multiplier for a parsed-byte *fraction*; 1.0 when unknown (None)."""
+    if fraction is None or fraction <= 0.0:
+        return 1.0
+    return 1.0 + gain * min(fraction, 1.0)
+
+
 # Exit statuses a rejection code may take. Negative codes are signals in
 # this fuzzer's runner convention (-1 timeout, -2 infrastructure, -N fatal
 # signal), and 0 is how a harness reports acceptance -- either as a

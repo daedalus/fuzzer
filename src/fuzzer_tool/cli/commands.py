@@ -1337,6 +1337,7 @@ def cmd_fuzz(args):
         swap_walk=getattr(args, "swap_walk", False),
         weizz_tags=getattr(args, "weizz_tags", False),
         weizz_tags_max_len=getattr(args, "weizz_tags_max_len", 8192),
+        validity_energy=getattr(args, "validity_energy", False),
         formatfuzzer=getattr(args, "formatfuzzer", False),
         ff_bin_dir=getattr(args, "ff_bin_dir", None),
         ff_templates=getattr(args, "ff_templates", None),
@@ -7796,6 +7797,16 @@ def main() -> int:
             "Build Weizz-style structure tags from cmplog (+ optional colorize) "
             "and enable field/chunk operators that consume them. Off by default; "
             "see docs/handover/handover_done_2026-09-06.md section 4"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--validity-energy",
+        action="store_true",
+        help=(
+            "Graded validity energy (AFLSmart power schedule): scale each seed's "
+            "energy by 1 + g * f, f = fraction of its bytes the --weizz-tags "
+            "structure map explains (g = 1.0). Needs --weizz-tags; seeds without a "
+            "map stay neutral. Off by default"
         ),
     )
     fuzz_parser.add_argument(

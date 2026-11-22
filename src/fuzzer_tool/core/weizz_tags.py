@@ -1041,6 +1041,26 @@ def load_tags_from_meta(meta: dict) -> StructureMap | None:
     return StructureMap.from_rle(rle, int(length), from_cmplog=True)
 
 
+def parsed_fraction_from_meta(meta: dict | None) -> float | None:
+    """Fraction of a seed's bytes the structure map explains, or ``None``.
+
+    Sums the RLE runs that carry a ``cmp_id`` (bytes some comparison site
+    claimed) over the recorded input length, straight from the stored RLE: no
+    ``StructureMap`` is rebuilt, so the cost is one pass over the runs.
+    ``None`` when the seed has no map or the map is dirty (a length-changing
+    mutation left it stale), so a caller treats it as neutral rather than as
+    "nothing parsed".
+    """
+    if not meta or meta.get("weizz_tags_dirty"):
+        return None
+    rle = meta.get("weizz_tags_rle")
+    length = meta.get("weizz_tags_len")
+    if not rle or not length:
+        return None
+    parsed = sum(run[1] for run in rle if run[2] != 0)
+    return min(1.0, parsed / int(length))
+
+
 def inherit_tags_from_parent(
     parent_meta: dict | None,
     parent_data: bytes | None,

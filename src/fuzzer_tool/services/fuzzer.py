@@ -219,8 +219,9 @@ from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.stack_depth import StackMax
 from fuzzer_tool.core.target_schedule import TargetSchedule
-from fuzzer_tool.core.validity import ValidityChannel
+from fuzzer_tool.core.validity import ValidityChannel, graded_validity_factor
 from fuzzer_tool.core.waypoints import NO_STRATUM
+from fuzzer_tool.core.weizz_tags import parsed_fraction_from_meta
 from fuzzer_tool.services.advisors import AdvisorCtx, AdvisorStage, default_advisors
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
@@ -1920,6 +1921,7 @@ class Fuzzer:
         # end so positional callers of Fuzzer() are not shifted.
         weizz_tags=False,
         weizz_tags_max_len=8192,
+        validity_energy=False,
         email_on_crash=None,
         # Poisson-disk admission (proactive corpus diversity via MinHash LSH).
         # Appended at the end so positional callers of Fuzzer() are not shifted.
@@ -2574,6 +2576,12 @@ class Fuzzer:
         self.weizz_tags = weizz_tags
         self.weizz_tags_max_len = weizz_tags_max_len
         self._weizz_tags_collected = 0
+        # --validity-energy: AFLSmart graded validity multiplier on seed energy.
+        # Reads the Weizz map, so it is inert (with a warning) without it.
+        self.validity_energy = bool(validity_energy)
+        if self.validity_energy and not self.weizz_tags:
+            log.warning("--validity-energy needs --weizz-tags; ignoring it")
+            self.validity_energy = False
         # FormatFuzzer structural mutators (--formatfuzzer): off by default.
         # Operators self-register on import; is_available gates on this flag
         # plus binary presence. Also enabled by --hail-mary.
@@ -10764,6 +10772,8 @@ class Fuzzer:
             groups["Mutation"].append("regex-bomb")
         if self.weizz_tags:
             groups["Mutation"].append("weizz-tags")
+        if getattr(self, "validity_energy", False):
+            groups["Scheduling"].append("validity-energy")
         if self.colorize:
             groups["Mutation"].append("colorize")
 
@@ -11273,6 +11283,12 @@ class Fuzzer:
                         self._last_perf_score = min(
                             self._last_perf_score
                             * self._waypoints.multiplier(meta.get("waypoint", NO_STRATUM)),
+                            self._seed_scorer.max_mult * 100.0,
+                        )
+                    if self.validity_energy:
+                        self._last_perf_score = min(
+                            self._last_perf_score
+                            * graded_validity_factor(parsed_fraction_from_meta(meta)),
                             self._seed_scorer.max_mult * 100.0,
                         )
                 elif staged is None:
