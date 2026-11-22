@@ -607,5 +607,6 @@ reproduces the EBADF by exiting a subprocess child without calling `stop()`.
 ## Swarm testing follow-ups (2026-11-21)
 
 - [x] Per-round `--swarm` A/B on ffmpeg 9.1: no signal (8W/12L, p=0.50). Record in `docs/AB_LEDGER.md`.
-- [ ] Paired A/B arm `swarm-seed` (per-seed masks) vs baseline on ffmpeg 9.1; sweep `--swarm-prob` 0.25/0.75 and `--swarm-seed-rounds` 16/256; longer runs (50k+ execs).
+- [x] `swarm-seed` A/B at 5k execs (20 seeds): no signal (p=0.82). At 30k execs (6 seeds): swarm-seed 5W/1L p=0.22, med +771; p75 4W/2L p=0.69, med +881 (#179).
+- [ ] Repeat #179 with >= 20 seeds at 30k execs (about 100 min per arm on one core) to resolve a ~+800 edge median; sweep `--swarm-seed-rounds` 16/256 and `--swarm-prob` 0.25; try a target that crashes.
 - [ ] Mask havoc's inline sub-mutations.

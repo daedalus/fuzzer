@@ -105,6 +105,8 @@ ARMS: dict[str, list[str]] = {
     "swarm": ["--swarm"],
     # Same, but one mask per parent seed, redrawn every 64 rounds on that seed.
     "swarm-seed": ["--swarm", "--swarm-scope", "seed"],
+    # Per-seed masks keeping 75% of operators: fewer ops absent per round.
+    "swarm-seed-p75": ["--swarm", "--swarm-scope", "seed", "--swarm-prob", "0.75"],
     "baseline-ctl": [],
     "qea": ["--qea"],
     "qea-elite-reset": ["--qea", "--qea-elite-reset", "8"],
@@ -438,6 +440,7 @@ POSITION_ARENA_ARMS = (
 ARM_BASELINES: dict[str, str] = {
     "swarm": "baseline",
     "swarm-seed": "baseline",
+    "swarm-seed-p75": "baseline",
     "baseline-ctl": "baseline",
     "wfc": "baseline",
     "elo-mcts": "elo-lineage",
