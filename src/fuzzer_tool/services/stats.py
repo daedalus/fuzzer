@@ -1791,11 +1791,18 @@ class StatsReporter:
         s = perf_counters.stats
         llc_r, llc_m = s["total_llc_read_access"], s["total_llc_read_miss"]
         dtlb, itlb = s["total_dtlb_read_miss"], s["total_itlb_read_miss"]
+        # Skylake-X STLB presets (--hw-perf-counters skx_*): dTLB misses the
+        # next-page prefetcher turned into STLB hits vs. full STLB misses.
+        stlb_h = s.get("total_skx_dtlb_load_stlb_hit", 0)
+        stlb_m = s.get("total_skx_stlb_miss_loads", 0)
         # Not opened (no PMU, or not requested): print nothing, not zeros.
-        if llc_r + llc_m + dtlb + itlb <= 0:
+        if llc_r + llc_m + dtlb + itlb + stlb_h + stlb_m <= 0:
             return ""
         rate = llc_m / llc_r * 100 if llc_r else 0.0
-        return f" | llc: {llc_r:,}r {llc_m:,}m {rate:.2f}% tlb: {dtlb:,}d {itlb:,}i"
+        out = f" | llc: {llc_r:,}r {llc_m:,}m {rate:.2f}% tlb: {dtlb:,}d {itlb:,}i"
+        if stlb_h + stlb_m > 0:
+            out += f" stlb: {stlb_h:,}h {stlb_m:,}m"
+        return out
 
     def _print_stats_pt_str(self, f) -> str:
         """Intel PT block/trace/lost bytes."""

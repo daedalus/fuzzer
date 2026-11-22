@@ -29,8 +29,10 @@ import contextlib
 import ctypes
 import ctypes.util
 import fcntl
+import functools
 import logging
 import os
+import re
 import struct
 
 log = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ NR_PERF_EVENT_OPEN = 298
 PERF_TYPE_HARDWARE = 0
 PERF_TYPE_SOFTWARE = 1
 PERF_TYPE_HW_CACHE = 3
+PERF_TYPE_RAW = 4
 
 # perf_hw_config values (for PERF_TYPE_HARDWARE)
 PERF_COUNT_HW_CPU_CYCLES = 0
@@ -271,8 +274,80 @@ COUNTER_DEFS = {
     ),
 }
 
-# Group read struct per member count, built once (the read is per exec).
-_GROUP_LAYOUT = [struct.Struct(f"<{_GROUP_HDR + k}Q") for k in range(len(COUNTER_DEFS) + 1)]
+# Model-specific raw events (config = umask << 8 | event select, as in
+# Intel's perfmon tables).  Skylake-X's next-page-prefetcher study counts
+# these three: a dTLB miss that hits the STLB (the prefetcher turned it into
+# a cheap hit), and retired loads/stores that missed the STLB too.  They
+# are meaningless on another CPU model, so PerfCounters drops them there.
+RAW_PRESETS = {
+    "skx_dtlb_load_stlb_hit": 0x2008,  # DTLB_LOAD_MISSES.STLB_HIT
+    "skx_stlb_miss_loads": 0x11D0,  # MEM_INST_RETIRED.STLB_MISS_LOADS
+    "skx_stlb_miss_stores": 0x12D0,  # MEM_INST_RETIRED.STLB_MISS_STORES
+}
+for _n, _cfg in RAW_PRESETS.items():
+    COUNTER_DEFS[_n] = (PERF_TYPE_RAW, _cfg, True)
+
+# Preset name -> (vendor, cpu family, model) the event encoding is valid on.
+# Model 0x55 covers Skylake-SP/X, Cascade Lake and Cooper Lake, which share
+# the encodings above.
+_PRESET_CPU = dict.fromkeys(RAW_PRESETS, ("GenuineIntel", 6, 0x55))
+
+_RAW_NAME = re.compile(r"r([0-9a-fA-F]{1,16})")
+
+
+def parse_raw_name(name: str) -> int | None:
+    """Config for a ``rXXXX`` raw event name (perf's syntax), else None."""
+    m = _RAW_NAME.fullmatch(name)
+    return int(m.group(1), 16) if m else None
+
+
+def cpu_signature(cpuinfo: str = "/proc/cpuinfo") -> tuple[str, int, int] | None:
+    """(vendor, family, model) of the first CPU, or None when unreadable."""
+    try:
+        with open(cpuinfo) as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, val = line.partition(":")
+        if sep:
+            fields.setdefault(key.strip(), val.strip())
+        if len(fields) >= 3 and {"vendor_id", "cpu family", "model"} <= fields.keys():
+            break
+    try:
+        return fields["vendor_id"], int(fields["cpu family"]), int(fields["model"])
+    except (KeyError, ValueError):
+        return None
+
+
+def counter_supported(name: str, signature: tuple[str, int, int] | None = None) -> bool:
+    """Whether *name*'s encoding is valid on this CPU (always for generic names)."""
+    want = _PRESET_CPU.get(name)
+    if want is None:
+        return True
+    return (signature if signature is not None else cpu_signature()) == want
+
+
+def resolve_counter(name: str) -> tuple[int, int, bool] | None:
+    """(perf_type, config, needs_inherit) for a counter name, or None if unknown.
+
+    Names are the COUNTER_DEFS keys, or ``rXXXX`` for a raw PMU event.
+    """
+    if name in COUNTER_DEFS:
+        return COUNTER_DEFS[name]
+    cfg = parse_raw_name(name)
+    return (PERF_TYPE_RAW, cfg, True) if cfg is not None else None
+
+
+@functools.cache
+def _group_layout(k: int) -> struct.Struct:
+    """Group read struct for *k* members, built once (the read is per exec)."""
+    return struct.Struct(f"<{_GROUP_HDR + k}Q")
+
+
+# Kept for callers that index it directly.
+_GROUP_LAYOUT = [_group_layout(k) for k in range(len(COUNTER_DEFS) + 1)]
 
 DEFAULT_COUNTERS = [
     "instructions",
@@ -310,7 +385,15 @@ class PerfCounters:
     ):
         if counter_names is None:
             counter_names = list(DEFAULT_COUNTERS)
-        self.counter_names = [n for n in counter_names if n in COUNTER_DEFS]
+        sig = cpu_signature() if any(n in _PRESET_CPU for n in counter_names) else None
+        self.counter_names = []
+        for n in counter_names:
+            if resolve_counter(n) is None:
+                continue
+            if not counter_supported(n, sig):
+                log.warning("perf counter %s is not valid on this CPU model; skipped", n)
+                continue
+            self.counter_names.append(n)
         self.exclude_kernel = exclude_kernel
         self.inherit = inherit
         self._fds: dict[str, int] = {}
@@ -466,7 +549,7 @@ class PerfCounters:
 
     def _attr(self, name: str) -> bytes:
         """perf_event_attr for counter *name*, as the syscall takes it."""
-        perf_type, config, needs_inherit = COUNTER_DEFS[name]
+        perf_type, config, needs_inherit = resolve_counter(name)  # type: ignore[misc]
         flags = _FLAG_DISABLED | _FLAG_EXCLUDE_HV | _FLAG_ENABLE_ON_EXEC
         if self.exclude_kernel or self._exclude_kernel_required():
             flags |= _FLAG_EXCLUDE_KERNEL
@@ -547,7 +630,7 @@ class PerfCounters:
 
     def _read_group(self, fd: int, names: tuple[str, ...]) -> dict[str, int]:
         """One read() for the group; v * enabled / running per value."""
-        layout = _GROUP_LAYOUT[len(names)]
+        layout = _group_layout(len(names))
         try:
             buf = os.read(fd, layout.size)
         except OSError:
@@ -637,6 +720,11 @@ class PerfCounters:
         """Return cumulative perf stats for display."""
         # total_<name> for every counter; the explicit keys below win.
         out = {f"total_{name}": self._totals.get(name, 0) for name in COUNTER_DEFS}
+        out |= {
+            f"total_{n}": self._totals.get(n, 0)
+            for n in self.counter_names
+            if n not in COUNTER_DEFS
+        }
         return out | {
             "total_instructions": self._total_instructions,
             "total_branches": self._total_branches,

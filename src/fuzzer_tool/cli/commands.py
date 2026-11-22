@@ -177,13 +177,19 @@ def _run_mail_test(args) -> int:
 
 def _hw_perf_counter_list(text: str) -> list[str]:
     """``--hw-perf-counters`` value: comma list of known counter names."""
-    from fuzzer_tool.adapters.perf_event import COUNTER_DEFS
+    from fuzzer_tool.adapters.perf_event import COUNTER_DEFS, counter_supported, resolve_counter
 
     names = [n.strip() for n in text.split(",") if n.strip()]
-    unknown = [n for n in names if n not in COUNTER_DEFS]
+    unknown = [n for n in names if resolve_counter(n) is None]
     if unknown or not names:
         known = ", ".join(sorted(COUNTER_DEFS))
-        raise argparse.ArgumentTypeError(f"unknown counter(s) {unknown}; known: {known}")
+        raise argparse.ArgumentTypeError(
+            f"unknown counter(s) {unknown}; known: {known}; or rXXXX (hex raw PMU event, "
+            "umask<<8|event, as in perf)"
+        )
+    wrong_cpu = [n for n in names if not counter_supported(n)]
+    if wrong_cpu:
+        raise argparse.ArgumentTypeError(f"counter(s) {wrong_cpu} are not valid on this CPU model")
     return names
 
 
@@ -7445,7 +7451,9 @@ def main() -> int:
         default=None,
         metavar="NAME[,NAME...]",
         help="Counters to open instead of the --hw-perf defaults (implies --hw-perf), "
-        "e.g. instructions,llc_read_miss,dtlb_read_miss,page_faults.",
+        "e.g. instructions,llc_read_miss,dtlb_read_miss,page_faults. Raw PMU events "
+        "as rXXXX (hex umask<<8|event, like perf, e.g. r2008); Skylake-X presets "
+        "skx_dtlb_load_stlb_hit, skx_stlb_miss_loads, skx_stlb_miss_stores.",
     )
     fuzz_parser.add_argument(
         "--hw-instr-limit",
