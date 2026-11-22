@@ -50,6 +50,7 @@ from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURI
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST
 from fuzzer_tool.core.shim_health import WriteGuard
+from fuzzer_tool.core.swarm import DEFAULT_SWARM_PROB
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.crash_cluster import CLUSTER_THRESHOLD, REDUCE_EXECS, WL_ITERS
@@ -1338,6 +1339,8 @@ def cmd_fuzz(args):
         weizz_tags=getattr(args, "weizz_tags", False),
         weizz_tags_max_len=getattr(args, "weizz_tags_max_len", 8192),
         validity_energy=getattr(args, "validity_energy", False),
+        swarm=getattr(args, "swarm", False),
+        swarm_prob=getattr(args, "swarm_prob", DEFAULT_SWARM_PROB),
         formatfuzzer=getattr(args, "formatfuzzer", False),
         ff_bin_dir=getattr(args, "ff_bin_dir", None),
         ff_templates=getattr(args, "ff_templates", None),
@@ -7808,6 +7811,22 @@ def main() -> int:
             "structure map explains (g = 1.0). Needs --weizz-tags; seeds without a "
             "map stay neutral. Off by default"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--swarm",
+        action="store_true",
+        help=(
+            "Swarm testing (Csmith): each round draws from a random subset of the "
+            "available operators instead of all of them, so bugs that need an "
+            "operator absent are reachable. Off by default"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--swarm-prob",
+        type=float,
+        default=DEFAULT_SWARM_PROB,
+        help="With --swarm: per-operator inclusion probability in (0, 1) "
+        "(default %(default)s)",
     )
     fuzz_parser.add_argument(
         "--weizz-tags-max-len",

@@ -94,6 +94,7 @@ from fuzzer_tool.core.schedulers.pos_burn_front import BurnFrontPositionSchedule
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
+from fuzzer_tool.core.swarm import swarm_filter
 from fuzzer_tool.services.position_arena import PositionArena
 from fuzzer_tool.services.seed_picker import invasion_select
 
@@ -7711,6 +7712,9 @@ class OperatorEngine:
             buf = bytearray(b"\x00" * self.ctx._rng.randint_list(1, 32, 1)[0])
 
         ops = self.build_ops(data, self._ctx_cache)
+        # --swarm: this round runs a random operator subset (Csmith swarm testing).
+        if getattr(f, "_swarm", False) is True:
+            ops = swarm_filter(ops, self.ctx._rng, f._swarm_prob)
         f._last_ops_used = []
         if getattr(f, "_gravity", None) is not None:
             f._gravity.discard()

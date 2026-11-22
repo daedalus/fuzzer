@@ -218,6 +218,7 @@ from fuzzer_tool.core.shim_health import (
 from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.stack_depth import StackMax
+from fuzzer_tool.core.swarm import DEFAULT_SWARM_PROB, check_prob
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel, graded_validity_factor
 from fuzzer_tool.core.waypoints import NO_STRATUM
@@ -1922,6 +1923,8 @@ class Fuzzer:
         weizz_tags=False,
         weizz_tags_max_len=8192,
         validity_energy=False,
+        swarm=False,
+        swarm_prob=DEFAULT_SWARM_PROB,
         email_on_crash=None,
         # Poisson-disk admission (proactive corpus diversity via MinHash LSH).
         # Appended at the end so positional callers of Fuzzer() are not shifted.
@@ -2582,6 +2585,9 @@ class Fuzzer:
         if self.validity_energy and not self.weizz_tags:
             log.warning("--validity-energy needs --weizz-tags; ignoring it")
             self.validity_energy = False
+        # --swarm: per-round random operator subset (Csmith swarm testing).
+        self._swarm = bool(swarm)
+        self._swarm_prob = check_prob(swarm_prob)
         # FormatFuzzer structural mutators (--formatfuzzer): off by default.
         # Operators self-register on import; is_available gates on this flag
         # plus binary presence. Also enabled by --hail-mary.
@@ -10774,6 +10780,8 @@ class Fuzzer:
             groups["Mutation"].append("weizz-tags")
         if getattr(self, "validity_energy", False):
             groups["Scheduling"].append("validity-energy")
+        if getattr(self, "_swarm", False):
+            groups["Mutation"].append("swarm")
         if self.colorize:
             groups["Mutation"].append("colorize")
 

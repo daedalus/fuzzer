@@ -603,3 +603,8 @@ reproduces the EBADF by exiting a subprocess child without calling `stop()`.
 - [ ] Paired A/B of `--validity-energy --weizz-tags` vs `--weizz-tags` on a chunked format; if `f` is flat across the corpus, try a gain sweep (g = 0.5/2) or a grammar-backed `f` (FormatFuzzer) before dropping it.
 - [ ] Nested chunk ops (`chunk_spans(parent=id)`) for splice/swap/delete.
 - [ ] Feed `weizz_chunk_splice` donors from `seed_meta` RLE (`load_tags_from_meta`) instead of rebuilding donor maps through the in-process LRU.
+
+## Swarm testing follow-ups (2026-11-21)
+
+- [ ] Paired A/B `--swarm` vs default on a real clang target (`bench_paired.py`); sweep `--swarm-prob` 0.25/0.5/0.75; record in `docs/AB_LEDGER.md`.
+- [ ] Per-seed masks (kept for the seed's whole energy budget) vs per-round; mask havoc's inline sub-mutations.
