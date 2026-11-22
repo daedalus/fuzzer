@@ -218,7 +218,13 @@ from fuzzer_tool.core.shim_health import (
 from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.stack_depth import StackMax
-from fuzzer_tool.core.swarm import DEFAULT_SWARM_PROB, check_prob
+from fuzzer_tool.core.swarm import (
+    DEFAULT_SEED_ROUNDS,
+    DEFAULT_SWARM_PROB,
+    SCOPE_ROUND,
+    SWARM_SCOPES,
+    check_prob,
+)
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel, graded_validity_factor
 from fuzzer_tool.core.waypoints import NO_STRATUM
@@ -1925,6 +1931,8 @@ class Fuzzer:
         validity_energy=False,
         swarm=False,
         swarm_prob=DEFAULT_SWARM_PROB,
+        swarm_scope=SCOPE_ROUND,
+        swarm_seed_rounds=DEFAULT_SEED_ROUNDS,
         email_on_crash=None,
         # Poisson-disk admission (proactive corpus diversity via MinHash LSH).
         # Appended at the end so positional callers of Fuzzer() are not shifted.
@@ -2588,6 +2596,11 @@ class Fuzzer:
         # --swarm: per-round random operator subset (Csmith swarm testing).
         self._swarm = bool(swarm)
         self._swarm_prob = check_prob(swarm_prob)
+        if swarm_scope not in SWARM_SCOPES:
+            raise ValueError(f"swarm_scope must be one of {SWARM_SCOPES}, got {swarm_scope!r}")
+        self._swarm_scope = swarm_scope
+        self._swarm_seed_rounds = swarm_seed_rounds
+        self._swarm_masks = None  # SeedMasks, built on first use (needs the RNG)
         # FormatFuzzer structural mutators (--formatfuzzer): off by default.
         # Operators self-register on import; is_available gates on this flag
         # plus binary presence. Also enabled by --hail-mary.

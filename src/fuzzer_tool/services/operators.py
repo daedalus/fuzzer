@@ -94,7 +94,7 @@ from fuzzer_tool.core.schedulers.pos_burn_front import BurnFrontPositionSchedule
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
-from fuzzer_tool.core.swarm import swarm_filter
+from fuzzer_tool.core.swarm import SCOPE_SEED, SeedMasks, swarm_filter
 from fuzzer_tool.services.position_arena import PositionArena
 from fuzzer_tool.services.seed_picker import invasion_select
 
@@ -7618,6 +7618,15 @@ class OperatorEngine:
             return self._build_shared_context(data)
         return None
 
+    def _swarm_ops(self, ops: list[str], data: bytes) -> list[str]:
+        """--swarm: this round's operator subset (per round, or held per seed)."""
+        f = self.f
+        if f._swarm_scope != SCOPE_SEED:
+            return swarm_filter(ops, self.ctx._rng, f._swarm_prob)
+        if f._swarm_masks is None:
+            f._swarm_masks = SeedMasks(self.ctx._rng, f._swarm_prob, f._swarm_seed_rounds)
+        return f._swarm_masks.filter(ops, data)
+
     def mutate(self, data: bytes) -> bytes:
         from fuzzer_tool.core.similarity import hamming_distance
 
@@ -7714,7 +7723,7 @@ class OperatorEngine:
         ops = self.build_ops(data, self._ctx_cache)
         # --swarm: this round runs a random operator subset (Csmith swarm testing).
         if getattr(f, "_swarm", False) is True:
-            ops = swarm_filter(ops, self.ctx._rng, f._swarm_prob)
+            ops = self._swarm_ops(ops, data)
         f._last_ops_used = []
         if getattr(f, "_gravity", None) is not None:
             f._gravity.discard()

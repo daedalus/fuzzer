@@ -100,6 +100,12 @@ SEED_NEWEST_PCTS = (0, 30, 60, 100)
 ARMS: dict[str, list[str]] = {
     "baseline": [],
     # Ports under test. Each differs from baseline in exactly one knob.
+    # Swarm testing: per-round random operator subset. Baseline is plain
+    # `baseline`; `baseline-ctl` is baseline again, the A/A control (Rule 46).
+    "swarm": ["--swarm"],
+    # Same, but one mask per parent seed, redrawn every 64 rounds on that seed.
+    "swarm-seed": ["--swarm", "--swarm-scope", "seed"],
+    "baseline-ctl": [],
     "qea": ["--qea"],
     "qea-elite-reset": ["--qea", "--qea-elite-reset", "8"],
     "qea-no-rotation": ["--qea", "--qea-rotation-angle", "0.0"],
@@ -430,6 +436,9 @@ POSITION_ARENA_ARMS = (
 # but every generation arm is listed so a test can hold them to one rule: the
 # arm is its baseline plus added flags.
 ARM_BASELINES: dict[str, str] = {
+    "swarm": "baseline",
+    "swarm-seed": "baseline",
+    "baseline-ctl": "baseline",
     "wfc": "baseline",
     "elo-mcts": "elo-lineage",
     "elo-alphabeta": "elo-lineage",

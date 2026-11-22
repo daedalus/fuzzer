@@ -125,3 +125,99 @@ class TestWiring:
 
         assert seen and max(seen) < full
         assert len(set(seen)) > 1
+
+
+class TestSeedMasks:
+    def _masks(self, seed=1, prob=0.5, rounds=8):
+        from fuzzer_tool.core.swarm import SeedMasks
+
+        return SeedMasks(_rng(seed), prob, rounds)
+
+    def test_same_seed_same_mask_within_epoch(self):
+        m = self._masks(rounds=8)
+        first = m.filter(_OPS, b"seed-a")
+        assert all(m.filter(_OPS, b"seed-a") == first for _ in range(7))
+
+    def test_seeds_differ(self):
+        m = self._masks()
+        masks = {tuple(m.filter(_OPS, bytes([i]))) for i in range(40)}
+        assert len(masks) > 30
+
+    def test_mask_redrawn_after_epoch(self):
+        m = self._masks(rounds=4)
+        seen = []
+        for _ in range(4 * 12):
+            seen.append(tuple(m.filter(_OPS, b"s")))
+        epochs = [seen[i * 4 : (i + 1) * 4] for i in range(12)]
+        assert all(len(set(e)) == 1 for e in epochs)
+        assert len({e[0] for e in epochs}) > 8
+
+    def test_stable_when_op_list_changes(self):
+        m = self._masks()
+        full = m.filter(_OPS, b"s")
+        sub = m.filter(_OPS[:10] + ["extra"], b"s")
+        assert [o for o in sub if o != "extra"] == [o for o in full if o in _OPS[:10]]
+
+    def test_inclusion_rate_across_seeds(self):
+        m = self._masks(prob=0.25)
+        kept = sum(len(m.filter(_OPS, i.to_bytes(4, "little"))) for i in range(1500))
+        assert kept / (1500 * len(_OPS)) == pytest.approx(0.25, abs=0.03)
+
+    def test_deterministic_per_rng_seed_and_salted(self):
+        a, b, c = self._masks(3), self._masks(3), self._masks(4)
+        assert a.filter(_OPS, b"x") == b.filter(_OPS, b"x")
+        assert a.filter(_OPS, b"x") != c.filter(_OPS, b"x")
+
+    def test_never_empty_and_short_lists_untouched(self):
+        m = self._masks(prob=0.001)
+        for i in range(300):
+            out = m.filter(_OPS, bytes([i % 256, i // 256]))
+            assert len(out) >= 1
+            assert set(out) <= set(_OPS)
+        assert m.filter(["a", "b"], b"x") == ["a", "b"]
+        assert m.filter([], b"x") == []
+
+    def test_lru_bounded(self):
+        from fuzzer_tool.core import swarm
+
+        m = self._masks()
+        for i in range(swarm.MASK_CACHE_SIZE + 50):
+            m.filter(_OPS, i.to_bytes(4, "little"))
+        assert len(m._state) <= swarm.MASK_CACHE_SIZE
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_rejects_bad_rounds(self, bad):
+        with pytest.raises(ValueError, match="seed_rounds"):
+            self._masks(rounds=bad)
+
+
+class TestSeedScopeWiring(TestWiring):
+    def test_cli_scope_flags(self):
+        from fuzzer_tool.cli import commands
+
+        src = Path(commands.__file__).read_text()
+        assert '"--swarm-scope"' in src and '"--swarm-seed-rounds"' in src
+
+    def test_bad_scope_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="swarm_scope"):
+            self._fuzzer(tmp_path, swarm=True, swarm_scope="epoch")
+
+    def test_seed_scope_holds_subset_for_a_seed(self, tmp_path, monkeypatch):
+        f = self._fuzzer(tmp_path, swarm=True, swarm_scope="seed", swarm_seed_rounds=1000)
+        # build_ops shifts between rounds with fuzzer state; pin it so only the
+        # mask can change what select_op sees.
+        pinned = list(f._operators.build_ops(b"A" * 64))
+        monkeypatch.setattr(f._operators, "build_ops", lambda *_a, **_k: list(pinned))
+        seen: list[tuple[str, ...]] = []
+        real = f._operators.select_op
+
+        def spy(ops):
+            seen.append(tuple(ops))
+            return real(ops)
+
+        monkeypatch.setattr(f._operators, "select_op", spy)
+        for _ in range(12):
+            f._operators.mutate(b"A" * 64)
+
+        assert len(set(seen)) == 1
+        assert 0 < len(seen[0]) < len(pinned)

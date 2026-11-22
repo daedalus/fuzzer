@@ -50,7 +50,12 @@ from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURI
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST
 from fuzzer_tool.core.shim_health import WriteGuard
-from fuzzer_tool.core.swarm import DEFAULT_SWARM_PROB
+from fuzzer_tool.core.swarm import (
+    DEFAULT_SEED_ROUNDS,
+    DEFAULT_SWARM_PROB,
+    SCOPE_ROUND,
+    SWARM_SCOPES,
+)
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.crash_cluster import CLUSTER_THRESHOLD, REDUCE_EXECS, WL_ITERS
@@ -1341,6 +1346,8 @@ def cmd_fuzz(args):
         validity_energy=getattr(args, "validity_energy", False),
         swarm=getattr(args, "swarm", False),
         swarm_prob=getattr(args, "swarm_prob", DEFAULT_SWARM_PROB),
+        swarm_scope=getattr(args, "swarm_scope", SCOPE_ROUND),
+        swarm_seed_rounds=getattr(args, "swarm_seed_rounds", DEFAULT_SEED_ROUNDS),
         formatfuzzer=getattr(args, "formatfuzzer", False),
         ff_bin_dir=getattr(args, "ff_bin_dir", None),
         ff_templates=getattr(args, "ff_templates", None),
@@ -7827,6 +7834,19 @@ def main() -> int:
         default=DEFAULT_SWARM_PROB,
         help="With --swarm: per-operator inclusion probability in (0, 1) "
         "(default %(default)s)",
+    )
+    fuzz_parser.add_argument(
+        "--swarm-scope",
+        choices=SWARM_SCOPES,
+        default=SCOPE_ROUND,
+        help="With --swarm: redraw the operator subset every round, or hold one "
+        "per parent seed for --swarm-seed-rounds rounds (default %(default)s)",
+    )
+    fuzz_parser.add_argument(
+        "--swarm-seed-rounds",
+        type=int,
+        default=DEFAULT_SEED_ROUNDS,
+        help="With --swarm-scope seed: rounds a seed keeps its mask (default %(default)s)",
     )
     fuzz_parser.add_argument(
         "--weizz-tags-max-len",
