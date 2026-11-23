@@ -295,6 +295,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "flac_frame_mutate",
         "mp4_codec_cfg_mutate",
         "mp4_stsd_mutate",
+        "mp4_atom_mutate",
+        "mp4_atom_transplant",
         "aac_asc_mutate",
         "caf_chunk_mutate",
         "rpl_chunk_mutate",
@@ -828,6 +830,11 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "aac_asc_mutate": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES and b"esds" in d,
     # ISO-BMFF holding a sample description table.
     "mp4_stsd_mutate": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES and b"stsd" in d,
+    # ISO-BMFF with a movie box: atom havoc / donor transplant.
+    "mp4_atom_mutate": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES and (b"moov" in d or b"moof" in d),
+    "mp4_atom_transplant": lambda d: (
+        d[4:8] in _ISOBMFF_HEAD_TYPES and (b"moov" in d or b"moof" in d)
+    ),
     # CAF magic + one chunk header; ARMovie signature + 20 header lines.
     "caf_chunk_mutate": _sniff_caf,
     "rpl_chunk_mutate": _sniff_rpl,

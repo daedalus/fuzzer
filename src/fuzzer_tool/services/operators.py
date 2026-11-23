@@ -5383,6 +5383,26 @@ class OperatorEngine:
         out = mutate_mp4_stsd(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("mp4_stsd_mutate", out, buf)
 
+    def _op_mp4_atom_mutate(self, buf, _byte_idx, _data):
+        """Havoc one stsd/stts/tkhd/... atom payload; ancestors and stco resized."""
+        from fuzzer_tool.core.mutations.mp4_atom import mutate_mp4_atom  # noqa: PLC0415
+
+        out = mutate_mp4_atom(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("mp4_atom_mutate", out, buf)
+
+    def _op_mp4_atom_transplant(self, buf, _byte_idx, data):
+        """Graft a same-type atom of a corpus donor into this file's ancestor tree."""
+        from fuzzer_tool.core.mutations.mp4_atom import transplant_atom  # noqa: PLC0415
+
+        others = [c for c in self.ctx.corpus if c is not data]
+        if not others:
+            return self._op_declined("mp4_atom_transplant", buf)
+
+        rng = self.ctx._rng
+        donor = bytes(self._donor(data, others, rng))
+        out = transplant_atom(bytes(buf), donor, max_len=self._max_len(), rng=rng)
+        return self._or_declined("mp4_atom_transplant", out, buf)
+
     def _op_aac_asc_mutate(self, buf, _byte_idx, _data):
         """One AAC AudioSpecificConfig field inside an MP4 esds."""
         from fuzzer_tool.core.mutations.aac_asc import mutate_aac_asc  # noqa: PLC0415
