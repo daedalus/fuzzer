@@ -24,6 +24,9 @@ Not every method consumes the pre-fetched uint32 pool:
   ``k >= 3`` when Floyd is disabled, ``weighted_choice_list``, ``categorical``,
   and continuous/distribution helpers.
 
+- **Auxiliary stream**: ``poisson_array`` uses its own ``Generator``
+  (``_aux_rng``) derived from the seed, independent of both of the above.
+
 Because of this, seeded reproducibility depends on method, thresholds, and
 configuration (such as ``FUZZER_RAND_FLOYD``) as well as the seed.
 
@@ -89,6 +92,9 @@ _NO_SEED_FALLBACK = 0x5EED_5EED
 _NEG_SEED_TAG = 0x4E45_4721
 _DEFAULT_POOL_TAG = 0xDEFA_0172
 
+# Tag for the auxiliary (distribution) stream's SeedSequence spawn key.
+_AUX_STREAM_TAG = 0x4155_5831
+
 # Entropy-gate retries per refill before raising starvation.
 _GATE_RETRIES = 3
 
@@ -125,6 +131,23 @@ def _default_source(seed) -> np.random.SeedSequence:
     base = _NO_SEED_FALLBACK if seed is None else seed
     entropy = [-base, _NEG_SEED_TAG] if base < 0 else [base]
     return np.random.SeedSequence([*entropy, _DEFAULT_POOL_TAG])
+
+
+def _derive_aux_rng(rng: np.random.Generator) -> np.random.Generator:
+    """Independent Generator derived from *rng*'s seed, without consuming it.
+
+    Same entropy as the main stream with an extra spawn-key element, so it is
+    a pure function of the seed (not of how many draws the main stream has
+    served) and does not touch ``seed_seq``'s spawn counter.
+    """
+    ss = rng.bit_generator.seed_seq
+    return np.random.default_rng(
+        np.random.SeedSequence(
+            entropy=ss.entropy,
+            spawn_key=(*ss.spawn_key, _AUX_STREAM_TAG),
+            pool_size=ss.pool_size,
+        )
+    )
 
 
 def _min_entropy(data: bytes) -> float:
@@ -201,6 +224,7 @@ class RandPool:
         "_pool_l",
         "_m256_l",
         "_rng",
+        "_aux_rng",
         "_min_entropy",
         "_min_hinf",
     )
@@ -212,6 +236,7 @@ class RandPool:
         min_hinf: float | None = None,
     ) -> None:
         self._rng = np.random.default_rng(_seed_source(seed))
+        self._aux_rng = _derive_aux_rng(self._rng)
         self._pool: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint32)
         self._m256: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint8)  # pre-computed % 256
         # Python-list mirrors of the pools. numpy is the right representation
@@ -250,7 +275,11 @@ class RandPool:
             if retries == _GATE_RETRIES:
                 raise RuntimeError(starved)
             retries += 1
-            self.reseed(int(self._rng.integers(0, 2**63)))
+            # Swap only the main generator: the aux stream (poisson_array)
+            # must not shift because a gate happened to retry.
+            self._rng = np.random.default_rng(_seed_source(int(self._rng.integers(0, 2**63))))
+            self._idx = _POOL_ENTRIES
+            self._pool_l = []
             self._generate_pool()
 
         self._pool_l = self._pool.tolist()
@@ -312,6 +341,7 @@ class RandPool:
         batch stale for the entropy readers.
         """
         self._rng = np.random.default_rng(_seed_source(seed))
+        self._aux_rng = _derive_aux_rng(self._rng)
         self._idx = _POOL_ENTRIES
         self._pool_l = []
 
@@ -354,6 +384,7 @@ class RandPool:
         digest = hashlib.sha256(state_bytes + bytes(raw)).digest()
         seed_words = [int.from_bytes(digest[i : i + 4], "little") for i in range(0, len(digest), 4)]
         self._rng = np.random.default_rng(np.random.SeedSequence(seed_words))
+        self._aux_rng = _derive_aux_rng(self._rng)
         self._idx = _POOL_ENTRIES
         self._pool_l = []
 
@@ -892,10 +923,19 @@ class RandPool:
     def poisson_array(self, lams) -> np.ndarray:
         """Return one Poisson(lams[i]) draw per element, as an array.
 
-        One C-level numpy call (no pool words consumed); keeps the shape of
-        *lams*. Negative rates raise ``ValueError``.
+        One C-level numpy call; keeps the shape of *lams*. Draws from a
+        dedicated auxiliary ``Generator`` derived from the seed, so the
+        result depends only on the seed and on earlier ``poisson_array``
+        calls -- not on pool draws, generator-backed helpers, or entropy-gate
+        retries. ``reseed`` / ``inject_entropy`` restart it.
+
+        Raises:
+            ValueError: a rate is negative or NaN, or too large for int64
+                (numpy's "lam value too large": rates above ~9.2e18, inf
+                included). Rates near that limit are valid but carry only
+                ~sqrt(lam) of noise, so low-order digits are not meaningful.
         """
-        return self._rng.poisson(lams)
+        return self._aux_rng.poisson(lams)
 
     def geometric(self, p: float) -> int:
         """Return the number of failures before the first success.
