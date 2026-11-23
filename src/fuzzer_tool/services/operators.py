@@ -5376,6 +5376,13 @@ class OperatorEngine:
         out = mutate_mp4_cfg(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("mp4_codec_cfg_mutate", out, buf)
 
+    def _op_mp4_stsd_mutate(self, buf, _byte_idx, _data):
+        """stsd entry_count, sample-entry fields, entries and entry child boxes."""
+        from fuzzer_tool.core.mutations.mp4_stsd import mutate_mp4_stsd  # noqa: PLC0415
+
+        out = mutate_mp4_stsd(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("mp4_stsd_mutate", out, buf)
+
     def _op_aac_asc_mutate(self, buf, _byte_idx, _data):
         """One AAC AudioSpecificConfig field inside an MP4 esds."""
         from fuzzer_tool.core.mutations.aac_asc import mutate_aac_asc  # noqa: PLC0415

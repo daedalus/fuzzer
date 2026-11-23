@@ -294,6 +294,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "h264_ps_mutate",
         "flac_frame_mutate",
         "mp4_codec_cfg_mutate",
+        "mp4_stsd_mutate",
         "aac_asc_mutate",
         "caf_chunk_mutate",
         "rpl_chunk_mutate",
@@ -825,6 +826,8 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
         d[4:8] in _ISOBMFF_HEAD_TYPES and any(t in d for t in (b"avcC", b"hvcC", b"esds"))
     ),
     "aac_asc_mutate": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES and b"esds" in d,
+    # ISO-BMFF holding a sample description table.
+    "mp4_stsd_mutate": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES and b"stsd" in d,
     # CAF magic + one chunk header; ARMovie signature + 20 header lines.
     "caf_chunk_mutate": _sniff_caf,
     "rpl_chunk_mutate": _sniff_rpl,
