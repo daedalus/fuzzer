@@ -15,6 +15,8 @@ Rather than reimplementing statistical tests, this reuses the checks already in
   * ``runs_test``     -- bit oscillation rate (catches RLE/padding-like output)
   * ``shannon_entropy`` -- bits/byte uniformity (catches low-entropy streams
     that pass the above by accident)
+  * ``poisson``       -- Pearson chi-square of ``poisson_array`` draws against
+    the exact Poisson pmf (skipped for RNGs without a usable ``poisson_array``)
 
 plus ``repeat_test`` on the raw draws, which is the one failure mode the
 bit/byte-level tests structurally can't see: a stream that repeats its
@@ -39,6 +41,7 @@ comparisons on cloned streams; see its docstring.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -46,6 +49,7 @@ import numpy as np
 from fuzzer_tool.core.rand_pool import _NO_SEED_FALLBACK, _POOL_ENTRIES, RandPool
 from fuzzer_tool.core.randomness import (
     byte_chisq,
+    chisq_sf,
     compressed_ratio,
     fishers_method,
     monobit,
@@ -56,6 +60,9 @@ from fuzzer_tool.core.randomness import (
 
 _DEFAULT_N_BYTES = 4096
 _P_THRESHOLD = 0.01  # standard NIST SP 800-22 significance level
+_POISSON_N = 4096  # draws for the Poisson goodness-of-fit check
+_POISSON_LAM = 4.0  # rate: ~13 bins with expected count >= 5 at n = 4096
+_MIN_EXPECTED = 5.0  # Pearson chi-square validity: every bin expects >= this
 _REDUNDANT = frozenset({"entropy", "compress_ratio"})  # same histogram / point-mass null
 
 # structure_check: exact 32-bit word checks on a cloned stream.
@@ -94,13 +101,47 @@ class RngHealthResult:
         return "SUSPECT: " + "; ".join(reasons)
 
 
+def _poisson_pvalue(rng, n: int = _POISSON_N, lam: float = _POISSON_LAM) -> float | None:
+    """Poisson goodness-of-fit p-value for ``rng.poisson_array``, else None.
+
+    Pearson chi-square of *n* Poisson(*lam*) draws against the exact pmf,
+    bins 0..kmax-1 plus a pooled tail ``X >= kmax`` (kmax: the last k whose
+    tail still expects >= ``_MIN_EXPECTED`` draws). Draws come from a deep
+    copy, so the live auxiliary stream is not advanced and the check is
+    deterministic. Returns None (no p-value, no warning) when *rng* has no
+    ``poisson_array`` or cannot enumerate it (``ExhaustivePool`` raises).
+    """
+    if not callable(getattr(rng, "poisson_array", None)):
+        return None
+    try:
+        draws = np.asarray(copy.deepcopy(rng).poisson_array(np.full(n, lam)))
+    except Exception:
+        return None
+    if draws.shape != (n,) or draws.min() < 0:
+        return 0.0  # wrong shape / negative counts: not a Poisson sample
+
+    pmf, cdf, k = [], 0.0, 0
+    while n * (1.0 - cdf) >= _MIN_EXPECTED:
+        p_k = math.exp(-lam + k * math.log(lam) - math.lgamma(k + 1))
+        pmf.append(p_k)
+        cdf += p_k
+        k += 1
+    kmax = len(pmf) - 1  # last individual bin; X >= kmax is pooled
+    expected = np.array([*pmf[:kmax], 1.0 - sum(pmf[:kmax])]) * n
+    observed = np.bincount(np.minimum(draws.astype(np.int64), kmax), minlength=kmax + 1)
+    x2 = float(np.sum((observed - expected) ** 2 / expected))
+    return chisq_sf(x2, kmax)  # kmax + 1 bins - 1
+
+
 def quick_health_check(rng, n_bytes: int = _DEFAULT_N_BYTES) -> RngHealthResult:
     """Run a quick sanity check on *rng*'s output stream.
 
     Draws ``n_bytes`` bytes (default 4096 -- one ``RandPool`` refill's
     worth, negligible next to a fuzzing campaign) and runs monobit,
     byte_chisq, runs_test, shannon_entropy and repeat_test, then combines
-    all but entropy (redundant with byte_chisq) with Fisher's method. Also flags an outright-constant
+    all but entropy (redundant with byte_chisq) with Fisher's method. When
+    *rng* has a working ``poisson_array`` a Poisson goodness-of-fit p-value
+    (``poisson``) is added to the report and to the combination. Also flags an outright-constant
     stream, which a single small sample could in principle slip past the
     statistical tests.
 
@@ -124,6 +165,11 @@ def quick_health_check(rng, n_bytes: int = _DEFAULT_N_BYTES) -> RngHealthResult:
         "repeat": repeat_test(values, alphabet=256),
         "compress_ratio": compressed_ratio(data),
     }
+    # Independent of the byte draws above (poisson_array has its own stream),
+    # so it joins the Fisher combination without breaking its null.
+    poisson_p = _poisson_pvalue(rng)
+    if poisson_p is not None:
+        pvalues["poisson"] = poisson_p
     combined_p = fishers_method([p for name, p in pvalues.items() if name not in _REDUNDANT])
 
     # warn if the pool is significantly compressible: a symptom of low
