@@ -25,6 +25,8 @@ from typing import Any
 from fuzzer_tool.core.mutations.generic import _swap_pair
 from fuzzer_tool.core.rand_pool import RandPool
 
+BOX_HDR = 8  # size u32 + fourcc
+
 # Box types that contain sub-boxes
 CONTAINER_TYPES = {
     b"moov",
@@ -329,6 +331,20 @@ def serialize_boxes(boxes: list[Box]) -> bytes:
             buf.extend(box.box_type)
         buf.extend(payload)
     return bytes(buf)
+
+
+def fit_sizes(boxes: list[Box]) -> int:
+    """Set each container's size_orig to header + children; return the total.
+
+    Generated trees start with size 0 containers; ``parse_boxes`` clamps
+    those to 8, which drops the children and breaks the round trip.
+    """
+    total = 0
+    for box in boxes:
+        if box.children:
+            box.size_orig = BOX_HDR + fit_sizes(box.children)
+        total += box.size_orig
+    return total
 
 
 def _find_hdlr(boxes: list[Box]) -> list[tuple[list[Box], int]]:
@@ -753,5 +769,6 @@ class IsobmffMutator:
 
         moov = Box(box_type=b"moov", size_orig=0, children=[mvhd, trak])
 
-        result = serialize_boxes([ftyp, moov])
-        return result[:max_len]
+        tree = [ftyp, moov]
+        fit_sizes(tree)
+        return serialize_boxes(tree)[:max_len]
