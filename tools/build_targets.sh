@@ -1644,6 +1644,7 @@ build_simple_targets() {
     build_target "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "${TARGETS_SRC:-$TARGETS}/bithacks_diff.c" "$TARGETS/bithacks_diff${out_suffix}" "-lm" "$flags" "$cc" "$extra_cflags"
     build_target "${TARGETS_SRC:-$TARGETS}/gf256_inv_diff.c" "$TARGETS/gf256_inv_diff${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
+    build_target "${TARGETS_SRC:-$TARGETS}/p6_flags_diff.c" "$TARGETS/p6_flags_diff${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "${TARGETS_SRC:-$TARGETS}/fxt_gates.c" "$TARGETS/fxt_gates${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "${TARGETS_SRC:-$TARGETS}/png_read.c" "$TARGETS/png_read${out_suffix}" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
     build_target "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"

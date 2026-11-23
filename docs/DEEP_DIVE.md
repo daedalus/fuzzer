@@ -2187,6 +2187,12 @@ error queue cleared per exec. Measured (no-ASAN, clang 18): 63.7k guard sites,
 `tests/test_regression_openssl_target.py` pins sniffer agreement and wiring.
 `x509_field_mutate` (above) adds certificate-aware edits on top of the generic DER operators.
 
+### P6 flag/alias differential target (p6_flags_diff)
+
+`targets/p6_flags_diff.c`: model of the P6 µop flag and alias rules (nand2mario, "P6 Micro-Ops", 2026-11-22) checked against the host CPU. Per-register flags, `U2` publish masks (`CF`, `CF|OF`, all-but-`CF`, all), `ADC` via `MOVEMERGEFLGS`, `CMPXCHG` as the branchless `MERGE`/`CMOV.Z` sequence, `AL`/`AH`/`AX` merges, 32-bit effective-address wrap for `LOCK` RMW. Each 12-byte input record (`op, ctl, flags_in, disp, a, b`) is assembled into x86, run from a JIT page, and compared on registers, defined flags and the memory operand. Undefined flags (AF after logic ops, SF/ZF/AF/PF after MUL, ...) are masked, not guessed. Mismatch: `raise(SIGABRT)`.
+
+`./p6_flags_diff exh` sweeps 25 ops x 4 widths x 16 register pairs x edge values (1.25M cases, <1 s); `list` prints the op table. `-DP6_BUG=1..4` plants a model bug (INC publishes CF, ADC drops carry-in, CMPXCHG skips the accumulator write, EA without 32-bit wrap) so tests prove the comparison can fail. Swap in `p6.c` once public: same record format, replace `model_exec`. Limits: x86-64 Linux only, 16-bit addressing and x87 not covered. `tests/test_regression_p6_flags_diff.py`.
+
 ### OpenSSL base64 differential target (openssl_b64_diff)
 
 `targets/openssl_b64_diff.so`: OpenSSL 4.x AVX2 base64 encoder

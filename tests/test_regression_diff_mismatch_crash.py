@@ -37,6 +37,7 @@ DIFF_TARGETS = (
     "hash_simd_diff.c",
     "libbase64_read.c",
     "openssl_b64_diff.c",
+    "p6_flags_diff.c",
 )
 
 
