@@ -271,13 +271,19 @@ static void __afl_cmplog_fini(void);
 
 #if __AFL_DISTANCE_MODE
 #include <dlfcn.h>
+#if __AFL_EDGE
 static void __afl_map_dist_shm(void);
 static void __afl_map_dist_hits_shm(void);
 static void __afl_map_node_shm(void);
 #endif
+#endif
+/* Edge-only definitions (2026-11-24 review): ungated declarations made
+ * the preload build warn about functions it never compiles. */
+#if __AFL_EDGE
 static void __afl_map_block_shm(void);
 static void __afl_map_ijon_shm(void);
 static void __afl_map_c11_shm(void);
+#endif
 
 /* ── Health counters ──────────────────────────────────────────────────
  *
@@ -338,24 +344,28 @@ enum {
 };
 static uint64_t __afl_health[__AFL_HEALTH_FIELDS];
 
-/* Strict decimal parse of an environment knob: the value, or -1 when *s*
- * is NULL, empty, or anything but a run of ASCII digits (the digits-only
- * discipline of __afl_parse_shmid and AFL_MAP_SIZE below). The 2026-11-24
- * review flagged the three remaining atoi() callers -- two in the cmplog
- * section, one here in the edge section -- so this helper lives in the
- * common region both builds compile. atoi's prefix semantics let "1junk"
- * pass as 1 and "banana" as 0, and although each of those three failed
- * safe by accident, the file's own rule is that a malformed value reads
- * as unset, not as its longest numeric prefix. No env knob needs more
- * than 2^31, so anything above reads as malformed too -- which also makes
- * a hostile 40-digit string fail instead of wrapping the accumulator. */
-__AFL_GCC_NO_COV static long long __afl_env_num(const char *s) {
+/* Strict decimal parse of an environment knob capped at *max*: the
+ * value, or -1 when *s* is NULL, empty, or anything but a run of ASCII
+ * digits. The 2026-11-24 review flagged the three remaining atoi()
+ * callers -- two in the cmplog section, one here in the edge section --
+ * so this helper lives in the common region both builds compile. atoi's
+ * prefix semantics let "1junk" pass as 1 and "banana" as 0, and although
+ * each of those three failed safe by accident, the file's own rule is
+ * that a malformed value reads as unset, not as its longest numeric
+ * prefix. The knob ceiling is 2^31 (__AFL_KNOB_MAX), which also makes a
+ * hostile 40-digit string fail instead of wrapping the accumulator;
+ * AFL_MAP_SIZE passes UINT32_MAX -- the one knob allowed the full
+ * entry-count range -- so the edge section uses this helper too and it
+ * is never dead code in any build. */
+#define __AFL_KNOB_MAX (1ULL << 31)
+__AFL_GCC_NO_COV static long long __afl_env_num_max(const char *s,
+                                                    unsigned long long max) {
     if (!s || !s[0]) return -1;
     unsigned long long v = 0;
     for (const char *q = s; *q; q++) {
         if (*q < '0' || *q > '9') return -1;
         v = v * 10 + (unsigned)(*q - '0');
-        if (v > (1ULL << 31)) return -1;
+        if (v > max) return -1;
     }
     return (long long)v;
 }
@@ -987,9 +997,22 @@ __AFL_NO_COV static int __afl_wguard_pkey_arm(void *p, size_t len) {
 #endif
 }
 
+/* An explicitly requested guard that could not be armed must not fail
+ * silently: the run continues unguarded, which is exactly the state the
+ * user asked not to be in (2026-11-24 review F5). write(2), as every
+ * other loud failure here; the wording avoids the crash-scanner tokens. */
+__attribute__((noinline, cold))
+__AFL_NO_COV static void __afl_wguard_arm_fail(const char *want) {
+    char msg[128];
+    int n = snprintf(msg, sizeof(msg),
+                     "__afl_shim: __AFL_WGUARD=%.16s could not be armed"
+                     " -- coverage unguarded\n", want);
+    if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+}
+
 /* Arm the guard on a freshly attached segment. Opt-in via __AFL_WGUARD
- * (fuzzer-tool --shm-write-guard): "pkey" or "mprotect"; unset or anything
- * else leaves it off. */
+ * (fuzzer-tool --shm-write-guard): "pkey" or "mprotect"; unset or empty
+ * leaves it off quietly, any other value or a failed arm says so. */
 __attribute__((noinline))
 __AFL_NO_COV static void __afl_wguard_arm(void *p, size_t len) {
     long page = sysconf(_SC_PAGESIZE);
@@ -997,7 +1020,7 @@ __AFL_NO_COV static void __afl_wguard_arm(void *p, size_t len) {
 
     const char *want = getenv("__AFL_WGUARD");
     __afl_wguard_mode = __AFL_WGUARD_OFF;
-    if (!want) return;
+    if (!want || !want[0]) return;
 
     if (strcmp(want, "mprotect") == 0) {
         /* A re-attach keeps the count: zeroed under another thread's open
@@ -1007,13 +1030,25 @@ __AFL_NO_COV static void __afl_wguard_arm(void *p, size_t len) {
         __afl_wguard_base = p;
         __afl_wguard_len  = len;
         int open_brackets = __atomic_load_n(&__afl_wguard_depth, __ATOMIC_ACQUIRE) != 0;
-        if (!open_brackets && mprotect(p, len, PROT_READ) != 0) return;
+        if (!open_brackets && mprotect(p, len, PROT_READ) != 0) {
+            __afl_wguard_arm_fail(want);
+            return;
+        }
         __afl_wguard_mode = __AFL_WGUARD_MPROTECT;
         return;
     }
 
-    if (strcmp(want, "pkey") == 0 && __afl_wguard_pkey_arm(p, len) == 0)
-        __afl_wguard_mode = __AFL_WGUARD_PKEY;
+    if (strcmp(want, "pkey") == 0) {
+        if (__afl_wguard_pkey_arm(p, len) == 0) {
+            __afl_wguard_mode = __AFL_WGUARD_PKEY;
+            return;
+        }
+        __afl_wguard_arm_fail(want);   /* no PKU, or keys exhausted */
+        return;
+    }
+
+    /* An explicit value that armed nothing: a typo, not an off. */
+    __afl_wguard_arm_fail(want);
 }
 
 /* Per-iteration state */
@@ -1187,21 +1222,13 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
      * probe wrote past the segment. Unset, "" and "0" keep the size in
      * effect: the default, or the previous attach's. Parsed into a local,
      * published with the table below, so no other thread sees the new size
-     * before the new table. */
+     * before the new table. Shared helper now, as every other env knob;
+     * UINT32_MAX cap -- this is the one value that legitimately reaches it. */
     uint32_t map_size = __afl_map_size;
     char *size_str = getenv("AFL_MAP_SIZE");
     if (size_str && size_str[0]) {
-        errno = 0;
-        char *size_end = NULL;
-        /* strtoull accepts leading whitespace, '+' and '-'; the value is part of
-         * the shared-memory ABI, so only ASCII decimal digits are valid. */
-        int digits_only = 1;
-        for (const unsigned char *q = (const unsigned char *)size_str; *q; q++) {
-            if (*q < '0' || *q > '9') { digits_only = 0; break; }
-        }
-        unsigned long long s = digits_only ? strtoull(size_str, &size_end, 10) : 0;
-        if (!digits_only || size_end == size_str || *size_end != '\0' ||
-            errno == ERANGE || s > UINT32_MAX) {
+        long long s = __afl_env_num_max(size_str, UINT32_MAX);
+        if (s < 0) {
             char msg[128];
             int n = snprintf(msg, sizeof(msg),
                              "__afl_shim: AFL_MAP_SIZE=%.32s is not a valid entry count"
@@ -2286,7 +2313,7 @@ __AFL_NO_COV static void __afl_id_scheme_init(void) {
     /* Digits-only parse, not atoi: "1junk" must read as unset (the
      * review's one remaining prefix-parse site). */
     const char *c = getenv("__AFL_COMPCOV_LEVEL");
-    if (__afl_env_num(c) > 0) {
+    if (__afl_env_num_max(c, __AFL_KNOB_MAX) > 0) {
         __afl_id_keep = __AFL_REAL_ID_MASK;
         __afl_id_tag  = __AFL_SYNTH_ID_BIT;
     }
@@ -4650,7 +4677,7 @@ __AFL_NO_COV static int __afl_cmp_shm_attach(int want_sites) {
     /* Digits-only, as every other segment id: strtol's prefix semantics
      * let " 12" and "+12" attach a segment a malformed value must read
      * as unset for. */
-    int shmid = (int)__afl_env_num(id);
+    int shmid = (int)__afl_env_num_max(id, __AFL_KNOB_MAX);
     if (shmid < 0) return 0;
 
     /* Refuse a segment too small for the layout rather than write past it. */
@@ -4774,7 +4801,7 @@ __AFL_NO_COV static int __afl_rec_attach(void) {
     if (!id || !id[0]) return 0;
 
     /* Digits-only, as _CMPLOG_COUNTS_SHM above. */
-    int shmid = (int)__afl_env_num(id);
+    int shmid = (int)__afl_env_num_max(id, __AFL_KNOB_MAX);
     if (shmid < 0) return 0;
 
     struct shmid_ds ds;
@@ -5646,12 +5673,6 @@ __AFL_NO_COV static int __afl_fb_wmemcmp(const wchar_t *a, const wchar_t *b, siz
     return 0;
 }
 
-__AFL_NO_COV static size_t __afl_fb_wcslen(const wchar_t *s) {
-    const wchar_t *p = s;
-    while (*p) p++;
-    return (size_t)(p - s);
-}
-
 /* strlen / wcslen for an operand the REAL call has only proven readable up to
  * its first mismatch (or first match, for the set scans), never to its NUL.
  * strcmp("AAAA", "Z") returns at byte 0, so an unterminated buffer ending at a
@@ -5694,13 +5715,12 @@ __AFL_NO_COV static wchar_t __afl_fb_wlower(wchar_t c) {
     return (c >= L'A' && c <= L'Z') ? c + (L'a' - L'A') : c;
 }
 
-__AFL_NO_COV static int __afl_fb_wcscasecmp(const wchar_t *a, const wchar_t *b, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        wchar_t x = __afl_fb_wlower(a[i]), y = __afl_fb_wlower(b[i]);
+__AFL_NO_COV static int __afl_fb_wcscasecmp(const wchar_t *a, const wchar_t *b) {
+    for (;;) {
+        wchar_t x = __afl_fb_wlower(*a++), y = __afl_fb_wlower(*b++);
         if (x != y) return x < y ? -1 : 1;
         if (!x) return 0;
     }
-    return 0;
 }
 
 __AFL_NO_COV static char *__afl_fb_strpbrk(const char *s, const char *accept) {
@@ -5829,6 +5849,17 @@ __AFL_NO_COV static inline void __afl_on_strncasecmp(const char *a, const char *
     __afl_compcov_bytes(a, b, n, pc, COMPCOV_STR);
 }
 
+/* gcc -Wmissing-attributes (2026-11-24 review F6): the afl_cmp_* weak
+ * aliases below carry fewer attributes than the glibc declarations they
+ * shadow (leaf/nonnull/pure). Copying those attributes would be wrong --
+ * our versions record comparisons and are not pure, and a pure attribute
+ * would license the optimizer to drop repeat calls -- so the alias takes
+ * only the name and the warning is suppressed for the region. clang does
+ * not warn, hence the gate. */
+#if !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wmissing-attributes"
+#endif
 __AFL_NO_COV int memcmp(const void *a, const void *b, size_t n) {
     __AFL_RESOLVE(real_memcmp, afl_cmp_fn, "memcmp", __afl_fb_memcmp);
     int result = __AFL_MUTED(real_memcmp(a, b, n));
@@ -6151,6 +6182,9 @@ __AFL_NO_COV void *memrchr(const void *s, int c, size_t n) {
 }
 __AFL_NO_COV void * afl_cmp_memrchr(const void *s, int c, size_t n)
     __attribute__((weak, alias("memrchr")));
+#if !defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
 
 /* ── Sanitizer weak hooks ─────────────────────────────────────────────
  * The overrides above see direct calls only. A compare that lands on the
@@ -6554,7 +6588,7 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
      * that wants only the edge-map partial-match signal, and none of the
      * record/counts/sites log machinery, sets this and nothing else.
      * Malformed values keep the default level, not atoi's prefix. */
-    long long v = __afl_env_num(getenv("__AFL_COMPCOV_LEVEL"));
+    long long v = __afl_env_num_max(getenv("__AFL_COMPCOV_LEVEL"), __AFL_KNOB_MAX);
     if (v >= 0)
         __afl_compcov_level = v > 2 ? 2 : (int)v;
 #if __AFL_EDGE
@@ -6563,14 +6597,14 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
     if (vp) __afl_vp_on = (volatile uint32_t *)vp + 1;
 #endif
     const char *prune = getenv("__AFL_CMP_PRUNE_CONST");
-    long long prune_v = __afl_env_num(prune);
+    long long prune_v = __afl_env_num_max(prune, __AFL_KNOB_MAX);
     __afl_prune_const = prune_v > 0;
     /* Record knobs; see "Dedup scope" and "Per-site record cap". */
     const char *cap = getenv("__AFL_CMPLOG_SITE_CAP");
     /* Digits-only like the knobs above: "12junk", " 12" and "-5" read as
      * unset (strtol took the numeric prefix), and an absurdly long value
      * reads as malformed rather than saturating to the cap maximum. */
-    long long cap_v = __afl_env_num(cap);
+    long long cap_v = __afl_env_num_max(cap, __AFL_KNOB_MAX);
     __afl_cmplog_site_cap = cap_v <= 0 ? 0
         : (cap_v > CMPLOG_SITE_CAP_MAX ? CMPLOG_SITE_CAP_MAX : (uint32_t)cap_v);
     const char *scope = getenv("__AFL_CMPLOG_DEDUP_SCOPE");
@@ -8636,6 +8670,12 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     }
 
     __afl_wguard_land(wg_prev);
+    /* The LTL sink's open(2) is interruptible, and a jump from inside
+     * __ltl_open's CAS->store window left the fd in LTL_FD_OPENING for
+     * good: every later event span the yield loop and was dropped.
+     * Reset as the fork child does; a waiter re-reads and re-races
+     * cleanly (2026-11-24 review F2). */
+    if (__ltl_fd == LTL_FD_OPENING) __ltl_fd = LTL_FD_UNOPENED;
 #if __AFL_CMPLOG
     __afl_hook_mute = mute_prev;
     /* A timeout tick can land mid-record; a lock left held drops every
