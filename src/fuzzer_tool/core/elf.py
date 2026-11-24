@@ -566,6 +566,33 @@ def _shdrs_in_bounds(n: int, e_shoff: int, e_shnum: int, e_shentsize: int) -> bo
     return 0 < e_shoff <= n and e_shnum * e_shentsize <= n - e_shoff
 
 
+def _payload_in_bounds(n: int, off: int, size: int) -> bool:
+    """Whether ``[off, off + size)`` lies inside an *n*-byte image.
+
+    The 2026-11-13 audit validated the section-header *table*
+    (_shdrs_in_bounds) but not the payloads its headers describe:
+    sh_offset/sh_size are exactly as attacker-controlled (the kernel
+    ignores both), and every section-payload reader below used to trust
+    them, relying on per-caller except clauses of demonstrably incomplete
+    coverage (2026-11-24 review — deadness and pc_resolver catch OSError /
+    ValueError but not struct.error). One contract here instead: a
+    payload either lies inside the image or the section reads as missing.
+    Phrased as a subtraction so off + size cannot overflow.
+    """
+    return 0 <= off <= n and size <= n - off
+
+
+def _cstr(elf: bytes, at: int) -> bytes:
+    """Bytes from *at* through the next NUL, or the end of the image.
+
+    ``bytes.index`` raised ValueError once *at* ran past the image end —
+    a hostile st_name produces that — so this variant never raises: past
+    the end reads as the empty string.
+    """
+    end = elf.find(b"\x00", at)
+    return elf[at : end if end >= 0 else len(elf)]
+
+
 def _sym_sections(elf: bytes) -> tuple | None:
     """Section-header offsets of (.symtab, .strtab, .dynsym, .dynstr).
 
@@ -603,12 +630,17 @@ def _read_sym_names(elf: bytes, sym_sec: int | None, str_sec: int | None) -> lis
     """Every symbol name in one symbol table; [] when either section is missing."""
     if sym_sec is None or str_sec is None:
         return []
-    sym_offset = struct.unpack_from("<Q", elf, sym_sec + 24)[0]
-    sym_size = struct.unpack_from("<Q", elf, sym_sec + 32)[0]
+    sym_offset, sym_size = struct.unpack_from("<QQ", elf, sym_sec + 24)
     sym_entsize = struct.unpack_from("<Q", elf, sym_sec + 56)[0]
-    if sym_entsize == 0:
+    strtab_offset, strtab_size = struct.unpack_from("<QQ", elf, str_sec + 24)
+    # Elf64_Sym is 24 bytes; a smaller "entsize" is malformed and would let
+    # per-entry reads run past the payload's last entry.
+    if sym_entsize < _SYM_SIZE:
         return []
-    strtab_offset = struct.unpack_from("<Q", elf, str_sec + 24)[0]
+    if not _payload_in_bounds(len(elf), sym_offset, sym_size):
+        return []
+    if not _payload_in_bounds(len(elf), strtab_offset, strtab_size):
+        return []
     names: list[str] = []
     for i in range(sym_size // sym_entsize):
         sym = sym_offset + i * sym_entsize
@@ -622,6 +654,7 @@ def _read_sym_names(elf: bytes, sym_sec: int | None, str_sec: int | None) -> lis
 
 
 # Elf64_Sym, one record per 24 bytes; st_info's low nibble is the type.
+_SYM_SIZE = 24  # sizeof(Elf64_Sym); sh_entsize below this is malformed
 _SYM_DTYPE = [
     ("name", "<u4"), ("info", "u1"), ("other", "u1"),
     ("shndx", "<u2"), ("value", "<u8"), ("size", "<u8"),
@@ -654,6 +687,11 @@ def func_table(elf: bytes) -> FuncTable | None:
         if sym_sec is None or str_sec is None:
             continue
         off, size = struct.unpack_from("<QQ", elf, sym_sec + 24)
+        str_off, str_size = struct.unpack_from("<QQ", elf, str_sec + 24)
+        if not _payload_in_bounds(len(elf), off, size):
+            continue
+        if not _payload_in_bounds(len(elf), str_off, str_size):
+            continue
         syms = np.frombuffer(elf, dtype=_SYM_DTYPE, count=size // 24, offset=off)
         keep = syms[
             ((syms["info"] & 0xF) == _STT_FUNC) & (syms["shndx"] != 0) & (syms["value"] > 0)
@@ -662,11 +700,7 @@ def func_table(elf: bytes) -> FuncTable | None:
             continue
 
         keep = keep[np.argsort(keep["value"], kind="stable")]
-        str_off = struct.unpack_from("<Q", elf, str_sec + 24)[0]
-        names = [
-            elf[str_off + n : elf.index(b"\x00", str_off + n)].decode(errors="replace")
-            for n in keep["name"].tolist()
-        ]
+        names = [_cstr(elf, str_off + n).decode(errors="replace") for n in keep["name"].tolist()]
         starts = keep["value"].copy()
         return FuncTable(starts, starts + np.maximum(keep["size"], 1), names)
     return None
@@ -695,13 +729,16 @@ def _symbol_names(target: str) -> list[str]:
 
 def _bounds_in_symtab(elf: bytes, symtab_sec: int, strtab_sec: int, start_sym: str, stop_sym: str):
     """(start, stop) st_values of the two named symbols; None unless both are > 0."""
-    sym_offset = struct.unpack_from("<Q", elf, symtab_sec + 24)[0]
-    sym_size = struct.unpack_from("<Q", elf, symtab_sec + 32)[0]
+    sym_offset, sym_size = struct.unpack_from("<QQ", elf, symtab_sec + 24)
     sym_entsize = struct.unpack_from("<Q", elf, symtab_sec + 56)[0]
-    if sym_entsize == 0:
+    strtab_offset, strtab_size = struct.unpack_from("<QQ", elf, strtab_sec + 24)
+    if sym_entsize < _SYM_SIZE:
+        return None
+    if not _payload_in_bounds(len(elf), sym_offset, sym_size):
+        return None
+    if not _payload_in_bounds(len(elf), strtab_offset, strtab_size):
         return None
     sym_count = sym_size // sym_entsize
-    strtab_offset = struct.unpack_from("<Q", elf, strtab_sec + 24)[0]
     start_addr = stop_addr = None
     for i in range(sym_count):
         sym = sym_offset + i * sym_entsize
@@ -1070,9 +1107,12 @@ def _static_symbol_addr(elf: bytes, name: str) -> int | None:
     for sym_sec, str_sec in ((symtab, strtab), (dynsym, dynstr)):
         if sym_sec is None or str_sec is None:
             continue
-        sym_off = struct.unpack_from("<Q", elf, sym_sec + 24)[0]
-        sym_size = struct.unpack_from("<Q", elf, sym_sec + 32)[0]
-        str_off = struct.unpack_from("<Q", elf, str_sec + 24)[0]
+        sym_off, sym_size = struct.unpack_from("<QQ", elf, sym_sec + 24)
+        str_off, str_size = struct.unpack_from("<QQ", elf, str_sec + 24)
+        if not _payload_in_bounds(len(elf), sym_off, sym_size):
+            continue
+        if not _payload_in_bounds(len(elf), str_off, str_size):
+            continue
         for i in range(sym_size // 24):
             sym = sym_off + i * 24
             st_name = struct.unpack_from("<I", elf, sym)[0]

@@ -27,7 +27,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import pickle
 import re
 import signal
 import socket
@@ -409,15 +408,25 @@ class PushNotifier:
 
 
 def _encode(targets: Sequence[PushTarget], msg: PushMessage) -> bytes:
-    """Plain tuples: the child runs this file as __main__, not as the package module."""
-    rows = [(t.service.value, t.endpoint, t.host, t.secret, t.key) for t in targets]
-    return pickle.dumps((rows, msg.title, msg.body))
+    """JSON, not pickle: the child runs this file as __main__, not as the
+    package module.
+
+    The pipe is private (parent to its own child), so pickle was safe as
+    used -- but pickle.loads executes code on malformed input, and a
+    future refactor that ever lets anything but this parent write that
+    pipe would turn a protocol error into code execution (2026-11-24
+    review). JSON just fails to parse. Shape: one object, targets under
+    "t" (rows of the five primitive fields), title and body under
+    "h"/"b".
+    """
+    rows = [[t.service.value, t.endpoint, t.host, t.secret, t.key] for t in targets]
+    return json.dumps({"t": rows, "h": msg.title, "b": msg.body}).encode()
 
 
 def _decode(blob: bytes) -> tuple[list[PushTarget], PushMessage]:
-    rows, title, body = pickle.loads(blob)
-    targets = [PushTarget(PushService(s), e, h, sec, k) for s, e, h, sec, k in rows]
-    return targets, PushMessage(title, body)
+    obj = json.loads(blob)
+    targets = [PushTarget(PushService(s), e, h, sec, k) for s, e, h, sec, k in obj["t"]]
+    return targets, PushMessage(obj["h"], obj["b"])
 
 
 def _main() -> int:

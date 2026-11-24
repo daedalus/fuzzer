@@ -19,6 +19,7 @@ Runs once per novel crash. Resolvers are cached per module file, keyed by
 from __future__ import annotations
 
 import os
+import struct
 from collections import OrderedDict
 from typing import NamedTuple
 
@@ -105,7 +106,10 @@ def resolver_for(module: str) -> PcResolver | None:
     if st.st_size <= _MAX_MODULE_BYTES:
         try:
             res = PcResolver(module)
-        except (OSError, ValueError):
+        except (OSError, ValueError, struct.error):
+            # struct.error completes the guard (2026-11-24 review): a
+            # malformed ELF can raise it out of DwarfSiteResolver's own
+            # header unpacking, and it is not a ValueError.
             res = None
     _cache[key] = res
     while len(_cache) > _MAX_CACHED:

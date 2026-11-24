@@ -9,6 +9,7 @@ during fuzzing. Supports three execution modes:
 Also supports optional hardware performance counter tracking on child processes.
 """
 
+import atexit
 import collections
 import contextlib
 import enum
@@ -336,8 +337,15 @@ def _ppid_of(pid: int) -> int | None:
             stat = f.read()
     except OSError:
         return None
-    # comm may hold spaces and ')': split after the last one.
-    return int(stat.rsplit(b")", 1)[1].split()[1])
+    # comm may hold spaces and ')': split after the last one. A short or
+    # ')' less read (raced exit mid-read, exotic kernel) must read as
+    # "gone", not raise: this runs on the kill path, and an IndexError
+    # here turned a plain timeout into an infra-failure exit of the
+    # whole campaign (2026-11-24 review).
+    try:
+        return int(stat.rsplit(b")", 1)[1].split()[1])
+    except (IndexError, ValueError):
+        return None
 
 
 def _descendants(pid: int) -> list[int]:
@@ -809,6 +817,37 @@ def _get_fast_path_file() -> str:
     return _fast_path_name
 
 
+def _close_fast_path_file() -> None:
+    """Close and unlink the fast-path temp file at process exit.
+
+    2026-11-24 review: the mkstemp name was never unlinked, so every
+    campaign left one fuzz_fast_* file in /tmp per process. Unlinking at
+    exit is safe for children still holding it open as stdin -- POSIX
+    keeps an unlinked file alive until its last descriptor closes.
+    """
+    global _fast_path_fd, _fast_path_name
+    with _fast_path_lock:
+        fd, name = _fast_path_fd, _fast_path_name
+        _fast_path_fd = None
+        _fast_path_name = None
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+    if name is not None:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+
+
+atexit.register(_close_fast_path_file)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write until every byte is out (a regular-file write may be short)."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
+
+
 def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
     """Copy env and strip LD_PRELOAD entries that conflict with sanitizers.
     Caches the result for repeated calls with the same env.
@@ -1006,11 +1045,15 @@ def run_target_fast(
     pid = 0
     stderr_r = -1
     try:
-        # Write data to temp file (reuse fd to avoid open/close overhead)
+        # Write data to temp file (reuse fd to avoid open/close overhead).
+        # write-all: os.write on a regular file may still return short.
         os.lseek(_fast_path_fd, 0, os.SEEK_SET)
-        os.write(_fast_path_fd, data)
+        _write_all(_fast_path_fd, data)
         os.ftruncate(_fast_path_fd, len(data))
-        os.fsync(_fast_path_fd)
+        # No fsync (2026-11-24 review): the child reads the same page
+        # cache through its own open() of fname, which write() already
+        # updated; fsync buys crash durability, which a fuzzing input
+        # does not need, at a measurable per-exec cost.
 
         e = _clean_env(env)
         # Redirect stdin from the temp file so targets that read(0, ...) get the data.
@@ -1241,10 +1284,18 @@ def run_target_file(
 
     from pathlib import Path
 
-    tmp_file = Path(tmp_dir) / f"fuzz_{os.getpid()}"
+    # Regression (2026-11-24 review): this was a fixed fuzz_<pid> name —
+    # predictable, so one shared-directory refactor away from a symlink
+    # race. Every other temp path in the tree is mkstemp; this one now is
+    # too, even though the dir itself is already a private mkdtemp.
+    fd, tmp_path = tempfile.mkstemp(prefix="fuzz_", dir=str(tmp_dir))
+    os.close(fd)
+    tmp_file = Path(tmp_path)
     try:
         tmp_file.write_bytes(data)
     except OSError as e:
+        with contextlib.suppress(OSError):
+            tmp_file.unlink()
         return -2, str(e), 0
     cmd = _file_cmd(target, target_args, str(tmp_file))
 

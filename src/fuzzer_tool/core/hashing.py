@@ -140,6 +140,16 @@ def hash64(data: bytes) -> int:
 # Last (bytes object, key) from hash64_len. Position schedulers key the same
 # parent back to back (~2/3 of calls with --pos-* on), so a hit is ~65 ns vs
 # 0.3-40 us. One tuple: swapped atomically, holds a single object.
+#
+# Retention (2026-11-24 review, documented as accepted): the memo pins the
+# most recently hashed bytes object for the process lifetime, so its memory
+# is held until the *next* hash64_len call replaces it -- up to one full
+# seed per process, on top of the corpus's own copy of that seed. Bounded
+# to exactly one object and one hash by the single-slot design (a dict of
+# recent keys would grow with the corpus, which is worse); the retained
+# object is always one the caller kept alive anyway during a mutation
+# round, and a large-seed campaign pays at most one extra seed. If that
+# ever matters, the fix is an explicit clear on round end, not a cache.
 _len_memo: tuple[bytes | None, int] = (None, 0)
 
 

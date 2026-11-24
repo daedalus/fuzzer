@@ -35,7 +35,7 @@ def test_large_range_is_unbiased_by_rejection(n):
     cut = (1 << 32) - n
     frac = float((xs < cut).mean())
     assert abs(frac - cut / n) < 0.02
-    assert 0 <= xs.min() and xs.max() < n
+    assert xs.min() >= 0 and xs.max() < n
 
 
 def test_list_apis_agree_on_range():

@@ -52,6 +52,117 @@ class TestHostileSectionOffset:
         assert elf._sym_sections(raw) is not None
 
 
+class TestHostileSectionPayload:
+    """Hostile ``sh_offset``/``sh_size`` of section payloads (2026-11-24 review).
+
+    The 2026-11-13 audit (class above) validated the section-header
+    *table*; the payloads its headers describe were still trusted. A
+    malformed symtab offset raised ``struct.error`` / ``ValueError`` out of
+    readers whose callers do not catch them: DeadProver runs unguarded
+    from ``analyzer_distance._drop_dead_targets``, and ``pc_resolver``
+    caught only ``(OSError, ValueError)``. The readers must treat an
+    out-of-image payload as a missing section, by construction in
+    ``elf._payload_in_bounds``.
+    """
+
+    @staticmethod
+    def _symtab_secs(raw: bytes):
+        secs = elf._sym_sections(raw)
+        assert secs is not None and secs[0] is not None, "host binary has no .symtab"
+        return secs
+
+    @staticmethod
+    def _patched_all(patches: list[tuple[int, int, int]]) -> bytes:
+        """A real ELF with several section-header payload fields overwritten."""
+        raw = bytearray(Path(sys.executable).read_bytes())
+        for sec, field_off, value in patches:
+            struct.pack_into("<Q", raw, sec + field_off, value)
+        return bytes(raw)
+
+    def _patched(self, sec: int, field_off: int, value: int) -> bytes:
+        """A real ELF with one section-header payload field overwritten."""
+        return self._patched_all([(sec, field_off, value)])
+
+    @pytest.mark.parametrize("off", _HOSTILE_SHOFF)
+    def test_regression_hostile_symtab_offset(self, off):
+        # Both symbol tables: func_table/_static_symbol_addr fall back from
+        # .symtab to .dynsym, so only a hostile payload in BOTH reads as None.
+        raw0 = Path(sys.executable).read_bytes()
+        symtab_sec, strtab_sec, dynsym_sec, dynstr_sec = self._symtab_secs(raw0)
+        raw = self._patched_all(
+            [(symtab_sec, 24, off)] + ([(dynsym_sec, 24, off)] if dynsym_sec else [])
+        )
+
+        assert elf.func_table(raw) is None
+        assert elf._static_symbol_addr(raw, "main") is None
+        assert elf._read_sym_names(raw, symtab_sec, strtab_sec) == []
+        assert (
+            elf._bounds_in_symtab(
+                raw, symtab_sec, strtab_sec, "__start___sancov_guards", "__stop___sancov_guards"
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("size", [_U64_MAX, 2**63, len(Path(sys.executable).read_bytes()) * 8])
+    def test_regression_hostile_symtab_size(self, size):
+        raw0 = Path(sys.executable).read_bytes()
+        symtab_sec, strtab_sec, dynsym_sec, _ = self._symtab_secs(raw0)
+        raw = self._patched_all(
+            [(symtab_sec, 32, size)] + ([(dynsym_sec, 32, size)] if dynsym_sec else [])
+        )
+
+        assert elf.func_table(raw) is None
+        assert elf._static_symbol_addr(raw, "main") is None
+        assert (
+            elf._bounds_in_symtab(
+                raw, symtab_sec, strtab_sec, "__start___sancov_guards", "__stop___sancov_guards"
+            )
+            is None
+        )
+
+    def test_regression_hostile_strtab_offset(self):
+        raw0 = Path(sys.executable).read_bytes()
+        symtab_sec, strtab_sec, dynsym_sec, dynstr_sec = self._symtab_secs(raw0)
+        assert dynstr_sec is not None, "host binary has no .dynstr"
+        raw = self._patched_all([(strtab_sec, 24, 2**40), (dynstr_sec, 24, 2**40)])
+
+        assert elf._read_sym_names(raw, symtab_sec, strtab_sec) == []
+        assert elf.func_table(raw) is None
+
+    @pytest.mark.parametrize("entsize", [0, 1, 8, 23])
+    def test_regression_undersized_sym_entsize(self, entsize):
+        """A sub-Elf64_Sym entsize is malformed: reads as a missing table."""
+        raw0 = Path(sys.executable).read_bytes()
+        symtab_sec, strtab_sec = self._symtab_secs(raw0)[:2]
+        raw = self._patched(symtab_sec, 56, entsize)
+
+        assert elf._read_sym_names(raw, symtab_sec, strtab_sec) == []
+        assert (
+            elf._bounds_in_symtab(
+                raw, symtab_sec, strtab_sec, "__start___sancov_guards", "__stop___sancov_guards"
+            )
+            is None
+        )
+
+    def test_regression_deadness_sym_fields_hostile_payload(self):
+        """DeadProver's unguarded dynsym read stays exception-free."""
+        from fuzzer_tool.core.deadness import _sym_fields
+
+        values, info, shndx = _sym_fields(b"\x7fELF" + b"\x00" * 60, _U64_MAX, 24)
+
+        assert values.size == 0
+        assert info.size == 0
+        assert shndx.size == 0
+
+    def test_intact_binary_still_parses(self):
+        """Falsification: the payload guards do not decline a well-formed image."""
+        raw = Path(sys.executable).read_bytes()
+
+        assert elf.func_table(raw) is not None
+        secs = self._symtab_secs(raw)
+        assert elf._read_sym_names(raw, secs[0], secs[1]) != []
+
+
 class TestHostileProgramOffset:
     """``e_phoff = 2**64 - 1`` raised ``ValueError`` out of ``is_elf_executable``."""
 

@@ -16,8 +16,8 @@ import pytest
 
 from tests.conftest import requires_clang
 from tests.test_regression_shim_audit import SHIM, _build
-from tests.test_shim_simd_probe import _DRIVER, FIRES, WINDOW, _homing_on, _model, _run
 from tests.test_shim_map_slot import _home
+from tests.test_shim_simd_probe import _DRIVER, FIRES, WINDOW, _homing_on, _model, _run
 
 STEP_MUL = 0x85EBCA6B
 STEP_SHIFT = 16

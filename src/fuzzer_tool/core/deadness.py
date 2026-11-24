@@ -32,7 +32,13 @@ from enum import Enum
 
 import numpy as np
 
-from fuzzer_tool.core.elf import _elf64_le, _shdrs_in_bounds, _sym_sections, func_table
+from fuzzer_tool.core.elf import (
+    _elf64_le,
+    _payload_in_bounds,
+    _shdrs_in_bounds,
+    _sym_sections,
+    func_table,
+)
 
 
 class Verdict(Enum):
@@ -346,7 +352,15 @@ def _ramp(counts: np.ndarray) -> np.ndarray:
 
 
 def _sym_fields(elf: bytes, off: int, size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(st_value, st_info, st_shndx) arrays of one symbol table."""
+    """(st_value, st_info, st_shndx) arrays of one symbol table.
+
+    Section payloads are attacker-controlled (elf._payload_in_bounds);
+    DeadProver runs unguarded from analyzer_distance._drop_dead_targets,
+    so an out-of-image table reads as empty here instead of raising
+    ValueError out of np.frombuffer (2026-11-24 review).
+    """
+    if not _payload_in_bounds(len(elf), off, size):
+        off, size = 0, 0
     n = size // _SYM_SIZE
     dt = np.dtype(
         [("name", "<u4"), ("info", "u1"), ("other", "u1"), ("shndx", "<u2"),

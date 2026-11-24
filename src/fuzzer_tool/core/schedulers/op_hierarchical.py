@@ -158,12 +158,22 @@ class HierarchicalBanditScheduler:
             and self._total_pulls > 0
             and self._total_pulls % self.decay_interval == 0
         ):
+            # Decay toward each posterior's prior (Beta(1,1) here), never
+            # toward (0, 0): forgotten evidence must read "unknown", not
+            # Beta(eps, eps). Multiplying both parameters by the decay
+            # factor preserved the posterior mean while evaporating the
+            # concentration, so an arm that always succeeded kept mean 1.0
+            # forever as its evidence vanished (2026-11-24 review: the two
+            # Thompson schedulers disagreed about what forgotten evidence
+            # means — op_monte_carlo decays toward the prior and derives
+            # why in its record()).
+            d = self.arm_decay
             for k in self.cat_alpha:
-                self.cat_alpha[k] *= self.arm_decay
-                self.cat_beta[k] *= self.arm_decay
+                self.cat_alpha[k] = 1.0 + (self.cat_alpha[k] - 1.0) * d
+                self.cat_beta[k] = 1.0 + (self.cat_beta[k] - 1.0) * d
             for k in self.op_alpha:
-                self.op_alpha[k] *= self.arm_decay
-                self.op_beta[k] *= self.arm_decay
+                self.op_alpha[k] = 1.0 + (self.op_alpha[k] - 1.0) * d
+                self.op_beta[k] = 1.0 + (self.op_beta[k] - 1.0) * d
 
         # Top-level: Thompson sample categories
         cat_scores = {}
@@ -210,15 +220,23 @@ class HierarchicalBanditScheduler:
             self.cat_alpha.setdefault(cat, 1.0)
             self.cat_beta[cat] = 1.0
 
-        # Update bottom-level (per-operator)
+        # Update bottom-level (per-operator). Fractional Bernoulli: a
+        # success worth w is w of a hit and 1 - w of a miss, so
+        # alpha / (alpha + beta) converges to E[reward]. Adding only w to
+        # alpha converged to p*E[w] / (p*E[w] + 1 - p) instead
+        # (2026-11-24 review: same derivation as op_monte_carlo.record).
         if success:
+            miss = max(0.0, 1.0 - weight)
             self.op_alpha[name] += weight
+            self.op_beta[name] += miss
         else:
             self.op_beta[name] += 1
 
         # Update top-level (per-category) — same success signal
         if success:
+            miss = max(0.0, 1.0 - weight)
             self.cat_alpha[cat] += weight
+            self.cat_beta[cat] += miss
         else:
             self.cat_beta[cat] += 1
 

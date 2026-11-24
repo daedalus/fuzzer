@@ -25,10 +25,14 @@ jobs:
       # targets; z3 backs the SMT path-constraint solver. Neither is pulled
       # by ".[dev]", and conftest.py skips rather than fails without them —
       # so without this step CI silently never runs ~76 tests.
-      - name: Install toolchain (clang, z3)
+      # libclang-rt-dev is compiler-rt (the ASAN runtime): Ubuntu's clang
+      # omits it (the Dockerfile installs it for the same reason), and
+      # without it 38 ASAN-gated tests (test_mutant_build, test_mutant_kill,
+      # CLI mutants) skip silently in CI.
+      - name: Install toolchain (clang, z3, ASAN runtime)
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang libclang-rt-dev
           clang --version
 
       - name: Install dependencies
@@ -39,7 +43,7 @@ jobs:
       - name: Verify the toolchain-gated tests are not skipped
         run: |
           python - <<'PY'
-          import importlib.util, shutil, sys
+          import importlib.util, os, shutil, subprocess, sys, tempfile
           missing = [n for n, ok in
                      (("clang", shutil.which("clang")),
                       ("z3", importlib.util.find_spec("z3")))
@@ -47,6 +51,26 @@ jobs:
           if missing:
               sys.exit(f"toolchain missing: {', '.join(missing)} — "
                        "conftest.py would skip the tests that need them")
+          # ASAN runtime probe: link a trivial -fsanitize=address program.
+          # Ubuntu's clang without libclang-rt-dev links nothing and 38
+          # ASAN-gated tests skip silently — a missing runtime is a failure
+          # here, not a skip.
+          fd, out = tempfile.mkstemp(suffix=".out")
+          try:
+              os.close(fd)
+              probe = subprocess.run(
+                  ["clang", "-fsanitize=address", "-x", "c", "-", "-o", out],
+                  input="int main(void) { return 0; }",
+                  text=True, capture_output=True)
+          finally:
+              try:
+                  os.unlink(out)
+              except OSError:
+                  pass
+          if probe.returncode != 0:
+              sys.exit("ASAN runtime missing: clang cannot link "
+                       "-fsanitize=address (install libclang-rt-dev)\n"
+                       + probe.stderr)
           PY
 
       # W3: fuzz_loader is gitignored, so a fresh checkout has none. Without

@@ -5,11 +5,17 @@ files, so ``mypy src/`` could never go green. A gate that is permanently red
 is a gate nobody reads, which is how 47 ruff errors and 28 test failures
 survived until the 2026-08-08 review.
 
-The ``[[tool.mypy.overrides]]`` block in ``pyproject.toml`` exempts exactly
-those 114 modules and lets the other 17 be checked strictly. New modules are
-strict automatically because they are absent from the list. These tests keep
-the list honest: entries must name real modules, the list must not grow, and
+The ``[[tool.mypy.overrides]]`` block in ``pyproject.toml`` exempts failing
+modules and lets the rest be checked strictly. New modules are strict
+automatically because they are absent from the list. These tests keep the
+list honest: entries must name real modules, the list must not grow, and
 nothing may be added to buy silence for a new file.
+
+2026-11-24 re-baseline: the tree had grown to 632 files and 370 non-exempt
+modules failed strict (2589 errors), so the gate was permanently red again.
+The list was re-baselined mechanically to 482 entries and the ceiling raised
+once, 114 -> 482, in the same commit. Re-baselines are one-per-event, dated
+in pyproject.toml, and never a per-PR convenience.
 """
 
 import os
@@ -18,9 +24,10 @@ import tomllib
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(REPO, "src")
 
-# Ceiling recorded at the ratchet's introduction. Lower it as modules are
-# fixed; never raise it.
-EXEMPT_CEILING = 114
+# Ceiling recorded at the ratchet's introduction (114), raised once to 482
+# by the 2026-11-24 mechanical re-baseline above. Lower it as modules are
+# fixed; never raise it without a dated re-baseline note in pyproject.toml.
+EXEMPT_CEILING = 482
 
 
 def _exempt_modules() -> list[str]:

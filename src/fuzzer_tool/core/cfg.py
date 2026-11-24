@@ -264,9 +264,8 @@ def _close_block(start, insns, base_addr, func_end, resolve_callee) -> BasicBloc
             blk.indirect_jump = True
         elif base_addr <= target < func_end:
             blk.successors.append(target)
-    elif kind in (_CALL, _FALL):
-        if base_addr <= fall < func_end:
-            blk.successors.append(fall)
+    elif kind in (_CALL, _FALL) and base_addr <= fall < func_end:
+        blk.successors.append(fall)
     return blk
 
 

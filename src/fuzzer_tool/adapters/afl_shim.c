@@ -338,6 +338,28 @@ enum {
 };
 static uint64_t __afl_health[__AFL_HEALTH_FIELDS];
 
+/* Strict decimal parse of an environment knob: the value, or -1 when *s*
+ * is NULL, empty, or anything but a run of ASCII digits (the digits-only
+ * discipline of __afl_parse_shmid and AFL_MAP_SIZE below). The 2026-11-24
+ * review flagged the three remaining atoi() callers -- two in the cmplog
+ * section, one here in the edge section -- so this helper lives in the
+ * common region both builds compile. atoi's prefix semantics let "1junk"
+ * pass as 1 and "banana" as 0, and although each of those three failed
+ * safe by accident, the file's own rule is that a malformed value reads
+ * as unset, not as its longest numeric prefix. No env knob needs more
+ * than 2^31, so anything above reads as malformed too -- which also makes
+ * a hostile 40-digit string fail instead of wrapping the accumulator. */
+__AFL_GCC_NO_COV static long long __afl_env_num(const char *s) {
+    if (!s || !s[0]) return -1;
+    unsigned long long v = 0;
+    for (const char *q = s; *q; q++) {
+        if (*q < '0' || *q > '9') return -1;
+        v = v * 10 + (unsigned)(*q - '0');
+        if (v > (1ULL << 31)) return -1;
+    }
+    return (long long)v;
+}
+
 #if __AFL_EDGE
 
 /* ── 8-byte hash table entry ──────────────────────────────────────────
@@ -1051,6 +1073,17 @@ __AFL_GCC_NO_COV static uint64_t __afl_str_hash(const char *s) {
 static void    *__afl_shm_grave[__AFL_SHM_GRAVE];
 static uint32_t __afl_shm_grave_next = 0;
 
+/* Single-threaded by design (2026-11-24 review noted the unguarded
+ * increments): every caller -- __afl_shm_detach and the refusal paths --
+ * runs under __afl_auto_init's attach, which the Python side drives from
+ * one thread while the target is stopped at a breakpoint or between
+ * execs; a resize never races another. The ++ and the slot store are
+ * therefore plain, and MUST stay plain: a lock here could be re-entered
+ * from a preload constructor (no pthread guarantees yet), and torn slot
+ * writes are what the grave exists to prevent. If attach ever becomes
+ * concurrent, this ring needs a CAS cursor and slot exchange, not a
+ * mutex -- __atomic_compare_exchange on grave_next and, on the winner,
+ * an exchange of the slot. */
 __AFL_GCC_NO_COV static void __afl_shm_retire(void *seg) {
     if (!seg) return;
     void **slot = &__afl_shm_grave[__afl_shm_grave_next++ % __AFL_SHM_GRAVE];
@@ -2250,8 +2283,10 @@ static uint32_t __afl_id_tag  = 0;           /* bits of cur_loc carried over   *
 
 __AFL_NO_COV static void __afl_id_scheme_init(void) {
 #if __AFL_CMPLOG
+    /* Digits-only parse, not atoi: "1junk" must read as unset (the
+     * review's one remaining prefix-parse site). */
     const char *c = getenv("__AFL_COMPCOV_LEVEL");
-    if (c && c[0] && atoi(c) > 0) {
+    if (__afl_env_num(c) > 0) {
         __afl_id_keep = __AFL_REAL_ID_MASK;
         __afl_id_tag  = __AFL_SYNTH_ID_BIT;
     }
@@ -6483,19 +6518,19 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
     pthread_atfork(NULL, NULL, __afl_cmplog_atfork_child);
     /* COMPCOV level: parsed independently of _CMPLOG_OUT below -- a run
      * that wants only the edge-map partial-match signal, and none of the
-     * record/counts/sites log machinery, sets this and nothing else. */
-    const char *compcov = getenv("__AFL_COMPCOV_LEVEL");
-    if (compcov && compcov[0]) {
-        int v = atoi(compcov);
-        __afl_compcov_level = v < 0 ? 0 : (v > 2 ? 2 : v);
-    }
+     * record/counts/sites log machinery, sets this and nothing else.
+     * Malformed values keep the default level, not atoi's prefix. */
+    long long v = __afl_env_num(getenv("__AFL_COMPCOV_LEVEL"));
+    if (v >= 0)
+        __afl_compcov_level = v > 2 ? 2 : (int)v;
 #if __AFL_EDGE
     /* Value profile segment: [u32 head = 1][u32 on]. */
     void *vp = __afl_attach_sized("__AFL_VP_SHM_ID", 4);
     if (vp) __afl_vp_on = (volatile uint32_t *)vp + 1;
 #endif
     const char *prune = getenv("__AFL_CMP_PRUNE_CONST");
-    __afl_prune_const = prune && prune[0] && atoi(prune) != 0;
+    long long prune_v = __afl_env_num(prune);
+    __afl_prune_const = prune_v > 0;
     /* Record knobs; see "Dedup scope" and "Per-site record cap". */
     const char *cap = getenv("__AFL_CMPLOG_SITE_CAP");
     long cap_v = cap && cap[0] ? strtol(cap, NULL, 10) : 0;
@@ -9380,6 +9415,9 @@ static struct sigaction __afl_pre_old_fpe;
 
 __AFL_NO_COV static void __afl_preload_crash_handler(int sig, siginfo_t *si, void *uc) {
     (void)uc;
+    /* Runs on the alternate stack (see __afl_preload_altstack): a stack
+     * overflow leaves no room on the faulting stack, and the flush below
+     * is exactly what that crash must still get to do. */
     __afl_cmplog_flush();
     __afl_cmp_dump_counts();
     __afl_cmp_dump_sites();
@@ -9400,14 +9438,38 @@ __AFL_NO_COV static void __afl_preload_crash_handler(int sig, siginfo_t *si, voi
     raise(sig);
 }
 
+/* Alternate stack for the handler above (2026-11-24 review): the edge-mode
+ * handler installs one (__afl_install_altstack, edge-only) so a stack-
+ * overflow SIGSEGV can still run its flush; the preload handler alone ran
+ * on the faulting -- possibly exhausted -- stack, so the crash that most
+ * needed the cmplog buffer out was the one least able to flush it. Main
+ * thread only: the constructor runs before the target can spawn others,
+ * and a thread without an altstack simply falls back to its own stack
+ * (SA_ONSTACK is a no-op then), which is the old behavior, not worse. An
+ * existing alternate stack (ASAN's, the target's own) is kept. */
+#define __AFL_PRE_ALTSTACK_SIZE (64 * 1024)
+__AFL_NO_COV static void __afl_preload_altstack(void) {
+    stack_t cur;
+    if (sigaltstack(NULL, &cur) == 0 && !(cur.ss_flags & SS_DISABLE)) return;
+    void *mem = mmap(NULL, __AFL_PRE_ALTSTACK_SIZE, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) return;
+    stack_t ss;
+    ss.ss_sp = mem;
+    ss.ss_size = __AFL_PRE_ALTSTACK_SIZE;
+    ss.ss_flags = 0;
+    if (sigaltstack(&ss, NULL) != 0) munmap(mem, __AFL_PRE_ALTSTACK_SIZE);
+}
+
 __attribute__((constructor))
 __AFL_NO_COV static void __afl_preload_init(void) {
     __afl_cmplog_init();
     if (__sanitizer_set_death_callback) __sanitizer_set_death_callback(__afl_cmplog_crash_flush);
+    __afl_preload_altstack();
     struct sigaction sa;
     sa.sa_sigaction = __afl_preload_crash_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigaction(SIGSEGV, &sa, &__afl_pre_old_segv);
     sigaction(SIGABRT, &sa, &__afl_pre_old_abrt);
     sigaction(SIGBUS,  &sa, &__afl_pre_old_bus);

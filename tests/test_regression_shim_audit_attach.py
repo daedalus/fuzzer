@@ -11,6 +11,7 @@ an invariant or injects the other side's whole update at step k, for every k.
 from __future__ import annotations
 
 import platform
+import shutil
 import subprocess
 
 import pytest
@@ -524,6 +525,12 @@ M32 = ["clang", "-m32", "-O1", "-include", str(SHIM)]
 
 
 def _links_m32() -> bool:
+    # Regression (2026-11-24 review): this probe ran clang unconditionally
+    # at import time (the skipif below) and aborted collection on clang-less
+    # machines. A missing tool is a skip, never a crash — same fix as
+    # _rt_available in test_sanitizer_death_callback.py.
+    if shutil.which("clang") is None:
+        return False
     r = subprocess.run(
         [*M32[:2], "-x", "c", "-", "-o", "/dev/null"],
         input="int main(void){return 0;}", capture_output=True, text=True,
@@ -575,3 +582,18 @@ def test_plain_shm_id_attaches(tmp_path):
 
     assert r.returncode == 0, r.stderr
     assert _health(r)[0][:2] == [1, MAP_ENTRIES]
+
+
+def test_links_m32_is_a_skip_not_a_crash_without_clang(monkeypatch):
+    """A missing clang must skip the m32 test, not abort collection.
+
+    Regression (2026-11-24 review): _links_m32() ran clang unconditionally
+    at import time (the skipif decorator on the overflow test below
+    evaluates it), so on a clang-less machine importing this module raised
+    FileNotFoundError during collection and took the whole suite down with
+    it. Same contract as conftest's requires_clang and _rt_available in
+    test_sanitizer_death_callback.py: a missing tool is a skip, never a
+    crash.
+    """
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert _links_m32() is False

@@ -2988,11 +2988,13 @@ class Fuzzer:
             self._smt_solver = None
             self._enable_smt_z3 = False
 
-        if self.file_mode:
-            self._tmp_dir = Path(tempfile.mkdtemp(prefix="fuzzer_"))
-            atexit.register(_cleanup_tmp_dir, self._tmp_dir)
-        else:
-            self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
+        # A private temp dir in both modes (2026-11-24 review): the old
+        # non-file branch pre-assigned a predictable /tmp/fuzzer_<pid>
+        # path — dead for the file-mode-gated consumers, but one refactor
+        # away from a fixed-name write, and every other temp path in the
+        # tree is already mkstemp/mkdtemp.
+        self._tmp_dir = Path(tempfile.mkdtemp(prefix="fuzzer_"))
+        atexit.register(_cleanup_tmp_dir, self._tmp_dir)
         self._input_file = None
         self._export_input_env()
 
@@ -11463,11 +11465,10 @@ class Fuzzer:
                         elif regime is CoverageRegime.CRITICAL:
                             # CSD: near a coverage jump — preserve current strategy
                             log.info("REGIME: critical — preserving strategy (%s)", reason)
-                        elif regime is CoverageRegime.SUPERCRITICAL:
+                        elif regime is CoverageRegime.SUPERCRITICAL and self._stall_recovery_active:
                             # Healthy: clear any emergency state
-                            if self._stall_recovery_active:
-                                self._stall_recovery_exit("supercritical regime")
-                                log.info("REGIME: supercritical — clearing stall recovery")
+                            self._stall_recovery_exit("supercritical regime")
+                            log.info("REGIME: supercritical — clearing stall recovery")
                         self._regime.acknowledge()
                     # Stall detection: no new edges in threshold execs
                     if (

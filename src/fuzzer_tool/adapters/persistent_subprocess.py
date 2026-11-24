@@ -197,7 +197,11 @@ while True:
     if cmd.startswith("RUN "):
         data_len = int(cmd.split()[1])
         data = sys.stdin.buffer.read(data_len)
-        buf = (ctypes.c_uint8 * len(data))(*data)
+        # from_buffer_copy, not the (c_uint8 * n)(*data) star-unpack: the
+        # unpack splats every byte as an individual argument and measured
+        # ~100x slower (2026-11-24 review) -- this is the per-exec hot
+        # path of persistent mode.
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
 
         # Fork child to enforce timeout on .so target calls.
         # Child calls os.setsid() to create its own process group, so the

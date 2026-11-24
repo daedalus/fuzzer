@@ -604,15 +604,26 @@ class MonteCarloScheduler:
             self.elite_set.append((score, data))
             return
 
-        self.elite_set.sort(key=lambda x: x[0])
+        # One O(n) scan for the worst entry, not a full sort (2026-11-24
+        # review): add_elite sorted all ELITE_MAX entries on every
+        # insertion once the set filled -- O(n log n) per CEM exec for an
+        # element only ever needed as "the current minimum". The scan
+        # finds the same first-minimum a stable sort put at index 0, and
+        # the set stays a plain list (tests and maybe_refit reassign or
+        # re-sort it freely; a heap invariant would not survive that).
+        worst_i = 0
         worst_score = self.elite_set[0][0]
+        for i in range(1, len(self.elite_set)):
+            s = self.elite_set[i][0]
+            if s < worst_score:
+                worst_score, worst_i = s, i
         if score > worst_score:
-            self.elite_set[0] = (score, data)
+            self.elite_set[worst_i] = (score, data)
         elif temperature > 0.01:
             delta_e = worst_score - score
             acceptance = math.exp(-delta_e / temperature)
             if self._rng.random() < acceptance:
-                self.elite_set[0] = (score, data)
+                self.elite_set[worst_i] = (score, data)
 
     def maybe_refit(self) -> None:
         """Refit the CEM byte distribution if enough data exists.

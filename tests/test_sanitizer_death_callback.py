@@ -8,6 +8,7 @@ shim registers a death callback that runs the crash handler's flush.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -45,7 +46,16 @@ int main(int argc, char **argv) {
 
 
 def _rt_available() -> bool:
-    """clang's ASAN runtime is a separate package on Debian/Ubuntu."""
+    """clang's ASAN runtime is a separate package on Debian/Ubuntu.
+
+    Regression (2026-11-24 review): this probe ran clang unconditionally at
+    import time, so on a clang-less machine ``requires_asan_rt`` raised
+    FileNotFoundError during collection — and took this file plus the four
+    files importing the marker down with it, aborting the whole suite. Like
+    conftest's ``requires_clang``, a missing tool is a skip, never a crash.
+    """
+    if shutil.which("clang") is None:
+        return False
     probe = subprocess.run(
         ["clang", "-fsanitize=address", "-x", "c", "-", "-o", "/dev/null"],
         input="int main(void){return 0;}",
@@ -56,6 +66,19 @@ def _rt_available() -> bool:
 
 
 requires_asan_rt = pytest.mark.skipif(not _rt_available(), reason="no clang ASAN runtime")
+
+
+def test_rt_available_is_a_skip_not_a_crash_without_clang(monkeypatch):
+    """A missing clang must skip the ASAN tests, not abort collection.
+
+    Guards the import-time probe: with clang absent, _rt_available() must
+    return False without spawning any subprocess (the original defect raised
+    FileNotFoundError here and broke whole-suite collection on clang-less
+    machines). The four sibling files importing requires_asan_rt depend on
+    this staying exception-free.
+    """
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert _rt_available() is False
 
 
 def _pairs(exe: Path, tmp: Path, *argv: str, **env_extra: str):

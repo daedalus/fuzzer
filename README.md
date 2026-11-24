@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/daedalus/fuzzer)
 
-**Information-dense, coverage-guided binary fuzzer**: 271 mutation operators across 9 categories, 41 operator-scheduling strategies under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring.
+**Information-dense, coverage-guided binary fuzzer**: 364 mutation operators across 9 categories, 60 operator-scheduling strategies under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring. *(The operator and strategy counts are enforced against the registry by `tests/test_readme_claims.py`.)*
 
 > **Honest caveat**: This is probably the most complex fuzzer from an information-theory standpoint, and also the slowest raw-throughput. The tradeoff is speed for edge-discovery novelty. For production fuzzing at scale, AFL family fuzzers remain the best choice.
 
@@ -509,7 +509,7 @@ ruff check src/ tests/
 ruff format src/ tests/
 ```
 
-Current test suite: **14,000+ tests** across `tests/` and its `core/`, `services/`, `cli/`, and
+Current test suite: **29,000+ tests collected** (21,000+ test functions) across `tests/` and its `core/`, `services/`, `cli/`, and
 `integration/` subdirectories, including a large body of regression tests each pinned to a
 specific historical bug. Several toolchain-dependent families (`test_cfg_cache`,
 `test_distance_aflgo`, `test_icfg`, trace-cmp visibility) skip or fail without `clang`,

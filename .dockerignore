@@ -11,6 +11,8 @@ build/
 dist/
 # Compiled targets and loaders: rebuilt inside the image against its own
 # toolchain. Copying host artifacts in would defeat the point of pinning it.
+# NOTE: tools/lib/ must stay IN the context — tools/build_targets.sh sources
+# tools/lib/ffmpeg_config.sh, asan_flags.sh and frontier_stub.c
+# (2026-11-24 review: excluding it broke every target-build stage).
 targets/*.so
 targets/*.o
-tools/lib/

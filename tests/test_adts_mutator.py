@@ -107,13 +107,22 @@ class TestAdtsMutator:
         assert len(frames) >= 1
 
     def test_mutate_frame_length_changes_header(self):
+        # Hard Rule 39 (2026-11-24 review): this used to loop up to 20
+        # times until a random draw happened to change the header. One
+        # call, scripted draws in evaluation order: choose the only
+        # frame, roll the randint inside the bogus-length list (its
+        # value is never selected), then choose index 1 = 0x1FFF -- a
+        # 13-bit maximum the small generated frame (declared length 56)
+        # can never already hold.
         data = _frame_bytes(random.Random(1))
         frames = parse_adts_frames(data)
+        assert frames is not None and len(frames) == 1
         before = bytes(frames[0].header)
-        rng = random.Random(42)
-        mutator = AdtsMutator()
-        for _ in range(20):
-            mutator._mutate_frame_length(frames, rng)
-            if bytes(frames[0].header) != before:
-                break
-        assert bytes(frames[0].header) != before
+        AdtsMutator()._mutate_frame_length(frames, ScriptedRng(choice_idxs=[0, 1], randints=[0]))
+        after = bytes(frames[0].header)
+        assert after != before
+        # 0x1FFF across the 13-bit aac_frame_length field: top 2 bits in
+        # byte 3, middle 8 in byte 4, low 3 in byte 5's high bits.
+        assert after[3] & 0x03 == 0x03
+        assert after[4] == 0xFF
+        assert after[5] & 0xE0 == 0xE0

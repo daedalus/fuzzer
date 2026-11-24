@@ -71,15 +71,21 @@ def test_decay_survives_failure_only_runtime_arm():
 
 
 def test_decay_scales_both_sides_of_a_late_arm():
-    """Adversarial: the repaired key must decay, not merely exist."""
+    """Adversarial: the repaired key must decay, not merely exist.
+
+    Decay is prior-anchored (Beta(1,1)): each parameter moves toward 1.0,
+    not toward 0 (see test_regression_hierarchical_decay_semantics.py for
+    why toward-zero was wrong).
+    """
     sched = _armed()
     sched.record(LATE_OP, success=True)
     before = (sched.op_alpha[LATE_OP], sched.op_beta[LATE_OP])
     sched._total_pulls = sched.decay_interval
     sched.select_op([*BASE_OPS, LATE_OP])
+    d = sched.arm_decay
 
-    assert sched.op_alpha[LATE_OP] == pytest.approx(before[0] * sched.arm_decay)
-    assert sched.op_beta[LATE_OP] == pytest.approx(before[1] * sched.arm_decay)
+    assert sched.op_alpha[LATE_OP] == pytest.approx(1.0 + (before[0] - 1.0) * d)
+    assert sched.op_beta[LATE_OP] == pytest.approx(1.0 + (before[1] - 1.0) * d)
 
 
 def test_unregistered_arm_defaults_match_init_arm():

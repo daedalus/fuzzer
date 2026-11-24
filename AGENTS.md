@@ -79,7 +79,7 @@ fuzzer, not just the target.
 47. Always do git commit and push after tests pass do not run tests after git commit and push.
 48. When planning to add new features: add code sketches and always add a section with the fully wiring the new feature.
 49. When planning a new feature always reason over small targeted code tests, copy the function to test and test it.
-50. The full pytest battery is over 14k tests, running it is unpractical, always run the tests for the affected code.
+50. The full pytest battery is over 29k tests, running it is unpractical, always run the tests for the affected code.
 51. Whenever any method from scipy, sympy or gmpy is needed implement it by ourselves instead of importing more libraries.
 52. Always run calibrations against fuzzgoat target and make sure it's built with clang.
 53. For every layout update in `afl_shim.c` then increment `__AFL_SHM_LAYOUT` +1.

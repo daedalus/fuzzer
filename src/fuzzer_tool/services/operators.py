@@ -12,6 +12,14 @@ Extracted from Fuzzer class (~lines 1116-1845). Contains:
 Operator names, categories, and availability conditions are the single
 source of truth in ``fuzzer_tool.core.operator_registry.REGISTRY``; this
 module only supplies the ``_op_*`` handlers that the registry dispatches to.
+
+Not every ``_op_*`` name is a registry handler: ``_op_declined`` (called
+from ~30 format-aware handlers to record a decline) and ``_op_cost_feature``
+(the per-arm entry of ``_context_vector`` for the contextual/c2ucb
+strategies) are engine-internal helpers that no registry spec names, by
+design. The 2026-11-24 review once read their absence from the registry as
+dead code; both are load-bearing (pinned live by
+tests/test_regression_operator_helpers_live.py).
 """
 
 import bisect

@@ -123,15 +123,27 @@ else:
 if shim_path and os.path.exists(shim_path):
     try:
         shim = ctypes.CDLL(shim_path)
-        bmp_ptr = shim.cov_get_bitmap()
-        bmp_size = shim.cov_get_size()
-        if bmp_ptr and bmp_size:
-            bitmap = (ctypes.c_uint8 * bmp_size).from_address(bmp_ptr)
-            out_path = os.environ.get("_COV_BITMAP_OUT")
-            if out_path:
-                with open(out_path, "wb") as f:
-                    f.write(bytes(bitmap))
-    except OSError:
+        # Regression (2026-11-24 review): the bare shim.cov_get_bitmap()
+        # call raised AttributeError — no shim this tree builds exports
+        # cov_get_bitmap/cov_get_size — and the exception escaped the
+        # except OSError meant to contain it, killing this loader with a
+        # traceback (exit 1) on every clean run instead of the target's
+        # own exit code. Probe with getattr: this block is the documented
+        # dead fallback (shim_factory's stub only defines
+        # __sanitizer_cov_8bit_counters_init), the SHM read below is the
+        # live coverage path.
+        get_bmp = getattr(shim, "cov_get_bitmap", None)
+        get_size = getattr(shim, "cov_get_size", None)
+        if get_bmp is not None and get_size is not None:
+            bmp_ptr = get_bmp()
+            bmp_size = get_size()
+            if bmp_ptr and bmp_size:
+                bitmap = (ctypes.c_uint8 * bmp_size).from_address(bmp_ptr)
+                out_path = os.environ.get("_COV_BITMAP_OUT")
+                if out_path:
+                    with open(out_path, "wb") as f:
+                        f.write(bytes(bitmap))
+    except (OSError, AttributeError):
         pass
 
 # Also try reading from SHM (AFL shim targets)
@@ -795,8 +807,16 @@ class InProcessRunner:
                 if self._shm_ptr is None:
                     self._shm_ptr = libc_shm.shmat(int(self.coverage_env_id))
                 if self._shm_ptr:
-                    return (ctypes.c_uint8 * (self.shm_size * SIZEOF_ENTRY)).from_address(
-                        self._shm_ptr + SHM_METADATA_SIZE
+                    # A real bytes copy, not a from_address view (2026-11-24
+                    # review): the view is live SHM that the next exec
+                    # overwrites, so the bytes annotation was only true for
+                    # callers that copy before returning to the run loop --
+                    # an invariant no type checker can see. One memcpy per
+                    # read, the same size the caller's memmove already pays.
+                    return bytes(
+                        (ctypes.c_uint8 * (self.shm_size * SIZEOF_ENTRY)).from_address(
+                            self._shm_ptr + SHM_METADATA_SIZE
+                        )
                     )
             except Exception:
                 log.warning(
@@ -1156,10 +1176,15 @@ class InProcessRunner:
             try:
                 getattr(self._lib, "__afl_map_shm")()
             except (OSError, AttributeError):
-                # Fallback: patch __afl_area directly
+                # Fallback: patch __afl_area directly.  __afl_area points
+                # at the edge TABLE, which begins SHM_METADATA_SIZE (32)
+                # bytes past the raw shmat base — the header lives in
+                # front of it.  Regression (2026-11-24 review): the raw
+                # base pointer was stored here, so every edge write in
+                # the fallback landed in the segment header instead.
                 try:
                     afl_area = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
-                    afl_area.value = new_ptr
+                    afl_area.value = new_ptr + SHM_METADATA_SIZE
                 except (ValueError, OSError):
                     pass
 
@@ -1170,11 +1195,29 @@ class InProcessRunner:
             except (OSError, AttributeError):
                 try:
                     afl_area = ctypes.c_void_p.in_dll(self._shim_handle, "__afl_area")
-                    afl_area.value = new_ptr
+                    # Same table offset as above: __afl_area is base+32,
+                    # never the raw base.
+                    afl_area.value = new_ptr + SHM_METADATA_SIZE
                 except (ValueError, OSError):
                     pass
 
     def stop(self):
+        # Regression (2026-11-24 review): _run_c_direct_lite installs its
+        # SIGALRM handler once (install-once is the design — per-call
+        # signal() would tax the hot path) and stashes the previous
+        # disposition in _old_alarm_handler, but nothing ever restored it:
+        # the displaced disposition leaked for the process lifetime.
+        # Restore it here, but only if ours is still the installed handler
+        # — something else may have installed its own since, and
+        # restoring over that would trade one leak for a stomp.
+        if getattr(self, "_alarm_handler", None) is not None:
+            try:
+                if signal.getsignal(signal.SIGALRM) is self._alarm_handler:
+                    signal.signal(signal.SIGALRM, self._old_alarm_handler)
+            except (OSError, ValueError, TypeError):
+                pass
+            self._alarm_handler = None
+            self._old_alarm_handler = None
         self._func = None
         self._lib = None
         self._func_ptr = None
