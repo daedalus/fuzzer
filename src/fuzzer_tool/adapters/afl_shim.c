@@ -6533,7 +6533,10 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
     __afl_prune_const = prune_v > 0;
     /* Record knobs; see "Dedup scope" and "Per-site record cap". */
     const char *cap = getenv("__AFL_CMPLOG_SITE_CAP");
-    long cap_v = cap && cap[0] ? strtol(cap, NULL, 10) : 0;
+    /* Digits-only like the knobs above: "12junk", " 12" and "-5" read as
+     * unset (strtol took the numeric prefix), and an absurdly long value
+     * reads as malformed rather than saturating to the cap maximum. */
+    long long cap_v = __afl_env_num(cap);
     __afl_cmplog_site_cap = cap_v <= 0 ? 0
         : (cap_v > CMPLOG_SITE_CAP_MAX ? CMPLOG_SITE_CAP_MAX : (uint32_t)cap_v);
     const char *scope = getenv("__AFL_CMPLOG_DEDUP_SCOPE");

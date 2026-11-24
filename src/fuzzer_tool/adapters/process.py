@@ -841,6 +841,31 @@ def _close_fast_path_file() -> None:
 atexit.register(_close_fast_path_file)
 
 
+def _reset_in_child() -> None:
+    """Forget the parent's fast-path file in a forked child.
+
+    Follow-up to the 2026-11-24 review. After fork the child holds the
+    parent's fd (one open file description, so one shared offset: two
+    processes doing lseek+write+ftruncate would interleave inputs) and the
+    parent's *name*, which the atexit hook above would unlink when the child
+    exits, pulling the file out from under the parent. The child drops its
+    copy without unlinking, and builds its own file on first use. The lock
+    is replaced too: a thread holding it at fork time never releases it in
+    the child.
+    """
+    global _fast_path_fd, _fast_path_name, _fast_path_lock
+    fd = _fast_path_fd
+    _fast_path_fd = None
+    _fast_path_name = None
+    _fast_path_lock = threading.Lock()
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+os.register_at_fork(after_in_child=_reset_in_child)
+
+
 def _write_all(fd: int, data: bytes) -> None:
     """os.write until every byte is out (a regular-file write may be short)."""
     view = memoryview(data)

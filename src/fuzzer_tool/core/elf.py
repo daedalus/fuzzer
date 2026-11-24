@@ -582,15 +582,17 @@ def _payload_in_bounds(n: int, off: int, size: int) -> bool:
     return 0 <= off <= n and size <= n - off
 
 
-def _cstr(elf: bytes, at: int) -> bytes:
-    """Bytes from *at* through the next NUL, or the end of the image.
+def _cstr(elf: bytes, at: int, limit: int) -> bytes:
+    """Bytes from *at* up to the next NUL, never reading at or past *limit*.
 
-    ``bytes.index`` raised ValueError once *at* ran past the image end —
-    a hostile st_name produces that — so this variant never raises: past
-    the end reads as the empty string.
+    *limit* is the end of the string table the name belongs to: an
+    unterminated name is cut there instead of running on into whatever
+    section follows (2026-11-24 follow-up). Never raises: *at* past the
+    limit or the image reads as the empty string -- a hostile st_name
+    produces that.
     """
-    end = elf.find(b"\x00", at)
-    return elf[at : end if end >= 0 else len(elf)]
+    end = elf.find(b"\x00", at, limit)
+    return elf[at : end if end >= 0 else limit]
 
 
 def _sym_sections(elf: bytes) -> tuple | None:
@@ -700,7 +702,10 @@ def func_table(elf: bytes) -> FuncTable | None:
             continue
 
         keep = keep[np.argsort(keep["value"], kind="stable")]
-        names = [_cstr(elf, str_off + n).decode(errors="replace") for n in keep["name"].tolist()]
+        str_end = str_off + str_size
+        names = [
+            _cstr(elf, str_off + n, str_end).decode(errors="replace") for n in keep["name"].tolist()
+        ]
         starts = keep["value"].copy()
         return FuncTable(starts, starts + np.maximum(keep["size"], 1), names)
     return None
