@@ -3850,9 +3850,16 @@ __AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
  * past the edge table; the Python side always allocates them).
  * count==0 means "no distance data" for the reader. */
 __AFL_GCC_NO_COV static void __afl_write_distance_tail(void) {
-    if (__afl_area) {
-        uint64_t *dist_sum = (uint64_t *)((uint8_t *)__afl_area +
-                                          __afl_map_size * sizeof(struct __afl_entry));
+    /* Size first, acquire, then the table -- the publish order in
+     * __afl_map_shm (see __afl_map_from_home). The reverse (table, then a
+     * plain size) paired a retired table with a new size and wrote past
+     * its end; size-first keeps every interleaving inside a mapped
+     * segment: an old size lands inside the new, larger table. */
+    uint32_t size = __atomic_load_n(&__afl_map_size, __ATOMIC_ACQUIRE);
+    struct __afl_entry *area = __afl_area;
+    if (area) {
+        uint64_t *dist_sum = (uint64_t *)((uint8_t *)area +
+                                          size * sizeof(struct __afl_entry));
         __afl_wtok_t wk = __afl_wguard_open_cold();
         *dist_sum = __afl_dist_sum;
         *(dist_sum + 1) = __afl_dist_hits;
@@ -4640,9 +4647,11 @@ __AFL_NO_COV static int __afl_cmp_shm_attach(int want_sites) {
     const char *id = getenv("_CMPLOG_COUNTS_SHM");
     if (!id || !id[0]) return 0;
 
-    char *end = NULL;
-    long shmid = strtol(id, &end, 10);
-    if (*end || shmid < 0 || shmid > INT_MAX) return 0;
+    /* Digits-only, as every other segment id: strtol's prefix semantics
+     * let " 12" and "+12" attach a segment a malformed value must read
+     * as unset for. */
+    int shmid = (int)__afl_env_num(id);
+    if (shmid < 0) return 0;
 
     /* Refuse a segment too small for the layout rather than write past it. */
     struct shmid_ds ds;
@@ -4719,6 +4728,18 @@ static struct __afl_rec_bytes *__afl_rec_bytes_tab;
  * index is ever bounded by a value read back from it. */
 static uint32_t __afl_rec_nsites, __afl_rec_nhits, __afl_rec_nrecs, __afl_rec_nbytes;
 
+/* Any record sink live: the text stream (fd) or the records segment. The
+ * libc recorders gate on this, not on the fd alone -- a run with only
+ * $_CMPLOG_RECORDS_SHM attached (no _CMPLOG_OUT) otherwise dropped every
+ * record the memcmp family did not write: memcmp/bcmp/strncmp reached
+ * __afl_cmplog_bytes (which gates on both sinks) while strcmp, strcasecmp,
+ * strstr and the wide-char and set-scan recorders returned early on the
+ * fd. __afl_cmplog_bytes / __afl_cmplog_ints keep their own gate; this is
+ * for the callers that skip work before reaching them. */
+__AFL_NO_COV static inline int __afl_cmp_rec_on(void) {
+    return __afl_cmplog_fd >= 0 || __afl_rec != NULL;
+}
+
 /* Value profile attached: callbacks stay live even while its `on` word is
  * 0 (--value-profile stall), since only init and pause re-gate them. */
 __AFL_NO_COV static inline int __afl_vp_attached(void) {
@@ -4752,9 +4773,9 @@ __AFL_NO_COV static int __afl_rec_attach(void) {
     const char *id = getenv("_CMPLOG_RECORDS_SHM");
     if (!id || !id[0]) return 0;
 
-    char *end = NULL;
-    long shmid = strtol(id, &end, 10);
-    if (*end || shmid < 0 || shmid > INT_MAX) return 0;
+    /* Digits-only, as _CMPLOG_COUNTS_SHM above. */
+    int shmid = (int)__afl_env_num(id);
+    if (shmid < 0) return 0;
 
     struct shmid_ds ds;
     if (shmctl((int)shmid, IPC_STAT, &ds) < 0) return 0;
@@ -5769,7 +5790,7 @@ __AFL_NO_COV static inline void __afl_on_memcmp(const void *a, const void *b, si
 
 __AFL_NO_COV static inline void __afl_on_strcmp(const char *a, const char *b, int r, void *pc) {
     __AFL_CMP_COUNT_AT(__AFL_CMP_STRCMP, r == 0, pc);
-    if (__afl_cmplog_fd < 0 && __afl_compcov_level < 2) return;
+    if (!__afl_cmp_rec_on() && __afl_compcov_level < 2) return;
 
     size_t na = __afl_safe_len(a), nb = __afl_safe_len(b), n = na < nb ? na : nb;
     if (n == 0) return;
@@ -5788,16 +5809,24 @@ __AFL_NO_COV static inline void __afl_on_strncmp(const char *a, const char *b, s
 __AFL_NO_COV static inline void __afl_on_strcasecmp(const char *a, const char *b, int r,
                                                     void *pc) {
     __AFL_CMP_COUNT_AT(__AFL_CMP_STRCASECMP, r == 0, pc);
-    if (__afl_cmplog_fd < 0) return;
+    if (!__afl_cmp_rec_on() && __afl_compcov_level < 2) return;
 
     size_t na = __afl_safe_len(a), nb = __afl_safe_len(b), n = na < nb ? na : nb;
-    if (n > 0) __afl_cmplog_bytes(a, b, n + 1, r);
+    /* Level 2 is documented to fire from the case-insensitive interceptors
+     * too; raw bytes, like the memcmp family ("MAGIC" vs "MAGICX" marks the
+     * 5 matching positions, case-differing bytes do not). */
+    if (n > 0) {
+        __afl_cmplog_bytes(a, b, n + 1, r);
+        __afl_compcov_bytes(a, b, n + 1, pc, COMPCOV_STR);
+    }
 }
 
 __AFL_NO_COV static inline void __afl_on_strncasecmp(const char *a, const char *b, size_t n,
                                                      int r, void *pc) {
     __AFL_CMP_COUNT_AT(__AFL_CMP_STRNCASECMP, r == 0, pc);
-    if (n > 0) __afl_cmplog_bytes(a, b, n, r);
+    if (n == 0) return;
+    __afl_cmplog_bytes(a, b, n, r);
+    __afl_compcov_bytes(a, b, n, pc, COMPCOV_STR);
 }
 
 __AFL_NO_COV int memcmp(const void *a, const void *b, size_t n) {
@@ -5838,7 +5867,7 @@ __AFL_NO_COV void *memchr(const void *s, int c, size_t n) {
      * searching for. Only built when the search failed -- the record writer
      * discards result==0 anyway, so on a successful memchr the memset would
      * be pure cost on what is often a hot loop. */
-    if (__afl_cmplog_fd >= 0 && n > 0 && !result) {
+    if (__afl_cmp_rec_on() && n > 0 && !result) {
         size_t k = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
         unsigned char needle[CMPLOG_MAX_OPERAND];
         for (size_t i = 0; i < k; i++) needle[i] = (unsigned char)c;
@@ -5914,7 +5943,7 @@ __AFL_NO_COV static inline void __afl_on_memmem(const void *h, size_t hl, const 
     /* h was previously unguarded here even though __afl_cmplog_bytes reads it:
      * memmem is __nonnull((1,3)), so a NULL haystack is just as reachable from
      * a buggy target as a NULL needle, and it dereferences one line later. */
-    if (__afl_cmplog_fd < 0 || !__afl_launder_ptr(n) || !__afl_launder_ptr(h)) return;
+    if (!__afl_cmp_rec_on() || !__afl_launder_ptr(n) || !__afl_launder_ptr(h)) return;
     if (nl == 0 || nl > CMPLOG_MAX_OPERAND || hl == 0) return;
 
     size_t k = hl < nl ? hl : nl;
@@ -5927,7 +5956,7 @@ __AFL_NO_COV static inline void __afl_on_memmem(const void *h, size_t hl, const 
 __AFL_NO_COV static inline void __afl_on_strstr(const char *h, const char *n, int found,
                                                 void *pc, int site) {
     __AFL_CMP_COUNT_AT(site, found, pc);
-    if (__afl_cmplog_fd < 0 || !__afl_launder_ptr(n) || !__afl_launder_ptr(h)) return;
+    if (!__afl_cmp_rec_on() || !__afl_launder_ptr(n) || !__afl_launder_ptr(h)) return;
 
     size_t nl = __afl_fb_len(n);
     size_t k = 0;
@@ -5984,10 +6013,10 @@ __AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
     __AFL_RESOLVE(real_wmemcmp, afl_wchar_cmp_fn, "wmemcmp", __afl_fb_wmemcmp);
     int result = real_wmemcmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_WMEMCMP, result == 0);
-    /* Gated on cmplog-log-active OR compcov-active: compcov has no fd of
+    /* Gated on any record sink OR compcov-active: compcov has no fd of
      * its own, so a run with only $__AFL_COMPCOV_LEVEL set (no
-     * _CMPLOG_OUT) must not skip this block the way it did before. */
-    if ((__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) && n > 0) {
+     * _CMPLOG_OUT, no records segment) must not skip this block. */
+    if ((__afl_cmp_rec_on() || __afl_compcov_level >= 2) && n > 0) {
         /* Saturate before multiplying: n * 4 wraps for n >= 2^62. */
         size_t k = n > CMPLOG_MAX_OPERAND / sizeof(wchar_t) ? CMPLOG_MAX_OPERAND
                                                              : n * sizeof(wchar_t);
@@ -6003,7 +6032,7 @@ __AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     __AFL_RESOLVE(real_wcsncmp, afl_wchar_cmp_fn, "wcsncmp", __afl_fb_wcsncmp);
     int result = real_wcsncmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_WCSNCMP, result == 0);
-    if ((__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) && n > 0) {
+    if ((__afl_cmp_rec_on() || __afl_compcov_level >= 2) && n > 0) {
         /* Saturate before multiplying: n * 4 wraps for n >= 2^62. */
         size_t k = n > CMPLOG_MAX_OPERAND / sizeof(wchar_t) ? CMPLOG_MAX_OPERAND
                                                              : n * sizeof(wchar_t);
@@ -6021,7 +6050,7 @@ __AFL_NO_COV int wcscmp(const wchar_t *a, const wchar_t *b) {
     __AFL_RESOLVE(real_wcscmp, afl_wchar_cmp_2arg_fn, "wcscmp", __afl_fb_wcscmp);
     int result = real_wcscmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_WCSCMP, result == 0);
-    if (__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) {
+    if (__afl_cmp_rec_on() || __afl_compcov_level >= 2) {
         size_t na = __afl_safe_wcslen(a), nb = __afl_safe_wcslen(b), n = na < nb ? na : nb;
         if (n > 0) {
             size_t k = (n + 1) * sizeof(wchar_t);   /* + terminator, as strcmp */
@@ -6039,12 +6068,14 @@ __AFL_NO_COV int wcscasecmp(const wchar_t *a, const wchar_t *b) {
     __AFL_RESOLVE(real_wcscasecmp, afl_wchar_cmp_2arg_fn, "wcscasecmp", __afl_fb_wcscasecmp);
     int result = real_wcscasecmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_WCSCASECMP, result == 0);
-    if (__afl_cmplog_fd >= 0) {
+    if (__afl_cmp_rec_on() || __afl_compcov_level >= 2) {
         size_t na = __afl_safe_wcslen(a), nb = __afl_safe_wcslen(b), n = na < nb ? na : nb;
         if (n > 0) {
             size_t k = (n + 1) * sizeof(wchar_t);   /* + terminator, as strcmp */
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
             __afl_cmplog_bytes(a, b, k, result);
+            /* Level 2, as the narrow case-insensitive pair above. */
+            __afl_compcov_bytes(a, b, k, __builtin_return_address(0), COMPCOV_WSTR);
         }
     }
     return result;
@@ -6056,7 +6087,7 @@ __AFL_NO_COV char *strpbrk(const char *s, const char *accept) {
     __AFL_RESOLVE(real_strpbrk, afl_strpbrk_fn, "strpbrk", __afl_fb_strpbrk);
     char *result = real_strpbrk(s, accept);
     __AFL_CMP_COUNT(__AFL_CMP_STRPBRK, result != NULL);
-    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(accept)) {
+    if (__afl_cmp_rec_on() && __afl_launder_ptr(s) && __afl_launder_ptr(accept)) {
         size_t sl = __afl_safe_len(s), al = __afl_safe_len(accept);
         if (sl > 0 && al > 0) {
             size_t k = sl < al ? sl : al;
@@ -6073,7 +6104,7 @@ __AFL_NO_COV size_t strspn(const char *s, const char *accept) {
     __AFL_RESOLVE(real_strspn, afl_strspn_fn, "strspn", __afl_fb_strspn);
     size_t result = real_strspn(s, accept);
     __AFL_CMP_COUNT(__AFL_CMP_STRSPN, result != 0);
-    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(accept)) {
+    if (__afl_cmp_rec_on() && __afl_launder_ptr(s) && __afl_launder_ptr(accept)) {
         size_t sl = __afl_safe_len(s), al = __afl_safe_len(accept);
         if (sl > 0 && al > 0) {
             size_t k = sl < al ? sl : al;
@@ -6090,7 +6121,7 @@ __AFL_NO_COV size_t strcspn(const char *s, const char *reject) {
     __AFL_RESOLVE(real_strcspn, afl_strcspn_fn, "strcspn", __afl_fb_strcspn);
     size_t result = real_strcspn(s, reject);
     __AFL_CMP_COUNT(__AFL_CMP_STRCSPN, result != 0);
-    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(reject)) {
+    if (__afl_cmp_rec_on() && __afl_launder_ptr(s) && __afl_launder_ptr(reject)) {
         size_t sl = __afl_safe_len(s), rl = __afl_safe_len(reject);
         if (sl > 0 && rl > 0) {
             size_t k = sl < rl ? sl : rl;
@@ -6107,7 +6138,7 @@ __AFL_NO_COV void *memrchr(const void *s, int c, size_t n) {
     __AFL_RESOLVE(real_memrchr, afl_memrchr_fn, "memrchr", __afl_fb_memrchr);
     void *result = real_memrchr(s, c, n);
     __AFL_CMP_COUNT(__AFL_CMP_MEMRCHR, result != NULL);
-    if (__afl_cmplog_fd >= 0 && n > 0 && !result) {
+    if (__afl_cmp_rec_on() && n > 0 && !result) {
         /* memrchr scans from the end, so the bytes it compared first are
          * the tail; logging the head anchored the pair on bytes it may
          * never have reached. */
@@ -6332,7 +6363,9 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
      * inside the loop would report a 200-case jump table as 200 compares
      * and, worse, as 199 unsatisfied ones -- the arm that was actually
      * taken drowned in the arms that never could be. Asserted here means
-     * the value hit some case, i.e. the switch did not fall to default. */
+     * the value hit some case, i.e. the switch did not fall to default.
+     * Deliberately NOT clamped: a case past the logging cap still counts
+     * (test_regression_big_switch_counted); count is compiler data. */
     if (__AFL_CMP_COUNTS_ON || __AFL_CMP_SITES_ON) {
         int matched = 0;
         for (int64_t i = 0; i < count; i++)
@@ -6343,7 +6376,8 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
      * bytes pads the operand with zeros the input never contains. */
     size_t width = (size_t)(ref[1] / 8);
     if (width != 1 && width != 2 && width != 4) width = 8;
-    /* A huge switch is clamped, not skipped: its first cases still log. */
+    /* A huge switch is clamped, not skipped: its first cases still log.
+     * A volume bound only: the matched scan above is exact. */
     if (count > MAX_SWITCH_CASES) count = MAX_SWITCH_CASES;
     for (int64_t i = 0; i < count; i++)
         __afl_cmplog_ints(val, ref[2 + i], width, pc);
@@ -9191,11 +9225,11 @@ __AFL_GCC_NO_COV static void __afl_fuzz_args(int argc, char **argv) {
 __AFL_GCC_NO_COV static void __afl_fuzz_attach(void) {
     if (__afl_fuzz_data) return;
 
+    /* Digits-only, as every other segment id (see __afl_cmp_shm_attach). */
     const char *id = getenv("__AFL_SHM_FUZZ_ID");
-    char *end = NULL;
-    long shmid = (id && id[0]) ? strtol(id, &end, 10) : -1;
+    int shmid = (id && id[0]) ? __afl_parse_shmid(id) : -1;
     struct shmid_ds ds;
-    if (shmid >= 0 && shmid <= INT_MAX && !*end &&
+    if (shmid >= 0 &&
         shmctl((int)shmid, IPC_STAT, &ds) == 0 && ds.shm_segsz > sizeof(struct __afl_fuzz_seg)) {
         void *p = shmat((int)shmid, NULL, 0);
         if (p != (void *)-1) {
