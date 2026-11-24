@@ -34,6 +34,15 @@ static const char *kFallback[] = { "qtdemux", "matroskademux", "wavparse",
 
 static int g_inited;
 
+/* GLib log handler that swallows GStreamer's g_warning()/g_message() noise
+ * (e.g. "(python3:PID): GStreamer-WARNING **: ...") so it doesn't flood the
+ * fuzzer's stderr. G_LOG_LEVEL_ERROR/CRITICAL stay visible. Set
+ * FUZZ_GST_VERBOSE=1 to keep the warnings. */
+static void drop_gst_log(const gchar *domain, GLogLevelFlags level,
+                         const gchar *msg, gpointer data) {
+    (void)domain; (void)level; (void)msg; (void)data;
+}
+
 static GstFlowReturn drop_chain(GstPad *pad, GstObject *parent, GstBuffer *buf) {
     (void)pad; (void)parent;
     __afl_map_edge(0x3300);
@@ -65,7 +74,12 @@ static void fuzz_gst_init(void) {
     g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", "", TRUE);
     g_setenv("GST_PLUGIN_PATH_1_0", "", TRUE);
     g_setenv("GST_REGISTRY_FORK", "no", TRUE);
-    g_setenv("GST_DEBUG", "0", FALSE);
+    g_setenv("GST_DEBUG", "0", TRUE);
+    if (!g_getenv("FUZZ_GST_VERBOSE"))
+        g_log_set_handler("GStreamer",
+                          (GLogLevelFlags)(G_LOG_LEVEL_WARNING | G_LOG_LEVEL_MESSAGE |
+                                           G_LOG_LEVEL_INFO | G_LOG_LEVEL_DEBUG),
+                          drop_gst_log, NULL);
     gst_init(NULL, NULL);
     GST_PLUGIN_STATIC_REGISTER(typefindfunctions);
     GST_PLUGIN_STATIC_REGISTER(isomp4);
