@@ -20,6 +20,12 @@ def gstreamer_build_fn() -> str:
     return text[start : text.index("\n}\n", start)]
 
 
+def gstreamer_versions_fn() -> str:
+    text = src()
+    start = text.index("build_gstreamer_versions() {")
+    return text[start : text.index("\n}\n", start)]
+
+
 def test_standalone_build_script_removed():
     assert not (ROOT / "tools" / "build_gstreamer.sh").exists()
 
@@ -51,10 +57,14 @@ def test_gstreamer_uses_ccache_and_coverage_by_default():
     assert "--no-ccache" in text
 
 
+def test_gstreamer_targets_live_with_other_targets():
+    fn = gstreamer_versions_fn()
+    assert 'local so="$TARGETS/gstreamer_read_${GSTREAMER_VERSION}${name_suffix}.so"' in fn
+
+
 def test_gstreamer_targets_are_verified():
     text = src()
-    assert text.count('"$TARGETS"/gstreamer/*.so') >= 2
-    assert '"$TARGETS"/gstreamer/*' in text
+    assert '"$TARGETS"/gstreamer/' not in text
 
 
 def test_references_point_at_main_build():

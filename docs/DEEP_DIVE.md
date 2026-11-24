@@ -1994,8 +1994,10 @@ against those libs; the wrapper uses the same sancov flags and gates `__AFL_PRIV
 off under sanitizers. The target sends STREAM_START → CAPS → SEGMENT before buffers:
 without CAPS the demuxer returns `GST_FLOW_NOT_NEGOTIATED` for every push, so its parsers
 never run and the campaign reports only wrapper edges. Measured on the existing corpus:
-61 SHM edges before the fix/build wiring, 12,288 after. Verification scans the nested
-`gstreamer/` target directory too. Tests: `tests/test_regression_gstreamer_{build,caps}.py`.
+61 SHM edges before the fix/build wiring, 12,288 after. The `.so` targets land directly
+in `$FUZZ_BUILD_ROOT` like the other targets; meson build trees stay in
+`$FUZZ_BUILD_ROOT/gstreamer-<ver>-{noasan,asan}`. Tests:
+`tests/test_regression_gstreamer_{build,caps}.py`.
 
 **Dual vendored FFmpeg builds**: FFmpeg fuzz targets require coverage-instrumented
 vendored static libraries. Since the vendored FFmpeg `.a` files are compiled with

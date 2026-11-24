@@ -2183,7 +2183,7 @@ build_gstreamer_versions() {
         name_suffix="_asan"
     fi
     local BUILD_DIR="$FUZZ_BUILD_ROOT/gstreamer-$GSTREAMER_VERSION-$build_tag"
-    local so="$TARGETS/gstreamer/gstreamer_read_${GSTREAMER_VERSION}${name_suffix}.so"
+    local so="$TARGETS/gstreamer_read_${GSTREAMER_VERSION}${name_suffix}.so"
 
     local -a libs=()
     local lib
@@ -2620,7 +2620,7 @@ verify_afl() {
     # Every ELF in the build root: a fixed name list fell behind the
     # _noasan / _asan.so / _ubsan.so outputs and checked 8 of ~60 targets.
     # ffmpeg_read_* is summarised separately below.
-    for f in "$TARGETS"/* "$TARGETS"/gstreamer/*; do
+    for f in "$TARGETS"/*; do
         [ -f "$f" ] || continue
         [[ "$(basename "$f")" == ffmpeg_read_* ]] && continue
         [ "$(head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] || continue
@@ -2663,7 +2663,7 @@ verify_shm_run() {
     echo "Verifying fuzz_shm_run in .so targets..."
     local ok_count=0
     local fail_count=0
-    for f in "$TARGETS"/*.so "$TARGETS"/gstreamer/*.so; do
+    for f in "$TARGETS"/*.so; do
         [ -f "$f" ] || continue
         if nm "$f" 2>/dev/null | grep -q "fuzz_shm_run"; then
             ok_count=$((ok_count + 1))
@@ -2691,7 +2691,7 @@ verify_sancov() {
     echo "Verifying sancov instrumentation in .so targets..."
     local ok_count=0
     local fail_count=0
-    for f in "$TARGETS"/*.so "$TARGETS"/gstreamer/*.so; do
+    for f in "$TARGETS"/*.so; do
         [ -f "$f" ] || continue
         nm "$f" 2>/dev/null | grep -q "fuzz_shm_run" || continue
         # Look for the __sancov_guards SECTION, not for __sanitizer_cov_*
@@ -2725,7 +2725,7 @@ verify_cmplog() {
     echo "Verifying cmplog symbols in .so targets..."
     local ok_count=0
     local fail_count=0
-    for f in "$TARGETS"/*.so "$TARGETS"/gstreamer/*.so; do
+    for f in "$TARGETS"/*.so; do
         [ -f "$f" ] || continue
         if nm "$f" 2>/dev/null | grep -q "__cmplog_reset"; then
             ok_count=$((ok_count + 1))
@@ -2769,7 +2769,7 @@ verify_vendor_tracecmp() {
     # ── Final .so: check resolution + -Bsymbolic ──────────────────
     local resolved_ok=0 resolved_fail=0 bsymbolic_ok=0 bsymbolic_fail=0
     local total_implementations=0 total_so_callers=0
-    for f in "$TARGETS"/*.so "$TARGETS"/gstreamer/*.so; do
+    for f in "$TARGETS"/*.so; do
         [ -f "$f" ] || continue
         local impl_count=$(nm "$f" 2>/dev/null | grep -cE '[Tt].*trace_cmp' || true)
         local undef_count=$(nm "$f" 2>/dev/null | grep -c 'U.*trace_cmp' || true)
