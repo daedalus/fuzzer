@@ -8,7 +8,7 @@
 # Source: github.com/GStreamer/gstreamer (mirror; gitlab.freedesktop.org is
 # not reachable from the sandbox).  Shallow clone of the release tag into
 # $FUZZ_VENDOR_ROOT/gstreamer-<version>.
-# Build it with: tools/build_gstreamer.sh
+# Build it with: tools/build_targets.sh (vendored GStreamer is built there)
 
 set -e
 : "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"

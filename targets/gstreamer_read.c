@@ -4,7 +4,7 @@
  * wavparse, avidemux, flvdemux; byte 0 % 5 when typefind finds nothing) and
  * pushes the data into it from the calling thread (no pipeline threads):
  *   src pad -> demuxer sink; each dynamic demuxer src pad -> a drop sink.
- * Build: tools/build_gstreamer.sh --cov --target
+ * Build: tools/build_targets.sh (vendored libs are instrumented there)
  */
 #include <gst/gst.h>
 #include <gst/base/gsttypefindhelper.h>
@@ -110,9 +110,17 @@ int fuzz_gstreamer(const unsigned char *buf, size_t size) {
         const char *name = gst_structure_get_name(gst_caps_get_structure(caps, 0));
         for (size_t i = 0; i < sizeof kMap / sizeof kMap[0]; i++)
             if (strcmp(name, kMap[i].caps) == 0) { elem = kMap[i].elem; __afl_map_edge(0x3010 + i); break; }
-        gst_caps_unref(caps);
     }
-    if (!elem) { __afl_map_edge(0x3002); elem = kFallback[buf[0] % 5]; }
+    if (!elem) {
+        __afl_map_edge(0x3002);
+        elem = kFallback[buf[0] % 5];
+        /* No typefind match (or a mismatch between kMap and kFallback's chosen
+         * element): fall back to the caps string this element is known for, so
+         * a CAPS event can still be sent below. */
+        if (caps) { gst_caps_unref(caps); caps = NULL; }
+        for (size_t i = 0; i < sizeof kMap / sizeof kMap[0]; i++)
+            if (strcmp(elem, kMap[i].elem) == 0) { caps = gst_caps_from_string(kMap[i].caps); break; }
+    }
 
     GstElement *demux = gst_element_factory_make(elem, NULL);
     if (!demux) { __afl_map_edge(0x3003); return 0; }
@@ -133,6 +141,18 @@ int fuzz_gstreamer(const unsigned char *buf, size_t size) {
     GstSegment seg;
     gst_segment_init(&seg, GST_FORMAT_BYTES);
     gst_pad_push_event(src, gst_event_new_stream_start("fuzz"));
+    /* Sticky-event order matters: STREAM_START, CAPS, SEGMENT, then buffers.
+     * Without a CAPS event the demuxer's chain function returns
+     * GST_FLOW_NOT_NEGOTIATED for every push regardless of payload, so the
+     * demuxer's own parsing code (the real coverage target) is never
+     * reached and every exec converges on the same handful of edges. */
+    if (caps) {
+        gst_pad_push_event(src, gst_event_new_caps(caps));
+        gst_caps_unref(caps);
+        caps = NULL;
+    } else {
+        __afl_map_edge(0x3006);
+    }
     gst_pad_push_event(src, gst_event_new_segment(&seg));
 
     GstFlowReturn fr = GST_FLOW_OK;

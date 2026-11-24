@@ -1985,6 +1985,18 @@ order, and its sort order follows the locale.
 - Not covered: ASAN's per-module name keeps the source path as passed (clang 18 ignores the map).
 - Tests: `tests/test_regression_build_repro_flags.py`.
 
+**Vendored GStreamer** (`tools/vendor_gstreamer.sh`, `build_vendored_gstreamer` in
+`build_targets.sh`): like FFmpeg, the out-of-tree meson build is always instrumented
+(`trace-pc-guard` + `trace-cmp`, ccache, `-fno-omit-frame-pointer`) and has separate
+`$FUZZ_BUILD_ROOT/gstreamer-<ver>-{noasan,asan}` trees. `gst_parse` is disabled (needs
+flex, unused here). `build_gstreamer_versions` links `gstreamer_read_<ver>_{noasan,asan}.so`
+against those libs; the wrapper uses the same sancov flags and gates `__AFL_PRIVATE_HEAP`
+off under sanitizers. The target sends STREAM_START → CAPS → SEGMENT before buffers:
+without CAPS the demuxer returns `GST_FLOW_NOT_NEGOTIATED` for every push, so its parsers
+never run and the campaign reports only wrapper edges. Measured on the existing corpus:
+61 SHM edges before the fix/build wiring, 12,288 after. Verification scans the nested
+`gstreamer/` target directory too. Tests: `tests/test_regression_gstreamer_{build,caps}.py`.
+
 **Dual vendored FFmpeg builds**: FFmpeg fuzz targets require coverage-instrumented
 vendored static libraries. Since the vendored FFmpeg `.a` files are compiled with
 `-fsanitize-coverage=trace-pc-guard,trace-cmp`, they embed undefined references to

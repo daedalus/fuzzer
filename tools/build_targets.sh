@@ -28,6 +28,7 @@
 #   tools/vendor_grep.sh      -> $FUZZ_VENDOR_ROOT/grep
 #   tools/vendor_ffmpeg.sh    -> $FUZZ_VENDOR_ROOT/ffmpeg
 #   tools/vendor_ffmpeg.sh --top=3 -> $FUZZ_VENDOR_ROOT/ffmpeg-<ver>  (ffmpeg_read_<ver>_{asan,noasan,ubsan,ng2,ng3}{,.so})
+#   tools/vendor_gstreamer.sh -> $FUZZ_VENDOR_ROOT/gstreamer-<ver>     (gstreamer_read_<ver>_{noasan,asan}.so)
 #
 # ffmpeg_read is built ONLY in this versioned form — ffmpeg_read_<version>_<OPTS>
 # and ffmpeg_read_<version>_<OPTS>.so, OPTS in {noasan, asan, ubsan, ng2, ng3}.
@@ -76,6 +77,8 @@ fi
 # two machines link the same objects in the same order.
 export LC_ALL=C
 
+GSTREAMER_VERSION="${GSTREAMER_VERSION:-1.28.9}"
+
 # ── Path roots ────────────────────────────────────────────────────────
 # FUZZ_VENDOR_ROOT: where vendored **sources** live. Defaults to
 #   ~/fuzzing/vendoring/; override with FUZZ_VENDOR_ROOT=...
@@ -94,6 +97,7 @@ for arg in "$@"; do
         --in-tree-targets) IN_TREE_TARGETS=1 ;;
         --in-tree-targets-src) IN_TREE_TARGETS_SRC=1 ;;
         --no-ccache)       USE_CCACHE=0      ;;
+        --gstreamer-version=*) GSTREAMER_VERSION="${arg#*=}" ;;
     esac
 done
 : "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"
@@ -138,6 +142,10 @@ if [ "${IN_TREE_TARGETS_SRC:-0}" = "1" ] && [ "${IN_TREE_TARGETS:-0}" = "0" ]; t
     mkdir -p "$TARGETS"
 fi
 mkdir -p "$VENDOR" "$TARGETS"
+
+GSTREAMER_SRC="$VENDOR/gstreamer-$GSTREAMER_VERSION"
+WITH_GSTREAMER=0
+[ -f "$GSTREAMER_SRC/meson.build" ] && WITH_GSTREAMER=1
 
 # ── Build log ─────────────────────────────────────────────────────────
 # Every compile, link, configure and make in this script sent its
@@ -362,6 +370,7 @@ FRAME_POINTER="-fno-omit-frame-pointer"
 # flag string stays byte-identical and nothing rebuilds.
 SWITCH_CASES_FLAG="-fno-jump-tables"
 NO_JUMP_TABLES=""
+GSTREAMER_COV_FLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp"
 
 # Path-stable debug info. -g records absolute repo/vendor/build-root paths
 # in DWARF and __FILE__, so one source built under two roots differs. Remap
@@ -2054,6 +2063,152 @@ build_ffmpeg_version_ngram() {
     done
 }
 
+# ── Vendored GStreamer: coverage + ASAN parity with FFmpeg ───────
+# Out-of-tree meson build; $VENDOR/gstreamer-<ver> stays read-only.
+# gst_parse is disabled because it needs flex, which this target never uses.
+build_vendored_gstreamer() {
+    [ "$WITH_GSTREAMER" -eq 1 ] || return 0
+    local variant="${1:-}" src="$GSTREAMER_SRC"
+    local build_tag="noasan"; [ "$variant" = "_asan" ] && build_tag="asan"
+    local BUILD_DIR="$FUZZ_BUILD_ROOT/gstreamer-$GSTREAMER_VERSION-$build_tag"
+    mkdir -p "$BUILD_DIR"
+
+    local cc="clang" cxx="clang++"
+    if [ "${USE_CCACHE:-1}" = "1" ] && command -v ccache &>/dev/null; then
+        cc="ccache clang"
+        cxx="ccache clang++"
+    fi
+    local COV_FLAGS="$GSTREAMER_COV_FLAGS $FRAME_POINTER $DEBUG_CFLAGS"
+    local LINK_FLAGS=""
+    if [ "$variant" = "_asan" ]; then
+        COV_FLAGS="$ASAN_CFLAGS $COV_FLAGS"
+        LINK_FLAGS="-fsanitize=address"
+    fi
+
+    # Meson also links build-time helper executables (mklicensestables, etc.)
+    # from instrumented objects. FFmpeg supplies the same stub for configure.
+    local stub_dir="$BUILD_DIR/sancov_stub"
+    mkdir -p "$stub_dir"
+    cat > "$stub_dir/sancov_stub.c" << 'STUBEOF'
+void __sanitizer_cov_trace_pc_guard_init(void *s, void *e) { (void)s; (void)e; }
+void __sanitizer_cov_trace_pc_guard(void *g) { (void)g; }
+void __sanitizer_cov_trace_cmp1(unsigned char a, unsigned char b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_cmp2(unsigned short a, unsigned short b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_cmp4(unsigned int a, unsigned int b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_cmp8(unsigned long long a, unsigned long long b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_const_cmp1(unsigned char a, unsigned char b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_const_cmp2(unsigned short a, unsigned short b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_const_cmp4(unsigned int a, unsigned int b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_const_cmp8(unsigned long long a, unsigned long long b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_switch(unsigned long long v, unsigned long long *r) { (void)v; (void)r; }
+STUBEOF
+    $cc -c -o "$stub_dir/sancov_stub.o" "$stub_dir/sancov_stub.c" 2>>"$BUILD_LOG"
+    ar rcs "$stub_dir/libsancov_stub.a" "$stub_dir/sancov_stub.o"
+    LINK_FLAGS="-L$stub_dir -lsancov_stub $LINK_FLAGS"
+
+    local cc_id src_stamp cfg_stamp
+    cc_id=$(clang --version 2>/dev/null | head -1)
+    # meson keeps the compiler from the first setup on --reconfigure. A ccache
+    # wrapper added later is silent otherwise, so force a fresh setup when it changes.
+    local compiler_marker="$BUILD_DIR/.compiler"
+    local prev_compiler="" need_fresh=0
+    [ -f "$compiler_marker" ] && prev_compiler=$(cat "$compiler_marker")
+    [ -f "$BUILD_DIR/build.ninja" ] && [ "$prev_compiler" != "$cc|$cxx" ] && need_fresh=1
+    src_stamp=$( { (cd "$src" && git rev-parse HEAD 2>/dev/null) || echo "no-git"
+                   find "$src" \( -name '*.c' -o -name '*.h' -o -name 'meson.build' \) \
+                        -printf '%P %T@ %s\n' 2>/dev/null | sort; } | md5sum | cut -d' ' -f1)
+    local meson_opts=(
+        --wrap-mode=nofallback --default-library=static --buildtype=debugoptimized
+        -Dauto_features=disabled -Dgpl=disabled -Dtests=disabled
+        -Dexamples=disabled -Ddoc=disabled -Dintrospection=disabled
+        -Dgtk_doc=disabled -Dnls=disabled -Dgst-examples=disabled
+        -Dgstreamer:tools=disabled -Dgstreamer:benchmarks=disabled
+        -Dgstreamer:gst_parse=false -Dbase=enabled -Dgood=enabled
+        -Dgst-plugins-base:app=enabled -Dgst-plugins-base:typefind=enabled
+        -Dgst-plugins-base:playback=enabled -Dgst-plugins-base:audioconvert=enabled
+        -Dgst-plugins-base:videoconvertscale=enabled
+        -Dgst-plugins-good:isomp4=enabled -Dgst-plugins-good:matroska=enabled
+        -Dgst-plugins-good:wavparse=enabled -Dgst-plugins-good:avi=enabled
+        -Dgst-plugins-good:flv=enabled
+    )
+    cfg_stamp=$(printf '%s|%s|%s|%s|%s|%s' "$COV_FLAGS" "$LINK_FLAGS" "$cc_id" "$cc|$cxx" \
+                       "${meson_opts[*]}" "$GSTREAMER_VERSION" | md5sum | cut -d' ' -f1)
+
+    local stamp_file="$BUILD_DIR/.sancov_stamp"
+    local prev_src="" prev_cfg=""
+    if [ -f "$stamp_file" ]; then
+        prev_src=$(sed -n '1p' "$stamp_file")
+        prev_cfg=$(sed -n '2p' "$stamp_file")
+    fi
+    local have_libs=1
+    find "$BUILD_DIR" -name 'libgst*.a' -print -quit | grep -q . || have_libs=0
+    if [ "$FORCE_REBUILD" -eq 0 ] && [ "$have_libs" -eq 1 ] \
+       && [ "$src_stamp" = "$prev_src" ] && [ "$cfg_stamp" = "$prev_cfg" ]; then
+        ok "vendored GStreamer${variant}: up to date"
+        return 0
+    fi
+
+    echo "Building vendored GStreamer${variant} with sancov coverage..."
+    # A failed build must not leave the previous successful stamps in place.
+    rm -f "$stamp_file"
+    if [ "$need_fresh" -eq 1 ]; then
+        rm -rf "$BUILD_DIR/meson-private" "$BUILD_DIR/meson-info" "$BUILD_DIR/build.ninja"
+    fi
+    local reconfig=()
+    [ -f "$BUILD_DIR/build.ninja" ] && reconfig=(--reconfigure)
+    log_section "vendored GStreamer${variant}: meson setup"
+    if env CC="$cc" CXX="$cxx" meson setup "${reconfig[@]}" "$BUILD_DIR" "$src" \
+        "${meson_opts[@]}" "-Dc_args=$COV_FLAGS" "-Dcpp_args=$COV_FLAGS" \
+        "-Dc_link_args=$LINK_FLAGS" "-Dcpp_link_args=$LINK_FLAGS" >>"$BUILD_LOG" 2>&1; then
+        log_section "vendored GStreamer${variant}: ninja"
+        if ninja -C "$BUILD_DIR" -j "$(nproc)" >>"$BUILD_LOG" 2>&1; then
+            printf '%s\n%s\n' "$src_stamp" "$cfg_stamp" > "$stamp_file"
+            printf '%s' "$cc|$cxx" > "$compiler_marker"
+            ok "vendored GStreamer${variant}"
+            return 0
+        fi
+    fi
+    warn_failed "vendored GStreamer${variant}: see $BUILD_LOG"
+    return 1
+}
+
+# $1 variant ("" or "_asan"), $2 wrapper flags, [$3 cc]
+build_gstreamer_versions() {
+    [ "$WITH_GSTREAMER" -eq 1 ] || return 0
+    local variant="${1:-}" flags="$2" cc="${3:-$DEFAULT_CC}"
+    build_vendored_gstreamer "$variant" || return 0
+    local build_tag="noasan" name_suffix="_noasan"
+    if [ "$variant" = "_asan" ]; then
+        build_tag="asan"
+        name_suffix="_asan"
+    fi
+    local BUILD_DIR="$FUZZ_BUILD_ROOT/gstreamer-$GSTREAMER_VERSION-$build_tag"
+    local so="$TARGETS/gstreamer/gstreamer_read_${GSTREAMER_VERSION}${name_suffix}.so"
+
+    local -a libs=()
+    local lib
+    while IFS= read -r lib; do libs+=("$lib"); done < <(find "$BUILD_DIR" -name 'libgst*.a' | sort)
+    if [ "${#libs[@]}" -eq 0 ]; then
+        rm -f "$so"
+        warn_failed "gstreamer_read${name_suffix}: no current archives in $BUILD_DIR"
+        return 0
+    fi
+
+    local pkg_flags pkg_libs
+    pkg_flags=$(pkg-config --cflags glib-2.0 gobject-2.0 2>/dev/null || true)
+    pkg_libs=$(pkg-config --libs gobject-2.0 gmodule-2.0 gio-2.0 glib-2.0 2>/dev/null || true)
+    local inc="-I$GSTREAMER_SRC/subprojects/gstreamer -I$GSTREAMER_SRC/subprojects/gstreamer/libs -I$BUILD_DIR/subprojects/gstreamer $pkg_flags"
+    # Private heap is refused by the shim under sanitizers (ffmpeg uses the same gate).
+    if [[ "$flags" != *-fsanitize=address* && "$flags" != *-fsanitize=memory* \
+          && "$flags" != *-fsanitize=thread* ]]; then
+        inc="$inc -D__AFL_PRIVATE_HEAP=1"
+    fi
+    local link_libs="-Wl,--start-group ${libs[*]} -Wl,--end-group $pkg_libs -lm -ldl -lpthread"
+    local extra="-Wl,-Bsymbolic -Wl,-z,nodelete -Wl,--export-dynamic"
+    mkdir -p "$(dirname "$so")"
+    build_so_target "$TARGETS_SRC/gstreamer_read.c" "$so" "$link_libs" "$extra $flags" "$cc" "$inc"
+}
+
 # ── Build simple .so targets ────────────────────────────────────
 build_simple_so_targets() {
     local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
@@ -2465,7 +2620,7 @@ verify_afl() {
     # Every ELF in the build root: a fixed name list fell behind the
     # _noasan / _asan.so / _ubsan.so outputs and checked 8 of ~60 targets.
     # ffmpeg_read_* is summarised separately below.
-    for f in "$TARGETS"/*; do
+    for f in "$TARGETS"/* "$TARGETS"/gstreamer/*; do
         [ -f "$f" ] || continue
         [[ "$(basename "$f")" == ffmpeg_read_* ]] && continue
         [ "$(head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ] || continue
@@ -2508,7 +2663,7 @@ verify_shm_run() {
     echo "Verifying fuzz_shm_run in .so targets..."
     local ok_count=0
     local fail_count=0
-    for f in "$TARGETS"/*.so; do
+    for f in "$TARGETS"/*.so "$TARGETS"/gstreamer/*.so; do
         [ -f "$f" ] || continue
         if nm "$f" 2>/dev/null | grep -q "fuzz_shm_run"; then
             ok_count=$((ok_count + 1))
@@ -2536,7 +2691,7 @@ verify_sancov() {
     echo "Verifying sancov instrumentation in .so targets..."
     local ok_count=0
     local fail_count=0
-    for f in "$TARGETS"/*.so; do
+    for f in "$TARGETS"/*.so "$TARGETS"/gstreamer/*.so; do
         [ -f "$f" ] || continue
         nm "$f" 2>/dev/null | grep -q "fuzz_shm_run" || continue
         # Look for the __sancov_guards SECTION, not for __sanitizer_cov_*
@@ -2570,7 +2725,7 @@ verify_cmplog() {
     echo "Verifying cmplog symbols in .so targets..."
     local ok_count=0
     local fail_count=0
-    for f in "$TARGETS"/*.so; do
+    for f in "$TARGETS"/*.so "$TARGETS"/gstreamer/*.so; do
         [ -f "$f" ] || continue
         if nm "$f" 2>/dev/null | grep -q "__cmplog_reset"; then
             ok_count=$((ok_count + 1))
@@ -2614,7 +2769,7 @@ verify_vendor_tracecmp() {
     # ── Final .so: check resolution + -Bsymbolic ──────────────────
     local resolved_ok=0 resolved_fail=0 bsymbolic_ok=0 bsymbolic_fail=0
     local total_implementations=0 total_so_callers=0
-    for f in "$TARGETS"/*.so; do
+    for f in "$TARGETS"/*.so "$TARGETS"/gstreamer/*.so; do
         [ -f "$f" ] || continue
         local impl_count=$(nm "$f" 2>/dev/null | grep -cE '[Tt].*trace_cmp' || true)
         local undef_count=$(nm "$f" 2>/dev/null | grep -c 'U.*trace_cmp' || true)
@@ -3305,6 +3460,8 @@ print_feature_matrix() {
     ffvers=$(cd "$VENDOR" 2>/dev/null && ls -d ffmpeg-*/ 2>/dev/null | tr -d / | tr '\n' ' ')
     state=$([ -n "$ffvers" ] && [ $((BUILD_ASAN + BUILD_NOSAN)) -gt 0 ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "ffmpeg versions" "$state" "${ffvers:-none, run tools/vendor_ffmpeg.sh --top=3} (exe + .so, _asan/_noasan/_ubsan)"
+    state=$([ "$WITH_GSTREAMER" -eq 1 ] && [ $((BUILD_ASAN + BUILD_NOSAN)) -gt 0 ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "gstreamer" "$state" "$([ "$WITH_GSTREAMER" -eq 1 ] && echo "$GSTREAMER_SRC" || echo "not vendored — run tools/vendor_gstreamer.sh") (_noasan/_asan .so)"
 
     state=$([ "$BUILD_ASAN" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ASAN variants" "$state" "executables + .so targets"
@@ -3408,6 +3565,7 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
     build_vendored_ffmpeg_sancov "_asan"
     build_simple_targets "_asan" "$ASAN_CFLAGS" "ASAN"
     build_ffmpeg_versions "_asan" "$ASAN_CFLAGS"
+    build_gstreamer_versions "_asan" "$ASAN_CFLAGS $GSTREAMER_COV_FLAGS"
     build_ffmpeg_version_ubsan
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "$ASAN_CFLAGS" "ASAN"
     build_simple_so_targets "_asan" "$ASAN_CFLAGS" "ASAN"
@@ -3440,6 +3598,7 @@ if [ "$BUILD_NOSAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan_tcg" "" "No-ASAN"
     build_vendored_ffmpeg_sancov ""
     build_ffmpeg_versions "_noasan" ""
+    build_gstreamer_versions "" "$GSTREAMER_COV_FLAGS"
     build_ffmpeg_version_ijon
     build_simple_so_targets "_nosan" "" "No-ASAN"
     build_standalone_so_targets "_nosan" "" "No-ASAN"
