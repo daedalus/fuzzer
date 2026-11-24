@@ -34,10 +34,13 @@ static const char *kFallback[] = { "qtdemux", "matroskademux", "wavparse",
 
 static int g_inited;
 
-/* GLib log handler that swallows GStreamer's g_warning()/g_message() noise
- * (e.g. "(python3:PID): GStreamer-WARNING **: ...") so it doesn't flood the
- * fuzzer's stderr. G_LOG_LEVEL_ERROR/CRITICAL stay visible. Set
- * FUZZ_GST_VERBOSE=1 to keep the warnings. */
+/* GLib log handler that swallows GStreamer/plugin g_warning()/g_critical()/
+ * g_message() noise (e.g. "(python3:PID): GStreamer-WARNING **: ..." and
+ * "** (python3:PID): CRITICAL **: file ../gst-plugins-good/...: assertion
+ * ... failed"). Plugins built without G_LOG_DOMAIN log under the NULL
+ * domain, so a per-domain handler alone misses them: also replace the
+ * default handler. G_LOG_LEVEL_ERROR is never dropped (it aborts anyway).
+ * Set FUZZ_GST_VERBOSE=1 to keep all output. */
 static void drop_gst_log(const gchar *domain, GLogLevelFlags level,
                          const gchar *msg, gpointer data) {
     (void)domain; (void)level; (void)msg; (void)data;
@@ -75,11 +78,14 @@ static void fuzz_gst_init(void) {
     g_setenv("GST_PLUGIN_PATH_1_0", "", TRUE);
     g_setenv("GST_REGISTRY_FORK", "no", TRUE);
     g_setenv("GST_DEBUG", "0", TRUE);
-    if (!g_getenv("FUZZ_GST_VERBOSE"))
-        g_log_set_handler("GStreamer",
-                          (GLogLevelFlags)(G_LOG_LEVEL_WARNING | G_LOG_LEVEL_MESSAGE |
-                                           G_LOG_LEVEL_INFO | G_LOG_LEVEL_DEBUG),
-                          drop_gst_log, NULL);
+    if (!g_getenv("FUZZ_GST_VERBOSE")) {
+        const GLogLevelFlags quiet = (GLogLevelFlags)(
+            G_LOG_LEVEL_CRITICAL | G_LOG_LEVEL_WARNING | G_LOG_LEVEL_MESSAGE |
+            G_LOG_LEVEL_INFO | G_LOG_LEVEL_DEBUG);
+        g_log_set_default_handler(drop_gst_log, NULL);       /* any domain */
+        g_log_set_handler(NULL, quiet, drop_gst_log, NULL);  /* NULL domain */
+        g_log_set_handler("GStreamer", quiet, drop_gst_log, NULL);
+    }
     gst_init(NULL, NULL);
     GST_PLUGIN_STATIC_REGISTER(typefindfunctions);
     GST_PLUGIN_STATIC_REGISTER(isomp4);
