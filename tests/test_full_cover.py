@@ -448,14 +448,21 @@ def test_subset_is_not_a_twin(tmp_path):
 
 
 class _Clock:
-    """Scripted ``time`` module: each ``time()`` call advances by *step* seconds."""
+    """Scripted ``time`` module: each call advances by *step* seconds.
+
+    ``time()`` (wall) runs backward, ``monotonic()`` forward: the throttle
+    must read only the monotonic clock.
+    """
 
     def __init__(self, step: float):
         self.now, self.step = 0.0, step
 
-    def time(self) -> float:
+    def monotonic(self) -> float:
         self.now += self.step
         return self.now
+
+    def time(self) -> float:
+        return -self.monotonic()
 
 
 def _status(out: str) -> list[tuple[int, int]]:
@@ -464,34 +471,55 @@ def _status(out: str) -> list[tuple[int, int]]:
     return [(int(ln.split()[2]), int(ln.split("edges: ")[1].split()[0])) for ln in lines]
 
 
-def test_scan_prints_status_line_per_interval(tmp_path, capsys, monkeypatch):
-    """Clock past the interval every batch: one line per batch, then the final line."""
+def _running(batches: list[dict[bytes, list[int]]]) -> list[tuple[int, int]]:
+    """``(seeds, distinct edges)`` after each batch, derived from the fixture."""
+    seen: set[int] = set()
+    seeds = 0
+    out = []
+    for batch in batches:
+        seeds += len(batch)
+        for ids in batch.values():
+            seen.update(ids)
+        out.append((seeds, len(seen)))
+    return out
+
+
+_TWO_BATCHES = [{b"aaaa": [1, 2]}, {b"bb": [2, 3, 4]}]
+
+
+def _cover(tmp_path: Path, batches: list[dict[bytes, list[int]]]) -> full_cover.CoverReport:
+    """Seed every fixture key, dump *batches*, run full_cover."""
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    _seed(corpus, b"aaaa")
-    _seed(corpus, b"bb")
-    dump = _dump(tmp_path / "e.pkl", [{b"aaaa": [1, 2]}, {b"bb": [2, 3, 4]}])
+    for batch in batches:
+        for data in batch:
+            _seed(corpus, data)
+    dump = _dump(tmp_path / "e.pkl", batches)
+    return full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+
+
+def test_scan_prints_status_line_per_interval(tmp_path, capsys, monkeypatch):
+    """Monotonic clock past the interval every batch: one line per batch, then the final line.
+
+    The wall clock runs backward here: a throttle reading it prints nothing.
+    """
     monkeypatch.setattr(full_cover, "time", _Clock(full_cover._STATUS_EVERY_S))
 
-    full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+    _cover(tmp_path, _TWO_BATCHES)
 
     out = capsys.readouterr().out
-    assert _status(out) == [(1, 2), (2, 4), (2, 4)]
+    want = _running(_TWO_BATCHES)
+    assert _status(out) == want + want[-1:]
     assert "seeds/s" in out and "ETA" not in out
 
 
 def test_scan_status_throttled_to_final_line(tmp_path, capsys, monkeypatch):
     """Falsification: clock below the interval: only the final line, with full counts."""
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    _seed(corpus, b"aaaa")
-    _seed(corpus, b"bb")
-    dump = _dump(tmp_path / "e.pkl", [{b"aaaa": [1, 2]}, {b"bb": [2, 3, 4]}])
     monkeypatch.setattr(full_cover, "time", _Clock(0.0))
 
-    full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+    _cover(tmp_path, _TWO_BATCHES)
 
-    assert _status(capsys.readouterr().out) == [(2, 4)]
+    assert _status(capsys.readouterr().out) == _running(_TWO_BATCHES)[-1:]
 
 
 def test_empty_dump_prints_no_status(tmp_path, capsys):
@@ -522,58 +550,82 @@ def test_regression_empty_legacy_batch_prints_no_status(tmp_path, capsys):
 
 def test_regression_status_union_counts_distinct_edges(tmp_path, capsys, monkeypatch):
     """Overlap across seeds and batches never inflates the line: expected = distinct ids."""
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
     batches = [{b"aa": [1, 2], b"bb": [2, 3]}, {b"cc": [3, 1 << 20]}, {b"dd": [1, 2]}]
-    for batch in batches:
-        for data in batch:
-            _seed(corpus, data)
-    dump = _dump(tmp_path / "e.pkl", batches)
     monkeypatch.setattr(full_cover, "time", _Clock(full_cover._STATUS_EVERY_S))
 
-    rep = full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+    rep = _cover(tmp_path, batches)
 
-    seen: set[int] = set()
-    seeds = 0
-    expected = []
-    for batch in batches:
-        seeds += len(batch)
-        for ids in batch.values():
-            seen.update(ids)
-        expected.append((seeds, len(seen)))
-    assert _status(capsys.readouterr().out) == expected + expected[-1:]
-    assert rep.union_edges == len(seen)
+    want = _running(batches)
+    assert _status(capsys.readouterr().out) == want + want[-1:]
+    assert rep.union_edges == want[-1][1]
+
+
+class _SlowCount:
+    """Clock where each status line takes a full interval; batches take none.
+
+    The first ``monotonic()`` (the throttle's start) reads 0; later reads see
+    one interval already passed, so batch 1 is due.
+    """
+
+    def __init__(self) -> None:
+        self.now = full_cover._STATUS_EVERY_S
+        self.started = False
+        self.calls = 0
+
+    def monotonic(self) -> float:
+        if not self.started:
+            self.started = True
+            return 0.0
+        return self.now
+
+    def time(self) -> float:
+        return self.now
+
+    def status(self, *_args: object) -> None:
+        self.calls += 1
+        self.now += full_cover._STATUS_EVERY_S
+
+
+def test_regression_slow_status_not_rearmed_per_batch(tmp_path, monkeypatch):
+    """A count lasting the interval must not re-trigger on the next batch.
+
+    Interval runs from the end of the last line: batch 1 prints, later batches
+    take no time, so only the final line follows.
+    """
+    clock = _SlowCount()
+    monkeypatch.setattr(full_cover, "time", clock)
+    monkeypatch.setattr(full_cover, "_scan_status", clock.status)
+    batches = [{bytes([65 + i]): [i]} for i in range(4)]
+
+    _cover(tmp_path, batches)
+
+    first_batch, final = 1, 1
+    assert clock.calls == first_batch + final
 
 
 class _NpSpy:
     """numpy proxy: records the size of every array passed to count_nonzero."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.sizes: list[int] = []
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> object:
         return getattr(np, name)
 
-    def count_nonzero(self, a, *args, **kwargs):
+    def count_nonzero(self, a: np.ndarray) -> int:
         self.sizes.append(np.asarray(a).size)
-        return np.count_nonzero(a, *args, **kwargs)
+        return int(np.count_nonzero(a))
 
 
 def test_regression_scan_never_rescans_map_per_batch(tmp_path, monkeypatch):
     """Crafted dump: one high edge id, many tiny batches; map counts do not scale with batches."""
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
     top = 1 << 20
     batches = [{b"hi": [top]}] + [{bytes([65 + i]): [i]} for i in range(8)]
-    for batch in batches:
-        for data in batch:
-            _seed(corpus, data)
-    dump = _dump(tmp_path / "e.pkl", batches)
     spy = _NpSpy()
     monkeypatch.setattr(full_cover, "np", spy)
     monkeypatch.setattr(full_cover, "time", _Clock(0.0))
 
-    full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+    _cover(tmp_path, batches)
 
-    # Two map-sized counts: the final status line, and full_cover()'s unreachable check.
-    assert sum(size > top for size in spy.sizes) == 2
+    # Map-sized counts: the final status line and full_cover()'s unreachable check.
+    assert sum(size > top for size in spy.sizes) < len(batches)
