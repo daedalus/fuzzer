@@ -12,6 +12,7 @@
 
 set -e
 : "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GST_VERSION="${GST_VERSION:-1.28.9}"
 for arg in "$@"; do
     case "$arg" in --version=*) GST_VERSION="${arg#*=}" ;; esac
@@ -25,6 +26,14 @@ else
     git clone --depth 1 --branch "$GST_VERSION" \
         https://github.com/GStreamer/gstreamer.git "$DIR"
 fi
+
+# Apply wavparse NULL-buffer fix patch
+PATCH_FILE="$SCRIPT_DIR/../patches/gstwavparse_null_max_buf_size.patch"
+if [ -f "$PATCH_FILE" ]; then
+    echo "Applying wavparse fix patch..."
+    (cd "$DIR" && git apply "$PATCH_FILE") || echo "WARNING: patch already applied or conflicts"
+fi
+
 for f in meson.build subprojects/gstreamer/meson.build \
          subprojects/gst-plugins-base/meson.build \
          subprojects/gst-plugins-good/meson.build; do

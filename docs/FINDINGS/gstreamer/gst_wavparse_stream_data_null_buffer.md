@@ -224,7 +224,7 @@ static const unsigned char gs_wav_crash[] = {
 
 ## Upstream Status
 
-Not reported upstream at the time of discovery. The next step would be a confidential security report through GStreamer's security process.
+Not reported upstream at the time of discovery. The next step would be a confidential security report through GStreamer's security process. See [GStreamer security](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5485) for the work item associated with this class of bug (wavparse NULL buffer dereference).
 
 ---
 
