@@ -41,10 +41,14 @@ class StateRestore(Enum):
     OFF      nothing: target globals carry over (``--no-snapshot-restore``).
     GLOBALS  default: the target .so's .data/.bss as captured after load
              (``adapters/global_snapshot.py``). Heap is not restored.
+             Refused for targets linking a shared registry (libgobject).
+    GLOBALS_UNSAFE  GLOBALS without that refusal: reproduces restore
+             artifacts (GStreamer clipping-meta SIGSEGV). Not for fuzzing.
     """
 
     OFF = "off"
     GLOBALS = "globals"
+    GLOBALS_UNSAFE = "globals-unsafe"
 
 
 class CrashReward(Enum):

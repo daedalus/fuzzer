@@ -20,6 +20,7 @@ re-registration returns 0. GStreamer 1.28.9: NULL GstMetaInfo -> SIGSEGV.
 
 import ctypes
 import logging
+from enum import Enum
 
 from fuzzer_tool.adapters.libc_symbols import module_base
 from fuzzer_tool.core.elf import data_ranges, needed_libs
@@ -87,6 +88,13 @@ class _AsanShadow:
         return tuple(out)
 
 
+class Registry(Enum):
+    """Shared-registry policy at capture: refuse (GUARD) or restore anyway (IGNORE)."""
+
+    GUARD = "guard"
+    IGNORE = "ignore"
+
+
 def _registry_lib(needed: tuple[bytes, ...]) -> bytes:
     """First soname in *needed* that is a shared registry; ``b""`` when none."""
     return next((n for n in needed if n.startswith(_REGISTRY_LIBS)), b"")
@@ -108,7 +116,12 @@ class GlobalSnapshot:
 
     @classmethod
     def capture(
-        cls, lib: ctypes.CDLL, path: str, entry, level: int = logging.WARNING
+        cls,
+        lib: ctypes.CDLL,
+        path: str,
+        entry,
+        level: int = logging.WARNING,
+        registry: Registry = Registry.GUARD,
     ) -> "GlobalSnapshot | None":
         """Snapshot *lib*'s globals; None when unsafe or unknown.
 
@@ -122,15 +135,22 @@ class GlobalSnapshot:
         ranges = data_ranges(elf)
 
         # Restore would desync the target's caches from a shared registry.
-        registry = _registry_lib(needed_libs(elf) or ())
-        if registry:
+        shared = _registry_lib(needed_libs(elf) or ()).decode(errors="replace")
+        if shared and registry is Registry.GUARD:
             log.log(
                 level,
                 "snapshot-restore: %s links shared %s (type registry); restore off.",
                 path,
-                registry.decode(errors="replace"),
+                shared,
             )
             return None
+        if shared:
+            log.warning(
+                "snapshot-restore: %s links shared %s; restoring anyway (globals-unsafe): "
+                "crashes may be restore artifacts.",
+                path,
+                shared,
+            )
 
         base = module_base(ctypes.cast(entry, ctypes.c_void_p).value or 0)
         if ranges is None or not base:

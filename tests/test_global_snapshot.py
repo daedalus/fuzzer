@@ -518,3 +518,50 @@ class TestSharedRegistry:
         rcs, _ = _gtype_probe(gtype_so, "off", "aCa")
 
         assert rcs[0] == 0 and rcs[1] < 0 and rcs[2] == 0
+
+
+class TestUnsafeRestore:
+    """`globals-unsafe`: restore despite a shared registry, to reproduce its artifacts."""
+
+    def test_reproduces_artifact(self, gtype_so):
+        """Falsification: skipping the guard brings back exec-2 failure, with a warning."""
+        rcs, err = _gtype_probe(gtype_so, "globals-unsafe", "aaa")
+
+        assert rcs == [0, 1, 1]
+        assert "artifact" in err
+
+    def test_plain_target_same_as_globals(self, probe_so):
+        """Control: without a registry, unsafe restores exactly like globals."""
+        rcs, err = _probe(probe_so, "globals-unsafe")
+        fresh = 1 * 10 + 0
+
+        assert rcs == [fresh] * len(rcs)
+        assert "artifact" not in err
+
+    def test_off_abandon_keeps_guard(self, gtype_so):
+        """Adversarial: the unsafe opt-in must not leak into off mode's abandon restore."""
+        rcs, _ = _gtype_probe(gtype_so, "off", "aCa")
+
+        assert rcs[2] == 0
+
+    @pytest.mark.parametrize("cmd", ["fuzz", "replay"])
+    def test_cli_accepts(self, monkeypatch, tmp_path, cmd):
+        from fuzzer_tool.cli import commands
+
+        seen = []
+        exe = tmp_path / "t"
+        exe.write_bytes(b"\x7fELF")
+        exe.chmod(0o755)
+        if cmd == "fuzz":
+            monkeypatch.setattr(commands, "Fuzzer", lambda **kw: seen.append(kw) or MagicMock())
+            argv = ["fuzz", str(exe), "-d", str(tmp_path / "c")]
+        else:
+            monkeypatch.setattr(commands, "cmd_replay", lambda a: seen.append(vars(a)) or 0)
+            argv = ["replay", str(exe), "crash.bin"]
+        monkeypatch.setattr(
+            sys, "argv", ["fuzzer-tool", *argv, "--snapshot-restore", "globals-unsafe"]
+        )
+        commands.main()
+        got = seen[-1].get("state_restore", seen[-1].get("snapshot_restore"))
+
+        assert getattr(got, "value", got) == "globals-unsafe"
