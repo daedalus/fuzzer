@@ -162,7 +162,7 @@ Shim symbolization resolved via module DWARF → `gst_wavparse_stream_data` @ `g
 
 ## Suggested Fix
 
-Add a NULL check after `gst_buffer_make_writable`:
+### 1. Immediate NULL guard (from fuzzer-tool)
 
 ```c
   buf = gst_buffer_make_writable (buf);
@@ -170,6 +170,34 @@ Add a NULL check after `gst_buffer_make_writable`:
     return GST_FLOW_ERROR;
   GST_BUFFER_OFFSET (buf) = pos / wav->bytes_per_sample;
 ```
+
+### 2. Upstream fix (keep `max_buf_size` >= `blockalign` after rounding)
+
+Two related guards are needed:
+
+**a) Keep `max_buf_size` ≥ `blockalign` after rounding.** The harness pushes buffers, so `wavparse` runs in push mode. If `max_buf_size` rounds down to 0 while `blockalign > 0`, then `desired = MIN(dataleft, 0*rate) = 0` and `avail < desired` evaluates oddly, causing `gst_adapter_take_buffer(adapter, 0)` to fail and return **NULL**. This drives `max_buf_size` to 0 at `gstwavparse.c:2126`:
+```c
+max_buf_size =
+MAX(ceil(0.04 * bps), 4096);   // ~7066
+max_buf_size -= max_buf_size % blockalign;  // 7066 % 8192 = 7066 -> 0
+```
+Fix:
+```c
+if (wav->blockalign > 0) {
+    wav->max_buf_size -= (wav->max_buf_size % wav->blockalign);
+    if (wav->max_buf_size == 0)
+        wav->max_buf_size = wav->blockalign;
+}
+```
+This matches the existing validation in `vpk_read_header` (`ch_layout.nb_channels <= 0` rejected).
+
+**b) Don't request zero bytes.** Place a guard before the adapter/pull branch:
+```c
+if (desired <= 0 || wav->blockalign > 0) {
+    goto found_eos;   // no valid data to emit
+}
+```
+Placed before `gst_adapter_take_buffer(adapter, desired)`.
 
 ---
 
