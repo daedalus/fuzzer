@@ -108,7 +108,7 @@ class TestFlags:
     def test_defaults_off(self):
         a = self._args("t.so")
         assert (a.inprocess, a.inprocess_direct) == (False, False)
-        assert a.inprocess_func == "LLVMFuzzerTestOneInput"
+        assert a.inprocess_func is None  # probe
         assert a.repeat == 1
 
     @pytest.mark.parametrize("flag", ["-N", "--repeat"])
@@ -283,3 +283,61 @@ class TestRepeatState:
         n = STATEFUL_CALLS + 2
         out = self._hits(monkeypatch, tmp_path, build_so, ExecMode.LOADER, n, capsys)
         assert f"Reproduced 0/{n}" in out
+
+
+class TestReviewRegressions:
+    """PR #462 review: entry name, script targets, ASAN preload for replay."""
+
+    @pytest.fixture
+    def seen_func(self, monkeypatch):
+        """Capture the func _so_exec receives; never load anything."""
+        seen = []
+
+        def fake(_target, _timeout, _mode, func):
+            seen.append(func)
+            return (lambda _d: CLEAN_RUN), (lambda: None)
+
+        monkeypatch.setattr(commands, "_so_exec", fake)
+        return seen
+
+    @pytest.mark.parametrize(
+        ("flags", "want"),
+        [
+            ((), None),  # control: no flag still probes
+            (("--inprocess-func", "LLVMFuzzerTestOneInput"), "LLVMFuzzerTestOneInput"),
+            (("--inprocess-func", "fuzz_test"), "fuzz_test"),
+        ],
+    )
+    def test_regression_explicit_default_func_not_probed(
+        self, monkeypatch, tmp_path, seen_func, flags, want
+    ):
+        so = tmp_path / "t.so"
+        so.write_bytes(b"")
+        so.chmod(0o755)
+        _main(monkeypatch, str(so), _input(tmp_path, CRASH), "--inprocess", *flags)
+        assert seen_func == [want]
+
+    @pytest.mark.parametrize("flags", list(IN_PROCESS_MODES.values()))
+    def test_regression_script_target_spawns(self, monkeypatch, tmp_path, flags):
+        # A runnable non-ELF target cannot be dlopen'd: spawn it.
+        script = tmp_path / "t.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        seen = []
+        monkeypatch.setattr(commands, "cmd_replay", lambda a: seen.append(a) or 0)
+        _main(monkeypatch, str(script), "crash.bin", *flags)
+        assert _replay_exec_mode(seen[-1]) is ExecMode.SPAWN
+
+    @pytest.mark.parametrize(
+        ("argv", "want"),
+        [
+            (["fuzz", "t.so", "-d", "c"], "t.so"),  # control: unchanged
+            (["replay", "t.so", "crash.bin", "--inprocess-direct"], "t.so"),
+            (["rank", "t.so"], None),  # falsification: other commands untouched
+            (["replay", "--inprocess-direct"], None),  # adversarial: option, not a path
+        ],
+    )
+    def test_regression_wrapper_preloads_for_replay(self, argv, want):
+        from fuzzer_tool.cli.ldpreload_wrapper import _fuzz_target
+
+        assert _fuzz_target(argv) == want

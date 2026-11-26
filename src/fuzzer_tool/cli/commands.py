@@ -2389,27 +2389,31 @@ def cmd_mutants_score(args):
 
 
 def _replay_exec_mode(args):
-    """Backend for ``replay``: fuzz's flag mapping, but a .so never spawns."""
+    """Backend for ``replay``: fuzz's flag mapping for a .so; anything else spawns.
+
+    A .so cannot be exec'd, so it never spawns; a script or executable
+    cannot be dlopen'd, so it always does.
+    """
     from fuzzer_tool.services.minimize import ExecMode
 
+    if not _is_shared_object(args.target):
+        return ExecMode.SPAWN
+
     mode = _minimize_exec_mode(args, args.target)
-    if mode is ExecMode.SPAWN and _is_shared_object(args.target):
-        return ExecMode.LOADER
-    return mode
+    return ExecMode.LOADER if mode is ExecMode.SPAWN else mode
 
 
 def _replay_runner(args):
     """Bind replay's backend once: ``data -> (rc, stderr)``. Returns (run, stop)."""
-    from fuzzer_tool.services.minimize import DEFAULT_INPROCESS_FUNC, ExecMode
+    from fuzzer_tool.services.minimize import ExecMode
 
     mode = _replay_exec_mode(args)
     if mode is ExecMode.SPAWN:
         env = os.environ.copy()
         return (lambda data: _replay_exec(args, data, env)), (lambda: None)
 
-    # Default name on a .so: probe the entry point, as fuzz does.
-    func = None if args.inprocess_func == DEFAULT_INPROCESS_FUNC else args.inprocess_func
-    return _so_exec(args.target, args.timeout, mode, func)
+    # No --inprocess-func: probe the entry point, as fuzz does.
+    return _so_exec(args.target, args.timeout, mode, args.inprocess_func)
 
 
 def _replay_hit(returncode: int, stderr: str) -> bool:
@@ -8715,7 +8719,7 @@ def main() -> int:
     )
     replay_parser.add_argument(
         "--inprocess-func",
-        default="LLVMFuzzerTestOneInput",
+        default=None,
         help="Function name for in-process replay (default: probe the .so)",
     )
     replay_parser.add_argument(

@@ -180,10 +180,14 @@ _UBSAN_DEFAULTS = ("halt_on_error=0", "abort_on_error=1", "print_stacktrace=1")
 _MSAN_DEFAULTS = ("exit_code=86", "symbolize=0")
 
 
+# Subcommands that load the target in-process: their runtime must be preloaded at start.
+_PRELOAD_COMMANDS = ("fuzz", "replay")
+
+
 def _fuzz_target(args: list[str]) -> str | None:
-    """Target path after `fuzz` in argv (None when absent or an option)."""
+    """Target path after `fuzz`/`replay` in argv (None when absent or an option)."""
     for i, arg in enumerate(args):
-        if arg == "fuzz" and i + 1 < len(args):
+        if arg in _PRELOAD_COMMANDS and i + 1 < len(args):
             candidate = args[i + 1]
             if not candidate.startswith("-"):
                 return candidate
