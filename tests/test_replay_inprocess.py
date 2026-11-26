@@ -148,7 +148,7 @@ class TestReplay:
         runs = [self._replay(monkeypatch, tmp_path, build_so(), CRASH, mode) for _ in "ab"]
         assert runs[0] == runs[1]
 
-    def test_missing_function_fails_cleanly(self, monkeypatch, tmp_path, build_so, mode, capsys):
+    def test_missing_func(self, monkeypatch, tmp_path, build_so, mode, capsys):
         # Adversarial: a wrong --inprocess-func is an error, never "reproduced".
         so = build_so()
         rc = _main(
@@ -225,7 +225,7 @@ class TestRepeat:
         assert "Crash reproduced: signal 6" in out
         assert "No crash detected" not in out
 
-    def test_single_run_prints_no_summary(self, monkeypatch, tmp_path, scripted, capsys):
+    def test_one_run_no_summary(self, monkeypatch, tmp_path, scripted, capsys):
         scripted([ABORT_RUN])
         assert self._run(monkeypatch, tmp_path) == REPRODUCED
         assert "Reproduced 1/1" not in capsys.readouterr().out
@@ -265,7 +265,7 @@ class TestRepeatState:
         return capsys.readouterr().out
 
     @pytest.mark.parametrize("mode", [ExecMode.DIRECT_LITE, ExecMode.DIRECT], ids=lambda m: m.value)
-    def test_direct_reaches_stateful_crash(self, monkeypatch, tmp_path, build_so, mode, capsys):
+    def test_direct_keeps_state(self, monkeypatch, tmp_path, build_so, mode, capsys):
         # The counter equals CALLS exactly once in N > CALLS calls.
         n = STATEFUL_CALLS + 2
         out = self._hits(monkeypatch, tmp_path, build_so, mode, n, capsys)
@@ -308,9 +308,7 @@ class TestReviewRegressions:
             (("--inprocess-func", "fuzz_test"), "fuzz_test"),
         ],
     )
-    def test_regression_explicit_default_func_not_probed(
-        self, monkeypatch, tmp_path, seen_func, flags, want
-    ):
+    def test_regression_func_kept(self, monkeypatch, tmp_path, seen_func, flags, want):
         so = tmp_path / "t.so"
         so.write_bytes(b"")
         so.chmod(0o755)
@@ -318,7 +316,7 @@ class TestReviewRegressions:
         assert seen_func == [want]
 
     @pytest.mark.parametrize("flags", list(IN_PROCESS_MODES.values()))
-    def test_regression_script_target_spawns(self, monkeypatch, tmp_path, flags):
+    def test_regression_script(self, monkeypatch, tmp_path, flags):
         # A runnable non-ELF target cannot be dlopen'd: spawn it.
         script = tmp_path / "t.sh"
         script.write_text("#!/bin/sh\nexit 0\n")
@@ -337,7 +335,43 @@ class TestReviewRegressions:
             (["replay", "--inprocess-direct"], None),  # adversarial: option, not a path
         ],
     )
-    def test_regression_wrapper_preloads_for_replay(self, argv, want):
+    def test_regression_preload(self, argv, want):
         from fuzzer_tool.cli.ldpreload_wrapper import _fuzz_target
 
         assert _fuzz_target(argv) == want
+
+
+# InProcessRunner's infrastructure-failure sentinel.
+ERROR_RUN = (-2, "runner not initialized")
+
+
+class TestRunnerError:
+    """rc -2 is a runner failure, never a crash."""
+
+    @pytest.fixture
+    def scripted(self, monkeypatch):
+        def install(outcomes):
+            it = iter(outcomes)
+            monkeypatch.setattr(
+                commands, "_replay_runner", lambda _a: ((lambda _d: next(it)), (lambda: None))
+            )
+
+        return install
+
+    def _run(self, monkeypatch, tmp_path, *flags):
+        exe = shutil.which("true")
+        assert exe is not None
+        return _main(monkeypatch, exe, _input(tmp_path, CRASH), *flags)
+
+    def test_regression_err_not_crash(self, monkeypatch, tmp_path, scripted, capsys):
+        scripted([ERROR_RUN])
+        assert self._run(monkeypatch, tmp_path) == NOT_REPRODUCED
+        out = capsys.readouterr()
+        assert "Crash reproduced" not in out.out
+        assert ERROR_RUN[1] in out.out + out.err
+
+    def test_regression_err_not_hit(self, monkeypatch, tmp_path, scripted, capsys):
+        # Adversarial: errors mixed with a real crash count only the crash.
+        scripted([ERROR_RUN, ABORT_RUN, ERROR_RUN])
+        assert self._run(monkeypatch, tmp_path, "-N", "3") == REPRODUCED
+        assert "Reproduced 1/3" in capsys.readouterr().out

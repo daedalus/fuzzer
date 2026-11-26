@@ -2416,15 +2416,20 @@ def _replay_runner(args):
     return _so_exec(args.target, args.timeout, mode, args.inprocess_func)
 
 
+# Runner sentinels (not signals): -1 timeout, -2 infrastructure failure.
+_RC_TIMEOUT = -1
+_RC_RUNNER_ERROR = -2
+
+
 def _replay_hit(returncode: int, stderr: str) -> bool:
-    """Crash verdict of ``_print_replay``: sanitizer report, or a non-timeout signal."""
+    """Crash verdict of ``_print_replay``: sanitizer report, or a signal (not a sentinel)."""
     from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
     report = SanitizerReport.parse(stderr)
     if report and report.is_valid():
         return True
-    if returncode == -1:
+    if returncode in (_RC_TIMEOUT, _RC_RUNNER_ERROR):
         return False
     return returncode in SIGNAL_CRASH_CODES or returncode < 0
 
@@ -2476,8 +2481,13 @@ def _print_replay(returncode: int, stderr: str, timeout: float) -> int:
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
     report = SanitizerReport.parse(stderr)
-    if returncode == -1 and not (report and report.is_valid()):
+    if returncode == _RC_TIMEOUT and not (report and report.is_valid()):
         print(f"[*] Target timed out after {timeout}s")
+        return 1
+
+    # The runner failed (not the target): no verdict.
+    if returncode == _RC_RUNNER_ERROR and not (report and report.is_valid()):
+        print(f"[-] Runner error: {stderr[:200]}")
         return 1
 
     if report and report.is_valid():
