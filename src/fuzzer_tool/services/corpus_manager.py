@@ -620,6 +620,7 @@ class CorpusManager:
         f = self.f
         state = {
             "exec_count": f.exec_count,
+            "clock_ticks": clock_of(f).ticks,
             "crash_count": f.crash_count,
             "timeout_count": f.timeout_count,
             "crash_sigs": f.crash_sigs,
@@ -774,6 +775,11 @@ class CorpusManager:
         if not state:
             return
         f.exec_count = state.get("exec_count", 0)
+
+        # Virtual time resumes where it stopped, or restored added_at stamps
+        # read as future. Legacy states: one tick per exec is an upper bound.
+        clock_of(f).resume(state.get("clock_ticks", f.exec_count))
+
         f._resume_baseline_exec = f.exec_count
         f._last_eps_count = f.exec_count
         f.crash_count = state.get("crash_count", 0)
