@@ -445,3 +445,34 @@ def test_subset_is_not_a_twin(tmp_path):
 
     full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
     assert _written_hashes(tmp_path / "out") == {hash_data(BIG_TWIN)}
+
+
+def test_scan_prints_status_line_per_batch(tmp_path, capsys):
+    """Status line like edge-dump: one per batch, running seed and union-edge counts."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, b"aaaa")
+    _seed(corpus, b"bb")
+    dump = _dump(tmp_path / "e.pkl", [{b"aaaa": [1, 2]}, {b"bb": [2, 3, 4]}])
+
+    full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+
+    lines = capsys.readouterr().out.split("\r")
+    status = [ln for ln in lines if ln.startswith("[*] Scanned")]
+    assert len(status) >= 2
+    assert "Scanned 1 " in status[0] and "edges: 2" in status[0]
+    assert "Scanned 2 " in status[-1] and "edges: 4" in status[-1]
+    assert "seeds/s" in status[-1] and "ETA" not in status[-1]
+
+
+def test_empty_dump_prints_no_status(tmp_path, capsys):
+    """Adversarial: no batch, no status line; EmptyDump still raised."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    _seed(corpus, b"aaaa")
+    dump = tmp_path / "e.pkl"
+    dump.write_bytes(b"\x80\x03}.")
+
+    with pytest.raises(full_cover.EmptyDump):
+        full_cover.full_cover(dump, corpus, output_dir=tmp_path / "out")
+    assert "Scanned" not in capsys.readouterr().out
