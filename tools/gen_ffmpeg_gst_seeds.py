@@ -1,399 +1,314 @@
 #!/usr/bin/env python3
-"""Generate crash seeds for FFmpeg 9.1 and/or GStreamer 1.28.9 fuzz targets.
+"""Generate crash/coverage seeds for the FFmpeg and/or GStreamer fuzz targets.
 
-This script produces seed files that can crash either the FFmpeg fuzz target
-(ffmpeg_read) or the GStreamer fuzz target (gstreamer_read), or both in a
-single run.  Seeds are written under ``<out>/seeds/`` with a ``ff_`` or ``gs_``
-prefix so they do not collide.
+Two seed families are produced under ``<out>/seeds/``:
+
+* ``ff_*`` -- the FFmpeg 9.0.2 crash seeds, reused verbatim from
+  ``tools/gen_ffmpeg_91_seeds`` (imported, not copied, so the two packs never
+  drift). Those seeds and their rationale are documented there.
+* ``gs_*`` -- GStreamer demuxer seeds for ``targets/gstreamer_read.c``.
+
+GStreamer routing contract (see ``targets/gstreamer_read.c``)
+------------------------------------------------------------
+The target type-finds the input, then pushes it into the matching demuxer:
+
+    EBML magic  (1A 45 DF A3)      -> matroskademux
+    RIFF....WAVE                   -> wavparse
+    RIFF....AVI\x20                -> avidemux
+    FLV\x01                        -> flvdemux
+    <box>ftyp.. at offset 4        -> qtdemux
+    (no typefind match)            -> kFallback[byte0 % 5]
+
+A seed that misses its format's magic falls through to the ``byte0 % 5``
+fallback and is parsed by the *wrong* demuxer under a synthesised caps, so its
+crafted sub-structure never runs. Every ``gs_`` seed below therefore carries
+valid container magic for its intended demuxer; the crafted malformation sits in
+a sub-structure the demuxer's own ``chain``/parse code reaches. ``tests/
+test_regression_ffmpeg_gst_seeds.py`` re-derives the route from the bytes and
+asserts each seed reaches the intended demuxer.
 
 Usage
 -----
-    python tools/gen_ffmpeg_gst_seeds.py --target ffmpeg --out /tmp/seeds
+    python tools/gen_ffmpeg_gst_seeds.py --target ffmpeg    --out /tmp/seeds
     python tools/gen_ffmpeg_gst_seeds.py --target gstreamer --out /tmp/seeds
-    python tools/gen_ffmpeg_gst_seeds.py --target both       --out /tmp/seeds
-
-The original ``tools/gen_ffmpeg_91_seeds.py`` is left untouched.
+    python tools/gen_ffmpeg_gst_seeds.py --target both      --out /tmp/seeds
 """
+
+from __future__ import annotations
 
 import argparse
 import os
 import struct
+import sys
 import tempfile
+from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Constants borrowed from the original script
-# ---------------------------------------------------------------------------
-INT64_MAX = 0x7FFFFFFFFFFFFFFF
+# Make the `tools` namespace package importable when run as a script (cwd-
+# independent), matching how the test suite imports it under pytest.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# FFmpeg seeds and byte helpers come from the 9.1 pack -- single source of truth.
+from tools.gen_ffmpeg_91_seeds import SEEDS as FFMPEG_SEEDS  # noqa: E402
+from tools.gen_ffmpeg_91_seeds import be16, be32, be64, le32  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Helper / formatting utilities (identical to original)
-# ---------------------------------------------------------------------------
-def le32(v):
-    return struct.pack("<I", v)
+DEFAULT_OUT = os.path.expanduser("~/fuzzing/crash_seeds")
 
+# AMF double whose bit pattern is a quiet NaN (FLV onMetaData duration).
+AMF_NAN = 0x7FF8000000000000
+FLV_PAD_TO = 128
 
-def le16(v):
-    return struct.pack("<H", v)
+# --- Matroska / EBML element ids (spec-level, shared with FFmpeg) -----------
+EBML_MAGIC = b"\x1a\x45\xdf\xa3"
+ID_SEGMENT = b"\x18\x53\x80\x67"
+ID_INFO = b"\x15\x49\xa9\x66"
+ID_TIMECODESCALE = b"\x2a\xd7\xb1"
+ID_DURATION = b"\x44\x89"
+ID_TRACKS = b"\x16\x54\xae\x6b"
+ID_TRACKENTRY = b"\xae"
+ID_TRACKNUMBER = b"\xd7"
+ID_TRACKUID = b"\x73\xc5"
+ID_TRACKTYPE = b"\x83"
+ID_CODECID = b"\x86"
+ID_CODECPRIVATE = b"\x63\xa2"
+ID_VIDEO = b"\xe0"
+ID_PIXELWIDTH = b"\xb0"
+ID_PIXELHEIGHT = b"\xba"
+ID_CLUSTER = b"\x1f\x43\xb6\x75"
 
-
-def le64(v):
-    return struct.pack("<Q", v)
-
-
-def be32(v):
-    return struct.pack(">I", v)
-
-
-def be16(v):
-    return struct.pack(">H", v)
-
-
-def be24(v):
-    return struct.pack(">I", v)[1:]
-
-
-def be64(v):
-    return struct.pack(">Q", v)
-
-
-# ---------------------------------------------------------------------------
-# FFmpeg seed generators (direct copies from the original file)
-# ---------------------------------------------------------------------------
+TRACKTYPE_VIDEO = 1
+TRACKTYPE_AUDIO = 2
+MK_TIMECODESCALE = 1_000_000  # nanoseconds per tick (1 ms)
 
 
-def caf_pakt_overflow():
-    """Signed int64 overflow in read_pakt_chunk (nb_frames += priming)."""
-    desc = struct.pack(">d", 44100.0)
-    desc += le32(0)
-    desc += be32(0)
-    desc += be32(0)
-    desc += be32(0)
-    desc += be32(1)
-    desc += be32(16)
-    assert len(desc) == 32
+def ebml_len(n: int) -> bytes:
+    """Encode ``n`` as the shortest EBML size vint (1..4 bytes here).
 
-    pakt = be64(0)
-    pakt += be64(INT64_MAX)
-    pakt += be32(1)
-    pakt += be32(0)
+    EBML marks the vint width with the position of the first set bit:
+    ``1xxxxxxx`` (7-bit), ``01xxxxxx xxxxxxxx`` (14-bit), etc.
+    """
+    if n < 0x7F:
+        return bytes([0x80 | n])
+    if n < 0x3FFF:
+        return bytes([0x40 | (n >> 8), n & 0xFF])
+    if n < 0x1FFFFF:
+        return bytes([0x20 | (n >> 16), (n >> 8) & 0xFF, n & 0xFF])
 
-    out = b"caff" + be16(1) + be16(0)
-    out += b"desc" + be64(32) + desc
-    out += b"pakt" + be64(len(pakt)) + pakt
-    return out
+    return bytes([0x10 | (n >> 24), (n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF])
 
 
-def rpl_idx_overflow():
-    """Signed int64 overflow in av_add_index_entry(offset + video_size)."""
-    lines = [
-        "ARMovie",
-        "t",
-        "c",
-        "a",
-        "0",
-        "0",
-        "0",
-        "0",
-        "1",
-        "1",
-        "1",
-        "1",
-        "8",
-        "0",
-        "0",
-        "0",
-        "0",
-        "000000",
-        "0",
-        "0",
-    ]
-    catalog_idx = 17
-
-    header = "\n".join(lines) + "\n"
-    offset = len(header)
-    assert offset < 10**6
-    lines[catalog_idx] = f"{offset:06d}"
-    header = "\n".join(lines) + "\n"
-    assert len(header) == offset
-
-    index_row = f"{INT64_MAX} , 1 ; 0\n"
-    return (header + index_row).encode()
+def ebml_elem(elem_id: bytes, payload: bytes) -> bytes:
+    """One EBML element: id + size-vint + payload."""
+    return elem_id + ebml_len(len(payload)) + payload
 
 
-def wav_bext_bigalloc():
-    """~1 GiB allocation from wav_parse_bext_tag (9.1 caps at 1 MiB)."""
-    BEXT_FIXED_SIZE = 602
-    BEXT_HISTORY = 0x40000000
-
-    bext_body = bytearray(BEXT_FIXED_SIZE)
-    bext_size = BEXT_FIXED_SIZE + BEXT_HISTORY
-
-    chunk = b"bext" + le32(bext_size) + bytes(bext_body)
-    payload = b"WAVE" + chunk
-    return b"RIFF" + le32(len(payload)) + payload
+def ebml_uint(elem_id: bytes, value: int, width: int) -> bytes:
+    """Fixed-width unsigned EBML integer element."""
+    return ebml_elem(elem_id, value.to_bytes(width, "big"))
 
 
-def sbg_nan_cast():
-    """NaN cast to int in scale_double (float-cast-overflow)."""
-    return b"a: nan\n"
-
-
-def flv_amf_nan_duration():
-    """NaN AMF double propagates into duration * AV_TIME_BASE."""
-    AMF_NAN = 0x7FF8000000000000
-
-    body = b"\x02" + be16(len("onMetaData")) + b"onMetaData"
-    body += b"\x08" + be32(0)
-    body += be16(len("duration")) + b"duration"
-    body += b"\x00" + be64(AMF_NAN)
-    body += b"\x00\x00\x09"
-
-    tag = bytes([18]) + be24(len(body)) + b"\x00" * 4 + b"\x00" * 3
-    out = b"FLV" + bytes([1, 0]) + be32(9) + be32(0) + tag + body
-    return out.ljust(128, b"\x00")
-
-
-def webm_duration_cast():
-    """Finite huge double overflows int64 store in matroska_read_header."""
-
-    def vint(v):
-        return bytes([0x80 | v])
-
-    WEBM_DURATION = 1e18
-
-    header = (
+def _ebml_header(doctype: bytes = b"matroska") -> bytes:
+    """Minimal EBML header a Matroska typefinder + demuxer accept."""
+    body = (
         b"\x42\x86\x81\x01"  # EBMLVersion = 1
         + b"\x42\xf7\x81\x01"  # EBMLReadVersion = 1
         + b"\x42\xf2\x81\x04"  # EBMLMaxIDLength = 4
         + b"\x42\xf3\x81\x08"  # EBMLMaxSizeLength = 8
-        + b"\x42\x82\x84webm"  # DocType
+        + b"\x42\x82"
+        + ebml_len(len(doctype))
+        + doctype  # DocType
         + b"\x42\x87\x81\x02"  # DocTypeVersion = 2
         + b"\x42\x85\x81\x02"  # DocTypeReadVersion = 2
     )
-
-    info = b"\x44\x89" + vint(8) + struct.pack(">d", WEBM_DURATION)
-    info_elem = b"\x15\x49\xa9\x66" + vint(len(info)) + info
-    cluster = b"\x1f\x43\xb6\x75"  # EBML_STOP needs no length
-
-    seg = info_elem + cluster
-    out = b"\x1a\x45\xdf\xa3" + vint(len(header)) + header
-    return out + b"\x18\x53\x80\x67" + vint(len(seg)) + seg
-
-
-def rf64_dataend_overflow():
-    """RF64 data_end + (data_size & 1) signed overflow."""
-    fmt = (
-        le16(1)  # PCM
-        + le16(1)  # channels
-        + le32(44100)  # sample rate
-        + le32(88200)  # byte rate
-        + le16(2)  # block align
-        + le16(16)  # bits per sample
-    )
-    ds64 = le64(0) + le64(INT64_MAX) + le64(0) + le32(0)
-
-    out = b"RF64" + le32(0) + b"WAVE"
-    out += b"ds64" + le32(len(ds64)) + ds64
-    out += b"fmt " + le32(len(fmt)) + fmt
-    out += b"data" + le32(0xFFFFFFFF)  # forces the rf64 branch
-    return out
+    return EBML_MAGIC + ebml_len(len(body)) + body
 
 
 # ---------------------------------------------------------------------------
-# GStreamer seed generators
+# GStreamer matroskademux seeds
 # ---------------------------------------------------------------------------
-# The GStreamer fuzz target (fuzz_gstreamer) works as follows:
-#   1. Type-finds the input data.
-#   2. Selects one of the built-in demuxers: qtdemux, matroskademux,
-#      wavparse, avidemux, flvdemux (or a fallback chosen by byte[0] % 5).
-#   3. Pushes STREAM_START -> CAPS -> SEGMENT -> a succession of 4096-byte
-#      buffers -> EOS.
-#   4. The demuxer's internal parsing code (the `chain` function) is the
-#      coverage surface.
-#
-# Known crash-class bugs in the demuxers that this target exercises
-# (and the corresponding CVE / advisory) are summarised below.
-# Each generator creates a minimal binary blob that triggers the bug
-# when the fuzzer runs the GStreamer target on it.
-
-# ---- Matroska (matroskademux) ----
-#  - CVE-2026-39043  Heap buffer overflow in bz2 decompression, missing parentheses.
-#  - CVE-2024-47540  Uninitialised stack memory.
-#  - CVE-2024-47602  / 47603 NULL-pointer deref / OOB read.
-#  - CVE-2021-3497 / 3498  Use-after-free in error paths.
-#  - CVE-2022-1922-22  Heap overwrite via zlib/bz2/lzo decompression.
 
 
-def gs_matroska_bz2_overflow():
-    """Trigger CVE-2026-39043 - heap buffer overflow in bz2 size calc."""
-    ebml_header = (
-        b"\x42\x86\x81\x01"
-        + b"\x42\xf7\x81\x01"
-        + b"\x42\xf2\x81\x04"
-        + b"\x42\xf3\x81\x08"
-        + b"\x42\x82\x84webm"
-        + b"\x42\x87\x81\x02"
-        + b"\x42\x85\x81\x02"
+def gs_mkv_duration_inf():
+    """Info.Duration is +inf -> matroskademux duration/segment float math.
+
+    gst_matroska_demux_parse_info reads Duration as a gdouble and scales it by
+    TimecodeScale into the segment stop; a non-finite value reaches that math
+    unchecked on the pre-hardening path.
+    """
+    dur = ebml_elem(ID_DURATION, struct.pack(">d", float("inf")))
+    info = ebml_uint(ID_TIMECODESCALE, MK_TIMECODESCALE, 3) + dur
+    segment = ebml_elem(ID_INFO, info) + ID_CLUSTER  # bare Cluster id ends parse
+
+    return _ebml_header() + ebml_elem(ID_SEGMENT, segment)
+
+
+def gs_mkv_video_dims():
+    """Huge PixelWidth/PixelHeight -> video track size computation overflow.
+
+    The dimensions feed buffer/stride sizing in the video stream setup; 0xFFFFFFFF
+    on each axis makes the product overflow 32 bits.
+    """
+    video = ebml_uint(ID_PIXELWIDTH, 0xFFFFFFFF, 4) + ebml_uint(ID_PIXELHEIGHT, 0xFFFFFFFF, 4)
+    entry = (
+        ebml_uint(ID_TRACKNUMBER, 1, 1)
+        + ebml_uint(ID_TRACKUID, 1, 1)
+        + ebml_uint(ID_TRACKTYPE, TRACKTYPE_VIDEO, 1)
+        + ebml_elem(ID_CODECID, b"V_UNCOMPRESSED")
+        + ebml_elem(ID_VIDEO, video)
     )
+    tracks = ebml_elem(ID_TRACKS, ebml_elem(ID_TRACKENTRY, entry))
+    segment = tracks + ID_CLUSTER
 
-    ebml_size = be32(len(ebml_header))
-
-    track_entry = be32(0x1654) + be64(0) + be64(0x18538067) + be32(0x05) + be32(0xFFFFFFFF)
-    track_entry_size = be32(len(track_entry))
-
-    cluster = b"\x1f\x43\xb6\x75"
-    out = ebml_size + ebml_header
-    out += track_entry_size + track_entry
-    out += cluster
-    return out
+    return _ebml_header() + ebml_elem(ID_SEGMENT, segment)
 
 
-def gs_matroska_uninit_stack():
-    """Trigger CVE-2024-47540 - usage of uninitialised stack memory."""
-    ebml_header = (
-        b"\x42\x86\x81\x01"
-        + b"\x42\xf7\x81\x01"
-        + b"\x42\xf2\x81\x04"
-        + b"\x42\xf3\x81\x08"
-        + b"\x42\x82\x84webm"
-        + b"\x42\x87\x81\x02"
-        + b"\x42\x85\x81\x02"
+def gs_mkv_codecprivate():
+    """CodecPrivate size vint outruns the bytes present -> truncation path.
+
+    The declared length (4 KiB) exceeds the 4 bytes that follow, so the demuxer
+    reads a CodecPrivate span longer than the available input.
+    """
+    present = b"\x01\x02\x03\x04"
+    cp = ID_CODECPRIVATE + ebml_len(0x1000) + present  # claims 4096, ships 4
+    entry = (
+        ebml_uint(ID_TRACKNUMBER, 1, 1)
+        + ebml_uint(ID_TRACKUID, 1, 1)
+        + ebml_uint(ID_TRACKTYPE, TRACKTYPE_AUDIO, 1)
+        + ebml_elem(ID_CODECID, b"A_VORBIS")
+        + cp
     )
-    ebml_size = be32(len(ebml_header))
+    tracks = ebml_elem(ID_TRACKS, ebml_elem(ID_TRACKENTRY, entry))
 
-    track_entry = be32(0x1654) + be64(1) + be64(0x00000000FFFF) + be32(0x00)
-    track_entry_size = be32(len(track_entry))
-
-    cluster = b"\x1f\x43\xb6\x75"
-    out = ebml_size + ebml_header
-    out += track_entry_size + track_entry
-    out += cluster
-    return out
+    return _ebml_header() + ebml_elem(ID_SEGMENT, tracks)
 
 
-def gs_matroska_null_deref():
-    """Trigger CVE-2024-47602 / 47603 - NULL-pointer deref / OOB read."""
-    ebml_header = (
-        b"\x42\x86\x81\x01"
-        + b"\x42\xf7\x81\x01"
-        + b"\x42\xf2\x81\x04"
-        + b"\x42\xf3\x81\x08"
-        + b"\x42\x82\x84webm"
-        + b"\x42\x87\x81\x02"
-        + b"\x42\x85\x81\x02"
+# ---------------------------------------------------------------------------
+# GStreamer qtdemux seed
+# ---------------------------------------------------------------------------
+
+
+def _mp4_box(box_type: bytes, payload: bytes) -> bytes:
+    """One MP4/QuickTime box: 32-bit size + 4-char type + payload."""
+    return be32(8 + len(payload)) + box_type + payload
+
+
+def gs_quicktime_mvhd():
+    """ftyp at offset 4 (typefind) + moov/mvhd with a huge v1 duration.
+
+    qtdemux parses the Movie Header; a version-1 mvhd carries 64-bit times and a
+    0x7FFF... duration drives the timescale/duration math.
+    """
+    ftyp = _mp4_box(b"ftyp", b"isom" + be32(0) + b"isom")
+
+    mvhd_body = (
+        bytes([1])
+        + b"\x00\x00\x00"  # version 1, flags
+        + be64(0)
+        + be64(0)  # creation / modification time
+        + be32(1000)  # timescale
+        + be64(0x7FFFFFFFFFFFFFFF)  # duration
     )
-    ebml_size = be32(len(ebml_header))
+    mvhd = _mp4_box(b"mvhd", mvhd_body)
+    moov = _mp4_box(b"moov", mvhd)
 
-    info_duration = struct.pack(">d", 1e30)
-    info_id = b"\x15\x49\xa9\x66"
-    info_size = be32(len(info_duration))
-    info_elem = info_id + info_size + info_duration
-
-    cluster = b"\x1f\x43\xb6\x75"
-    out = ebml_size + ebml_header
-    out += be32(len(info_elem)) + info_elem
-    out += cluster
-    return out
+    return ftyp + moov
 
 
-# ---- QuickTime / MPEG-4 (qtdemux) ----
-# Known issues in qtdemux include integer-overflow in sample-rate parsing
-# and out-of-bounds reads when the 'stsd' box has corrupted entry counts.
-
-
-def gs_quicktime_overflow():
-    """Exercize qtdemux size-field overflow (byte 0 == 0 -> qtdemux)."""
-    ftyp_magic = b"\x00\x00\x00\x20"
-    ftyp = ftyp_magic + b"ftyp"
-
-    mdat_magic = b"\x00\x00\x00\x00"
-    mdat = mdat_magic + b"mdat"
-
-    out = b"\x00" + ftyp + mdat
-    return out
-
-
-# ---- WAV (wavparse) ----
-# The original wav_bext_bigalloc seed already targets the FFmpeg path.
-# For GStreamer we reuse a minimal WAV file that forces wavparse to hit
-# its error-path (missing fmt chunk).
+# ---------------------------------------------------------------------------
+# GStreamer wavparse seed
+# ---------------------------------------------------------------------------
 
 
 def gs_wav_missing_fmt():
-    """Force wavparse down the error path (missing fmt chunk)."""
-    riff = b"RIFF" + le32(0) + b"WAVE"
-    bext_chunk = b"bext" + le32(0) + b"\x00" * 20
-    out = riff + bext_chunk
-    return out
+    """RIFF/WAVE with a data chunk but no fmt -> wavparse error path.
+
+    wavparse expects fmt before data; a lone data chunk with an oversized
+    declared size sends it down the missing-format branch.
+    """
+    data_chunk = b"data" + le32(0xFFFFFFFF)
+    payload = b"WAVE" + data_chunk
+
+    return b"RIFF" + le32(len(payload)) + payload
 
 
-# ---- AVI (avidemux) ----
-# AVI demuxer bugs typically involve negative chunk sizes or malformed
-# 'avih' headers.  The seed creates a minimal AVI where the 'dwMicroSecPerFrame'
-# is set to 0 and the 'rcFrame' count is 0xFFFFFFFF, which sends the
-# demuxer into an unbounded loop that the fuzzer's watchdog will cut short.
+# ---------------------------------------------------------------------------
+# GStreamer avidemux seed
+# ---------------------------------------------------------------------------
 
 
-def gs_avi_bad_header():
-    """Minimal AVI that sends avidemux into an unbounded loop."""
-    avih = b"avih" + le32(56) + struct.pack("<i", 0)
-    chunk_entry = le32(0xFFFFFFFF) + le32(0) + le32(0) + le32(0) + le32(0)
-    movi = b"movi"
-    out = b"AVI" + avih + chunk_entry + movi
-    out = b"\x03" + out
-    return out
+def _riff_list(list_type: bytes, payload: bytes) -> bytes:
+    """A RIFF LIST chunk: 'LIST' + size + list-type + payload."""
+    return b"LIST" + le32(4 + len(payload)) + list_type + payload
 
 
-# ---- FLV (flvdemux) ----
-# The original flv_amf_nan_duration seed already targets the FFmpeg path.
-# For GStreamer we reuse the same NaN AMF double and route it through
-# flvdemux (byte[0] == 4).  The NaN propagates into a duration field and
-# triggers a crash.
+def gs_avi_bad_avih():
+    """RIFF/AVI container with a malformed avih -> gst_avi_demux_parse_avih.
+
+    dwMicroSecPerFrame = 0 and dwStreams = 0xFFFFFFFF drive the header parse
+    with degenerate frame timing and an implausible stream count.
+    """
+    avih_body = (
+        le32(0)  # dwMicroSecPerFrame = 0
+        + le32(0)  # dwMaxBytesPerSec
+        + le32(0)  # dwPaddingGranularity
+        + le32(0)  # dwFlags
+        + le32(0)  # dwTotalFrames
+        + le32(0)  # dwInitialFrames
+        + le32(0xFFFFFFFF)  # dwStreams
+        + le32(0)  # dwSuggestedBufferSize
+        + le32(0)  # dwWidth
+        + le32(0)  # dwHeight
+        + le32(0) * 4  # dwReserved[4]
+    )
+    avih = b"avih" + le32(len(avih_body)) + avih_body
+    hdrl = _riff_list(b"hdrl", avih)
+    movi = _riff_list(b"movi", b"")
+    payload = b"AVI " + hdrl + movi
+
+    return b"RIFF" + le32(len(payload)) + payload
+
+
+# ---------------------------------------------------------------------------
+# GStreamer flvdemux seed
+# ---------------------------------------------------------------------------
 
 
 def gs_flv_nan_duration():
-    """NaN AMF duration in FLV - hits flvdemux parser path."""
-    AMF_NAN = 0x7FF8000000000000
-
+    """FLV magic + NaN AMF onMetaData duration -> flvdemux metadata parse."""
     body = b"\x02" + be16(len("onMetaData")) + b"onMetaData"
     body += b"\x08" + be32(0)
     body += be16(len("duration")) + b"duration"
     body += b"\x00" + be64(AMF_NAN)
     body += b"\x00\x00\x09"
 
-    tag = bytes([18]) + be24(len(body)) + b"\x00" * 4 + b"\x00" * 3
+    tag = bytes([18]) + be32(len(body))[1:] + b"\x00" * 4 + b"\x00" * 3
     out = b"FLV" + bytes([1, 0]) + be32(9) + be32(0) + tag + body
-    return out.ljust(128, b"\x00")
+
+    return out.ljust(FLV_PAD_TO, b"\x00")
 
 
 # ---------------------------------------------------------------------------
-# Seed registries
+# Seed registry
 # ---------------------------------------------------------------------------
-
-FFMPEG_SEEDS = {
-    "caf_pakt_overflow.caf": caf_pakt_overflow,
-    "rpl_idx_overflow.rpl": rpl_idx_overflow,
-    "wav_bext_bigalloc.wav": wav_bext_bigalloc,
-    "sbg_nan_cast.sbg": sbg_nan_cast,
-    "flv_amf_nan_duration.flv": flv_amf_nan_duration,
-    "webm_duration_cast.webm": webm_duration_cast,
-    "rf64_dataend_overflow.wav": rf64_dataend_overflow,
-}
 
 GSTREAMER_SEEDS = {
-    "matroska_bz2_overflow.mkv": gs_matroska_bz2_overflow,
-    "matroska_uninit_stack.mkv": gs_matroska_uninit_stack,
-    "matroska_null_deref.mkv": gs_matroska_null_deref,
-    "quicktime_overflow.mp4": gs_quicktime_overflow,
+    "matroska_duration_inf.mkv": gs_mkv_duration_inf,
+    "matroska_video_dims.mkv": gs_mkv_video_dims,
+    "matroska_codecprivate.mkv": gs_mkv_codecprivate,
+    "quicktime_mvhd.mp4": gs_quicktime_mvhd,
     "wav_missing_fmt.wav": gs_wav_missing_fmt,
-    "avi_bad_header.avi": gs_avi_bad_header,
+    "avi_bad_avih.avi": gs_avi_bad_avih,
     "flv_nan_duration.flv": gs_flv_nan_duration,
 }
 
 
 def write_seeds(seeds_dir, seeds_dict, prefix=""):
-    """Write the crafted seeds into seeds_dir."""
+    """Atomically publish ``seeds_dict`` into ``seeds_dir`` with ``prefix``.
+
+    Each seed is staged in the *parent* directory (outside the scanned
+    ``seeds/`` tree) via an exclusive, random temp name, then renamed into
+    place, so load_corpus never sees a partial file and a planted temp-name
+    symlink cannot redirect the write.
+    """
     stage_dir = os.path.dirname(os.path.abspath(seeds_dir))
 
     for name, build in seeds_dict.items():
@@ -415,7 +330,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
         "--out",
-        default=os.path.expanduser("~/fuzzing/crash_seeds"),
+        default=DEFAULT_OUT,
         help="pack root; seeds are written to <out>/seeds/ (default: %(default)s)",
     )
     ap.add_argument(

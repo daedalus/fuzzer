@@ -1281,6 +1281,24 @@ build here (system ffmpeg is 6.x), so they are potential-crash probes like the 8
 python tools/gen_ffmpeg_91_seeds.py --out ~/fuzzing/ffmpeg_91_potential_crashes
 ```
 
+#### Dual FFmpeg + GStreamer pack (`tools/gen_ffmpeg_gst_seeds.py`)
+
+Writes both families into one `<out>/seeds/` (`--target ffmpeg|gstreamer|both`):
+`ff_*` import the 9.1 pack above verbatim (no copy, no drift); `gs_*` target
+`targets/gstreamer_read.c`.
+
+The GStreamer target type-finds the input *before* choosing a demuxer, so a seed
+that misses its format's magic falls to `kFallback[byte0 % 5]` and is parsed by
+the wrong demuxer under a synthesised caps — its crafted bytes never run. Every
+`gs_` seed therefore leads with valid container magic (EBML `1A 45 DF A3` for
+matroskademux, `RIFF..WAVE`/`RIFF..AVI\x20` for wavparse/avidemux, `FLV\x01` for
+flvdemux, `ftyp` at offset 4 for qtdemux) and hides its malformation in a
+sub-structure the demuxer's own parse code reaches (inf Duration, 0xFFFFFFFF
+video dims, an over-long CodecPrivate vint, a huge v1 `mvhd` duration, a
+missing-fmt WAV, a degenerate `avih`, a NaN AMF duration). `tests/
+test_regression_ffmpeg_gst_seeds.py` re-derives the route from the bytes and
+asserts each seed reaches its intended demuxer.
+
 ## Coverage Modes
 
 Coverage-guided mode is **on by default** (`--no-coverage` to opt out).
