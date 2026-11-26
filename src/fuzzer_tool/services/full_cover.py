@@ -40,6 +40,9 @@ from fuzzer_tool.services.minimize import (
 
 # Status line verb: the dump is read, not replayed.
 _SCAN_VERB = "Scanned"
+# Seconds between status lines: each counts the whole map, O(map), so a
+# dump of many tiny batches must not pay it per batch.
+_STATUS_EVERY_S = 0.5
 
 # Seed filenames are content hashes: seeds/<hh>/id_<hash> (corpus_manager).
 _SEED_PREFIX = "id_"
@@ -214,9 +217,13 @@ def _scan(
     dump_seeds = 0
     # Edge-set fingerprint -> the pool seed holding that exact set.
     twins: dict[bytes, str] = {}
-    start = time.time()
+    start = last = time.time()
 
     for batch in iter_edges_pickle(dump_path):
+        # Legacy dumps can hold empty dicts: no seeds, no status line.
+        if not batch:
+            continue
+
         dump_seeds += len(batch)
         gone.update(sid for sid in batch if sid not in ids)
         unmeasured.difference_update(batch)
@@ -230,13 +237,23 @@ def _scan(
         pool.update(picks)
         _swap_twins(pool, twins, picks, batch, ids)
 
-        # Status line per batch, as edge-dump; total unknown (streamed), no ETA.
-        union = int(np.count_nonzero(dump))
-        _print_progress(dump_seeds, 0, start, union, _maxrss_kb(), verb=_SCAN_VERB)
+        # Status line as edge-dump, throttled by time; total unknown (streamed), no ETA.
+        now = time.time()
+        if now - last >= _STATUS_EVERY_S:
+            last = now
+            _scan_status(dump_seeds, start, dump)
 
+    # Final line: the throttle may have skipped the last batches.
     if dump_seeds:
+        _scan_status(dump_seeds, start, dump)
         print()
     return pool, dump, reach, unmeasured, gone, dump_seeds
+
+
+def _scan_status(seeds: int, start: float, dump: np.ndarray) -> None:
+    """One ``Scanned`` line: seeds read, union edges so far."""
+    union = int(np.count_nonzero(dump))
+    _print_progress(seeds, 0, start, union, _maxrss_kb(), verb=_SCAN_VERB)
 
 
 def _edge_fp(edges: np.ndarray) -> bytes:
