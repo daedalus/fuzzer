@@ -104,6 +104,21 @@ producing the SIGSEGV at fault address `0x60`.
 00000020  00 20 08 00 64 61 74 61 80 00 00 04 f8 01 7e 5e   |. ..data......~^|
 ```
 
+**RIFF/WAVE envelope breakdown (minimized 44-byte input):**
+
+| Offset | Bytes | Field | Value |
+|--------|-------|-------|-------|
+| 0 | RIFF + a4 00 00 00 | RIFF size | 164 — original file was 172 bytes |
+| 8 | WAVE | form type | |
+| 12 | fmt + 10 00 00 00 | fmt chunk size | 16 |
+| 20 | 70 00 | format tag | 0x0070 |
+| 22 | 02 00 | channels | 2 |
+| 24 | 44 01 01 00 | sample rate | 65860 |
+| 28 | 00 b2 02 00 | byte rate | 176640 (2 × 1 byte × 65860 should be 131720) |
+| 32 | 00 20 | block align | 8192 (should be 2) |
+| 34 | 08 00 | bits per sample | 8 |
+| 36 | data + 80 00 2b 4b | data size | 0x4B2B0080 ≈ 1.26 GB, 0 bytes after it |
+
 `fields (riff; baseline: parent 54e73eab8615a0e1)` — `fmt[0].data @0x14 +16` value differs from baseline:
 `700002004401010000b2020000200800` (was `700002004401010000b2020008000020`).
 
