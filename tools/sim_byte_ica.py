@@ -51,20 +51,18 @@ from fuzzer_tool.core.byte_pca import (
     MAX_ROWS,
     MIN_KEPT_ENERGY,
     MIN_ROWS,
+    Rotation,
     adjusted_rand,
     byte_groups,
+    gap_rank,
+    signed_labels,
     sketch_row,
 )
 from fuzzer_tool.core.rand_pool import RandPool
 
 ICA_MAX_ITER = 400
 ICA_TOL = 1e-6
-VARIMAX_ITER = 200
-VARIMAX_TOL = 1e-8
-MAX_RANK = 16  # eigenvalues searched for the gap in vmax_labels
 FIX_MIN_RANK = 1  # ica_fix: PC1 already dropped
-VMAX_MIN_RANK = 2  # vmax: skip the reject-vs-fields gap after PC1
-MIN_GAP_RATIO = 2.0  # a gap past min_rank below this is noise (tuned on seed 1)
 MIN_FIELD_BYTES = 2  # floor of a tapered field's size
 EDGES_PER_FIELD = 40  # own edges per field, and size of the shared pool
 FIELD_STRIDE = 10_000  # edge-id spacing between fields' own edges
@@ -189,53 +187,6 @@ def pca_labels(offsets: np.ndarray, rows: np.ndarray) -> np.ndarray | None:
     return labels
 
 
-def varimax(loadings: np.ndarray) -> np.ndarray:
-    """Orthogonal R maximising the variance of squared ``loadings @ R`` (Kaiser).
-
-    Sparse rows (a byte loading on one field) are its optimum.
-    """
-    p, k = loadings.shape
-    rot = np.eye(k)
-    if k == 1:
-        return rot
-
-    crit = 0.0
-    for _ in range(VARIMAX_ITER):
-        lr = loadings @ rot
-        u, s, vt = np.linalg.svd(loadings.T @ (lr**3 - lr * ((lr**2).sum(axis=0) / p)))
-        rot = u @ vt
-        if s.sum() < crit * (1.0 + VARIMAX_TOL):
-            break
-        crit = s.sum()
-    return rot
-
-
-def gap_rank(eig: np.ndarray, min_rank: int, min_gap: float = 0.0) -> int:
-    """Rank at the largest relative eigengap, searched from `min_rank` on.
-
-    Example: [100, 50, 40, 1, 0.9] -> 3 (40 / 1 is the largest ratio). When
-    that gap is below `min_gap` (noise only past min_rank), the largest gap
-    before min_rank decides: [500, 10, 9.5, 9] with min_rank 2 -> 1.
-    """
-    if eig.size <= min_rank:
-        return max(1, eig.size)
-    ratio = eig[:-1] / np.maximum(eig[1:], 1e-300)
-    rank = int(np.argmax(ratio[min_rank - 1 :])) + min_rank
-    if ratio[rank - 1] >= min_gap or min_rank == 1:
-        return rank
-    return int(np.argmax(ratio[: min_rank - 1])) + 1
-
-
-def signed_labels(src: np.ndarray, member: np.ndarray) -> np.ndarray:
-    """Vertex assignment: the source with the largest positive score names the
-    field; a byte with no positive score is the remaining vertex (label k)."""
-    src = src * np.where((src**3).mean(axis=0) < 0, -1.0, 1.0)  # heavy tail up
-    axis = src.argmax(axis=1)
-    top = src[np.arange(src.shape[0]), axis]
-    labels = np.where(top > 0, axis, src.shape[1])
-    return np.where(member, labels, -1).astype(np.int64)
-
-
 def _spectrum(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
     """Descending eigenvalues and eigenvectors of the centred row Gram."""
     if not MIN_ROWS <= rows.shape[0] <= MAX_ROWS:
@@ -320,23 +271,13 @@ def ica_fix_labels(offsets: np.ndarray, rows: np.ndarray, rand: RandPool) -> np.
 
 
 def vmax_labels(offsets: np.ndarray, rows: np.ndarray) -> np.ndarray | None:
-    """Varimax on the gap-rank scores, PC1 kept, vertex assignment."""
-    spec = _spectrum(rows) if rows.shape[0] == offsets.size else None
-    if spec is None:
+    """byte_groups(Rotation.VARIMAX) -- the production grouping -- one label per row."""
+    g = byte_groups(offsets, rows, Rotation.VARIMAX)
+    if g is None:
         return None
-    w, u = spec
-    live = int(np.count_nonzero(w > w[0] * EIG_FLOOR))
-    r = gap_rank(w[: min(live, MAX_RANK + 1)], VMAX_MIN_RANK, MIN_GAP_RATIO)
-
-    # Membership: energy share inside the kept rank, as byte_pca does.
-    scores = u[:, :r] * np.sqrt(w[:r])
-    total = (u[:, :live] ** 2 * w[:live]).sum(axis=1)
-    kept = (scores**2).sum(axis=1)
-    member = np.divide(kept, total, out=np.zeros(kept.size), where=total > 0) >= MIN_KEPT_ENERGY
-    if not member.any():
-        return None
-
-    return signed_labels(scores @ varimax(scores), member)
+    labels = np.full(offsets.size, -1, dtype=np.int64)
+    labels[np.searchsorted(offsets, g.offsets)] = g.comp
+    return labels
 
 
 def sign_p(wins: int, losses: int) -> float:

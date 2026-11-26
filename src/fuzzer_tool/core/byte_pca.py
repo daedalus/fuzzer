@@ -28,6 +28,17 @@ set of sketch columns); ``byte_groups`` itself is unchanged. Same physics as the
 "principal-axis swing" of a sample covariance when its top eigenvalues
 approach each other: the orientation, not the spectrum, is what is unstable.
 
+``Rotation.VARIMAX`` (``--pos-pca-rotation varimax``) groups the same rows
+differently: PC1 kept, rank at the largest eigengap, varimax rotation, and a
+byte joins the field of its largest positive score (no positive score: the
+remaining vertex -- k fields after centring are k vertices of a simplex in
+k-1 dims). Reject-only bytes then form their own group instead of being
+dropped. Offline it beats the PCA argmax, mostly because PC1 is a real field
+when no reject block exists (ledger #187, ``tools/sim_byte_ica.py``)::
+
+    rows -> centre, eigh -> rank r (largest gap from r=2; noise-only -> 1)
+         -> scores (n x r) @ varimax R -> field = argmax positive score, else r
+
 Rows are count-sketched (signed hash into SKETCH_COLS) so a trace of any size
 costs a fixed row; a signed sketch keeps inner products unbiased, and the
 static trace cancels at centring, so no baseline run is needed.
@@ -36,6 +47,7 @@ static trace cancels at centring, so no baseline run is needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
@@ -50,9 +62,21 @@ MIN_KEPT_ENERGY = 0.05  # row energy share outside the dropped components
 MIN_REL_GAP = 0.05  # (w_k - w_k+1) / w_k below this: component k is degenerate
 BOOT_RESAMPLES = 16  # column bootstraps in group_stability
 MIN_AGREEMENT = 0.8  # median adjusted Rand vs the original grouping to call it stable
+MAX_RANK = 16  # eigenvalues searched for the varimax rank
+VMAX_MIN_RANK = 2  # varimax: skip the reject-vs-fields gap after PC1
+MIN_GAP_RATIO = 2.0  # a later gap below this is noise: fall back to rank 1 (tuned offline)
+VARIMAX_ITER = 200
+VARIMAX_TOL = 1e-8
 
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
 _SIGN_BIT = np.uint64(1) << np.uint64(20)
+
+
+class Rotation(Enum):
+    """How kept components become groups (``--pos-pca-rotation``)."""
+
+    PCA = "pca"  # drop PC1, argmax |score| + pole
+    VARIMAX = "varimax"  # PC1 kept, gap rank, varimax, vertex labels
 
 
 @dataclass(frozen=True)
@@ -80,20 +104,39 @@ def sketch_row(edge_ids: np.ndarray) -> np.ndarray:
     return row.astype(np.int16)
 
 
-def byte_groups(offsets: np.ndarray, rows: np.ndarray) -> ByteGroups | None:
+def byte_groups(
+    offsets: np.ndarray, rows: np.ndarray, rotation: Rotation = Rotation.PCA
+) -> ByteGroups | None:
     """Group *offsets* by the PCA components of their sketch *rows*.
 
     Args:
         offsets: byte offset of each row, ascending.
         rows: ``(n, SKETCH_COLS)`` sketch rows.
+        rotation: PCA argmax (default) or varimax vertex grouping.
 
     Returns:
         ``None`` when the matrix cannot support a decomposition (too few or
         more than MAX_ROWS rows, no variance after centring, or nothing left
         after the drop).
     """
-    fit = _fit(offsets, rows)
+    fit = _FITS[rotation](offsets, rows)
     return None if fit is None else fit[0]
+
+
+def _spectrum(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Descending eigenvalues and eigenvectors of the centred row Gram.
+
+    n <= MAX_ROWS << SKETCH_COLS, so the n x n Gram is the small side.
+    """
+    if not MIN_ROWS <= rows.shape[0] <= MAX_ROWS:
+        return None
+    y = rows.astype(np.float64)
+    y -= y.mean(axis=0)
+    if not y.any():
+        return None
+    w, u = np.linalg.eigh(y @ y.T)
+    order = np.argsort(w)[::-1]
+    return np.maximum(w[order], 0.0), u[:, order]
 
 
 def _fit(
@@ -102,19 +145,11 @@ def _fit(
     """byte_groups plus what group_stability needs: the grouping, the sorted
     eigenvalues, the kept slice, and a per-row group label (-1 = not a member)."""
     n = rows.shape[0]
-    if not MIN_ROWS <= n <= MAX_ROWS or n != offsets.size:
+    spec = _spectrum(rows) if n == offsets.size else None
+    if spec is None:
         return None
-
-    y = rows.astype(np.float64)
-    y -= y.mean(axis=0)
-    if not y.any():
-        return None
-
-    # n <= MAX_ROWS << SKETCH_COLS, so the n x n Gram is the small side.
-    w, u = np.linalg.eigh(y @ y.T)
-    scores = u * np.sqrt(np.maximum(w, 0.0))
-    order = np.argsort(w)[::-1]
-    w, scores = np.maximum(w[order], 0.0), scores[:, order]
+    w, u = spec
+    scores = u * np.sqrt(w)
 
     live = int(np.count_nonzero(w > w[0] * EIG_FLOOR))
     # Only drop the leading component if there are enough remaining
@@ -152,6 +187,98 @@ def _fit(
     )
     labels = np.where(member, comp, -1).astype(np.int64)
     return groups, w, keep, labels
+
+
+def varimax(loadings: np.ndarray) -> np.ndarray:
+    """Orthogonal R maximising the variance of squared ``loadings @ R`` (Kaiser).
+
+    Sparse rows (a byte loading on one field) are its optimum.
+    """
+    p, k = loadings.shape
+    rot = np.eye(k)
+    if k == 1:
+        return rot
+
+    crit = 0.0
+    for _ in range(VARIMAX_ITER):
+        lr = loadings @ rot
+        u, s, vt = np.linalg.svd(loadings.T @ (lr**3 - lr * ((lr**2).sum(axis=0) / p)))
+        rot = u @ vt
+        if s.sum() < crit * (1.0 + VARIMAX_TOL):
+            break
+        crit = s.sum()
+    return rot
+
+
+def gap_rank(eig: np.ndarray, min_rank: int, min_gap: float = 0.0) -> int:
+    """Rank at the largest relative eigengap, searched from `min_rank` on.
+
+    Example: [100, 50, 40, 1, 0.9] -> 3 (40 / 1 is the largest ratio). When
+    that gap is below `min_gap` (noise only past min_rank), the largest gap
+    before min_rank decides: [500, 10, 9.5, 9] with min_rank 2 -> 1.
+    """
+    if eig.size <= min_rank:
+        return max(1, eig.size)
+    ratio = eig[:-1] / np.maximum(eig[1:], 1e-300)
+    rank = int(np.argmax(ratio[min_rank - 1 :])) + min_rank
+    if ratio[rank - 1] >= min_gap or min_rank == 1:
+        return rank
+    return int(np.argmax(ratio[: min_rank - 1])) + 1
+
+
+def _tail_up(src: np.ndarray) -> np.ndarray:
+    """Flip each column so its heavy (field-member) tail is positive."""
+    return src * np.where((src**3).mean(axis=0) < 0, -1.0, 1.0)
+
+
+def signed_labels(src: np.ndarray, member: np.ndarray) -> np.ndarray:
+    """Vertex assignment: the source with the largest positive score names the
+    field; a byte with no positive score is the remaining vertex (label k)."""
+    src = _tail_up(src)
+    axis = src.argmax(axis=1)
+    top = src[np.arange(src.shape[0]), axis]
+    labels = np.where(top > 0, axis, src.shape[1])
+    return np.where(member, labels, -1).astype(np.int64)
+
+
+def _fit_varimax(
+    offsets: np.ndarray, rows: np.ndarray
+) -> tuple[ByteGroups, np.ndarray, slice, np.ndarray] | None:
+    """_fit's contract under Rotation.VARIMAX (PC1 kept, ``keep = slice(0, r)``)."""
+    n = rows.shape[0]
+    spec = _spectrum(rows) if n == offsets.size else None
+    if spec is None:
+        return None
+    w, u = spec
+    live = int(np.count_nonzero(w > w[0] * EIG_FLOOR))
+    r = gap_rank(w[: min(live, MAX_RANK + 1)], VMAX_MIN_RANK, MIN_GAP_RATIO)
+
+    # Membership: energy share inside the kept rank, as in _fit.
+    scores = u[:, :r] * np.sqrt(w[:r])
+    kept = (scores**2).sum(axis=1)
+    total = (u[:, :live] ** 2 * w[:live]).sum(axis=1)
+    share = np.divide(kept, total, out=np.zeros(n), where=total > 0)
+
+    # Field = largest positive varimax score; weight = its square (the
+    # remaining vertex has none: its kept energy instead).
+    src = _tail_up(scores @ varimax(scores))
+    labels = signed_labels(src, np.ones(n, dtype=bool))
+    weight = np.where(labels < r, np.maximum(src, 0.0).max(axis=1) ** 2, kept)
+    weight = weight.astype(np.float32)
+
+    member = (share >= MIN_KEPT_ENERGY) & (weight > 0)
+    if not member.any():
+        return None
+    groups = ByteGroups(
+        offsets=offsets[member].astype(np.uint32),
+        comp=labels[member].astype(np.int8),
+        weight=weight[member],
+        count=r + 1,
+    )
+    return groups, w, slice(0, r), np.where(member, labels, -1).astype(np.int64)
+
+
+_FITS = {Rotation.PCA: _fit, Rotation.VARIMAX: _fit_varimax}
 
 
 @dataclass(frozen=True)
@@ -211,7 +338,11 @@ def adjusted_rand(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def group_stability(
-    offsets: np.ndarray, rows: np.ndarray, rand, resamples: int = BOOT_RESAMPLES
+    offsets: np.ndarray,
+    rows: np.ndarray,
+    rand,
+    resamples: int = BOOT_RESAMPLES,
+    rotation: Rotation = Rotation.PCA,
 ) -> GroupStability | None:
     """Eigengap and column-bootstrap check for ``byte_groups(offsets, rows)``.
 
@@ -219,11 +350,15 @@ def group_stability(
         offsets, rows: as for ``byte_groups``.
         rand: a ``RandPool`` (Hard Rule 16) drawing the bootstrap columns.
         resamples: number of column bootstraps.
+        rotation: as for ``byte_groups``. Under VARIMAX the rotation fixes the
+            axes inside the kept block, so only the truncation-edge gap can
+            be degenerate.
 
     Returns:
         ``None`` exactly when ``byte_groups`` declines.
     """
-    fit = _fit(offsets, rows)
+    fit_fn = _FITS[rotation]
+    fit = fit_fn(offsets, rows)
     if fit is None:
         return None
     _, w, keep, labels = fit
@@ -232,14 +367,17 @@ def group_stability(
     nxt = w[keep.start + 1 : stop + 1]
     nxt = np.concatenate([nxt, np.zeros(hi.size - nxt.size)])  # past the end: 0
     gaps = np.divide(hi - nxt, hi, out=np.zeros(hi.size), where=hi > 0)
-    used = np.unique(labels[labels >= 0] // 2)  # kept-component index of each member
+    if rotation is Rotation.PCA:
+        used = np.unique(labels[labels >= 0] // 2)  # kept-component index of each member
+    else:
+        used = np.array([hi.size - 1])  # truncation edge only
     degenerate = tuple(int(j) for j in used if gaps[j] < MIN_REL_GAP)
 
     scores = np.zeros(max(resamples, 0))
     for r in range(scores.size):
         raw = np.frombuffer(rand.randbytes(2 * SKETCH_COLS), dtype=np.uint16)
         cols = (raw % SKETCH_COLS).astype(np.intp)  # SKETCH_COLS | 65536: unbiased
-        boot = _fit(offsets, rows[:, cols])
+        boot = fit_fn(offsets, rows[:, cols])
         scores[r] = 0.0 if boot is None else adjusted_rand(labels, boot[3])
     agreement = float(np.median(scores)) if scores.size else 1.0
     return GroupStability(

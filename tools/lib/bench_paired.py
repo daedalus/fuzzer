@@ -295,6 +295,9 @@ ARMS: dict[str, list[str]] = {
     + ["--pos-emeans", "--pos-emeans-tau", "0.1", "--pos-arena-arms", "uniform,emeans"],
     # PCA is opt-in like kadane; the byteflip pass it reads is on by default.
     "pos-arena-pca": _ARENA + ["--pos-pca", "--pos-arena-arms", "uniform,pca"],
+    # Same arm, varimax grouping (PC1 kept); baseline is the PCA arm, not uniform.
+    "pos-arena-pca-varimax": _ARENA
+    + ["--pos-pca", "--pos-pca-rotation", "varimax", "--pos-arena-arms", "uniform,pca"],
     # LearnAFL path mask is opt-in like kadane.
     "pos-arena-learn": _ARENA + ["--pos-learn", "--pos-arena-arms", "uniform,learn"],
     # soksolv hotspot table is opt-in like kadane; needs cmplog (on by default).
@@ -488,6 +491,7 @@ ARM_BASELINES: dict[str, str] = {
     "pos-arena-emeans": "pos-arena-uniform",
     "pos-arena-emeans-revive": "pos-arena-uniform",
     "pos-arena-pca": "pos-arena-uniform",
+    "pos-arena-pca-varimax": "pos-arena-pca",
     "pos-arena-learn": "pos-arena-uniform",
     "pos-arena-hotspot": "pos-arena-uniform",
     "splice-gravity": "baseline",

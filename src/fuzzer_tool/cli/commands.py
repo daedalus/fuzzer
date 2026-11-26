@@ -23,6 +23,7 @@ from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric
 from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
+from fuzzer_tool.core.byte_pca import Rotation
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.cmplog import DedupScope, RecordChannel
@@ -1169,6 +1170,7 @@ def cmd_fuzz(args):
         pos_emeans=getattr(args, "pos_emeans", False),
         pos_emeans_tau=getattr(args, "pos_emeans_tau", 0.0),
         pos_pca=getattr(args, "pos_pca", False),
+        pos_pca_rotation=getattr(args, "pos_pca_rotation", Rotation.PCA.value),
         pos_learn=getattr(args, "pos_learn", False),
         pos_hotspot=getattr(args, "pos_hotspot", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
@@ -5191,6 +5193,15 @@ def _build_parser() -> _Parsers:
         "groups (core/schedulers/pos_pca.py; needs the deterministic stage). Opt-in: NOT implied by "
         "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
         "--position-arena is on.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-pca-rotation",
+        choices=tuple(r.value for r in Rotation),
+        default=Rotation.PCA.value,
+        help="With --pos-pca: how byteflip traces become groups. pca = drop the leading "
+        "component, argmax |score| (default); varimax = keep it, rank at the largest "
+        "eigengap, varimax rotation, largest positive score names the group "
+        "(offline win, ledger #187; unmeasured in-run).",
     )
     fuzz_parser.add_argument(
         "--pos-token",

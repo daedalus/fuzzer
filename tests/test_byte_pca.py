@@ -17,6 +17,7 @@ from fuzzer_tool.core.byte_pca import (
     MIN_AGREEMENT,
     MIN_ROWS,
     SKETCH_COLS,
+    Rotation,
     adjusted_rand,
     byte_groups,
     group_stability,
@@ -215,3 +216,107 @@ class TestGroupStability:
         a = group_stability(offs, rows, RandPool(seed=11))
         b = group_stability(offs, rows, RandPool(seed=11))
         assert a.agreement == b.agreement and (a.gaps == b.gaps).all()
+
+
+SHARED_POOL = np.arange(90_000, 90_040)
+
+
+def _overlap_fields(n_fields, per_field=30, reject=24, overlap=0.5, seed=1, keep=0.8):
+    """Fields that also move a field-specific share of a common edge pool, so
+    their signatures are not orthogonal; then `reject` clutter bytes."""
+    rng = np.random.default_rng(seed)
+    pool = rng.random((n_fields, SHARED_POOL.size)) < overlap
+    rows, truth = [], []
+    for g in range(n_fields):
+        own = np.arange(10_000 * (g + 1), 10_000 * (g + 1) + 40)
+        sig = np.concatenate([own, SHARED_POOL[pool[g]]])
+        for _ in range(per_field):
+            rows.append(sketch_row(np.concatenate([BASE, sig[rng.random(sig.size) < keep]])))
+            truth.append(g)
+    for _ in range(reject):
+        rows.append(sketch_row(np.concatenate([BASE[:50], REJECT])))
+        truth.append(-1)
+    return np.arange(len(rows)), np.stack(rows), np.array(truth)
+
+
+def _labels(groups, n):
+    """One label per row (-1 = not a member); offsets are row indices here."""
+    out = np.full(n, -1)
+    out[groups.offsets] = groups.comp
+    return out
+
+
+def _ari(offs, rows, truth, rotation):
+    got = byte_groups(offs, rows, rotation)
+    return -1.0 if got is None else adjusted_rand(truth, _labels(got, offs.size))
+
+
+class TestVarimaxRotation:
+    def test_default_is_pca(self):
+        offs, rows, _ = _overlap_fields(3)
+        a, b = byte_groups(offs, rows), byte_groups(offs, rows, Rotation.PCA)
+        assert (a.offsets == b.offsets).all() and (a.comp == b.comp).all()
+        assert (a.weight == b.weight).all() and a.count == b.count
+
+    def test_rotation_parses_from_cli_value(self):
+        assert Rotation("varimax") is Rotation.VARIMAX and Rotation("pca") is Rotation.PCA
+
+    def test_recovers_four_overlapping_fields(self):
+        """Tetrahedron case: four equal fields sharing pool edges."""
+        offs, rows, truth = _overlap_fields(4)
+        assert _ari(offs, rows, truth, Rotation.VARIMAX) >= 0.95
+
+    def test_keeps_the_pc1_field_without_reject(self):
+        """No reject block: PC1 is a field. PCA drops it; varimax must not."""
+        offs, rows, truth = _overlap_fields(4, reject=0)
+        assert _ari(offs, rows, truth, Rotation.VARIMAX) >= 0.95
+
+    def test_falsification_pca_loses_the_pc1_field(self):
+        """Same input under PCA: the unconditional drop must cost a field, or
+        the varimax test above proves nothing."""
+        offs, rows, truth = _overlap_fields(4, reject=0)
+        assert _ari(offs, rows, truth, Rotation.PCA) < 0.9
+
+    def test_rank_one_fallback(self):
+        """Two fields, no reject: one real axis. Fixed draws, all scored."""
+        ari = [_ari(*_overlap_fields(2, reject=0, seed=s), Rotation.VARIMAX) for s in range(10)]
+        assert np.mean(ari) >= 0.95
+
+    def test_reject_bytes_form_one_pure_group(self):
+        offs, rows, truth = _overlap_fields(3)
+        lab = _labels(byte_groups(offs, rows, Rotation.VARIMAX), offs.size)
+        rej = np.unique(lab[truth == -1])
+        assert rej.size == 1 and rej[0] >= 0
+        assert not (lab[truth >= 0] == rej[0]).any()
+
+    def test_group_ids_below_count_and_weights_positive(self):
+        offs, rows, _ = _overlap_fields(4)
+        got = byte_groups(offs, rows, Rotation.VARIMAX)
+        assert got.comp.min() >= 0 and got.comp.max() < got.count
+        assert (got.weight > 0).all() and got.weight.dtype == np.float32
+
+    def test_group_stability_under_varimax(self):
+        offs, rows, _ = _overlap_fields(4)
+        st = group_stability(offs, rows, RandPool(seed=4), rotation=Rotation.VARIMAX)
+        assert st is not None and st.stable
+
+    def test_falsification_no_structure(self):
+        rng = np.random.default_rng(9)
+        rows = np.stack([sketch_row(rng.integers(1, 1 << 30, 60)) for _ in range(120)])
+        got = byte_groups(np.arange(120), rows, Rotation.VARIMAX)
+        if got is not None:
+            fake = np.repeat(np.arange(3), 40)
+            assert abs(adjusted_rand(fake, _labels(got, 120))) < 0.1
+
+    @pytest.mark.parametrize("n", [0, 1, 2, 3])
+    def test_adversarial_tiny_inputs_decline(self, n):
+        rows = np.ones((n, SKETCH_COLS), np.int16)
+        assert byte_groups(np.arange(n), rows, Rotation.VARIMAX) is None
+
+    def test_adversarial_identical_and_capped_rows_decline(self):
+        rows = np.stack([sketch_row(BASE)] * 8)
+        assert byte_groups(np.arange(8), rows, Rotation.VARIMAX) is None
+        offs, rows, _ = _fields(per_field=MAX_ROWS // 2, reject=0, n_fields=3)
+        assert byte_groups(offs, rows, Rotation.VARIMAX) is None
+        offs, rows, _ = _overlap_fields(3)
+        assert byte_groups(offs[:-1], rows, Rotation.VARIMAX) is None

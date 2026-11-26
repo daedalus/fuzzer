@@ -36,7 +36,7 @@ import numpy as np
 
 from fuzzer_tool.core.aho_corasick import scanner_for_pairs
 from fuzzer_tool.core.auto_dict import NO_HASH, harvest_tokens
-from fuzzer_tool.core.byte_pca import MAX_ROWS, ByteGroups, byte_groups, sketch_row
+from fuzzer_tool.core.byte_pca import MAX_ROWS, ByteGroups, Rotation, byte_groups, sketch_row
 from fuzzer_tool.core.checksum_sites import hint_operands
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cond_stmt import CondStmt
@@ -1630,6 +1630,9 @@ class OperatorEngine:
         # position arena's pca arm; capture is off until the arm asks for it.
         self._det_groups: LRUCache = LRUCache(MAX_EFF_SEEDS)
         self._pca_capture = False
+        # Grouping fit bound once (--pos-pca-rotation), not chosen per drain.
+        self._pca_rotation = Rotation.PCA
+        self._group_fit = byte_groups
         # Cache backing the `ctx` property below: refreshed once per
         # mutate() round rather than rebuilt on every ctx access. See
         # `ctx`'s docstring for why (measured ~19% round-latency cost from
@@ -7069,9 +7072,12 @@ class OperatorEngine:
                 array("H", m[hot].tobytes()),
             )
 
-    def enable_pca_capture(self) -> None:
-        """Sketch byteflip traces from now on (the pca position arm needs them)."""
+    def enable_pca_capture(self, rotation: Rotation = Rotation.PCA) -> None:
+        """Sketch byteflip traces from now on (the pca position arm needs them),
+        grouped at each drain with *rotation*."""
         self._pca_capture = True
+        self._pca_rotation = rotation
+        self._group_fit = partial(byte_groups, rotation=rotation)
 
     def _may_capture(self) -> bool:
         if not self._pca_capture:
@@ -7090,7 +7096,7 @@ class OperatorEngine:
             return
         rows = sorted(rows, key=lambda r: r[0])
         offsets = np.fromiter((r[0] for r in rows), dtype=np.int64, count=len(rows))
-        groups = byte_groups(offsets, np.stack([r[1] for r in rows]))
+        groups = self._group_fit(offsets, np.stack([r[1] for r in rows]))
         if groups is not None:
             self._det_groups[seed_key] = groups
 

@@ -12,7 +12,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fuzzer_tool.core.byte_pca import adjusted_rand, sketch_row
+from fuzzer_tool.core.byte_pca import (
+    MIN_GAP_RATIO,
+    adjusted_rand,
+    gap_rank,
+    signed_labels,
+    sketch_row,
+    varimax,
+)
 from fuzzer_tool.core.rand_pool import RandPool
 
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
@@ -196,31 +203,31 @@ class TestVarimax:
         l0 = np.zeros((k * per, k))
         l0[np.arange(k * per), np.repeat(np.arange(k), per)] = 1.0 + rand.random_array(k * per)
         q = _rotation(rand, k)
-        got = l0 @ q @ sim.varimax(l0 @ q)
+        got = l0 @ q @ varimax(l0 @ q)
         c = np.abs(got.T @ l0) / np.outer(np.linalg.norm(got, axis=0), np.linalg.norm(l0, axis=0))
         assert _best_match(c).min() >= 0.999
 
     def test_rotation_is_orthogonal(self):
-        r = sim.varimax(RandPool(seed=23).normal_array((40, 4)))
+        r = varimax(RandPool(seed=23).normal_array((40, 4)))
         assert np.allclose(r @ r.T, np.eye(4), atol=1e-10)
 
     def test_single_column_is_identity(self):
-        assert np.allclose(sim.varimax(np.ones((5, 1))), np.eye(1))
+        assert np.allclose(varimax(np.ones((5, 1))), np.eye(1))
 
 
 class TestGapRank:
     def test_largest_relative_gap(self):
-        assert sim.gap_rank(np.array([100.0, 50, 40, 1, 0.9, 0.8]), 1) == 3
+        assert gap_rank(np.array([100.0, 50, 40, 1, 0.9, 0.8]), 1) == 3
 
     def test_min_rank_skips_leading_gap(self):
         """A dominant first eigenvalue (reject split) must not cap the rank at 1."""
         eig = np.array([2000.0, 50, 40, 30, 1, 0.9])
-        assert sim.gap_rank(eig, 1) == 1
-        assert sim.gap_rank(eig, 2) == 4
+        assert gap_rank(eig, 1) == 1
+        assert gap_rank(eig, 2) == 4
 
     @pytest.mark.parametrize("eig", [np.array([5.0]), np.array([3.0, 3.0])])
     def test_adversarial_short_spectrum_bounded(self, eig):
-        assert 1 <= sim.gap_rank(eig, 2) <= eig.size
+        assert 1 <= gap_rank(eig, 2) <= eig.size
 
 
 class TestSignedAssign:
@@ -230,7 +237,7 @@ class TestSignedAssign:
         src = np.vstack([src, -0.1 * np.ones((20, 3))])  # bulk keeps each tail positive
         member = np.ones(len(src), dtype=bool)
         member[-1] = False
-        got = sim.signed_labels(src, member)
+        got = signed_labels(src, member)
         assert got[:5].tolist() == [0, 1, 2, 3, 3]
         assert got[-1] == -1
 
@@ -273,8 +280,8 @@ class TestImprovedArms:
     def test_gap_rank_falls_back_without_later_gap(self):
         """No ratio past min_rank reaches min_gap: the leading gap decides."""
         eig = np.array([500.0, 10, 9.5, 9, 8.6, 8.2])
-        assert sim.gap_rank(eig, 2) == 3  # 9.5 / 9: largest noise ratio
-        assert sim.gap_rank(eig, 2, min_gap=sim.MIN_GAP_RATIO) == 1
+        assert gap_rank(eig, 2) == 3  # 9.5 / 9: largest noise ratio
+        assert gap_rank(eig, 2, min_gap=MIN_GAP_RATIO) == 1
 
     def test_taper_shrinks_later_fields(self):
         spec = sim.Spec(n_fields=3, per_field=40, overlap=0.0, reject=0, taper=0.5)
