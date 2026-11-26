@@ -217,7 +217,8 @@ def _scan(
     dump_seeds = 0
     # Edge-set fingerprint -> the pool seed holding that exact set.
     twins: dict[bytes, str] = {}
-    start = last = time.time()
+    start = time.time()
+    last = time.monotonic()
 
     for batch in iter_edges_pickle(dump_path):
         # Legacy dumps can hold empty dicts: no seeds, no status line.
@@ -238,10 +239,11 @@ def _scan(
         _swap_twins(pool, twins, picks, batch, ids)
 
         # Status line as edge-dump, throttled by time; total unknown (streamed), no ETA.
-        now = time.time()
-        if now - last >= _STATUS_EVERY_S:
-            last = now
+        # Monotonic: a wall-clock step back would mute it. Interval restarts
+        # after the line, so a slow map count is not re-paid every batch.
+        if time.monotonic() - last >= _STATUS_EVERY_S:
             _scan_status(dump_seeds, start, dump)
+            last = time.monotonic()
 
     # Final line: the throttle may have skipped the last batches.
     if dump_seeds:
