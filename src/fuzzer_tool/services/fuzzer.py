@@ -62,6 +62,7 @@ from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TECorrection
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
+from fuzzer_tool.core.byte_pca import Rotation
 from fuzzer_tool.core.cadence import due, phase_of
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
@@ -2302,6 +2303,9 @@ class Fuzzer:
         op_qlearn=False,
         op_tabu=False,
         op_hill_climb=False,
+        # --pos-pca-rotation: how the pca arm turns byteflip traces into groups
+        # ("pca" argmax, default; "varimax", core/byte_pca.py). Appended.
+        pos_pca_rotation="pca",
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -4194,6 +4198,13 @@ class Fuzzer:
 
             self._pos_consolidated = PositionConsolidatedScheduler(self._rng)
             log.info("Position consolidated scheduling enabled")
+        try:
+            self._pca_rotation = Rotation(pos_pca_rotation)
+        except ValueError:
+            raise ValueError(
+                f"pos_pca_rotation must be one of {[r.value for r in Rotation]}, "
+                f"got {pos_pca_rotation!r}"
+            ) from None
         flags = {
             "effector": pos_effector,
             "token": pos_token,
@@ -8104,8 +8115,8 @@ class Fuzzer:
                 ready=ops.has_effector_groups,
                 key_of=self._seed_key,
             )
-            ops.enable_pca_capture()
-            log.info("Position pca scheduling enabled")
+            ops.enable_pca_capture(self._pca_rotation)
+            log.info("Position pca scheduling enabled (%s rotation)", self._pca_rotation.value)
             if "pca" in asked and not getattr(self, "_skip_detector", None):
                 log.warning("--pos-pca needs --deterministic: the arm stays out of the pool")
 

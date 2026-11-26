@@ -209,3 +209,13 @@ def test_arena_testable_arms_need_no_extra_feature_flag():
     assert set(ARENA_TESTABLE) <= set(POSITION_STRATEGY_NAMES)
     # gated on their own feature, so they cannot be A/B'd by subset alone
     assert not {"cmplog", "lineage", "effector"} & set(ARENA_TESTABLE)
+
+
+def test_pca_varimax_arm_differs_from_pca_by_rotation_only(monkeypatch):
+    base = vars(_parse(monkeypatch, ARMS["pos-arena-pca"]))
+    test = vars(_parse(monkeypatch, ARMS["pos-arena-pca-varimax"]))
+    changed = {k for k in base if k != "func" and base[k] != test[k]}
+    assert changed == {"pos_pca_rotation"}
+    assert base["pos_pca_rotation"] == "pca"
+    assert test["pos_pca_rotation"] == "varimax"
+    assert ARM_BASELINES["pos-arena-pca-varimax"] == "pos-arena-pca"

@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from fuzzer_tool.core.byte_pca import ByteGroups, sketch_row
+from fuzzer_tool.core.byte_pca import ByteGroups, Rotation, byte_groups, sketch_row
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome, PositionScheduler
 from fuzzer_tool.core.schedulers.pos_pca import (
@@ -211,6 +211,44 @@ class TestEngineCapture:
         for off, comp in zip(got.offsets, got.comp, strict=True):
             by_group.setdefault(int(comp), set()).add((int(off) // 8) % 3)
         assert all(len(v) == 1 for v in by_group.values())
+
+    @staticmethod
+    def _rows(n):
+        return [(i, sketch_row(TestEngineCapture._trace(i))) for i in range(n)]
+
+    @pytest.mark.parametrize("rotation", list(Rotation))
+    def test_keep_groups_uses_the_bound_rotation(self, tmp_path, rotation):
+        """The drain groups with the rotation given to enable_pca_capture."""
+        f = self._fuzzer(tmp_path, bytes(8))
+        eng = f._operators
+        eng.enable_pca_capture(rotation)
+        rows = self._rows(48)
+        eng._keep_groups("k", rows)
+        want = byte_groups(np.arange(48), np.stack([r[1] for r in rows]), rotation)
+        got = eng._det_groups.get("k")
+        assert (got.offsets == want.offsets).all() and (got.comp == want.comp).all()
+        assert got.count == want.count
+
+    def test_rotation_defaults_to_pca(self, tmp_path):
+        f = self._fuzzer(tmp_path, bytes(8))
+        eng = f._operators
+        assert eng._pca_rotation is Rotation.PCA
+        eng.enable_pca_capture()
+        assert eng._pca_rotation is Rotation.PCA
+
+    def test_varimax_groups_survive_the_drain(self, tmp_path):
+        data = bytes((0x41 + i) & 0xFF for i in range(48))
+        f = self._fuzzer(tmp_path, data)
+        eng = f._operators
+        eng.enable_pca_capture(Rotation.VARIMAX)
+        self._drain(f, data, set(range(48)))
+        got = eng.effector_groups(data)
+        assert got is not None
+        by_group = {}
+        for off, comp in zip(got.offsets, got.comp, strict=True):
+            by_group.setdefault(int(comp), set()).add((int(off) // 8) % 3)
+        assert all(len(v) == 1 for v in by_group.values())
+        assert len(by_group) == 3  # PC1 kept: all three fields, none dropped
 
     def test_inert_flips_are_not_rows(self, tmp_path):
         data = bytes((0x41 + i) & 0xFF for i in range(16))

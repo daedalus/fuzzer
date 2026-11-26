@@ -1885,6 +1885,22 @@ class TestRealConstruction:
         assert isinstance(f._pos_pca, PositionPCAScheduler)
         assert f._position_arena is None
 
+    def test_pos_pca_rotation_reaches_the_engine(self, tmp_path):
+        from fuzzer_tool.core.byte_pca import Rotation
+
+        f = self._build(tmp_path, pos_pca=True, pos_pca_rotation="varimax")
+        assert f._operators._pca_rotation is Rotation.VARIMAX
+
+    def test_pos_pca_rotation_defaults_to_pca(self, tmp_path):
+        from fuzzer_tool.core.byte_pca import Rotation
+
+        f = self._build(tmp_path, pos_pca=True)
+        assert f._operators._pca_rotation is Rotation.PCA
+
+    def test_pos_pca_rotation_rejects_unknown(self, tmp_path):
+        with pytest.raises(ValueError, match="pos_pca_rotation"):
+            self._build(tmp_path, pos_pca=True, pos_pca_rotation="bogus")
+
     def test_pos_saliency_builds_and_joins_the_arena(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True, pos_saliency=True)
         assert isinstance(f._pos_saliency, PositionSaliencyScheduler)
