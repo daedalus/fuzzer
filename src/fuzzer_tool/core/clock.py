@@ -59,6 +59,19 @@ class Clock:
         """Advance virtual time by one execution; no-op on the wall clock."""
         self._ticks += 1
 
+    @property
+    def ticks(self) -> int:
+        return self._ticks
+
+    def resume(self, ticks: object) -> None:
+        """Continue a saved run's virtual time; never rewinds.
+
+        Restored timestamps carry the old run's ticks: restarting at 0 makes
+        them read as future (negative ages). Bad input is ignored.
+        """
+        if isinstance(ticks, int) and ticks > self._ticks:
+            self._ticks = ticks
+
     def _virtual_monotonic(self) -> float:
         return self._ticks * VIRTUAL_EXEC_S
 
