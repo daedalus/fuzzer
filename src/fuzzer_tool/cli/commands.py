@@ -3500,6 +3500,14 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the soksolv
 # hotspot arm has unit tests only.
 #
+# swarm (--swarm) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): per-round null on
+# ffmpeg 9.1, seed mode LEAN+ underpowered (ledger #179).
+#
+# validity_energy (--validity-energy) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): no A/B; needs
+# --weizz-tags.
+#
 # joint_liveness (--joint-liveness) is excluded: it only has an effect together
 # with --region-profile (the dead-region down-weight is the thing it revokes)
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on

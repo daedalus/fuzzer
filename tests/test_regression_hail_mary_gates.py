@@ -227,6 +227,12 @@ _EXCLUDED_OPT_IN = frozenset(
         "continue_until_crash",
         # Input delivery: -F hides the input from stdin-only targets.
         "file_mode",
+        # Unmeasured winner: per-round swarm null on ffmpeg 9.1 (8W/12L), seed
+        # mode LEAN+ underpowered (ledger #179); same criterion as pos_kadane.
+        "swarm",
+        # Unmeasured: AFLSmart validity energy, no A/B yet (docs/TODO.md);
+        # needs --weizz-tags, also opt-in.
+        "validity_energy",
     }
 )
 
