@@ -184,31 +184,43 @@ _MSAN_DEFAULTS = ("exit_code=86", "symbolize=0")
 _PRELOAD_COMMANDS = ("fuzz", "replay")
 
 
-_ELF_MAGIC = b"\x7fELF"
+def _parsed_target(args: list[str]) -> str | None:
+    """`target` as the real CLI parser assigns it; None when argv does not parse.
 
+    Imports the full CLI (~270 ms), so only for options-first argv. Its usage
+    error is muted: the exec'd command reports it.
+    """
+    import contextlib
+    import io
 
-def _is_elf(path: str) -> bool:
-    """True when *path* is a readable file starting with the ELF magic."""
+    from fuzzer_tool.cli.commands import _build_parser
+
     try:
-        with open(path, "rb") as f:
-            return f.read(len(_ELF_MAGIC)) == _ELF_MAGIC
-    except OSError:
-        return False
+        with contextlib.redirect_stderr(io.StringIO()):
+            ns = _build_parser().root.parse_args(args)
+    except SystemExit:
+        return None
+
+    # replay: `target`; fuzz: `targets` (one or more, the first is loaded).
+    targets = getattr(ns, "targets", None) or [getattr(ns, "target", None)]
+    return targets[0]
 
 
 def _fuzz_target(args: list[str]) -> str | None:
-    """Target path after `fuzz`/`replay` in argv (None when absent).
+    """Target path after `fuzz`/`replay` in argv (None when absent or invalid).
 
-    Options may come first (`replay --inprocess-direct -N 5 t.so c.bin`), and
-    option values look like positionals ("5", a dict file). The first ELF file
-    on disk wins; else the first non-option token, for paths not yet on disk.
+    `replay t.so c.bin -N 5`: the token after the command is the target.
+    `replay --inprocess-direct -N 5 t.so c.bin`: option values look like
+    positionals ("5", an ELF passed to -d), so the parser decides by role.
     """
     cmd = next((i for i, a in enumerate(args) if a in _PRELOAD_COMMANDS), None)
-    if cmd is None:
+    if cmd is None or cmd + 1 >= len(args):
         return None
 
-    positional = [a for a in args[cmd + 1 :] if not a.startswith("-")]
-    return next((a for a in positional if _is_elf(a)), positional[0] if positional else None)
+    first = args[cmd + 1]
+    if not first.startswith("-"):
+        return first
+    return _parsed_target(args)
 
 
 def _merge_opts(var: str, defaults: tuple[str, ...]) -> None:

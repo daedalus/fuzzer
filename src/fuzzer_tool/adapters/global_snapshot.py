@@ -13,13 +13,15 @@ Not restored: heap, TLS, the shim's own sections, ASAN global redzones. A
 global that points into heap freed by a later exec reads the freed pointer
 back after restore.
 
-Refused for targets linking a shared type registry (libgobject): a static
-cache in .bss (g_once GType) is zeroed, the registry keeps the type, and the
-re-registration returns 0. GStreamer 1.28.9: NULL GstMetaInfo -> SIGSEGV.
+Refused when the target uses a shared type registry (libgobject in DT_NEEDED,
+mapped after load, or deps unreadable): a static cache in .bss (g_once GType)
+is zeroed, the registry keeps the type, and the re-registration returns 0.
+GStreamer 1.28.9: NULL GstMetaInfo -> SIGSEGV.
 """
 
 import ctypes
 import logging
+from enum import Enum
 
 from fuzzer_tool.adapters.libc_symbols import module_base
 from fuzzer_tool.core.elf import data_ranges, needed_libs
@@ -87,9 +89,42 @@ class _AsanShadow:
         return tuple(out)
 
 
-def _registry_lib(needed: tuple[bytes, ...]) -> bytes:
-    """First soname in *needed* that is a shared registry; ``b""`` when none."""
-    return next((n for n in needed if n.startswith(_REGISTRY_LIBS)), b"")
+class Registry(Enum):
+    """Shared-registry policy at capture: refuse (GUARD) or restore anyway (IGNORE)."""
+
+    GUARD = "guard"
+    IGNORE = "ignore"
+
+
+_MAPS = "/proc/self/maps"
+_UNKNOWN_DEPS = "unknown dependencies"
+
+
+def _mapped_registry() -> str:
+    """Basename of a registry mapped in this process; ``""`` when none.
+
+    Catches registries reached through a dependency (target -> libmid ->
+    libgobject) or listed only in PT_DYNAMIC: run after the target is loaded.
+    """
+    with open(_MAPS, "rb") as maps:
+        for line in maps:
+            name = line.rsplit(b"/", 1)[-1].strip()
+            if name.startswith(_REGISTRY_LIBS):
+                return name.decode(errors="replace")
+    return ""
+
+
+def _shared_registry(elf: bytes) -> str:
+    """Why restore would desync a shared registry; ``""`` when safe.
+
+    e.g. ``"libgobject-2.0.so.0"`` (direct or mapped), or unknown deps (malformed).
+    """
+    needed = needed_libs(elf)
+    if needed is None:
+        return _UNKNOWN_DEPS
+
+    direct = next((n for n in needed if n.startswith(_REGISTRY_LIBS)), b"")
+    return direct.decode(errors="replace") or _mapped_registry()
 
 
 class GlobalSnapshot:
@@ -108,7 +143,12 @@ class GlobalSnapshot:
 
     @classmethod
     def capture(
-        cls, lib: ctypes.CDLL, path: str, entry, level: int = logging.WARNING
+        cls,
+        lib: ctypes.CDLL,
+        path: str,
+        entry,
+        level: int = logging.WARNING,
+        registry: Registry = Registry.GUARD,
     ) -> "GlobalSnapshot | None":
         """Snapshot *lib*'s globals; None when unsafe or unknown.
 
@@ -122,15 +162,22 @@ class GlobalSnapshot:
         ranges = data_ranges(elf)
 
         # Restore would desync the target's caches from a shared registry.
-        registry = _registry_lib(needed_libs(elf) or ())
-        if registry:
+        shared = _shared_registry(elf)
+        if shared and registry is Registry.GUARD:
             log.log(
                 level,
-                "snapshot-restore: %s links shared %s (type registry); restore off.",
+                "snapshot-restore: %s uses shared %s (type registry); restore off.",
                 path,
-                registry.decode(errors="replace"),
+                shared,
             )
             return None
+        if shared:
+            log.warning(
+                "snapshot-restore: %s uses shared %s; restoring anyway (globals-unsafe): "
+                "crashes may be restore artifacts.",
+                path,
+                shared,
+            )
 
         base = module_base(ctypes.cast(entry, ctypes.c_void_p).value or 0)
         if ranges is None or not base:

@@ -497,13 +497,13 @@ class TestSharedRegistry:
 
         assert cut is None or set(cut) <= set(full)
 
-    def test_control_off_registers_once(self, gtype_so):
+    def test_control_off_once(self, gtype_so):
         """Control: without restore the cached GType stays valid every exec."""
         rcs, _ = _gtype_probe(gtype_so, "off", "aaa")
 
         assert rcs == [0, 0, 0]
 
-    def test_regression_restore_resets_gtype_cache(self, gtype_so):
+    def test_regression_gtype_cache(self, gtype_so):
         """GStreamer 1.28.9: restore zeroed a g_once GType cache, re-registration failed.
 
         gst_buffer_add_audio_clipping_meta SIGSEGV at 0x10 on exec 2, hang on exec 3.
@@ -513,8 +513,163 @@ class TestSharedRegistry:
         assert rcs == [0, 0, 0]
         assert "snapshot-restore" in err
 
-    def test_regression_abandon_restore_resets_gtype_cache(self, gtype_so):
+    def test_regression_abandon_gtype(self, gtype_so):
         """Adversarial: off mode still restored globals after a guarded crash."""
         rcs, _ = _gtype_probe(gtype_so, "off", "aCa")
 
         assert rcs[0] == 0 and rcs[1] < 0 and rcs[2] == 0
+
+
+class TestUnsafeRestore:
+    """`globals-unsafe`: restore despite a shared registry, to reproduce its artifacts."""
+
+    def test_reproduces_artifact(self, gtype_so):
+        """Falsification: skipping the guard brings back exec-2 failure, with a warning."""
+        rcs, err = _gtype_probe(gtype_so, "globals-unsafe", "aaa")
+
+        assert rcs == [0, 1, 1]
+        assert "artifact" in err
+
+    def test_plain_same_as_globals(self, probe_so):
+        """Control: without a registry, unsafe restores exactly like globals."""
+        rcs, err = _probe(probe_so, "globals-unsafe")
+        fresh = 1 * 10 + 0
+
+        assert rcs == [fresh] * len(rcs)
+        assert "artifact" not in err
+
+    def test_off_abandon_keeps_guard(self, gtype_so):
+        """Adversarial: the unsafe opt-in must not leak into off mode's abandon restore."""
+        rcs, _ = _gtype_probe(gtype_so, "off", "aCa")
+
+        assert rcs[2] == 0
+
+    @pytest.mark.parametrize("cmd", ["fuzz", "replay"])
+    def test_cli_accepts(self, monkeypatch, tmp_path, cmd):
+        from fuzzer_tool.cli import commands
+
+        seen = []
+        exe = tmp_path / "t"
+        exe.write_bytes(b"\x7fELF")
+        exe.chmod(0o755)
+        if cmd == "fuzz":
+            monkeypatch.setattr(commands, "Fuzzer", lambda **kw: seen.append(kw) or MagicMock())
+            argv = ["fuzz", str(exe), "-d", str(tmp_path / "c")]
+        else:
+            monkeypatch.setattr(commands, "cmd_replay", lambda a: seen.append(vars(a)) or 0)
+            argv = ["replay", str(exe), "crash.bin"]
+        monkeypatch.setattr(
+            sys, "argv", ["fuzzer-tool", *argv, "--snapshot-restore", "globals-unsafe"]
+        )
+        commands.main()
+        got = seen[-1].get("state_restore", seen[-1].get("snapshot_restore"))
+
+        assert getattr(got, "value", got) == "globals-unsafe"
+
+
+# Shared lib that owns the registry; the target links only this, not libgobject.
+MID_SRC = r"""
+#include <glib-object.h>
+unsigned long mid_register(void) {
+    return (unsigned long)g_pointer_type_register_static("FuzzSnapshotMid");
+}
+"""
+
+# Target caches mid's handle in .bss; 0 back from mid = registration failed.
+INDIRECT_SRC = r"""
+#include <stddef.h>
+unsigned long mid_register(void);
+static unsigned long cached;
+__attribute__((visibility("default")))
+int fuzz_test(const unsigned char *buf, size_t len) {
+    (void)buf; (void)len;
+    if (!cached)
+        cached = mid_register();
+    return cached == 0;
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def indirect_so(tmp_path_factory) -> Path:
+    """Target -> libmid.so -> libgobject: the registry is not in the target's DT_NEEDED."""
+    tmp = tmp_path_factory.mktemp("snap_indirect")
+    pkg = subprocess.run(
+        ["pkg-config", "--cflags", "--libs", "gobject-2.0"], capture_output=True, text=True
+    )
+    if shutil.which("clang") is None or pkg.returncode != 0:
+        pytest.skip("clang or gobject-2.0 dev files not available")
+    (tmp / "mid.c").write_text(MID_SRC)
+    mid = subprocess.run(
+        ["clang", "-O1", "-fPIC", "-shared", "-o", str(tmp / "libmid.so"), str(tmp / "mid.c"),
+         *pkg.stdout.split()],
+        capture_output=True, text=True,
+    )  # fmt: skip
+    if mid.returncode != 0:
+        pytest.skip(f"libmid build failed: {mid.stderr[-400:]}")
+    link = ("-L" + str(tmp), "-lmid", "-Wl,-rpath," + str(tmp))
+    return _build(tmp, "indirect", SHIM, link, INDIRECT_SRC)
+
+
+_SHT_PROGBITS = 1
+
+
+def _hide_dynamic(so: Path, out: Path) -> Path:
+    """Copy *so* with SHT_DYNAMIC retyped: the loader still uses PT_DYNAMIC."""
+    elf = bytearray(so.read_bytes())
+    shoff = struct.unpack_from("<Q", elf, 40)[0]
+    shentsize, shnum = struct.unpack_from("<HH", elf, 58)
+    for i in range(shnum):
+        sh = shoff + i * shentsize
+        if struct.unpack_from("<I", elf, sh + 4)[0] == 6:
+            struct.pack_into("<I", elf, sh + 4, _SHT_PROGBITS)
+    out.write_bytes(bytes(elf))
+    out.chmod(0o755)
+    return out
+
+
+def _short_shdr_elf() -> bytes:
+    """Two 40-byte section headers, the last SHT_DYNAMIC, file ends at the table."""
+    ent, num, shoff = 40, 2, 64
+    hdr = bytearray(64)
+    hdr[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<Q", hdr, 40, shoff)
+    struct.pack_into("<HHH", hdr, 58, ent, num, 0)
+    tbl = bytearray(ent * num)
+    struct.pack_into("<I", tbl, ent + 4, 6)
+    return bytes(hdr + tbl)
+
+
+class TestRegistryReview:
+    """PR #463 review: unknown deps, indirect registries, short section headers."""
+
+    def test_regression_short_shdr(self):
+        """40-byte shdr entries: reading sh_link past the end raised struct.error."""
+        from fuzzer_tool.core.elf import needed_libs
+
+        assert needed_libs(_short_shdr_elf()) is None
+
+    def test_regression_hidden_dynamic(self, gtype_so, tmp_path):
+        """No SHT_DYNAMIC, PT_DYNAMIC still links libgobject: restore must stay off."""
+        so = _hide_dynamic(gtype_so, tmp_path / "hidden.so")
+        rcs, err = _gtype_probe(so, "globals", "aaa")
+
+        assert rcs == [0, 0, 0]
+        assert "snapshot-restore" in err
+
+    def test_control_indirect_off(self, indirect_so):
+        """Control: without restore the indirect probe stays valid."""
+        rcs, _ = _gtype_probe(indirect_so, "off", "aaa")
+
+        assert rcs == [0, 0, 0]
+
+    def test_regression_indirect(self, indirect_so):
+        """Registry reached through a dependency: direct DT_NEEDED check missed it."""
+        from fuzzer_tool.core.elf import needed_libs
+
+        needed = needed_libs(indirect_so.read_bytes()) or ()
+        rcs, err = _gtype_probe(indirect_so, "globals", "aaa")
+
+        assert not any(n.startswith(b"libgobject") for n in needed)  # really indirect
+        assert rcs == [0, 0, 0]
+        assert "snapshot-restore" in err

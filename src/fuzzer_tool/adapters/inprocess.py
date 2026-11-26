@@ -21,7 +21,7 @@ import tempfile
 from collections.abc import Callable
 
 from fuzzer_tool.adapters import libc_mem, libc_shm
-from fuzzer_tool.adapters.global_snapshot import GlobalSnapshot
+from fuzzer_tool.adapters.global_snapshot import GlobalSnapshot, Registry
 from fuzzer_tool.adapters.guard_arena import GUARD_OVERREAD, GuardArena
 from fuzzer_tool.adapters.heap_input import HeapInput
 from fuzzer_tool.adapters.loaded_image import NO_IMAGE, LoadedImage, NoImage
@@ -555,7 +555,11 @@ class InProcessRunner:
         if self._restore_mode is StateRestore.OFF:
             self._bind_abandon_restore()
             return
-        snap = GlobalSnapshot.capture(self._lib, self.target, self._func_ptr)
+        # globals-unsafe: restore despite a shared registry (artifact repro).
+        registry = (
+            Registry.IGNORE if self._restore_mode is StateRestore.GLOBALS_UNSAFE else Registry.GUARD
+        )
+        snap = GlobalSnapshot.capture(self._lib, self.target, self._func_ptr, registry=registry)
         if snap is None:
             return
         self._restore = snap.restore
