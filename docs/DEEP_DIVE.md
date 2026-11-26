@@ -1697,9 +1697,10 @@ fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 fuzzer-tool replay ./t.so crash.bin                                  # subprocess loader (default)
 fuzzer-tool replay ./t.so crash.bin --inprocess-direct               # direct_lite
 fuzzer-tool replay ./t.so crash.bin --inprocess --inprocess-direct   # direct
+fuzzer-tool replay ./t.so crash.bin --inprocess-direct -N 100        # reproduction rate
 ```
 
-Same flag mapping as `minimize` (`ExecMode`); a `.so` with no flag uses the loader, since it cannot be exec'd. An executable always spawns. `--inprocess-func` names the entry (default: probed). Use direct modes to reproduce crashes that depend on in-process state. Tests: `tests/test_replay_inprocess.py`.
+Same flag mapping as `minimize` (`ExecMode`); a `.so` with no flag uses the loader, since it cannot be exec'd. An executable always spawns. `--inprocess-func` names the entry (default: probed). Use direct modes to reproduce crashes that depend on in-process state. `-N/--repeat` runs N times on one runner and prints `Reproduced k/N`. Details are printed for the first hit only; exit 0 if any run crashed. Direct modes keep globals across the N calls; the loader forks per call, so state resets. Tests: `tests/test_replay_inprocess.py`.
 
 ### Edge dump (`services/edge_export.py`)
 

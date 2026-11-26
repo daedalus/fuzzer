@@ -2398,41 +2398,82 @@ def _replay_exec_mode(args):
     return mode
 
 
+def _replay_runner(args):
+    """Bind replay's backend once: ``data -> (rc, stderr)``. Returns (run, stop)."""
+    from fuzzer_tool.services.minimize import DEFAULT_INPROCESS_FUNC, ExecMode
+
+    mode = _replay_exec_mode(args)
+    if mode is ExecMode.SPAWN:
+        env = os.environ.copy()
+        return (lambda data: _replay_exec(args, data, env)), (lambda: None)
+
+    # Default name on a .so: probe the entry point, as fuzz does.
+    func = None if args.inprocess_func == DEFAULT_INPROCESS_FUNC else args.inprocess_func
+    return _so_exec(args.target, args.timeout, mode, func)
+
+
+def _replay_hit(returncode: int, stderr: str) -> bool:
+    """Crash verdict of ``_print_replay``: sanitizer report, or a non-timeout signal."""
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    report = SanitizerReport.parse(stderr)
+    if report and report.is_valid():
+        return True
+    if returncode == -1:
+        return False
+    return returncode in SIGNAL_CRASH_CODES or returncode < 0
+
+
 def cmd_replay(args):
-    """Replay a crash input against the target."""
+    """Replay a crash input against the target, ``--repeat`` times."""
     _validate_target(args.target)
 
     crash_path = Path(args.crash_file)
     if not crash_path.is_file():
         print(f"[-] Crash file not found: {args.crash_file}", file=sys.stderr)
         return 1
+    if args.repeat < 1:
+        print(f"[-] -N/--repeat must be >= 1, got {args.repeat}", file=sys.stderr)
+        return 1
 
     data = crash_path.read_bytes()
     print(f"[*] Replaying {len(data)} bytes from {args.crash_file}")
 
+    try:
+        run, stop = _replay_runner(args)
+    except (AttributeError, OSError) as e:
+        print(f"[-] In-process runner failed for {args.inprocess_func}: {e}", file=sys.stderr)
+        return 1
+
+    # One runner for all N: direct modes keep in-process state across repeats.
+    # Keep only the first hit (reported) and the last run (fallback): memory bounded.
+    hits = 0
+    first_hit = None
+    try:
+        for _ in range(args.repeat):
+            last = run(data)
+            if not _replay_hit(*last):
+                continue
+            hits += 1
+            first_hit = first_hit or last
+    finally:
+        stop()
+
+    status = _print_replay(*(first_hit or last), args.timeout)
+    if args.repeat > 1:
+        print(f"[*] Reproduced {hits}/{args.repeat}")
+    return status
+
+
+def _print_replay(returncode: int, stderr: str, timeout: float) -> int:
+    """Print one replay's verdict; 0 when it crashed, else 1."""
     from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, signal_number
     from fuzzer_tool.core.sanitizer import SanitizerReport
-    from fuzzer_tool.services.minimize import DEFAULT_INPROCESS_FUNC, ExecMode
-
-    mode = _replay_exec_mode(args)
-    if mode is ExecMode.SPAWN:
-        returncode, stderr = _replay_exec(args, data, os.environ.copy())
-    else:
-        # Default name on a .so: probe the entry point, as fuzz does.
-        func = None if args.inprocess_func == DEFAULT_INPROCESS_FUNC else args.inprocess_func
-        try:
-            run, stop = _so_exec(args.target, args.timeout, mode, func)
-        except (AttributeError, OSError) as e:
-            print(f"[-] In-process runner failed for {func}: {e}", file=sys.stderr)
-            return 1
-        try:
-            returncode, stderr = run(data)
-        finally:
-            stop()
 
     report = SanitizerReport.parse(stderr)
     if returncode == -1 and not (report and report.is_valid()):
-        print(f"[*] Target timed out after {args.timeout}s")
+        print(f"[*] Target timed out after {timeout}s")
         return 1
 
     if report and report.is_valid():
@@ -8676,6 +8717,13 @@ def main() -> int:
         "--inprocess-func",
         default="LLVMFuzzerTestOneInput",
         help="Function name for in-process replay (default: probe the .so)",
+    )
+    replay_parser.add_argument(
+        "-N",
+        "--repeat",
+        type=int,
+        default=1,
+        help="Replay N times on one runner; prints the reproduction rate (default: 1)",
     )
     replay_parser.set_defaults(func=cmd_replay)
 

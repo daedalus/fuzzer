@@ -65,13 +65,13 @@ def build_so(tmp_path):
         pytest.skip("clang not available")
     count = 0
 
-    def build() -> str:
+    def build(source: str = TARGET_SRC) -> str:
         nonlocal count
         count += 1
         d = tmp_path / f"so{count}"
         d.mkdir()
         src = d / "t.c"
-        src.write_text(TARGET_SRC)
+        src.write_text(source)
         so = d / "t.so"
         cmd = ["clang", "-O1", "-fPIC", "-shared", "-o", str(so), str(src), str(SHIM)]
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -109,6 +109,11 @@ class TestFlags:
         a = self._args("t.so")
         assert (a.inprocess, a.inprocess_direct) == (False, False)
         assert a.inprocess_func == "LLVMFuzzerTestOneInput"
+        assert a.repeat == 1
+
+    @pytest.mark.parametrize("flag", ["-N", "--repeat"])
+    def test_repeat_parses(self, flag):
+        assert self._args("t.so", flag, "5").repeat == 5
 
     @pytest.mark.parametrize(
         ("flags", "want"),
@@ -158,3 +163,123 @@ class TestReplay:
         out = capsys.readouterr()
         assert rc == NOT_REPRODUCED
         assert "Crash reproduced" not in out.out
+
+
+# Scripted runner outcomes: rc 0 clean, 134 SIGABRT (128 + 6).
+CLEAN_RUN = (0, "")
+ABORT_RUN = (134, "")
+
+
+class TestRepeat:
+    """-N: one runner, N calls, first hit reported, k/N summary."""
+
+    @pytest.fixture
+    def scripted(self, monkeypatch):
+        """Replace the backend with a scripted run; record call and stop counts."""
+        self.calls = 0
+        self.stops = 0
+
+        def install(outcomes):
+            def run(_data):
+                out = outcomes[self.calls]
+                self.calls += 1
+                return out
+
+            def stop():
+                self.stops += 1
+
+            monkeypatch.setattr(commands, "_replay_runner", lambda _args: (run, stop))
+
+        return install
+
+    def _run(self, monkeypatch, tmp_path, *flags):
+        exe = shutil.which("true")
+        assert exe is not None
+        return _main(monkeypatch, exe, _input(tmp_path, CRASH), *flags)
+
+    def test_runs_exactly_n(self, monkeypatch, tmp_path, scripted, capsys):
+        outcomes = [CLEAN_RUN, ABORT_RUN, CLEAN_RUN, ABORT_RUN, CLEAN_RUN]
+        scripted(outcomes)
+        n = len(outcomes)
+        hits = outcomes.count(ABORT_RUN)
+
+        assert self._run(monkeypatch, tmp_path, "-N", str(n)) == REPRODUCED
+        assert (self.calls, self.stops) == (n, 1)
+        assert f"Reproduced {hits}/{n}" in capsys.readouterr().out
+
+    def test_never_reproduced(self, monkeypatch, tmp_path, scripted, capsys):
+        # Falsification: N clean runs must not read as a crash.
+        n = 3
+        scripted([CLEAN_RUN] * n)
+        assert self._run(monkeypatch, tmp_path, "-N", str(n)) == NOT_REPRODUCED
+        out = capsys.readouterr().out
+        assert f"Reproduced 0/{n}" in out
+        assert "Crash reproduced" not in out
+
+    def test_late_hit_is_reported(self, monkeypatch, tmp_path, scripted, capsys):
+        # Adversarial: a crash only on the last run still wins over earlier clean runs.
+        n = 4
+        scripted([CLEAN_RUN] * (n - 1) + [ABORT_RUN])
+        assert self._run(monkeypatch, tmp_path, "-N", str(n)) == REPRODUCED
+        out = capsys.readouterr().out
+        assert "Crash reproduced: signal 6" in out
+        assert "No crash detected" not in out
+
+    def test_single_run_prints_no_summary(self, monkeypatch, tmp_path, scripted, capsys):
+        scripted([ABORT_RUN])
+        assert self._run(monkeypatch, tmp_path) == REPRODUCED
+        assert "Reproduced 1/1" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize("n", ["0", "-3"])
+    def test_rejects_non_positive(self, monkeypatch, tmp_path, scripted, n):
+        # Adversarial: no runs, an error exit.
+        scripted([])
+        assert self._run(monkeypatch, tmp_path, "-N", n) == NOT_REPRODUCED
+        assert self.calls == 0
+
+
+# Aborts on the CALLS-th call: needs state that survives between calls.
+STATEFUL_SRC = r"""
+#include <stddef.h>
+#include <stdlib.h>
+#ifndef CALLS
+#define CALLS 3
+#endif
+static int calls;
+__attribute__((visibility("default")))
+int fuzz_test(const unsigned char *buf, size_t len) {
+    (void)buf; (void)len;
+    if (++calls == CALLS) abort();
+    return 0;
+}
+"""
+STATEFUL_CALLS = 3
+
+
+class TestRepeatState:
+    """Direct modes keep globals across repeats; the loader forks per call."""
+
+    def _hits(self, monkeypatch, tmp_path, build_so, mode, n, capsys) -> str:
+        flags = (*IN_PROCESS_MODES[mode], "--inprocess-func", "fuzz_test", "-N", str(n))
+        _main(monkeypatch, build_so(STATEFUL_SRC), _input(tmp_path, BENIGN), *flags)
+        return capsys.readouterr().out
+
+    @pytest.mark.parametrize("mode", [ExecMode.DIRECT_LITE, ExecMode.DIRECT], ids=lambda m: m.value)
+    def test_direct_reaches_stateful_crash(self, monkeypatch, tmp_path, build_so, mode, capsys):
+        # The counter equals CALLS exactly once in N > CALLS calls.
+        n = STATEFUL_CALLS + 2
+        out = self._hits(monkeypatch, tmp_path, build_so, mode, n, capsys)
+        assert f"Reproduced 1/{n}" in out
+
+    @pytest.mark.parametrize("mode", [ExecMode.DIRECT_LITE, ExecMode.DIRECT], ids=lambda m: m.value)
+    def test_control_below_threshold(self, monkeypatch, tmp_path, build_so, mode, capsys):
+        # Falsification: fewer calls than CALLS never crash, so the hit above is the counter.
+        n = STATEFUL_CALLS - 1
+        out = self._hits(monkeypatch, tmp_path, build_so, mode, n, capsys)
+        assert f"Reproduced 0/{n}" in out
+
+    def test_loader_resets_state(self, monkeypatch, tmp_path, build_so, capsys):
+        # Each call runs in a fresh fork: the counter never passes 1.
+        n = STATEFUL_CALLS + 2
+        out = self._hits(monkeypatch, tmp_path, build_so, ExecMode.LOADER, n, capsys)
+        assert f"Reproduced 0/{n}" in out
