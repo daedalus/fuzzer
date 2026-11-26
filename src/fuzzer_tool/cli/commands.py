@@ -353,22 +353,27 @@ def _asan_so_ready(target: str) -> None:
         _preload_asan(target)
 
 
-def _so_exec(target: str, timeout: float):
+def _so_exec(target: str, timeout: float, mode=None, func: str | None = None):
     """Bind one-input execution of a .so target: ``data -> (rc, stderr)``.
 
     A .so cannot be exec'd: it dies with SIGSEGV on every input, so verify
     and replay once "confirmed" every crash file. It runs through the
-    in-process loader child instead. Returns (run, stop).
+    in-process loader child by default; ``mode`` (an ``ExecMode``) picks
+    direct/direct_lite instead. ``func`` None probes the entry point.
+    Returns (run, stop).
     """
     from fuzzer_tool.adapters.inprocess import InProcessRunner
     from fuzzer_tool.services.fuzzer import Fuzzer
+    from fuzzer_tool.services.minimize import ExecMode
 
     _asan_so_ready(target)
     runner = InProcessRunner(
         target=target,
-        function_name=Fuzzer._probe_so_function(target),
+        function_name=func or Fuzzer._probe_so_function(target),
         timeout=timeout,
         capture_stderr=True,
+        direct=mode is ExecMode.DIRECT,
+        direct_lite=mode is ExecMode.DIRECT_LITE,
     )
     return runner.run_one, runner.stop
 
@@ -2383,33 +2388,106 @@ def cmd_mutants_score(args):
     return 0
 
 
+def _replay_exec_mode(args):
+    """Backend for ``replay``: fuzz's flag mapping for a .so; anything else spawns.
+
+    A .so cannot be exec'd, so it never spawns; a script or executable
+    cannot be dlopen'd, so it always does.
+    """
+    from fuzzer_tool.services.minimize import ExecMode
+
+    if not _is_shared_object(args.target):
+        return ExecMode.SPAWN
+
+    mode = _minimize_exec_mode(args, args.target)
+    return ExecMode.LOADER if mode is ExecMode.SPAWN else mode
+
+
+def _replay_runner(args):
+    """Bind replay's backend once: ``data -> (rc, stderr)``. Returns (run, stop)."""
+    from fuzzer_tool.services.minimize import ExecMode
+
+    mode = _replay_exec_mode(args)
+    if mode is ExecMode.SPAWN:
+        env = os.environ.copy()
+        return (lambda data: _replay_exec(args, data, env)), (lambda: None)
+
+    # No --inprocess-func: probe the entry point, as fuzz does.
+    return _so_exec(args.target, args.timeout, mode, args.inprocess_func)
+
+
+# Runner sentinels (not signals): -1 timeout, -2 infrastructure failure.
+_RC_TIMEOUT = -1
+_RC_RUNNER_ERROR = -2
+
+
+def _replay_hit(returncode: int, stderr: str) -> bool:
+    """Crash verdict of ``_print_replay``: sanitizer report, or a signal (not a sentinel)."""
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    report = SanitizerReport.parse(stderr)
+    if report and report.is_valid():
+        return True
+    if returncode in (_RC_TIMEOUT, _RC_RUNNER_ERROR):
+        return False
+    return returncode in SIGNAL_CRASH_CODES or returncode < 0
+
+
 def cmd_replay(args):
-    """Replay a crash input against the target."""
+    """Replay a crash input against the target, ``--repeat`` times."""
     _validate_target(args.target)
 
     crash_path = Path(args.crash_file)
     if not crash_path.is_file():
         print(f"[-] Crash file not found: {args.crash_file}", file=sys.stderr)
         return 1
+    if args.repeat < 1:
+        print(f"[-] -N/--repeat must be >= 1, got {args.repeat}", file=sys.stderr)
+        return 1
 
     data = crash_path.read_bytes()
     print(f"[*] Replaying {len(data)} bytes from {args.crash_file}")
 
+    try:
+        run, stop = _replay_runner(args)
+    except (AttributeError, OSError) as e:
+        print(f"[-] In-process runner failed for {args.inprocess_func}: {e}", file=sys.stderr)
+        return 1
+
+    # One runner for all N: direct modes keep in-process state across repeats.
+    # Keep only the first hit (reported) and the last run (fallback): memory bounded.
+    hits = 0
+    first_hit = None
+    try:
+        for _ in range(args.repeat):
+            last = run(data)
+            if not _replay_hit(*last):
+                continue
+            hits += 1
+            first_hit = first_hit or last
+    finally:
+        stop()
+
+    status = _print_replay(*(first_hit or last), args.timeout)
+    if args.repeat > 1:
+        print(f"[*] Reproduced {hits}/{args.repeat}")
+    return status
+
+
+def _print_replay(returncode: int, stderr: str, timeout: float) -> int:
+    """Print one replay's verdict; 0 when it crashed, else 1."""
     from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, signal_number
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
-    if _is_shared_object(args.target):
-        run, stop = _so_exec(args.target, args.timeout)
-        try:
-            returncode, stderr = run(data)
-        finally:
-            stop()
-    else:
-        returncode, stderr = _replay_exec(args, data, os.environ.copy())
-
     report = SanitizerReport.parse(stderr)
-    if returncode == -1 and not (report and report.is_valid()):
-        print(f"[*] Target timed out after {args.timeout}s")
+    if returncode == _RC_TIMEOUT and not (report and report.is_valid()):
+        print(f"[*] Target timed out after {timeout}s")
+        return 1
+
+    # The runner failed (not the target): no verdict.
+    if returncode == _RC_RUNNER_ERROR and not (report and report.is_valid()):
+        print(f"[-] Runner error: {stderr[:200]}")
         return 1
 
     if report and report.is_valid():
@@ -7840,8 +7918,7 @@ def main() -> int:
         "--swarm-prob",
         type=float,
         default=DEFAULT_SWARM_PROB,
-        help="With --swarm: per-operator inclusion probability in (0, 1) "
-        "(default %(default)s)",
+        help="With --swarm: per-operator inclusion probability in (0, 1) (default %(default)s)",
     )
     fuzz_parser.add_argument(
         "--swarm-scope",
@@ -8641,6 +8718,26 @@ def main() -> int:
         "--target-args",
         nargs=argparse.REMAINDER,
         help="Target arguments ({file} placeholder)",
+    )
+    replay_parser.add_argument(
+        "--inprocess", action="store_true", help="Replay through the in-process loader"
+    )
+    replay_parser.add_argument(
+        "--inprocess-direct",
+        action="store_true",
+        help="Direct ctypes call (alone: direct_lite; with --inprocess: direct)",
+    )
+    replay_parser.add_argument(
+        "--inprocess-func",
+        default=None,
+        help="Function name for in-process replay (default: probe the .so)",
+    )
+    replay_parser.add_argument(
+        "-N",
+        "--repeat",
+        type=int,
+        default=1,
+        help="Replay N times on one runner; prints the reproduction rate (default: 1)",
     )
     replay_parser.set_defaults(func=cmd_replay)
 
