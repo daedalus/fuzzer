@@ -69,7 +69,8 @@ class KatzChannel:
         self, icfg: InterproceduralCFG, node_of: dict[int, int], clock: Clock = WALL_CLOCK
     ):
         self.icfg = icfg
-        # Decision clock: the recompute budget gates when Katz energy refreshes.
+        # Host clock: the recompute budget meters real cost. A virtual clock
+        # reads every rebuild as 0 s and disables it; inject one only in tests.
         self._clock = clock
         self.node_of = node_of
         self.n_nodes = icfg.n_nodes

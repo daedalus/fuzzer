@@ -3545,9 +3545,9 @@ class Fuzzer:
             try:
                 from fuzzer_tool.services.katz_channel import KatzChannel
 
-                ch = KatzChannel.build(
-                    target, use_cfg_cache=use_cfg_cache, debug=self.debug, clock=self._clock
-                )
+                # Host clock: the recompute budget meters real CPU cost, which
+                # the virtual clock reads as 0 (rebuilt every 50 execs).
+                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
                 if ch is not None and ch.upload():
                     self._katz_channel = ch
                     print(
