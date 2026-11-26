@@ -154,7 +154,7 @@ fuzzer, not just the target.
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
 | `python tools/gen_ffmpeg_803_seeds.py [--out DIR]` | Write the 8.0.3 version-diff crash seeds (14 crafted) into `<out>/seeds/` (default `~/fuzzing/ffmpeg_803_potential_crashes`) |
 | `tools/mint_ffmpeg_803_baselines.sh [--out DIR]` | Mint 12 container mutation baselines for the 8.0.3 seed pack into `<out>/seeds/` |
-| `python tools/gen_ffmpeg_91_seeds.py [--out DIR]` | Write the 9.0.2 version-diff crash seeds (3 crafted, from the 9.0.2->9.1 diff) into `<out>/seeds/` (default `~/fuzzing/ffmpeg_91_potential_crashes`) |
+| `python tools/gen_ffmpeg_91_seeds.py [--out DIR]` | Write the 9.0.2 version-diff crash seeds (7 crafted, from the 9.0.2->9.1 diff) into `<out>/seeds/` (default `~/fuzzing/ffmpeg_91_potential_crashes`) |
 | `tools/benchmark.py list` / `tools/benchmark.py <name> [args]` | All benchmarks behind one entry point (`smoke`, `sweep`, `paired`, `replicated`, …) |
 | `tools/sim_funnel_probe.py [--mode load\|growth\|hot\|real]` / `tools/edge_hit_spectrum.py TARGET -d CORPUS -o OUT.pkl` | SHM probe-table simulator (linear/funnel/elastic/hybrid) and measured per-edge hit spectrum; see `docs/handover/handover_funnel_elastic_hashing_2026-11-05.md` |
 | `python tools/fuzz.py [elf\|state\|learner\|ops\|mutate] [--seed N] [--replay FILE]` | Self-fuzz fuzzer-tool's own parsers; crashes in `~/fuzzing/selffuzz-crashes/` |

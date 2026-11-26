@@ -9,8 +9,10 @@ Changelog); the candidates below come from the libavformat tree diff instead.
 
 Most of 9.0.2's security fixes were also backported from master, so the genuine
 9.0.2-only delta is small and dominated by integer-overflow / large-allocation
-hardening rather than fresh OOB (those landed in both branches). The confirmed
-hand-craftable hunks:
+hardening rather than fresh OOB (those landed in both branches); the rest is
+float-cast hardening — NaN or out-of-range doubles stored into int64 — which the
+ubsan builds catch (`-fsanitize=undefined` includes float-cast-overflow).
+The confirmed hand-craftable hunks:
 
   caf  (libavformat/cafdec.c read_pakt_chunk): `st->nb_frames += priming` /
        `+= remainder` with no prior range check. 9.1 adds
@@ -26,12 +28,42 @@ hand-craftable hunks:
        with size straight from the chunk header. 9.1 caps the coding history at 1 MiB.
        -> up to ~4 GiB allocation (OOM / memory-DoS probe).
 
+  sbg  (libavformat/sbgdec.c scale_double): strtod accepts 'nan'; NaN fails both
+       `m < INT_MIN` and `m >= INT_MAX`, so `*r = m` casts NaN to int. 9.1 adds
+       isnan(m). sbg_read_probe parses the whole script, so this already fires
+       during avformat_open_input's format detection.
+       -> float-cast-overflow (UBSAN).
+
+  flv  (libavformat/flvdec.c amf_parse_object): `s->duration = num_val *
+       AV_TIME_BASE` with num_val a raw AMF double; NaN stays NaN through the
+       multiply. 9.1 gates duration / videodatarate / audiodatarate.
+       -> float-cast-overflow (UBSAN).
+
+  webm (libavformat/matroskadec.c matroska_read_header): `ctx->duration =
+       duration * time_scale * 1000 / AV_TIME_BASE` guards only isnan(duration);
+       a finite huge double overflows the int64 store. 9.1 also rejects
+       duration < 0 and duration >= INT64_MAX / time_scale.
+       -> float-cast-overflow (UBSAN).
+
+  rf64 (libavformat/wavdec.c wav_read_header): the ds64 data_size saturates
+       av_sat_add64 into data_end = INT64_MAX; `next_tag_ofs = data_end +
+       (data_size & 1)` then adds 1. 9.1 wraps that add in av_sat_add64.
+       -> signed int64 overflow (UBSAN).
+
 Analyzed but not crafted (weak or needs a real baseline, not a magic seed):
   nsvdec.c  `vsize -= auxsize + 6` unsigned underflow -> large av_get_packet (ENOMEM).
-  flvdec.c  keyframe `arraylen` up to 2^28 -> ~2 GiB av_mallocz (ENOMEM).
+  flvdec.c  keyframe `arraylen`: 9.1 bounds it by the metadata tag size; still an
+            ENOMEM probe, not a crash.
   mov.c     v2 audio sample entry: `sample_rate = av_int2double(avio_rb64())` with no
-            NaN/range check (9.1 rejects it); reachable only via a full moov/trak/stsd,
-            so it belongs in the mint-baseline path, not a crafted magic seed.
+            NaN/range check (9.1 rejects it), plus the elst edit-list and tmap
+            extent_offset overflows; all need a full moov/trak/stsd, so they
+            belong in the mint-baseline path, not a crafted magic seed.
+  flacdec.c SEEKTABLE `index_entries[i].pos += metadata_head_size` overflow:
+            gated behind AVFMT_FLAG_FAST_SEEK, which ffmpeg_read.c never sets.
+  wtvdec.c  sector-table accounting fix: real bug, but the WTV container is too
+            heavy to hand-craft as a seed.
+  mtv.c     zero video_fps: 9.1 rejects it, but 9.0.2's avpriv_set_pts_info only
+            logs "invalid timebase" and continues — correctness fix, no crash.
 
 Usage:
     python tools/gen_ffmpeg_91_seeds.py [--out DIR]
@@ -56,9 +88,26 @@ BEXT_FIXED_SIZE = 602
 # probe, small enough that av_malloc may still succeed and then the short read fails.
 BEXT_HISTORY = 0x40000000
 
+# Quiet NaN for the AMF double: av_int2double keeps the bits and every compare
+# in amf_parse_object propagates the NaN into the int64 duration store.
+AMF_NAN = 0x7FF8000000000000
+# flv probe() requires DataOffset + 100 < buf_size, so the file must outsize its tag.
+FLV_PAD_TO = 128
+# 1e18 * 1e6 (default time_scale) * 1000 / AV_TIME_BASE = 1e21: finite in
+# double but past INT64_MAX, so 9.0.2's isnan-only guard misses it.
+WEBM_DURATION = 1e18
+
 
 def le32(v):
     return struct.pack("<I", v)
+
+
+def le16(v):
+    return struct.pack("<H", v)
+
+
+def le64(v):
+    return struct.pack("<Q", v)
 
 
 def be32(v):
@@ -67,6 +116,10 @@ def be32(v):
 
 def be16(v):
     return struct.pack(">H", v)
+
+
+def be24(v):
+    return struct.pack(">I", v)[1:]
 
 
 def be64(v):
@@ -165,10 +218,98 @@ def wav_bext_bigalloc():
     return b"RIFF" + le32(len(payload)) + payload
 
 
+def sbg_nan_cast():
+    """SBaGen script with a NaN carrier: `a: nan`.
+
+    lex_double uses strtod, which parses 'nan'. scale_double's range check
+    compares NaN (both false), so `*r = m` casts NaN to int -- already inside
+    sbg_read_probe, which runs parse_script on every probed file.
+    """
+
+    return b"a: nan\n"
+
+
+def flv_amf_nan_duration():
+    """FLV + onMetaData script tag whose duration is a NaN AMF double.
+
+    amf_parse_object stores `num_val * AV_TIME_BASE` into the int64
+    s->duration with no range check in 9.0.2; 9.1 gates num_val.
+    """
+
+    body = b"\x02" + be16(len("onMetaData")) + b"onMetaData"
+    body += b"\x08" + be32(0)  # ECMA array, count 0
+    body += be16(len("duration")) + b"duration"
+    body += b"\x00" + be64(AMF_NAN)  # AMF number
+    body += b"\x00\x00\x09"  # AMF_END_OF_OBJECT
+
+    tag = bytes([18]) + be24(len(body)) + b"\x00" * 4 + b"\x00" * 3
+    out = b"FLV" + bytes([1, 0]) + be32(9) + be32(0) + tag + body
+    return out.ljust(FLV_PAD_TO, b"\x00")
+
+
+def webm_duration_cast():
+    """EBML/webm + Segment/Info whose Duration overflows the int64 store.
+
+    matroska_read_header computes ctx->duration = duration * time_scale *
+    1000 / AV_TIME_BASE; 9.0.2 only checks isnan(duration). The bare Cluster
+    id ends the header parse (EBML_STOP) so the duration line is reached.
+    """
+
+    def vint(v):
+        return bytes([0x80 | v])  # 1-byte size vint, all sizes here fit
+
+    header = (
+        b"\x42\x86\x81\x01"  # EBMLVersion = 1
+        + b"\x42\xf7\x81\x01"  # EBMLReadVersion = 1
+        + b"\x42\xf2\x81\x04"  # EBMLMaxIDLength = 4
+        + b"\x42\xf3\x81\x08"  # EBMLMaxSizeLength = 8
+        + b"\x42\x82\x84webm"  # DocType
+        + b"\x42\x87\x81\x02"  # DocTypeVersion = 2
+        + b"\x42\x85\x81\x02"  # DocTypeReadVersion = 2
+    )
+
+    info = b"\x44\x89" + vint(8) + struct.pack(">d", WEBM_DURATION)
+    info_elem = b"\x15\x49\xa9\x66" + vint(len(info)) + info
+    cluster = b"\x1f\x43\xb6\x75"  # id only: EBML_STOP needs no length
+
+    seg = info_elem + cluster
+    out = b"\x1a\x45\xdf\xa3" + vint(len(header)) + header
+    return out + b"\x18\x53\x80\x67" + vint(len(seg)) + seg
+
+
+def rf64_dataend_overflow():
+    """RF64/WAVE + ds64(data_size = INT64_MAX) + fmt + data tag.
+
+    The data tag makes wav->data_end = av_sat_add64(tell, INT64_MAX) saturate;
+    9.0.2's `next_tag_ofs = data_end + (data_size & 1)` then adds 1 to
+    INT64_MAX. fmt must precede data because the fuzz pb is not seekable.
+    """
+
+    fmt = (
+        le16(1)  # PCM
+        + le16(1)  # channels
+        + le32(44100)  # sample rate
+        + le32(88200)  # byte rate
+        + le16(2)  # block align
+        + le16(16)  # bits per sample
+    )
+    ds64 = le64(0) + le64(INT64_MAX) + le64(0) + le32(0)  # riff/data/sample/table
+
+    out = b"RF64" + le32(0) + b"WAVE"
+    out += b"ds64" + le32(len(ds64)) + ds64
+    out += b"fmt " + le32(len(fmt)) + fmt
+    out += b"data" + le32(0xFFFFFFFF)  # forces the rf64 branch, not the size one
+    return out
+
+
 SEEDS = {
     "caf_pakt_overflow.caf": caf_pakt_overflow,
     "rpl_idx_overflow.rpl": rpl_idx_overflow,
     "wav_bext_bigalloc.wav": wav_bext_bigalloc,
+    "sbg_nan_cast.sbg": sbg_nan_cast,
+    "flv_amf_nan_duration.flv": flv_amf_nan_duration,
+    "webm_duration_cast.webm": webm_duration_cast,
+    "rf64_dataend_overflow.wav": rf64_dataend_overflow,
 }
 
 
