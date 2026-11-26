@@ -593,6 +593,18 @@ class InProcessRunner:
         fn.argtypes = []
         self._fault_fn = fn
 
+    def restore_globals(self) -> bool:
+        """Write the load-time globals snapshot back; False when none was captured.
+
+        Direct modes only: either snapshot works (per-exec restore, else the
+        abandon one), both are taken right after load.
+        """
+        restore = self._after_abandon if self._restore is _no_restore else self._restore
+        if restore is _no_restore:
+            return False
+        restore()
+        return True
+
     def _unbind_guard(self) -> None:
         self._restore = _no_restore
         self._after_abandon = _no_restore

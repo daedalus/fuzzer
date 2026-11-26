@@ -5,6 +5,7 @@ import builtins
 import contextlib
 import datetime
 import glob
+import itertools
 import math
 import os
 import re
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections.abc import Callable, Iterator
 from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
@@ -370,6 +372,12 @@ def _so_exec(
     direct/direct_lite instead. ``func`` None probes the entry point.
     ``restore`` applies to direct modes only. Returns (run, stop).
     """
+    run, stop, _reset = _so_runner(target, timeout, mode, func, restore)
+    return run, stop
+
+
+def _so_runner(target, timeout, mode, func, restore):
+    """``_so_exec`` plus ``reset``: load-time globals back, False when unavailable."""
     from fuzzer_tool.adapters.inprocess import InProcessRunner
     from fuzzer_tool.services.fuzzer import Fuzzer
     from fuzzer_tool.services.minimize import ExecMode
@@ -392,7 +400,20 @@ def _so_exec(
         with lock:
             return runner.run_one(data)
 
-    return run, runner.stop
+    # The loader forks per call: already isolated.
+    if mode not in (ExecMode.DIRECT, ExecMode.DIRECT_LITE):
+        return run, runner.stop, _always_isolated
+
+    def reset() -> bool:
+        with lock:
+            return runner.restore_globals()
+
+    return run, runner.stop, reset
+
+
+def _always_isolated() -> bool:
+    """Reset of a runner whose calls share no state (spawn, loader fork)."""
+    return True
 
 
 def _validate_target(target):
@@ -2421,17 +2442,17 @@ def _replay_exec_mode(args):
 
 
 def _replay_runner(args):
-    """Bind replay's backend once: ``data -> (rc, stderr)``. Returns (run, stop)."""
+    """Bind replay's backend once: ``data -> (rc, stderr)``. Returns (run, stop, reset)."""
     from fuzzer_tool.services.minimize import ExecMode
 
     mode = _replay_exec_mode(args)
     if mode is ExecMode.SPAWN:
         env = os.environ.copy()
-        return (lambda data: _replay_exec(args, data, env)), (lambda: None)
+        return (lambda data: _replay_exec(args, data, env)), (lambda: None), _always_isolated
 
     # No --inprocess-func: probe the entry point, as fuzz does.
     restore = StateRestore(args.snapshot_restore)
-    return _so_exec(args.target, args.timeout, mode, args.inprocess_func, restore=restore)
+    return _so_runner(args.target, args.timeout, mode, args.inprocess_func, restore)
 
 
 # Runner sentinels (not signals): -1 timeout, -2 infrastructure failure.
@@ -2452,19 +2473,90 @@ def _replay_hit(returncode: int, stderr: str) -> bool:
     return returncode in SIGNAL_CRASH_CODES or returncode < 0
 
 
-# Report sidecars fuzz writes beside each crash input: never inputs themselves.
-_REPLAY_SKIP_SUFFIXES = frozenset((".json", ".txt", ".log"))
+# Files fuzz writes beside each crash input (save_crash, GDB .trace): never inputs.
+# .min (shrunk reproducer) is an input.
+_REPLAY_SKIP_SUFFIXES = frozenset((".json", ".txt", ".log", ".sh", ".hex", ".trace"))
 
 
-def _replay_inputs(crash_path: Path) -> list[Path]:
-    """Inputs under *crash_path*: itself if a file, else every input file below it, sorted."""
-    if crash_path.is_file():
-        return [crash_path]
+def _printable(text: str) -> str:
+    """*text* with control characters escaped: a filename must not drive the terminal.
 
-    def usable(f: Path) -> bool:
-        return f.is_file() and not f.is_symlink() and f.suffix not in _REPLAY_SKIP_SUFFIXES
+    Example: ``"a\\x1b[2J.bin"`` prints as ``a\\x1b[2J.bin``, not a screen clear.
+    """
+    if text.isprintable():
+        return text
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in text)
 
-    return sorted(f for f in crash_path.rglob("*") if usable(f))
+
+def _sorted_entries(path, on_error) -> list:
+    """One directory's entries by name; [] after reporting an unlistable one."""
+    try:
+        with os.scandir(path) as it:
+            return sorted(it, key=lambda e: e.name)
+    except OSError as e:
+        on_error(e)
+        return []
+
+
+def _replay_inputs(root: Path, on_error) -> Iterator[Path]:
+    """Input files below *root*: depth first, names sorted per directory.
+
+    Streams: holds one listing per open level, never every path. Unlistable
+    directories go to *on_error* (``rglob`` drops them silently).
+
+        root/          yields  a/x.bin, a/y.bin, b.bin
+        ├── a/{y,x}.bin
+        └── b.bin
+    """
+    levels = [iter(_sorted_entries(root, on_error))]
+    while levels:
+        entry = next(levels[-1], None)
+        if entry is None:
+            levels.pop()
+            continue
+        if entry.is_symlink():
+            continue
+        if entry.is_dir():
+            levels.append(iter(_sorted_entries(entry.path, on_error)))
+            continue
+
+        path = Path(entry.path)
+        if entry.is_file() and path.suffix not in _REPLAY_SKIP_SUFFIXES:
+            yield path
+
+
+class _ReplayTally:
+    """Counts over a dir replay: reproduced, unreadable, unlistable dirs."""
+
+    def __init__(self):
+        self.total = 0
+        self.hits = 0
+        self.unreadable = 0
+        self.scan_errors = 0
+        self._warned = False
+
+    def scan_failed(self, err: OSError) -> None:
+        self.scan_errors += 1
+        print(f"[!] Cannot list {_printable(str(err))}", file=sys.stderr)
+
+    def not_isolated(self) -> None:
+        """Warn once: no globals snapshot, so earlier files can change later verdicts."""
+        if self._warned:
+            return
+        self._warned = True
+        print(
+            "[!] Files not isolated: no globals snapshot; verdicts may depend on order",
+            file=sys.stderr,
+        )
+
+    def summary(self) -> str:
+        line = f"[*] {self.hits}/{self.total} files reproduced"
+        if self.unreadable:
+            line += f", {self.unreadable} unreadable"
+        if self.scan_errors:
+            dirs = "dir" if self.scan_errors == 1 else "dirs"
+            line += f", scan incomplete ({self.scan_errors} {dirs})"
+        return line
 
 
 def cmd_replay(args):
@@ -2472,39 +2564,68 @@ def cmd_replay(args):
     _validate_target(args.target)
 
     crash_path = Path(args.crash_file)
+    shown = _printable(args.crash_file)
+    # Before exists(): it follows the link.
+    if crash_path.is_symlink():
+        print(f"[-] Crash path is a symlink: {shown}", file=sys.stderr)
+        return 1
     if not crash_path.exists():
-        print(f"[-] Crash file not found: {args.crash_file}", file=sys.stderr)
+        print(f"[-] Crash file not found: {shown}", file=sys.stderr)
         return 1
     if args.repeat < 1:
         print(f"[-] -N/--repeat must be >= 1, got {args.repeat}", file=sys.stderr)
         return 1
 
-    inputs = _replay_inputs(crash_path)
-    if not inputs:
-        print(f"[-] No crash inputs in {args.crash_file}", file=sys.stderr)
+    tally = _ReplayTally()
+    is_dir = crash_path.is_dir()
+    inputs = _replay_inputs(crash_path, tally.scan_failed) if is_dir else iter((crash_path,))
+    first = next(inputs, None)
+    if first is None:
+        print(f"[-] No crash inputs in {shown}", file=sys.stderr)
         return 1
 
     try:
-        run, stop = _replay_runner(args)
+        run, stop, reset = _replay_runner(args)
     except (AttributeError, OSError) as e:
         print(f"[-] In-process runner failed for {args.inprocess_func}: {e}", file=sys.stderr)
         return 1
 
-    # One runner for every file and repeat; only the per-file verdict is kept.
+    # One runner for every file; each file starts from the load-time globals.
     try:
-        reproduced = sum(_replay_one(run, path, args) == 0 for path in inputs)
+        for path in itertools.chain((first,), inputs):
+            if not reset() and is_dir:
+                tally.not_isolated()
+            verdict = _replay_one(run, path, args)
+            tally.total += 1
+            tally.hits += verdict is _Verdict.HIT
+            tally.unreadable += verdict is _Verdict.UNREADABLE
     finally:
         stop()
 
-    if crash_path.is_dir():
-        print(f"[*] {reproduced}/{len(inputs)} files reproduced")
-    return 0 if reproduced else 1
+    if is_dir:
+        print(tally.summary())
+    return 0 if tally.hits else 1
 
 
-def _replay_one(run, path: Path, args) -> int:
-    """Replay one input ``--repeat`` times on *run*; 0 when it crashed, else 1."""
-    data = path.read_bytes()
-    print(f"[*] Replaying {len(data)} bytes from {path}")
+class _Verdict(Enum):
+    """One input's replay outcome."""
+
+    HIT = "hit"
+    MISS = "miss"
+    UNREADABLE = "unreadable"
+
+
+def _replay_one(
+    run: Callable[[bytes], tuple[int, str]], path: Path, args: argparse.Namespace
+) -> _Verdict:
+    """Replay one input ``--repeat`` times on *run*."""
+    shown = _printable(str(path))
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        print(f"[-] Cannot read {shown}: {e.strerror or e}", file=sys.stderr)
+        return _Verdict.UNREADABLE
+    print(f"[*] Replaying {len(data)} bytes from {shown}")
 
     # Direct modes keep in-process state across repeats.
     # Keep only the first hit (reported) and the last run (fallback): memory bounded.
@@ -2520,7 +2641,7 @@ def _replay_one(run, path: Path, args) -> int:
     status = _print_replay(*(first_hit or last), args.timeout)
     if args.repeat > 1:
         print(f"[*] Reproduced {hits}/{args.repeat}")
-    return status
+    return _Verdict.HIT if status == 0 else _Verdict.MISS
 
 
 def _print_replay(returncode: int, stderr: str, timeout: float) -> int:
