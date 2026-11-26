@@ -101,6 +101,7 @@ fuzzer, not just the target.
 60. **Evidence over assumptions. Verification over confidence.**
 61. Always run `fuzzer-tool fuzz` with `--push-on-crash https://ntfy.sh/daedalus_fuzzer`.
 62. Doc-only changes (`*.md`, comments, docstrings) run no tests. Commit and push.
+63. Always remember that .so objects can not be run as a standalone executables but rather they need dlopen.
 
 ## Corpus Rules
 
