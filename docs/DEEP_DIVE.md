@@ -1254,18 +1254,26 @@ clean on 8.1.3 and 9.0.2. The rest are coverage / MSAN / reachability probes (se
 direction (seeds written to `<out>/seeds/`, default `~/fuzzing/ffmpeg_91_potential_crashes`).
 9.1 is a feature release with no per-bug Changelog, so the candidates come from the
 libavformat tree diff, not bug titles. 9.0.2 already backports most security fixes, so the
-genuine 9.0.2-only delta is small — integer-overflow / large-allocation hardening, not fresh
-OOB. Three crafted seeds:
+genuine 9.0.2-only delta is small — integer-overflow / large-allocation hardening plus
+float-cast hardening (NaN / out-of-range doubles stored into int64), not fresh OOB.
+Seven crafted seeds:
 
 | Seed | Demuxer path (9.0.2 unguarded) | 9.1 fix | Expected |
 |------|--------------------------------|---------|----------|
 | `caf_pakt_overflow.caf` | `cafdec.c` `read_pakt_chunk`: `st->nb_frames += priming` | range guard before the add | signed int64 overflow (UBSAN) |
 | `rpl_idx_overflow.rpl` | `rpl.c` index loop: `av_add_index_entry(ast, offset + video_size, …)` | moves + extends the overflow check | signed int64 overflow (UBSAN) |
 | `wav_bext_bigalloc.wav` | `wavdec.c` `wav_parse_bext_tag`: `av_malloc(size - 602 + 1)` | caps coding history at 1 MiB | ~1 GiB alloc (OOM probe) |
+| `sbg_nan_cast.sbg` | `sbgdec.c` `scale_double`: NaN fails both range compares, `*r = m` casts it | adds `isnan(m)` | float-cast-overflow (UBSAN), fires in `sbg_read_probe` |
+| `flv_amf_nan_duration.flv` | `flvdec.c` `amf_parse_object`: `s->duration = num_val * AV_TIME_BASE` | gates duration/videodatarate/audiodatarate | float-cast-overflow (UBSAN) |
+| `webm_duration_cast.webm` | `matroskadec.c`: `ctx->duration = duration * time_scale * 1000 / AV_TIME_BASE` | rejects negative/huge duration | float-cast-overflow (UBSAN) |
+| `rf64_dataend_overflow.wav` | `wavdec.c` `wav_read_header`: `next_tag_ofs = data_end + (data_size & 1)` on a saturated `data_end` | wraps the add in `av_sat_add64` | signed int64 overflow (UBSAN) |
 
-`nsvdec.c` (vsize underflow → large `av_get_packet`) and `flvdec.c` (keyframe `arraylen` →
-~2 GiB `av_mallocz`) are weaker ENOMEM probes, not crafted. The `mov.c` v2 sample-rate
-NaN/range gap needs a full `moov/trak/stsd`, so it belongs in the mint-baseline path.
+`nsvdec.c` (vsize underflow → large `av_get_packet`) and `flvdec.c` (keyframe `arraylen`,
+now bounded by the metadata tag size) are weaker ENOMEM probes, not crafted. The `mov.c` v2
+sample-rate NaN/range gap (plus its elst/tmap overflows) needs a full `moov/trak/stsd`, so it
+belongs in the mint-baseline path. `flacdec.c`'s SEEKTABLE index overflow is gated behind
+`AVFMT_FLAG_FAST_SEEK`, which `ffmpeg_read.c` never sets; `mtv.c`'s zero fps is a correctness
+fix only (`avpriv_set_pts_info` rejects the 0 timebase).
 Verified structurally by `tests/test_regression_ffmpeg_91_seeds.py`; none run against a real
 build here (system ffmpeg is 6.x), so they are potential-crash probes like the 8.0.3 pack.
 
@@ -1691,6 +1699,17 @@ fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 
 `--max-seeds N` processes a uniform N-of-n subset (`_pick_seeds`, `RandPool.sample`), kept in disk order. It was the first N on disk: `seeds/<hh>/` sorts by hash prefix, so batches only saw low-prefix seeds. Tests: `tests/test_regression_minimize_uniform_pick.py`.
 
+### Replay backends (`cli/commands.py::_replay_exec_mode`)
+
+```bash
+fuzzer-tool replay ./t.so crash.bin                                  # subprocess loader (default)
+fuzzer-tool replay ./t.so crash.bin --inprocess-direct               # direct_lite
+fuzzer-tool replay ./t.so crash.bin --inprocess --inprocess-direct   # direct
+fuzzer-tool replay ./t.so crash.bin --inprocess-direct -N 100        # reproduction rate
+```
+
+Same flag mapping as `minimize` (`ExecMode`), for `.so` targets only: with no flag a `.so` uses the loader (it cannot be exec'd); anything else (ELF executable, script) spawns (it cannot be dlopen'd). `--inprocess-func` names the entry; omitted, it is probed. Direct modes contain crashes and timeouts only through the shim's `__afl_guarded_call{,_timeout}`; without the shim, a crash kills `fuzzer-tool` and a hang ignores `-t` (same contract as `fuzz --inprocess-direct`). The `fuzzer-tool` wrapper preloads libasan for `replay` as for `fuzz`, so a dynamically ASAN-linked `.so` loads in direct modes. rc `-2` (runner failure) prints `Runner error`, never a crash. Use direct modes to reproduce crashes that depend on in-process state. `-N/--repeat` runs N times on one runner and prints `Reproduced k/N`. Details are printed for the first hit only; exit 0 if any run crashed. Direct modes keep globals across the N calls; the loader forks per call, so state resets. Tests: `tests/test_replay_inprocess.py`.
+
 ### Edge dump (`services/edge_export.py`)
 
 ```bash
@@ -1733,7 +1752,7 @@ Seeds absent from the dump (`unmeasured`) are kept: never prune on a guess. Dump
 
 Batches are read as spans of the one spliced pickle (`adapters/edge_pickle.py::_batch_spans`): a one-item batch is `k v SETITEM`, more is `MARK k v ... SETITEMS`, so a span starts at the batch's own MARK — dropping it made every batch fail to load and every run a no-op copy (tests/test_full_cover.py::test_regression_spliced_dump_minimizes). Ids are content keys, so a seed stored twice (shard and `timeouts/`) is written once.
 
-**Status line**: the scan prints edge-dump's line (`_print_progress`, verb `Scanned`): seeds read, seeds/s, elapsed, dump-union edges, rss; at most every `_STATUS_EVERY_S` (0.5 s), plus a final line. No ETA: the stream has no seed total. Throttled by time because each line counts the whole map (O(map)): per batch, a crafted dump of tiny batches and one huge edge id stalls the scan. Exact incremental counting (`np.unique` of new ids) measured 2-25x slower than the map count, so it is not used. Throttled vs per-batch `_scan` (4,000 seeds, batches of 8, 512k map): 149-158 vs 177-210 ms. Empty legacy batches print nothing (`tests/test_full_cover.py::test_regression_empty_legacy_batch_prints_no_status`).
+**Status line**: the scan prints edge-dump's line (`_print_progress`, verb `Scanned`): seeds read, seeds/s, elapsed, dump-union edges, rss; at most every `_STATUS_EVERY_S` (0.5 s), plus a final line. No ETA: the stream has no seed total. Throttled by time because each line counts the whole map (O(map)): per batch, a crafted dump of tiny batches and one huge edge id stalls the scan. The throttle reads `time.monotonic()` and restarts after the line, so a slow map count is not re-paid next batch. Exact incremental counting (`np.unique` of new ids) is slower than the map count (AB_LEDGER #181, +184.5%), so it is not used. Throttled vs per-batch `_scan`: −15.4% (AB_LEDGER #180). Empty legacy batches print nothing (`tests/test_full_cover.py::test_regression_empty_legacy_batch_prints_no_status`).
 
 FFmpeg 9.0.2 dump (585,046 seeds, 202,942 edges): 585,241 on disk -> 11,897 kept, 0.26 GB of 11.11 GB, 195 unmeasured; 3.7 min scan + 46 s cover.
 
