@@ -1691,6 +1691,16 @@ fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 
 `--max-seeds N` processes a uniform N-of-n subset (`_pick_seeds`, `RandPool.sample`), kept in disk order. It was the first N on disk: `seeds/<hh>/` sorts by hash prefix, so batches only saw low-prefix seeds. Tests: `tests/test_regression_minimize_uniform_pick.py`.
 
+### Replay backends (`cli/commands.py::_replay_exec_mode`)
+
+```bash
+fuzzer-tool replay ./t.so crash.bin                                  # subprocess loader (default)
+fuzzer-tool replay ./t.so crash.bin --inprocess-direct               # direct_lite
+fuzzer-tool replay ./t.so crash.bin --inprocess --inprocess-direct   # direct
+```
+
+Same flag mapping as `minimize` (`ExecMode`); a `.so` with no flag uses the loader, since it cannot be exec'd. An executable always spawns. `--inprocess-func` names the entry (default: probed). Use direct modes to reproduce crashes that depend on in-process state. Tests: `tests/test_replay_inprocess.py`.
+
 ### Edge dump (`services/edge_export.py`)
 
 ```bash
