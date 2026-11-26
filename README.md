@@ -558,6 +558,14 @@ pipeline. Eight crashes, three unique bugs, first crash at ~432 execs.
 | [Heap-buffer-overflow in AVX2 dual-load search](docs/FINDINGS/fgrep/heap_buffer_overflow_avx2_dual_load.md) | Medium | `src/search.c:172`. The loop bound ignores the offset of the second `_mm256_loadu_si256`, reading 32 bytes past the allocation. |
 | [Heap-buffer-overflow in fixed-string insensitive match](docs/FINDINGS/fgrep/heap_buffer_overflow_fixed_string_insensitive_match.md) | Medium | `src/regex_engine.c:50`. Missing bounds check after `memchr` advances the position, reading past the heap allocation. |
 
+### GStreamer 1.28.9
+
+Found through `targets/gstreamer_read.c`, which drives the full RIFF/WAVE demuxer chain (`gst_pad_push → gst_wavparse_chain → gst_wavparse_stream_data`). Compiled with AFL edge coverage via `afl_shim.c`.
+
+| Bug | Severity | Summary |
+|---|---|---|
+| [SIGSEGV in `gst_wavparse_stream_data` (NULL buffer write)](docs/FINDINGS/gstreamer/gst_wavparse_stream_data_null_buffer.md) | Medium | `gst_wavparse_stream_data` wrote `GST_BUFFER_OFFSET` to a NULL buffer after `gst_buffer_make_writable()` returned NULL, causing SIGSEGV at offset 0x60 in the GstBuffer struct. 173-byte crafted WAV input. |
+
 ---
 
 ## License
