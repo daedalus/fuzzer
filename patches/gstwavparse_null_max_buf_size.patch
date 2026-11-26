@@ -1,7 +1,9 @@
 diff --git a/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c b/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c
+index 8e66b63..ae44dcd 100644
 --- a/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c
 +++ b/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c
-@@ -1690,8 +1690,14 @@
+@@ -1810,8 +1810,12 @@ gst_wavparse_stream_headers (GstWavParse * wav)
+   else
      wav->max_buf_size = 0;
    wav->max_buf_size = MAX (wav->max_buf_size, MAX_BUFFER_SIZE);
 -  if (wav->blockalign > 0)
@@ -11,10 +13,10 @@ diff --git a/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c b/subprojec
 +    if (wav->max_buf_size == 0)
 +      wav->max_buf_size = wav->blockalign;
 +  }
+
    GST_DEBUG_OBJECT (wav, "max buffer size %u", wav->max_buf_size);
 
-   return GST_FLOW_OK;
-@@ -1991,6 +1997,11 @@
+@@ -2130,6 +2134,12 @@ iterate_adapter:
    if (desired >= wav->blockalign && wav->blockalign > 0)
      desired -= (desired % wav->blockalign);
 
@@ -26,27 +28,35 @@ diff --git a/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c b/subprojec
 +
    GST_LOG_OBJECT (wav, "Fetching %" G_GINT64_FORMAT " bytes of data "
        "from the sinkpad", desired);
-@@ -2046,6 +2057,8 @@
+
+@@ -2192,6 +2202,8 @@ iterate_adapter:
+       if (size >= wav->blockalign) {
          if (wav->blockalign > 0) {
            buf = gst_buffer_make_writable (buf);
 +          if (G_UNLIKELY (buf == NULL))
 +            goto buffer_error;
            gst_buffer_resize (buf, 0, size - (size % wav->blockalign));
          }
-@@ -2062,6 +2075,8 @@
-   nextpos = pos + obtained;
+       } else {
+@@ -2209,6 +2221,8 @@ iterate_adapter:
+
    /* update offsets, does not overflow. */
    buf = gst_buffer_make_writable (buf);
 +  if (G_UNLIKELY (buf == NULL))
 +    goto buffer_error;
    GST_BUFFER_OFFSET (buf) = pos / wav->bytes_per_sample;
    GST_BUFFER_OFFSET_END (buf) = nextpos / wav->bytes_per_sample;
-@@ -2162,6 +2177,11 @@
-     return res;
+
+@@ -2297,6 +2311,12 @@ iterate_adapter:
    }
-+buffer_error:
+   return res;
+
++  buffer_error:
 +  {
 +    GST_WARNING_OBJECT (wav, "Failed to make audio buffer writable");
 +    return GST_FLOW_ERROR;
 +  }
- }
++
+   /* ERROR */
+ found_eos:
+   {
