@@ -4,6 +4,7 @@
 **Severity**: Medium — crafted RIFF/WAVE input crashes any GStreamer audio pipeline with SIGSEGV
 **Root cause**: `gst_buffer_make_writable()` returned NULL and the buffer-offset assignment dereferenced it unconditionally
 **Discovered by**: fuzzer-tool via `targets/gstreamer_read.c` — no-ASAN build (`_noasan.so`) with AFL edge coverage
+**ASAN replay**: confirmed SIGSEGV on ASAN build (`gstreamer_read_1.28.9_asan.so`) — exit 139
 
 ---
 
@@ -183,7 +184,7 @@ static const unsigned char gs_wav_crash[] = { /* 173-byte reproducer */ };
 
 ## Upstream Status
 
-Not reported upstream at the time of discovery.
+Not reported upstream at the time of discovery. The next step would be a confidential security report through GStreamer's security process.
 
 ---
 
