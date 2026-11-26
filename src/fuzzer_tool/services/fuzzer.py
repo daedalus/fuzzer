@@ -7,7 +7,6 @@ import itertools
 import logging
 import math
 import os
-import resource
 import shutil
 import signal
 import sys
@@ -35,7 +34,7 @@ try:
 except ImportError:
     _HAS_NUMPY = False
 
-from fuzzer_tool.adapters import process, seed_zip
+from fuzzer_tool.adapters import libc_mem, process, seed_zip
 from fuzzer_tool.adapters.filesystem import DeltaStore, without_timeout_seeds
 from fuzzer_tool.adapters.memfd_input import ALIAS_ENV, INPUT_PATH_ENV, MemfdInput
 from fuzzer_tool.adapters.process import (
@@ -3207,7 +3206,7 @@ class Fuzzer:
         # only -- never read back to gate operator selection. Keyed by
         # OrientationClass.value ("ro" / "rd" / "neutral").
         self._ro_rd_edge_counts: dict[str, float] = {"ro": 0.0, "rd": 0.0, "neutral": 0.0}
-        self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        self._peak_rss = libc_mem.peak_rss_kb()
         self._discovery_execs: array = array("Q")  # exec_count per discovery snapshot
         self._discovery_edges: array = array("Q")  # cumulative edges per snapshot
         self._discovery_timestamps: array = array("d")  # wall-clock timestamp per snapshot
