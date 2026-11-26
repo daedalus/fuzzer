@@ -12,8 +12,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 from enum import Enum
 from pathlib import Path
+from typing import NamedTuple
 
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import DistanceMetric
@@ -382,7 +384,15 @@ def _so_exec(
         direct_lite=mode is ExecMode.DIRECT_LITE,
         restore=restore,
     )
-    return runner.run_one, runner.stop
+
+    # One call at a time: direct runs share the .so's globals and the restore.
+    lock = threading.Lock()
+
+    def run(data: bytes):
+        with lock:
+            return runner.run_one(data)
+
+    return run, runner.stop
 
 
 def _validate_target(target):
@@ -3845,9 +3855,15 @@ def _record_ledger(args: argparse.Namespace, fuzzer) -> None:
         print("[ledger] no SHM edge count; campaign not recorded")
 
 
-def main() -> int:
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
+class _Parsers(NamedTuple):
+    """The root CLI parser and the ``fuzz`` subparser main() validates against."""
+
+    root: argparse.ArgumentParser
+    fuzz: argparse.ArgumentParser
+
+
+def _build_parser() -> _Parsers:
+    """Build the full CLI; also read by ldpreload_wrapper to find the target."""
     parser = argparse.ArgumentParser(
         prog="fuzzer-tool",
         description="Coverage-guided binary fuzzer with crash analysis tools",
@@ -9040,7 +9056,13 @@ def main() -> int:
         "--categories", action="store_true", help="Print category counts instead"
     )
     reg_parser.set_defaults(func=cmd_registry)
+    return _Parsers(parser, fuzz_parser)
 
+
+def main() -> int:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+    parser, fuzz_parser = _build_parser()
     args = parser.parse_args()
 
     # Default to fuzz if no subcommand given

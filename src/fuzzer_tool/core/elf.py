@@ -1538,6 +1538,7 @@ _SHT_DYNAMIC = 6
 _DT_NULL = 0
 _DT_NEEDED = 1
 _DYN_ENTRY = 16  # Elf64_Dyn: d_tag u64, d_val u64
+_SHDR_FULL = 64  # Elf64_Shdr through sh_entsize: sh_link (+40) must be in the entry
 
 
 def needed_libs(elf: bytes) -> tuple[bytes, ...] | None:
@@ -1551,6 +1552,8 @@ def needed_libs(elf: bytes) -> tuple[bytes, ...] | None:
     e_shoff = struct.unpack_from("<Q", elf, 40)[0]
     e_shentsize, e_shnum = struct.unpack_from("<HH", elf, 58)
     if e_shnum == 0 or not _shdrs_in_bounds(n, e_shoff, e_shnum, e_shentsize):
+        return None
+    if e_shentsize < _SHDR_FULL:
         return None
 
     for i in range(e_shnum):

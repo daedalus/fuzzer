@@ -443,4 +443,89 @@ class TestPreloadTarget:
         d = tmp_path / "x.dict"
         d.write_text('"a"\n')
 
-        assert _fuzz_target(["fuzz", "--dict", str(d), elf]) == elf
+        assert _fuzz_target(["fuzz", "-d", str(d), elf]) == elf
+
+
+class _OverlapRunner:
+    """Fake InProcessRunner: counts calls that overlap another call."""
+
+    overlaps = 0
+    active = 0
+
+    def __init__(self, **_kw):
+        pass
+
+    def run_one(self, _data):
+        import time
+
+        cls = type(self)
+        cls.active += 1
+        if cls.active > 1:
+            cls.overlaps += 1
+        time.sleep(0.02)  # hold the call open so an unserialized peer overlaps
+        cls.active -= 1
+        return CLEAN_RUN
+
+    def stop(self):
+        pass
+
+
+@pytest.mark.parametrize("threads", [1, 4], ids=["control", "concurrent"])
+def test_so_exec_serializes(monkeypatch, tmp_path, threads):
+    """PR #463 review: direct runs share the .so's globals; calls must not interleave."""
+    import threading
+
+    from fuzzer_tool.adapters import inprocess
+
+    monkeypatch.setattr(inprocess, "InProcessRunner", _OverlapRunner)
+    _OverlapRunner.overlaps = _OverlapRunner.active = 0
+    so = tmp_path / "t.so"
+    so.write_bytes(b"")
+    run, stop = commands._so_exec(str(so), 1.0, ExecMode.DIRECT_LITE, "fuzz_test")
+
+    workers = [threading.Thread(target=run, args=(b"a",)) for _ in range(threads)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    stop()
+
+    assert _OverlapRunner.overlaps == 0
+
+
+class TestTargetRole:
+    """PR #463 review: the target is the first positional by argparse role, not any ELF."""
+
+    @pytest.fixture
+    def elves(self, tmp_path) -> tuple[str, str]:
+        out = []
+        for name in ("a.so", "b.so"):
+            p = tmp_path / name
+            p.write_bytes(b"\x7fELF" + b"\0" * 60)
+            out.append(str(p))
+        return out[0], out[1]
+
+    def test_regression_elf_option_value(self, elves):
+        """An ELF given as an option value before the target was picked as the target."""
+        from fuzzer_tool.cli.ldpreload_wrapper import _fuzz_target
+
+        value, target = elves
+
+        assert _fuzz_target(["fuzz", "-d", value, target]) == target
+
+    def test_regression_script_target(self, elves, tmp_path):
+        """Script target + ELF crash file: the crash file was picked."""
+        from fuzzer_tool.cli.ldpreload_wrapper import _fuzz_target
+
+        script = tmp_path / "t.sh"
+        script.write_text("#!/bin/sh\n")
+        argv = ["replay", "--inprocess-direct", str(script), elves[0]]
+
+        assert _fuzz_target(argv) == str(script)
+
+    def test_invalid_cli_no_target(self, capsys):
+        """Adversarial: unparsable argv yields None and prints nothing (the command reports it)."""
+        from fuzzer_tool.cli.ldpreload_wrapper import _fuzz_target
+
+        assert _fuzz_target(["replay", "-N"]) is None
+        assert capsys.readouterr().err == ""
