@@ -181,7 +181,7 @@ _MSAN_DEFAULTS = ("exit_code=86", "symbolize=0")
 
 
 # Subcommands that load the target in-process: their runtime must be preloaded at start.
-_PRELOAD_COMMANDS = ("fuzz", "replay")
+_PRELOAD_COMMANDS = ("fuzz", "replay", "tmin")
 
 
 def _parsed_target(args: list[str]) -> str | None:
@@ -201,13 +201,13 @@ def _parsed_target(args: list[str]) -> str | None:
     except SystemExit:
         return None
 
-    # replay: `target`; fuzz: `targets` (one or more, the first is loaded).
+    # replay/tmin: `target`; fuzz: `targets` (one or more, the first is loaded).
     targets = getattr(ns, "targets", None) or [getattr(ns, "target", None)]
     return targets[0]
 
 
 def _fuzz_target(args: list[str]) -> str | None:
-    """Target path after `fuzz`/`replay` in argv (None when absent or invalid).
+    """Target path after `fuzz`/`replay`/`tmin` in argv (None when absent or invalid).
 
     `replay t.so c.bin -N 5`: the token after the command is the target.
     `replay --inprocess-direct -N 5 t.so c.bin`: option values look like

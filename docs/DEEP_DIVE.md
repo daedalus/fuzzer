@@ -2973,6 +2973,15 @@ AFLFast n_fuzz was the seed's own `fuzz_count`, not per-path exec count. `--path
 ### Crash localization (`core/local_align.py`)
 `root-cause` reports where the crash differs from its baseline, robust to indels (Levenshtein/Myers give a global distance only). Common prefix/suffix trimmed with numpy; the middle is Smith-Waterman-Gotoh aligned (+2/−3, gap −5 open, −1 extend), row-wise numpy DP. Adds a "Mutated region" line and `result["mutated_spans"]`. Over `MAX_CELLS` (4 MiB traceback): one coarse span.
 
+### tmin backends (`cli/commands.py::_tmin_backend`)
+
+```bash
+fuzzer-tool tmin ./t.so crash.bin -O min.bin                                          # loader (default)
+fuzzer-tool tmin ./t.so crash.bin -O min.bin --inprocess-direct --snapshot-restore globals
+```
+
+`--inprocess`, `--inprocess-direct`, `--inprocess-func`, `--snapshot-restore`/`--no-snapshot-restore` as `replay` (§Replay backends); no `-N`. One runner for the whole reduction, passed to `services/tmin.tmin(run=...)`; executables still spawn per candidate. Direct modes: use `--snapshot-restore globals` on a stateful target. With `off`, globals leak between candidates, the reducer accepts candidates that only crash after earlier runs, and the final re-check then rejects the result, so tmin falls back to the unminimized input. The wrapper preloads libasan for `tmin` too. Tests: `tests/test_tmin_inprocess.py`.
+
 ### Galloping prefix truncation (`tmin --gallop-prefix`)
 Optional reducer pre-pass: cut 1, 2, 4, … bytes off the end until a probe fails, then bisect. ≤ 2·(⌈log2 n⌉+1) execs, 1 when the last byte is needed. Off by default: over 42 synthetic cases it cost a median +13% execs vs ChunkPass alone (wins only when the crash needs a short prefix of a long input; ledger #176).
 
