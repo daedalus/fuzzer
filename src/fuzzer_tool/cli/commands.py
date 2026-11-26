@@ -2452,20 +2452,37 @@ def _replay_hit(returncode: int, stderr: str) -> bool:
     return returncode in SIGNAL_CRASH_CODES or returncode < 0
 
 
+# Report sidecars fuzz writes beside each crash input: never inputs themselves.
+_REPLAY_SKIP_SUFFIXES = frozenset((".json", ".txt", ".log"))
+
+
+def _replay_inputs(crash_path: Path) -> list[Path]:
+    """Inputs under *crash_path*: itself if a file, else every input file below it, sorted."""
+    if crash_path.is_file():
+        return [crash_path]
+
+    def usable(f: Path) -> bool:
+        return f.is_file() and not f.is_symlink() and f.suffix not in _REPLAY_SKIP_SUFFIXES
+
+    return sorted(f for f in crash_path.rglob("*") if usable(f))
+
+
 def cmd_replay(args):
-    """Replay a crash input against the target, ``--repeat`` times."""
+    """Replay a crash input (or every input in a dir) against the target, ``--repeat`` times."""
     _validate_target(args.target)
 
     crash_path = Path(args.crash_file)
-    if not crash_path.is_file():
+    if not crash_path.exists():
         print(f"[-] Crash file not found: {args.crash_file}", file=sys.stderr)
         return 1
     if args.repeat < 1:
         print(f"[-] -N/--repeat must be >= 1, got {args.repeat}", file=sys.stderr)
         return 1
 
-    data = crash_path.read_bytes()
-    print(f"[*] Replaying {len(data)} bytes from {args.crash_file}")
+    inputs = _replay_inputs(crash_path)
+    if not inputs:
+        print(f"[-] No crash inputs in {args.crash_file}", file=sys.stderr)
+        return 1
 
     try:
         run, stop = _replay_runner(args)
@@ -2473,19 +2490,32 @@ def cmd_replay(args):
         print(f"[-] In-process runner failed for {args.inprocess_func}: {e}", file=sys.stderr)
         return 1
 
-    # One runner for all N: direct modes keep in-process state across repeats.
+    # One runner for every file and repeat; only the per-file verdict is kept.
+    try:
+        reproduced = sum(_replay_one(run, path, args) == 0 for path in inputs)
+    finally:
+        stop()
+
+    if crash_path.is_dir():
+        print(f"[*] {reproduced}/{len(inputs)} files reproduced")
+    return 0 if reproduced else 1
+
+
+def _replay_one(run, path: Path, args) -> int:
+    """Replay one input ``--repeat`` times on *run*; 0 when it crashed, else 1."""
+    data = path.read_bytes()
+    print(f"[*] Replaying {len(data)} bytes from {path}")
+
+    # Direct modes keep in-process state across repeats.
     # Keep only the first hit (reported) and the last run (fallback): memory bounded.
     hits = 0
     first_hit = None
-    try:
-        for _ in range(args.repeat):
-            last = run(data)
-            if not _replay_hit(*last):
-                continue
-            hits += 1
-            first_hit = first_hit or last
-    finally:
-        stop()
+    for _ in range(args.repeat):
+        last = run(data)
+        if not _replay_hit(*last):
+            continue
+        hits += 1
+        first_hit = first_hit or last
 
     status = _print_replay(*(first_hit or last), args.timeout)
     if args.repeat > 1:
@@ -8732,7 +8762,10 @@ def _build_parser() -> _Parsers:
     # --- replay ---
     replay_parser = subparsers.add_parser("replay", help="Replay a crash input against the target")
     replay_parser.add_argument("target", help="Path to target binary")
-    replay_parser.add_argument("crash_file", help="Path to crash input file")
+    replay_parser.add_argument(
+        "crash_file",
+        help="Crash input file, or a dir: replays every input below it (skips .json/.txt/.log)",
+    )
     replay_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     replay_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"

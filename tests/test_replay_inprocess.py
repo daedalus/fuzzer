@@ -285,6 +285,83 @@ class TestRepeatState:
         assert f"Reproduced 0/{n}" in out
 
 
+class TestReplayDir:
+    """crash_file is a dir: replay every input in it on one runner."""
+
+    @pytest.fixture
+    def scripted(self, monkeypatch):
+        """Backend keyed by content: CRASH aborts, anything else is clean."""
+        self.seen = []
+        self.builds = 0
+        self.stops = 0
+
+        def run(data):
+            self.seen.append(data)
+            return ABORT_RUN if data == CRASH else CLEAN_RUN
+
+        def build(_args):
+            self.builds += 1
+            return run, stop
+
+        def stop():
+            self.stops += 1
+
+        monkeypatch.setattr(commands, "_replay_runner", build)
+
+    def _run(self, monkeypatch, crash_dir, *flags):
+        exe = shutil.which("true")
+        assert exe is not None
+        return _main(monkeypatch, exe, str(crash_dir), *flags)
+
+    def _dir(self, tmp_path, files: dict[str, bytes]) -> Path:
+        d = tmp_path / "crashes"
+        for name, data in files.items():
+            p = d / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+        return d
+
+    def test_replays_each_file(self, monkeypatch, tmp_path, scripted, capsys):
+        inputs = {"a.bin": BENIGN, "b.bin": CRASH, "sub/c.bin": BENIGN}
+        d = self._dir(tmp_path, inputs)
+
+        assert self._run(monkeypatch, d) == REPRODUCED
+        assert sorted(self.seen) == sorted(inputs.values())
+        assert (self.builds, self.stops) == (1, 1)
+        hits = list(inputs.values()).count(CRASH)
+        assert f"{hits}/{len(inputs)} files reproduced" in capsys.readouterr().out
+
+    def test_repeat_per_file(self, monkeypatch, tmp_path, scripted):
+        inputs = {"a.bin": BENIGN, "b.bin": CRASH}
+        n = 3
+        self._run(monkeypatch, self._dir(tmp_path, inputs), "-N", str(n))
+        assert len(self.seen) == n * len(inputs)
+
+    def test_none_reproduced(self, monkeypatch, tmp_path, scripted, capsys):
+        # Falsification: a dir of clean inputs must not read as a crash.
+        inputs = {"a.bin": BENIGN, "b.bin": BENIGN}
+        assert self._run(monkeypatch, self._dir(tmp_path, inputs)) == NOT_REPRODUCED
+        assert f"0/{len(inputs)} files reproduced" in capsys.readouterr().out
+
+    def test_skips_sidecars(self, monkeypatch, tmp_path, scripted):
+        # Adversarial: fuzz writes .json/.txt reports beside each crash; never inputs.
+        d = self._dir(
+            tmp_path, {"crash_x.bin": BENIGN, "crash_x.json": CRASH, "crash_x.txt": CRASH}
+        )
+        (d / "link.bin").symlink_to(d / "crash_x.json")
+        assert self._run(monkeypatch, d) == NOT_REPRODUCED
+        assert self.seen == [BENIGN]
+
+    @pytest.mark.parametrize("files", [{}, {"crash_x.json": CRASH}])
+    def test_no_inputs(self, monkeypatch, tmp_path, scripted, files, capsys):
+        # Adversarial: nothing to replay is an error, and no runner is built.
+        d = self._dir(tmp_path, files)
+        d.mkdir(exist_ok=True)
+        assert self._run(monkeypatch, d) == NOT_REPRODUCED
+        assert (self.builds, self.seen) == (0, [])
+        assert "No crash inputs" in capsys.readouterr().err
+
+
 class TestReviewRegressions:
     """PR #462 review: entry name, script targets, ASAN preload for replay."""
 
