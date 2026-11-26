@@ -293,7 +293,7 @@ class TestReviewRegressions:
         """Capture the func _so_exec receives; never load anything."""
         seen = []
 
-        def fake(_target, _timeout, _mode, func):
+        def fake(_target, _timeout, _mode, func, restore=None):
             seen.append(func)
             return (lambda _d: CLEAN_RUN), (lambda: None)
 
@@ -375,3 +375,72 @@ class TestRunnerError:
         scripted([ERROR_RUN, ABORT_RUN, ERROR_RUN])
         assert self._run(monkeypatch, tmp_path, "-N", "3") == REPRODUCED
         assert "Reproduced 1/3" in capsys.readouterr().out
+
+
+class TestSnapshotRestore:
+    """`replay --snapshot-restore`: the fuzz run's globals mode, default off."""
+
+    @pytest.fixture(autouse=True)
+    def _capture(self, monkeypatch):
+        self.seen = []
+        monkeypatch.setattr(commands, "cmd_replay", lambda a: self.seen.append(a) or 0)
+        self.monkeypatch = monkeypatch
+
+    def _restore(self, *extra: str) -> str:
+        assert _main(self.monkeypatch, "t.so", "crash.bin", *extra) == 0
+        return self.seen[-1].snapshot_restore
+
+    @pytest.mark.parametrize(
+        ("flags", "want"),
+        [
+            ((), "off"),  # control: #462 semantics, direct repeats keep state
+            (("--snapshot-restore", "globals"), "globals"),
+            (("--snapshot-restore", "globals", "--no-snapshot-restore"), "off"),
+        ],
+    )
+    def test_parses(self, flags, want):
+        assert self._restore(*flags) == want
+
+    def test_rejects_unknown(self):
+        """Adversarial: a typo fails loudly."""
+        with pytest.raises(SystemExit):
+            self._restore("--snapshot-restore", "heap")
+
+
+@pytest.mark.parametrize("mode", [ExecMode.DIRECT_LITE, ExecMode.DIRECT], ids=lambda m: m.value)
+def test_globals_resets_state(monkeypatch, tmp_path, build_so, mode, capsys):
+    """Falsification of TestRepeatState: globals restore resets the counter every exec."""
+    n = STATEFUL_CALLS + 2
+    flags = (*IN_PROCESS_MODES[mode], "--inprocess-func", "fuzz_test", "-N", str(n))
+    so = build_so(STATEFUL_SRC)
+    _main(monkeypatch, so, _input(tmp_path, BENIGN), *flags, "--snapshot-restore", "globals")
+    assert f"Reproduced 0/{n}" in capsys.readouterr().out
+
+
+class TestPreloadTarget:
+    """The wrapper must find the target after options, else ASAN is never preloaded."""
+
+    @pytest.fixture
+    def elf(self, tmp_path) -> str:
+        p = tmp_path / "t.so"
+        p.write_bytes(b"\x7fELF" + b"\0" * 60)
+        return str(p)
+
+    def test_regression_options_first(self, elf, tmp_path):
+        """`replay --inprocess-direct -N 5 t.so`: target was None, libasan not preloaded."""
+        from fuzzer_tool.cli.ldpreload_wrapper import _fuzz_target
+
+        crash = tmp_path / "c.bin"
+        crash.write_bytes(b"x")
+        argv = ["replay", "--inprocess-direct", "-N", "5", elf, str(crash)]
+
+        assert _fuzz_target(argv) == elf
+
+    def test_option_value_not_target(self, elf, tmp_path):
+        """Adversarial: an option value that is an existing non-ELF file is skipped."""
+        from fuzzer_tool.cli.ldpreload_wrapper import _fuzz_target
+
+        d = tmp_path / "x.dict"
+        d.write_text('"a"\n')
+
+        assert _fuzz_target(["fuzz", "--dict", str(d), elf]) == elf

@@ -184,14 +184,31 @@ _MSAN_DEFAULTS = ("exit_code=86", "symbolize=0")
 _PRELOAD_COMMANDS = ("fuzz", "replay")
 
 
+_ELF_MAGIC = b"\x7fELF"
+
+
+def _is_elf(path: str) -> bool:
+    """True when *path* is a readable file starting with the ELF magic."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(len(_ELF_MAGIC)) == _ELF_MAGIC
+    except OSError:
+        return False
+
+
 def _fuzz_target(args: list[str]) -> str | None:
-    """Target path after `fuzz`/`replay` in argv (None when absent or an option)."""
-    for i, arg in enumerate(args):
-        if arg in _PRELOAD_COMMANDS and i + 1 < len(args):
-            candidate = args[i + 1]
-            if not candidate.startswith("-"):
-                return candidate
-    return None
+    """Target path after `fuzz`/`replay` in argv (None when absent).
+
+    Options may come first (`replay --inprocess-direct -N 5 t.so c.bin`), and
+    option values look like positionals ("5", a dict file). The first ELF file
+    on disk wins; else the first non-option token, for paths not yet on disk.
+    """
+    cmd = next((i for i, a in enumerate(args) if a in _PRELOAD_COMMANDS), None)
+    if cmd is None:
+        return None
+
+    positional = [a for a in args[cmd + 1 :] if not a.startswith("-")]
+    return next((a for a in positional if _is_elf(a)), positional[0] if positional else None)
 
 
 def _merge_opts(var: str, defaults: tuple[str, ...]) -> None:

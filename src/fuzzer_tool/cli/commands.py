@@ -353,14 +353,20 @@ def _asan_so_ready(target: str) -> None:
         _preload_asan(target)
 
 
-def _so_exec(target: str, timeout: float, mode=None, func: str | None = None):
+def _so_exec(
+    target: str,
+    timeout: float,
+    mode=None,
+    func: str | None = None,
+    restore: StateRestore = StateRestore.OFF,
+):
     """Bind one-input execution of a .so target: ``data -> (rc, stderr)``.
 
     A .so cannot be exec'd: it dies with SIGSEGV on every input, so verify
     and replay once "confirmed" every crash file. It runs through the
     in-process loader child by default; ``mode`` (an ``ExecMode``) picks
     direct/direct_lite instead. ``func`` None probes the entry point.
-    Returns (run, stop).
+    ``restore`` applies to direct modes only. Returns (run, stop).
     """
     from fuzzer_tool.adapters.inprocess import InProcessRunner
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -374,6 +380,7 @@ def _so_exec(target: str, timeout: float, mode=None, func: str | None = None):
         capture_stderr=True,
         direct=mode is ExecMode.DIRECT,
         direct_lite=mode is ExecMode.DIRECT_LITE,
+        restore=restore,
     )
     return runner.run_one, runner.stop
 
@@ -2413,7 +2420,8 @@ def _replay_runner(args):
         return (lambda data: _replay_exec(args, data, env)), (lambda: None)
 
     # No --inprocess-func: probe the entry point, as fuzz does.
-    return _so_exec(args.target, args.timeout, mode, args.inprocess_func)
+    restore = StateRestore(args.snapshot_restore)
+    return _so_exec(args.target, args.timeout, mode, args.inprocess_func, restore=restore)
 
 
 # Runner sentinels (not signals): -1 timeout, -2 infrastructure failure.
@@ -8738,6 +8746,20 @@ def main() -> int:
         type=int,
         default=1,
         help="Replay N times on one runner; prints the reproduction rate (default: 1)",
+    )
+    replay_parser.add_argument(
+        "--snapshot-restore",
+        choices=[m.value for m in StateRestore],
+        default=StateRestore.OFF.value,
+        help="Direct modes: 'globals' restores .data/.bss before each exec, as fuzz "
+        "does by default. Default: off (repeats keep state).",
+    )
+    replay_parser.add_argument(
+        "--no-snapshot-restore",
+        dest="snapshot_restore",
+        action="store_const",
+        const=StateRestore.OFF.value,
+        help="Disable --snapshot-restore.",
     )
     replay_parser.set_defaults(func=cmd_replay)
 

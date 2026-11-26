@@ -42,11 +42,13 @@ int fuzz_test(const unsigned char *buf, size_t len) {
 PRAGMA_RE = re.compile(r"^#pragma clang section.*$", re.MULTILINE)
 
 
-def _build(tmp: Path, name: str, shim: Path, extra: tuple[str, ...] = ()) -> Path:
+def _build(
+    tmp: Path, name: str, shim: Path, extra: tuple[str, ...] = (), code: str = PROBE_SRC
+) -> Path:
     if shutil.which("clang") is None:
         pytest.skip("clang not available")
     src = tmp / f"{name}.c"
-    src.write_text(PROBE_SRC)
+    src.write_text(code)
     so = tmp / f"{name}.so"
     proc = subprocess.run(
         ["clang", "-O1", "-fPIC", "-shared", *extra, "-o", str(so), str(src), str(shim)],
@@ -395,3 +397,124 @@ class TestCli:
         src = inspect.getsource(fuzzer)
 
         assert src.count("restore=self.state_restore") >= 2
+
+
+# GStreamer pattern: a g_once-cached GType registered in the shared libgobject.
+# Restoring .bss zeroes the cache, libgobject keeps the type, and the second
+# registration returns 0 (gst_buffer_add_meta -> NULL -> SIGSEGV at 0x10).
+# rc 0: type valid; 1: registration failed. 'C' crashes inside the guard.
+GTYPE_SRC = r"""
+#include <glib-object.h>
+#include <stddef.h>
+static GType probe_type(void) {
+    static GType type;
+    if (g_once_init_enter(&type)) {
+        GType t = g_pointer_type_register_static("FuzzSnapshotProbe");
+        g_once_init_leave(&type, t ? t : (GType)1);
+    }
+    return type;
+}
+__attribute__((visibility("default")))
+int fuzz_test(const unsigned char *buf, size_t len) {
+    if (len && buf[0] == 'C')
+        *(volatile int *)0 = 0;
+    return probe_type() == (GType)1;
+}
+"""
+
+_GTYPE_PROBE = textwrap.dedent(
+    """
+    import sys
+    from fuzzer_tool.adapters.inprocess import InProcessRunner
+    from fuzzer_tool.core.run_mode import StateRestore
+
+    so, restore, inputs = sys.argv[1], sys.argv[2], sys.argv[3]
+    r = InProcessRunner(so, "fuzz_test", timeout=5.0, direct=True, direct_lite=True,
+                        restore=StateRestore(restore))
+    rcs = [r.run_one(c.encode())[0] for c in inputs]
+    r.stop()
+    print(repr(rcs))
+    """
+)
+
+
+@pytest.fixture(scope="module")
+def gtype_so(tmp_path_factory) -> Path:
+    if shutil.which("pkg-config") is None:
+        pytest.skip("pkg-config not available")
+    pkg = subprocess.run(
+        ["pkg-config", "--cflags", "--libs", "gobject-2.0"], capture_output=True, text=True
+    )
+    if pkg.returncode != 0:
+        pytest.skip("gobject-2.0 dev files not available")
+    flags = tuple(pkg.stdout.split())
+    return _build(tmp_path_factory.mktemp("snap_gtype"), "gtype", SHIM, flags, GTYPE_SRC)
+
+
+def _gtype_probe(so: Path, restore: str, inputs: str) -> tuple[list[int], str]:
+    proc = subprocess.run(
+        [sys.executable, "-c", _GTYPE_PROBE, str(so), restore, inputs],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=REPO_ROOT,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    return ast.literal_eval(proc.stdout.strip().splitlines()[-1]), proc.stderr
+
+
+class TestSharedRegistry:
+    def test_needed_lists_gobject(self, gtype_so, probe_so):
+        """Falsification: DT_NEEDED parse finds libgobject, and only where linked."""
+        from fuzzer_tool.core.elf import needed_libs
+
+        gtype = needed_libs(gtype_so.read_bytes())
+        plain = needed_libs(probe_so.read_bytes())
+
+        assert gtype is not None and any(n.startswith(b"libgobject-2.0.so") for n in gtype)
+        assert plain is not None and not any(n.startswith(b"libgobject") for n in plain)
+
+    @pytest.mark.parametrize(
+        "blob",
+        [
+            b"",
+            b"\x7fELF",
+            b"\x7fELF\x02\x01" + b"\0" * 34 + struct.pack("<Q", 2**64 - 1) + b"\0" * 16,
+        ],
+    )
+    def test_needed_malformed(self, blob):
+        """Adversarial: garbage headers return None, never raise."""
+        from fuzzer_tool.core.elf import needed_libs
+
+        assert needed_libs(blob) is None
+
+    def test_needed_truncated(self, gtype_so):
+        """Adversarial: a cut image drops .dynamic/.dynstr: None or a clean subset."""
+        from fuzzer_tool.core.elf import needed_libs
+
+        full = needed_libs(gtype_so.read_bytes())
+        cut = needed_libs(gtype_so.read_bytes()[:4096])
+
+        assert cut is None or set(cut) <= set(full)
+
+    def test_control_off_registers_once(self, gtype_so):
+        """Control: without restore the cached GType stays valid every exec."""
+        rcs, _ = _gtype_probe(gtype_so, "off", "aaa")
+
+        assert rcs == [0, 0, 0]
+
+    def test_regression_restore_resets_gtype_cache(self, gtype_so):
+        """GStreamer 1.28.9: restore zeroed a g_once GType cache, re-registration failed.
+
+        gst_buffer_add_audio_clipping_meta SIGSEGV at 0x10 on exec 2, hang on exec 3.
+        """
+        rcs, err = _gtype_probe(gtype_so, "globals", "aaa")
+
+        assert rcs == [0, 0, 0]
+        assert "snapshot-restore" in err
+
+    def test_regression_abandon_restore_resets_gtype_cache(self, gtype_so):
+        """Adversarial: off mode still restored globals after a guarded crash."""
+        rcs, _ = _gtype_probe(gtype_so, "off", "aCa")
+
+        assert rcs[0] == 0 and rcs[1] < 0 and rcs[2] == 0
