@@ -1636,9 +1636,6 @@ def cmd_import(args):
 
 def _tmin_run(args):
     """Load the grammar (if any) and minimize; None when the crash does not reproduce."""
-    from fuzzer_tool.core.reducer import Prefix
-    from fuzzer_tool.services.tmin import tmin
-
     grammar = None
     if args.grammar:
         from fuzzer_tool.core.grammar import load_grammar
@@ -1669,6 +1666,36 @@ def _tmin_run(args):
             else:
                 print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
 
+    try:
+        run, stop = _tmin_backend(args)
+    except (AttributeError, OSError) as e:
+        print(f"[-] In-process runner failed for {args.inprocess_func}: {e}", file=sys.stderr)
+        return None
+
+    try:
+        return _tmin_call(args, grammar, run)
+    finally:
+        stop()
+
+
+def _tmin_backend(args):
+    """Replay's backend for a .so: (run, stop); (None, no-op) spawns per run."""
+    from fuzzer_tool.services.minimize import ExecMode
+
+    mode = _replay_exec_mode(args)
+    if mode is ExecMode.SPAWN:
+        return None, (lambda: None)
+
+    # No --inprocess-func: probe the entry point, as fuzz does.
+    restore = StateRestore(args.snapshot_restore)
+    return _so_exec(args.target, args.timeout, mode, args.inprocess_func, restore)
+
+
+def _tmin_call(args, grammar, run):
+    """Call the tmin service with the CLI args and a bound executor."""
+    from fuzzer_tool.core.reducer import Prefix
+    from fuzzer_tool.services.tmin import tmin
+
     return tmin(
         target=args.target,
         crash_file=args.crash_file,
@@ -1682,6 +1709,7 @@ def _tmin_run(args):
         corpus_dir=getattr(args, "corpus_dir", None),
         also_dir=getattr(args, "also_interesting", None),
         prefix=Prefix.GALLOP if getattr(args, "gallop_prefix", False) else Prefix.KEEP,
+        run=run,
     )
 
 
@@ -8488,6 +8516,33 @@ def _build_parser() -> _Parsers:
         action="store_true",
         help="Find the shortest crashing prefix first (gallop + bisect, O(log n) runs); "
         "pays off when the crash needs a short prefix of a long input",
+    )
+    tmin_parser.add_argument(
+        "--inprocess", action="store_true", help="Run a .so through the in-process loader"
+    )
+    tmin_parser.add_argument(
+        "--inprocess-direct",
+        action="store_true",
+        help="Direct ctypes call (alone: direct_lite; with --inprocess: direct)",
+    )
+    tmin_parser.add_argument(
+        "--inprocess-func",
+        default=None,
+        help="Function name for in-process runs (default: probe the .so)",
+    )
+    tmin_parser.add_argument(
+        "--snapshot-restore",
+        choices=[m.value for m in StateRestore],
+        default=StateRestore.OFF.value,
+        help="Direct modes: 'globals' restores .data/.bss before each candidate, so "
+        "verdicts do not depend on run order. Default: off.",
+    )
+    tmin_parser.add_argument(
+        "--no-snapshot-restore",
+        dest="snapshot_restore",
+        action="store_const",
+        const=StateRestore.OFF.value,
+        help="Disable --snapshot-restore.",
     )
     tmin_parser.set_defaults(func=cmd_tmin)
 

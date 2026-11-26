@@ -4,6 +4,7 @@ import contextlib
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import hash_data, rehydrate_by_hash, save_crash
@@ -165,6 +166,11 @@ def _lineage_candidate(
     return None
 
 
+def _executor(run, spawn):
+    """Bind once: the caller's in-process runner, else spawn per run."""
+    return spawn if run is None else run
+
+
 def tmin(
     target: str,
     crash_file: str,
@@ -178,6 +184,7 @@ def tmin(
     corpus_dir: str | None = None,
     also_dir: str | None = None,
     prefix: Prefix = Prefix.KEEP,
+    run: Callable[[bytes], tuple[int, str]] | None = None,
 ) -> bytes | None:
     """Minimize a crash input to find the smallest reproducer.
 
@@ -208,6 +215,8 @@ def tmin(
             during lineage replay.
         also_dir: Where other-signature crashes go (default: crash file's dir).
         prefix: ``Prefix.GALLOP`` runs the shortest-prefix pre-pass first.
+        run: Bound one-input executor ``data -> (rc, stderr)`` (an in-process
+            runner); None spawns the target per run.
 
     Returns:
         Minimized bytes, or None if the crash could not be reproduced.
@@ -244,8 +253,10 @@ def tmin(
             rc, stderr, _pid = run_target_stdin(target, data_bytes, timeout, env=env)
             return rc, stderr
 
+        execute = _executor(run, _run_target)
+
         def _probe(data_bytes: bytes) -> tuple[str | None, int, str]:
-            returncode, stderr = _run_target(data_bytes)
+            returncode, stderr = execute(data_bytes)
             return crash_sig(returncode, stderr), returncode, stderr
 
         def _is_crash(data_bytes: bytes, expected_sig: str | None = None) -> str | None:
