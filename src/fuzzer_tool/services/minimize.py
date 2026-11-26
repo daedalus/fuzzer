@@ -73,11 +73,13 @@ def _print_progress(
     n_edges: int,
     peak_rss_kb: int,
     estimated_total_edges: int | None = None,
+    verb: str = "Replayed",
 ) -> None:
     """One-line replay status: rate, ETA, elapsed, unique edges, rss.
 
     *total_files* 0 = unknown (a streamed archive): no percentage or ETA.
     *estimated_total_edges* optional: projected total distinct edges if all seeds processed.
+    *verb* leads the line, e.g. ``Scanned`` for full-cover's dump read.
     """
     elapsed = time.time() - start_time
     live_kb = None
@@ -91,7 +93,7 @@ def _print_progress(
     if total_files <= 0:
         rate = files_done / elapsed if elapsed > 0 else 0.0
         print(
-            f"\r[*] Replayed {files_done} {rate:.1f} seeds/s | elapsed: {elapsed:.1f}s "
+            f"\r[*] {verb} {files_done} {rate:.1f} seeds/s | elapsed: {elapsed:.1f}s "
             f"| edges: {n_edges}{est_str}{rss_str}",
             end="",
             flush=True,
@@ -103,7 +105,7 @@ def _print_progress(
         remaining = total_files - files_done
         eta = remaining / rate if rate > 0 else 0
         print(
-            f"\r[*] Replayed {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
+            f"\r[*] {verb} {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
             f"{rate:.1f} seeds/s ETA: {eta:.1f}s | elapsed: {elapsed:.1f}s | edges: {n_edges}{est_str}{rss_str}",
             end="",
             flush=True,
@@ -111,7 +113,7 @@ def _print_progress(
         return
 
     print(
-        f"\r[*] Replayed {files_done}/{total_files} | elapsed: {elapsed:.1f}s | edges: {n_edges}{est_str}{rss_str}...",
+        f"\r[*] {verb} {files_done}/{total_files} | elapsed: {elapsed:.1f}s | edges: {n_edges}{est_str}{rss_str}...",
         end="",
         flush=True,
     )

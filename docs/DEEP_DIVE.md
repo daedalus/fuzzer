@@ -1733,6 +1733,8 @@ Seeds absent from the dump (`unmeasured`) are kept: never prune on a guess. Dump
 
 Batches are read as spans of the one spliced pickle (`adapters/edge_pickle.py::_batch_spans`): a one-item batch is `k v SETITEM`, more is `MARK k v ... SETITEMS`, so a span starts at the batch's own MARK — dropping it made every batch fail to load and every run a no-op copy (tests/test_full_cover.py::test_regression_spliced_dump_minimizes). Ids are content keys, so a seed stored twice (shard and `timeouts/`) is written once.
 
+**Status line**: the scan prints edge-dump's line once per batch (`_print_progress`, verb `Scanned`): seeds read, seeds/s, elapsed, dump-union edges, rss. No ETA: the stream has no seed total. Cost ~18 us per batch (`np.count_nonzero` on a 512k map).
+
 FFmpeg 9.0.2 dump (585,046 seeds, 202,942 edges): 585,241 on disk -> 11,897 kept, 0.26 GB of 11.11 GB, 195 unmeasured; 3.7 min scan + 46 s cover.
 
 Tests: `tests/test_full_cover.py`.

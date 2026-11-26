@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -30,7 +31,15 @@ from fuzzer_tool.adapters import seed_tar, seed_zip
 from fuzzer_tool.adapters.edge_pickle import iter_edges_pickle
 from fuzzer_tool.adapters.filesystem import hash_data, is_regular, live_delta_files, read_seed
 from fuzzer_tool.core.set_cover import min_cover
-from fuzzer_tool.services.minimize import _commit_results, _discover_corpus_files
+from fuzzer_tool.services.minimize import (
+    _commit_results,
+    _discover_corpus_files,
+    _maxrss_kb,
+    _print_progress,
+)
+
+# Status line verb: the dump is read, not replayed.
+_SCAN_VERB = "Scanned"
 
 # Seed filenames are content hashes: seeds/<hh>/id_<hash> (corpus_manager).
 _SEED_PREFIX = "id_"
@@ -205,6 +214,7 @@ def _scan(
     dump_seeds = 0
     # Edge-set fingerprint -> the pool seed holding that exact set.
     twins: dict[bytes, str] = {}
+    start = time.time()
 
     for batch in iter_edges_pickle(dump_path):
         dump_seeds += len(batch)
@@ -220,6 +230,12 @@ def _scan(
         pool.update(picks)
         _swap_twins(pool, twins, picks, batch, ids)
 
+        # Status line per batch, as edge-dump; total unknown (streamed), no ETA.
+        union = int(np.count_nonzero(dump))
+        _print_progress(dump_seeds, 0, start, union, _maxrss_kb(), verb=_SCAN_VERB)
+
+    if dump_seeds:
+        print()
     return pool, dump, reach, unmeasured, gone, dump_seeds
 
 
