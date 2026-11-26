@@ -168,3 +168,133 @@ class TestSignP:
         n = wins + losses
         tail = sum(math.comb(n, j) for j in range(0, min(wins, losses) + 1)) / 2**n
         assert sim.sign_p(wins, losses) == pytest.approx(min(1.0, 2 * tail))
+
+
+def _skewed_sources(rand: RandPool) -> np.ndarray:
+    """Three unit-variance, zero-mean, right-skewed sources (exponential)."""
+    s = -np.log(1.0 - rand.random_array((N, 3)))
+    s -= s.mean(axis=0)
+    return s / s.std(axis=0)
+
+
+class TestSkewContrast:
+    def test_recovers_rotated_skewed_sources(self):
+        rand = RandPool(seed=21)
+        s = _skewed_sources(rand)
+        z = s @ _rotation(rand, 3).T
+        w, conv = sim.fast_ica(z, rand, contrast=sim.Contrast.SKEW)
+        c = np.abs(np.corrcoef(s.T, (z @ w.T).T)[:3, 3:])
+        assert conv is sim.Converge.YES
+        assert _best_match(c).min() >= RECOVERY
+
+
+class TestVarimax:
+    def test_recovers_rotated_sparse_loadings(self):
+        """One nonzero per row (a byte in one field); varimax must undo Q."""
+        rand = RandPool(seed=22)
+        k, per = 3, 20
+        l0 = np.zeros((k * per, k))
+        l0[np.arange(k * per), np.repeat(np.arange(k), per)] = 1.0 + rand.random_array(k * per)
+        q = _rotation(rand, k)
+        got = l0 @ q @ sim.varimax(l0 @ q)
+        c = np.abs(got.T @ l0) / np.outer(np.linalg.norm(got, axis=0), np.linalg.norm(l0, axis=0))
+        assert _best_match(c).min() >= 0.999
+
+    def test_rotation_is_orthogonal(self):
+        r = sim.varimax(RandPool(seed=23).normal_array((40, 4)))
+        assert np.allclose(r @ r.T, np.eye(4), atol=1e-10)
+
+    def test_single_column_is_identity(self):
+        assert np.allclose(sim.varimax(np.ones((5, 1))), np.eye(1))
+
+
+class TestGapRank:
+    def test_largest_relative_gap(self):
+        assert sim.gap_rank(np.array([100.0, 50, 40, 1, 0.9, 0.8]), 1) == 3
+
+    def test_min_rank_skips_leading_gap(self):
+        """A dominant first eigenvalue (reject split) must not cap the rank at 1."""
+        eig = np.array([2000.0, 50, 40, 30, 1, 0.9])
+        assert sim.gap_rank(eig, 1) == 1
+        assert sim.gap_rank(eig, 2) == 4
+
+    @pytest.mark.parametrize("eig", [np.array([5.0]), np.array([3.0, 3.0])])
+    def test_adversarial_short_spectrum_bounded(self, eig):
+        assert 1 <= sim.gap_rank(eig, 2) <= eig.size
+
+
+class TestSignedAssign:
+    def test_vertex_and_rest(self):
+        """Positive tail names the field; no positive score -> rest group (k)."""
+        src = np.array([[3.0, -1, -1], [-1, 2.5, -1], [-1, -1, 4], [-1, -1, -0.5], [-2, -2, -2]])
+        src = np.vstack([src, -0.1 * np.ones((20, 3))])  # bulk keeps each tail positive
+        member = np.ones(len(src), dtype=bool)
+        member[-1] = False
+        got = sim.signed_labels(src, member)
+        assert got[:5].tolist() == [0, 1, 2, 3, 3]
+        assert got[-1] == -1
+
+
+FOUR = sim.Spec(n_fields=4, per_field=30, overlap=0.5, reject=24)
+
+
+class TestImprovedArms:
+    def test_ica_fix_keeps_pca_membership(self):
+        offs, rows, _ = sim.planted(RandPool(seed=31), FOUR)
+        p = sim.pca_labels(offs, rows)
+        i = sim.ica_fix_labels(offs, rows, RandPool(seed=32))
+        assert ((p >= 0) == (i >= 0)).all()
+
+    @pytest.mark.parametrize("arm", ["ica_fix", "vmax"])
+    def test_recovers_four_overlapping_fields(self, arm):
+        """The tetrahedron case where logcosh ICA scored ~0.69."""
+        offs, rows, truth = sim.planted(RandPool(seed=33), FOUR)
+        got = (
+            sim.ica_fix_labels(offs, rows, RandPool(seed=34))
+            if arm == "ica_fix"
+            else sim.vmax_labels(offs, rows)
+        )
+        assert adjusted_rand(truth, got) >= 0.95
+
+    def test_vmax_keeps_pc1_field_without_reject(self):
+        spec = sim.Spec(n_fields=4, per_field=30, overlap=0.5, reject=0)
+        offs, rows, truth = sim.planted(RandPool(seed=35), spec)
+        assert adjusted_rand(truth, sim.vmax_labels(offs, rows)) >= 0.95
+
+    def test_vmax_rank_one_without_reject(self):
+        """Two fields, no reject: one real axis; a forced 2nd axis splits noise."""
+        spec = sim.Spec(n_fields=2, per_field=30, overlap=0.5, reject=0)
+        ari = []
+        for seed in range(40, 50):  # fixed draws, not a retry loop: all are scored
+            offs, rows, truth = sim.planted(RandPool(seed=seed), spec)
+            ari.append(adjusted_rand(truth, sim.vmax_labels(offs, rows)))
+        assert np.mean(ari) >= 0.95
+
+    def test_gap_rank_falls_back_without_later_gap(self):
+        """No ratio past min_rank reaches min_gap: the leading gap decides."""
+        eig = np.array([500.0, 10, 9.5, 9, 8.6, 8.2])
+        assert sim.gap_rank(eig, 2) == 3  # 9.5 / 9: largest noise ratio
+        assert sim.gap_rank(eig, 2, min_gap=sim.MIN_GAP_RATIO) == 1
+
+    def test_taper_shrinks_later_fields(self):
+        spec = sim.Spec(n_fields=3, per_field=40, overlap=0.0, reject=0, taper=0.5)
+        _, _, truth = sim.planted(RandPool(seed=36), spec)
+        assert np.bincount(truth).tolist() == [40, 20, 10]
+
+    def test_falsification_no_structure(self):
+        rand = RandPool(seed=37)
+        rows = np.stack(
+            [sketch_row(np.array(rand.randint_list(1, 1 << 30, 60))) for _ in range(120)]
+        )
+        offs = np.arange(120)
+        fake = np.repeat(np.arange(3), 40)
+        for labels in (sim.ica_fix_labels(offs, rows, rand), sim.vmax_labels(offs, rows)):
+            assert labels is not None
+            assert abs(adjusted_rand(fake, labels)) < 0.1
+
+    def test_adversarial_degenerate_declines(self):
+        rows = np.stack([sketch_row(np.arange(1, 500))] * 16)
+        offs = np.arange(16)
+        assert sim.ica_fix_labels(offs, rows, RandPool(seed=38)) is None
+        assert sim.vmax_labels(offs, rows) is None
+        assert sim.vmax_labels(offs[:3], rows[:3]) is None
