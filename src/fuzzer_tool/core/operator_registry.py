@@ -31,12 +31,15 @@ from fuzzer_tool.core.mutations.base64 import parse_base64
 from fuzzer_tool.core.mutations.caf import sniff_caf as _sniff_caf
 from fuzzer_tool.core.mutations.dca import sniff_dca as _sniff_dca
 from fuzzer_tool.core.mutations.flac_frame import sniff_flac_frame as _sniff_flac_frame
+from fuzzer_tool.core.mutations.flv_fields import sniff_flv_fields as _sniff_flv_fields
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
 from fuzzer_tool.core.mutations.h264_ps import sniff_h264_ps as _sniff_h264_ps
 from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.ivf import sniff_ivf as _sniff_ivf
 from fuzzer_tool.core.mutations.per import parse_per
+from fuzzer_tool.core.mutations.riff_fields import sniff_avi as _sniff_avi
+from fuzzer_tool.core.mutations.riff_fields import sniff_wav as _sniff_wav
 from fuzzer_tool.core.mutations.rpl import sniff_rpl as _sniff_rpl
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
@@ -300,6 +303,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "aac_asc_mutate",
         "caf_chunk_mutate",
         "rpl_chunk_mutate",
+        "avi_field_mutate",
+        "wav_field_mutate",
+        "flv_field_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -838,6 +844,10 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # CAF magic + one chunk header; ARMovie signature + 20 header lines.
     "caf_chunk_mutate": _sniff_caf,
     "rpl_chunk_mutate": _sniff_rpl,
+    # Nested AVI/WAV chunk fields and FLV tag-payload fields (GStreamer demuxers).
+    "avi_field_mutate": _sniff_avi,
+    "wav_field_mutate": _sniff_wav,
+    "flv_field_mutate": _sniff_flv_fields,
     "json_mutate": _sniff_json,
     "sql_mutate": _sniff_sql,
     "ecdsa_field_mutate": _sniff_secp_payload,
