@@ -1,29 +1,38 @@
 """Regression tests for tools/gen_ffmpeg_gst_seeds.py.
 
-The dual-target pack writes FFmpeg seeds (``ff_`` prefix, reused verbatim from
-``gen_ffmpeg_91_seeds``) and GStreamer seeds (``gs_`` prefix). The FFmpeg
-builders are covered by ``test_regression_ffmpeg_91_seeds``; here we guard the
-GStreamer half.
+The cross-library pack writes FFmpeg seeds (``ff_`` prefix, reused verbatim
+from ``gen_ffmpeg_91_seeds``), GStreamer seeds (``gs_``) and one
+``dual_`` file that hits both libraries. The FFmpeg builders are covered by
+``test_regression_ffmpeg_91_seeds``; here we guard the GStreamer half.
 
-The one property that makes a GStreamer seed useful is *routing*: the target
-(``targets/gstreamer_read.c``) type-finds the input and only then feeds the
-matching demuxer. A seed whose leading bytes miss its format's typefind magic
-falls through to ``kFallback[buf[0] % 5]`` and lands on the wrong demuxer with a
-synthesised caps, so its crafted sub-structure is never parsed. Each test below
-re-derives the route from the bytes (independently of the builder) and asserts
-it reaches the intended demuxer, then checks the crafted sub-structure.
+Two properties make a GStreamer seed useful:
+
+*routing* -- the target (``targets/gstreamer_read.c``) type-finds the input
+and only then feeds the matching demuxer. A seed whose leading bytes miss
+its format's typefind magic falls through to ``kFallback[buf[0] % 5]`` and
+lands on the wrong demuxer with a synthesised caps, so its crafted
+sub-structure is never parsed.
+
+*reachability* -- each seed targets a demuxer path GStreamer 1.28.0 ships
+unguarded and a later 1.28.x hardened. Each test re-parses the produced
+bytes exactly as the demuxer reads them (independently of the builder) and
+asserts the unguarded path is reached, so a silent offset drift in the
+generator fails here rather than producing a seed that no longer lands on
+the bug.
 """
 
 from __future__ import annotations
 
+import bz2
 import io
 import math
 import os
+import random
 import struct
 
 import pytest
 import tools.gen_ffmpeg_gst_seeds as gen
-from tools.gen_ffmpeg_gst_seeds import GSTREAMER_SEEDS, write_seeds
+from tools.gen_ffmpeg_gst_seeds import BZ2_RNG_SEED, DUAL_SEEDS, GSTREAMER_SEEDS, write_seeds
 
 # --- Routing model: mirrors targets/gstreamer_read.c ------------------------
 # typefind magic -> caps name, caps name -> demuxer element, and the byte[0]%5
@@ -40,16 +49,15 @@ FLVDEMUX = "flvdemux"
 
 FALLBACK = (QTDEMUX, MATROSKADEMUX, WAVPARSE, AVIDEMUX, FLVDEMUX)
 
-# Intended demuxer per seed, inferred from the format in the seed name — the
+# Intended demuxer per seed, inferred from the format in the seed name -- the
 # human-side oracle, independent of the generator's byte layout.
 GS_INTENDED = {
-    "matroska_duration_inf.mkv": MATROSKADEMUX,
-    "matroska_video_dims.mkv": MATROSKADEMUX,
-    "matroska_codecprivate.mkv": MATROSKADEMUX,
-    "quicktime_mvhd.mp4": QTDEMUX,
-    "wav_missing_fmt.wav": WAVPARSE,
-    "avi_bad_avih.avi": AVIDEMUX,
-    "flv_nan_duration.flv": FLVDEMUX,
+    "wav_adtl_null_deref.wav": WAVPARSE,
+    "avi_vprp_zero_div.avi": AVIDEMUX,
+    "mkv_flac_priv_overread.mkv": MATROSKADEMUX,
+    "mkv_bz2_avail_out_overflow.mkv": MATROSKADEMUX,
+    "mkv_lzo_getlen_overflow.mkv": MATROSKADEMUX,
+    "webm_duration_lzo.webm": MATROSKADEMUX,
 }
 
 
@@ -101,14 +109,28 @@ def ebml_vint(p: io.BytesIO) -> int:
     return value
 
 
+def simple_block_payload(data: bytes) -> bytes:
+    """First SimpleBlock's payload, located via its Cluster id.
+
+    A bare ``data.index(b"\xa3")`` matches the last byte of the EBML magic
+    (``1a 45 df a3``); the search must start at the Cluster element.
+    """
+    cluster_off = data.index(b"\x1f\x43\xb6\x75")  # Cluster id
+    blk_off = data.index(b"\xa3", cluster_off)  # SimpleBlock id
+    p = io.BytesIO(data[blk_off + 1 :])
+    size = ebml_vint(p)
+    return p.read(size)[4:]  # track vint + int16 timecode + flags
+
+
 class TestRouting:
     def test_each_seed_reaches_intended_demuxer(self):
-        """Falsification: every gs_ seed must type-find to its format's demuxer.
+        """Falsification: every gs_/dual_ seed must type-find to its demuxer.
 
-        The committed-then-fixed bug: matroska seeds lacking the EBML magic fell
-        to ``FALLBACK[0] == qtdemux``. This asserts the magic routes correctly.
+        The committed-then-fixed bug: matroska seeds lacking the EBML magic
+        fell to ``FALLBACK[0] == qtdemux``. This asserts the magic routes
+        correctly.
         """
-        for name, build in GSTREAMER_SEEDS.items():
+        for name, build in {**GSTREAMER_SEEDS, **DUAL_SEEDS}.items():
             assert name in GS_INTENDED, f"no intended demuxer declared for {name}"
             assert route(build()) == GS_INTENDED[name], name
 
@@ -118,7 +140,7 @@ class TestRouting:
         Strip a matroska seed's EBML magic and it must NOT still resolve to
         matroskademux -- otherwise the routing assertion above is vacuous.
         """
-        good = GSTREAMER_SEEDS["matroska_duration_inf.mkv"]()
+        good = GSTREAMER_SEEDS["mkv_flac_priv_overread.mkv"]()
         assert route(good) == MATROSKADEMUX
 
         broken = b"\x00\x00\x00\x15" + good[4:]  # old be32-length prefix, no magic
@@ -130,97 +152,133 @@ class TestRouting:
 
         A stray ``ftyp``/``moov`` there would hijack typefind to qtdemux.
         """
-        for name, build in GSTREAMER_SEEDS.items():
+        for name, build in {**GSTREAMER_SEEDS, **DUAL_SEEDS}.items():
             if GS_INTENDED[name] == QTDEMUX:
                 continue
             assert build()[4:8] not in QT_BRANDS, name
 
 
 class TestMatroskaSeeds:
-    def test_duration_inf_double(self):
-        """Info.Duration is a non-finite double -> parse_info float handling."""
-        data = GSTREAMER_SEEDS["matroska_duration_inf.mkv"]()
-        assert data[:4] == EBML_MAGIC
-        assert b"\x15\x49\xa9\x66" in data  # Info id
-        off = data.index(b"\x44\x89")  # Duration id (2-byte)
-        p = io.BytesIO(data[off + 2 :])
-        assert ebml_vint(p) == 8
-        d = struct.unpack(">d", p.read(8))[0]
-        # Falsification: a finite double would take the normal path.
-        assert math.isinf(d) or math.isnan(d)
+    def test_flac_priv_declared_len_overreads_payload(self):
+        """The STREAMINFO header declares 4 bytes more than the payload holds.
 
-    def test_video_dims_huge(self):
-        """PixelWidth*PixelHeight overflows -> video track size computation."""
-        data = GSTREAMER_SEEDS["matroska_video_dims.mkv"]()
-        assert data[:4] == EBML_MAGIC
-        assert b"\x16\x54\xae\x6b" in data  # Tracks id
-        w_off = data.index(b"\xb0")  # PixelWidth id
-        p = io.BytesIO(data[w_off + 1 :])
-        n = ebml_vint(p)
-        width = int.from_bytes(p.read(n), "big")
-        # Falsification: a sane width wouldn't stress the size math.
-        assert width >= 0xFFFF
-
-    def test_codecprivate_claims_more_than_present(self):
-        """CodecPrivate size vint exceeds the bytes present -> truncation path."""
-        data = GSTREAMER_SEEDS["matroska_codecprivate.mkv"]()
+        1.28.0 checks ``off + len > codec_data_size`` but copies ``len + 4``:
+        the declared length must sit exactly at the private-data end so the
+        check passes while the copy reads past it.
+        """
+        data = GSTREAMER_SEEDS["mkv_flac_priv_overread.mkv"]()
         assert data[:4] == EBML_MAGIC
         cp_off = data.index(b"\x63\xa2")  # CodecPrivate id (2-byte)
         p = io.BytesIO(data[cp_off + 2 :])
         declared = ebml_vint(p)
-        remaining = len(data) - (cp_off + 2) - (p.tell())
-        # Falsification: the declared length must outrun the actual payload.
-        assert declared > remaining
+        priv = p.read(declared)
+        # Falsification: a declared len within the payload would not overread.
+        assert priv[:4] == b"fLaC"
+        # Last block of the block header: not-last flag, type 0 (STREAMINFO),
+        # then the 24-bit length.
+        block_len = int.from_bytes(priv[5:8], "big")
+        assert block_len == len(priv) - 8 + gen.FLAC_OVERREAD
+        assert block_len + 4 > len(priv) - 8
 
+    def test_bz2_block_decompresses_larger_than_input(self):
+        """The bz2 block must end the first pass output-full with input left.
 
-class TestQuickTimeSeed:
-    def test_ftyp_at_offset4_and_moov(self):
-        """ftyp at byte 4 (typefind) and a moov box for qtdemux to parse."""
-        data = GSTREAMER_SEEDS["quicktime_mvhd.mp4"]()
-        # Falsification: a prefix byte would shift ftyp off offset 4 (old bug).
-        assert data[4:8] == b"ftyp"
-        size = struct.unpack(">I", data[0:4])[0]
-        assert size >= 8 and size % 4 == 0
-        assert b"moov" in data
-        assert b"mvhd" in data
+        The buggy grow loop only iterates when BZ2_bzDecompress returns
+        BZ_OK with the output full; that needs decompressed > compressed.
+        """
+        data = GSTREAMER_SEEDS["mkv_bz2_avail_out_overflow.mkv"]()
+        payload = simple_block_payload(data)
+        raw = bz2.decompress(payload)
+        # Falsification: a well-compressing block would finish in one pass.
+        assert len(raw) > len(payload)
+        rng = random.Random(BZ2_RNG_SEED)
+        assert raw == bytes(rng.randrange(4) for _ in range(len(raw)))
 
-    def test_no_leading_prefix_byte(self):
-        """Adversarial: byte 0 is part of the box size, not a routing selector."""
-        data = GSTREAMER_SEEDS["quicktime_mvhd.mp4"]()
-        assert data[0] == 0x00  # high byte of a small 32-bit box size
+    def test_lzo_zero_run_wraps_int32(self):
+        """The length-run of zeros must overflow get_len's int counter.
+
+        1.28.0's ``cnt += 255`` runs until the zeros end; only a run past
+        2**31/255 bytes wraps cnt negative. The trailing 0x01 ends the run.
+        """
+        data = GSTREAMER_SEEDS["mkv_lzo_getlen_overflow.mkv"]()
+        payload = simple_block_payload(data)
+        # Falsification: a short run stays positive and takes the clamps.
+        assert payload[: payload.index(b"\x01")] == b"\x00" * gen.LZO_ZERO_RUN
+        assert gen.LZO_ZERO_RUN * 255 > gen.INT32_MAX
+        assert payload.endswith(b"\x01")
 
 
 class TestWavSeed:
-    def test_riff_wave_without_fmt(self):
-        """RIFF/WAVE present (routes to wavparse); fmt chunk absent (error path)."""
-        data = GSTREAMER_SEEDS["wav_missing_fmt.wav"]()
+    def test_adtl_list_declares_absent_body(self):
+        """LIST/adtl whose declared size leaves no room for any sub-chunk.
+
+        1.28.0 flushes the 12-byte header and maps ``size - 4`` bytes; with
+        size == 12 the 8 mapped body bytes never arrive -> NULL map -> the
+        deref in gst_wavparse_adtl_chunk.
+        """
+        data = GSTREAMER_SEEDS["wav_adtl_null_deref.wav"]()
         assert data[0:4] == b"RIFF"
         assert data[8:12] == b"WAVE"
-        # Falsification: a fmt chunk would take the normal negotiation path.
-        assert b"fmt " not in data
+        # Falsification: a body-carrying LIST would map real bytes.
+        adtl_off = data.index(b"adtl")
+        list_size = struct.unpack("<I", data[adtl_off - 4 : adtl_off])[0]
+        assert list_size == gen.WAV_ADTL_LIST_SIZE
+        assert len(data) == adtl_off + 4  # nothing after the "adtl" fourcc
 
 
 class TestAviSeed:
-    def test_riff_avi_container_with_avih(self):
-        """RIFF/AVI container (routes to avidemux) carrying a malformed avih."""
-        data = GSTREAMER_SEEDS["avi_bad_avih.avi"]()
+    def test_vprp_carries_zero_fields_and_fixed_prefix(self):
+        """vprp sized exactly to offsetof(field_info) with fields == 0.
+
+        1.28.0 computes ``(size - offsetof(field_info)) / vprp->fields``;
+        the 36-byte body passes its size check and divides by zero.
+        """
+        data = GSTREAMER_SEEDS["avi_vprp_zero_div.avi"]()
         assert data[0:4] == b"RIFF"
-        # Falsification: the old seed used bare b"AVI"; typefind needs "AVI ".
+        # Falsification: "AVI" alone (old bug) does not type-find to avidemux.
         assert data[8:12] == b"AVI "
-        assert b"hdrl" in data
-        assert b"avih" in data
+        for marker in (b"hdrl", b"avih", b"strl", b"strh", b"strf", b"movi"):
+            assert marker in data, marker
+        vprp_off = data.index(b"vprp")
+        size = struct.unpack("<I", data[vprp_off + 4 : vprp_off + 8])[0]
+        body = data[vprp_off + 8 : vprp_off + 8 + size]
+        assert size == 36  # exactly offsetof(gst_riff_vprp, field_info)
+        # Falsification: fields != 0 takes the division.
+        assert struct.unpack("<I", body[32:36])[0] == 0
 
 
-class TestFlvSeed:
-    def test_flv_magic_and_nan_duration(self):
-        """FLV magic (routes to flvdemux) with a NaN AMF duration double."""
-        data = GSTREAMER_SEEDS["flv_nan_duration.flv"]()
-        assert data[0:3] == b"FLV"
-        assert b"duration" in data
-        nan_off = data.index(b"duration") + len("duration") + 1
-        num = struct.unpack(">d", data[nan_off : nan_off + 8])[0]
-        # Falsification: a finite duration wouldn't exercise the NaN path.
-        assert math.isnan(num)
+class TestDualSeed:
+    def test_webm_carries_both_legs(self):
+        """One file, both libraries: Duration 1e18 (FFmpeg) + LZO run (gst).
+
+        Falsification: either half alone would crash only one target.
+        """
+        data = DUAL_SEEDS["webm_duration_lzo.webm"]()
+        assert data[:4] == EBML_MAGIC
+        off = data.index(b"\x44\x89")  # Duration id (2-byte)
+        p = io.BytesIO(data[off + 2 :])
+        assert ebml_vint(p) == 8
+        d = struct.unpack(">d", p.read(8))[0]
+        # 1e18 * 1e6 (time scale) * 1000 / 1e6 = 1e21 > INT64_MAX.
+        assert d == gen.WEBM_DURATION
+        assert d * 1e6 * 1000 / 1e6 > 2**63 - 1
+        # LZO leg: same zero-run payload as the gst lzo seed.
+        payload = simple_block_payload(data)
+        assert payload[: gen.LZO_ZERO_RUN] == b"\x00" * gen.LZO_ZERO_RUN
+
+    def test_webm_doctype_routes_to_matroskademux(self):
+        """Adversarial: doctype webm must still type-find to matroskademux."""
+        data = DUAL_SEEDS["webm_duration_lzo.webm"]()
+        assert b"webm" in data
+        assert route(data) == MATROSKADEMUX
+
+
+class TestFfImport:
+    def test_ff_group_is_the_91_pack_verbatim(self):
+        """The ff_ group imports the 91 pack's builders -- no copy, no drift."""
+        from tools.gen_ffmpeg_91_seeds import SEEDS
+
+        assert gen.FFMPEG_SEEDS is SEEDS
 
 
 def _stray(dir_path):
@@ -229,8 +287,8 @@ def _stray(dir_path):
 
 
 class TestAtomicPublish:
-    def test_both_prefixes_published(self, tmp_path):
-        """Falsification: --target both writes every ff_ and gs_ seed, no temp."""
+    def test_all_prefixes_published(self, tmp_path):
+        """Falsification: --target both writes every ff_, gs_ and dual_ seed."""
         from tools.gen_ffmpeg_gst_seeds import FFMPEG_SEEDS
 
         seeds = tmp_path / "seeds"
@@ -238,13 +296,17 @@ class TestAtomicPublish:
 
         write_seeds(str(seeds), FFMPEG_SEEDS, prefix="ff_")
         write_seeds(str(seeds), GSTREAMER_SEEDS, prefix="gs_")
+        write_seeds(str(seeds), DUAL_SEEDS, prefix="dual_")
 
-        for name, build in FFMPEG_SEEDS.items():
-            assert (seeds / f"ff_{name}").read_bytes() == build()
-        for name, build in GSTREAMER_SEEDS.items():
-            assert (seeds / f"gs_{name}").read_bytes() == build()
+        for group, prefix in ((FFMPEG_SEEDS, "ff_"), (GSTREAMER_SEEDS, "gs_"), (DUAL_SEEDS, "dual_")):
+            for name, build in group.items():
+                assert (seeds / f"{prefix}{name}").read_bytes() == build()
 
-        expected = {f"ff_{n}" for n in FFMPEG_SEEDS} | {f"gs_{n}" for n in GSTREAMER_SEEDS}
+        expected = (
+            {f"ff_{n}" for n in FFMPEG_SEEDS}
+            | {f"gs_{n}" for n in GSTREAMER_SEEDS}
+            | {f"dual_{n}" for n in DUAL_SEEDS}
+        )
         assert set(os.listdir(seeds)) == expected
         assert _stray(seeds) == []
         assert _stray(tmp_path) == []

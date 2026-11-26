@@ -1281,23 +1281,46 @@ build here (system ffmpeg is 6.x), so they are potential-crash probes like the 8
 python tools/gen_ffmpeg_91_seeds.py --out ~/fuzzing/ffmpeg_91_potential_crashes
 ```
 
-#### Dual FFmpeg + GStreamer pack (`tools/gen_ffmpeg_gst_seeds.py`)
+#### Cross-library FFmpeg vs GStreamer pack (`tools/gen_ffmpeg_gst_seeds.py`)
 
-Writes both families into one `<out>/seeds/` (`--target ffmpeg|gstreamer|both`):
-`ff_*` import the 9.1 pack above verbatim (no copy, no drift); `gs_*` target
-`targets/gstreamer_read.c`.
+Not a version diff inside one library but FFmpeg's native demuxer code against
+GStreamer's native demuxer code for the same container construct. Writes both
+families plus one dual into `<out>/seeds/` (`--target ffmpeg|gstreamer|both`):
+`ff_*` import the 9.1 pack above verbatim (no copy, no drift), cross-verified
+against GStreamer here; `gs_*` crash GStreamer 1.28.0 on inputs both FFmpeg 9.0.2
+and 9.1 parse clean; `dual_*` hits both libraries with two independent bugs in one
+file. Every verdict was measured by running each seed on gcc sanitizer harnesses of
+both libraries (sandbox has no clang): `ff902`/`ff902_fc`/`ff91` and
+`gst1280`/`gst1280_bz2`/`gst1289` (fixed controls).
 
 The GStreamer target type-finds the input *before* choosing a demuxer, so a seed
 that misses its format's magic falls to `kFallback[byte0 % 5]` and is parsed by
 the wrong demuxer under a synthesised caps — its crafted bytes never run. Every
-`gs_` seed therefore leads with valid container magic (EBML `1A 45 DF A3` for
-matroskademux, `RIFF..WAVE`/`RIFF..AVI\x20` for wavparse/avidemux, `FLV\x01` for
-flvdemux, `ftyp` at offset 4 for qtdemux) and hides its malformation in a
-sub-structure the demuxer's own parse code reaches (inf Duration, 0xFFFFFFFF
-video dims, an over-long CodecPrivate vint, a huge v1 `mvhd` duration, a
-missing-fmt WAV, a degenerate `avih`, a NaN AMF duration). `tests/
-test_regression_ffmpeg_gst_seeds.py` re-derives the route from the bytes and
-asserts each seed reaches its intended demuxer.
+`gs_`/`dual_` seed therefore leads with valid container magic and hides its
+malformation in a sub-structure the demuxer's own parse code reaches.
+
+| seed | divergence | 1.28.0 | FFmpeg |
+|------|-----------|--------|--------|
+| `gs_mkv_lzo_getlen_overflow.mkv` | gst ships a copy of FFmpeg's lzo.c; FFmpeg's `get_len` has carried the `INT_MAX-1000` wrap guard since 2014, 1.28.0's copy had the bare `cnt += 255` loop (9 MB zero run wraps int32 into memcpy; 1.28.9 re-ported the guard, MR 12079) | ASAN OOB | clean 9.0.2 + 9.1 |
+| `gs_mkv_bz2_avail_out_overflow.mkv` | FFmpeg computes the true remaining space `pkt_size - total_out_lo32`; 1.28.0 mis-parenthesized it into `new_size + total_out`, second bz2 pass writes past the buffer (needs an ASAN libbz2 to see) | ASAN OOB-W | clean |
+| `gs_mkv_flac_priv_overread.mkv` | FFmpeg's `matroska_parse_flac` requires `size >= 8+34` and clamps before its memcpy; 1.28.0 checked `off + len > size` but copied `len + 4` — a block length at the exact CodecPrivate end overreads 4 bytes | ASAN OOB-R | clean |
+| `gs_avi_vprp_zero_div.avi` | FFmpeg's vprp case consumes a fixed 36-byte prefix and skips the rest; 1.28.0 divided by the chunk-declared `vprp->fields` (fields == 0 → SIGFPE) | SIGFPE | clean |
+| `gs_wav_adtl_null_deref.wav` | FFmpeg reads adtl only as bounded `labl` strings (`avio_get_str`, 512-byte buffer, chapters-gated); 1.28.0's push-mode adtl branch mapped `size - 4` bytes with no NULL check | SEGV | clean |
+| `dual_webm_duration_lzo.webm` | Duration 1e18 → 9.0.2's `duration * time_scale * 1000 / AV_TIME_BASE` int64 store (1e21 float-cast overflow) + the LZO wrap on the same track | SEGV | UBSAN (9.0.2 only) |
+
+The `ff_*` cross verdicts: `caf`/`rpl` have no GStreamer demuxer (CAF type-finds
+to `audio/x-caf` but nothing sinks it; RPL/ARMovie is not typefound), so the
+harness's fallback picks an unrelated demuxer and exits clean. `rf64`, `flv` and
+`webm` are parser-vs-parser divergences: 9.0.2 stores through signed int64 where
+wavparse keeps everything `guint64` + `MIN()`-clamped, and flvdemux/matroskademux
+land the same doubles in unsigned `GstClockTime` stores, which clang's
+float-cast-overflow does not instrument. `tests/test_regression_ffmpeg_gst_seeds.py`
+re-derives the route from the bytes and re-parses each crafted sub-structure the
+way the demuxer reads it.
+
+```bash
+python tools/gen_ffmpeg_gst_seeds.py --out ~/fuzzing/crash_seeds
+```
 
 ## Coverage Modes
 
