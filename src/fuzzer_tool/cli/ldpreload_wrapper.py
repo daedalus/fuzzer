@@ -192,6 +192,7 @@ def _parsed_target(args: list[str]) -> str | None:
     """
     import contextlib
     import io
+    from typing import cast
 
     from fuzzer_tool.cli.commands import _build_parser
 
@@ -203,7 +204,7 @@ def _parsed_target(args: list[str]) -> str | None:
 
     # replay/tmin: `target`; fuzz: `targets` (one or more, the first is loaded).
     targets = getattr(ns, "targets", None) or [getattr(ns, "target", None)]
-    return targets[0]
+    return cast("str | None", targets[0])
 
 
 def _fuzz_target(args: list[str]) -> str | None:

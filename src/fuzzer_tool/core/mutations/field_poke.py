@@ -13,7 +13,7 @@ Edge values are ints (packed at the field width) or raw bytes (fourccs).
 from __future__ import annotations
 
 from enum import Enum
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 from fuzzer_tool.core.mutations.mp4_codec_cfg import W1_EDGES, W2_EDGES, W3_EDGES, W4_EDGES
 from fuzzer_tool.core.rand_pool import RandPool
@@ -34,7 +34,7 @@ class Field(NamedTuple):
     name: str
     off: int
     width: int
-    edges: tuple = ()  # () -> W_EDGES[width]
+    edges: tuple[int | bytes, ...] = ()  # () -> W_EDGES[width]
 
 
 class Table(NamedTuple):
@@ -79,7 +79,7 @@ def poke(data: bytes, sites: list[Site], endian: Endian, rng: RandPool) -> bytes
 
     fields = _fitting(table.fields, avail)
     f = fields[rng.randint(0, len(fields) - 1)]
-    value = rng.choice(f.edges or W_EDGES[f.width])
+    value = cast("int | bytes", rng.choice(f.edges or W_EDGES[f.width]))
     raw = value if isinstance(value, bytes) else value.to_bytes(f.width, endian.value)
 
     at = base + f.off
