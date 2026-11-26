@@ -134,7 +134,7 @@ def test_cli_accepts_virtual_clock(target, tmp_path):
 
 
 def test_katz_recompute_gate_reads_injected_clock():
-    """Virtual time: recompute cost reads 0, so only the exec gate applies."""
+    """The channel reads its injected clock (the Fuzzer injects none: host time)."""
     clock = Clock(ClockMode.VIRTUAL)
     ch = KatzChannel(MagicMock(), {}, clock=clock)
     assert ch._last_recompute_wall == clock.monotonic()
