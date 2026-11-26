@@ -1254,18 +1254,26 @@ clean on 8.1.3 and 9.0.2. The rest are coverage / MSAN / reachability probes (se
 direction (seeds written to `<out>/seeds/`, default `~/fuzzing/ffmpeg_91_potential_crashes`).
 9.1 is a feature release with no per-bug Changelog, so the candidates come from the
 libavformat tree diff, not bug titles. 9.0.2 already backports most security fixes, so the
-genuine 9.0.2-only delta is small — integer-overflow / large-allocation hardening, not fresh
-OOB. Three crafted seeds:
+genuine 9.0.2-only delta is small — integer-overflow / large-allocation hardening plus
+float-cast hardening (NaN / out-of-range doubles stored into int64), not fresh OOB.
+Seven crafted seeds:
 
 | Seed | Demuxer path (9.0.2 unguarded) | 9.1 fix | Expected |
 |------|--------------------------------|---------|----------|
 | `caf_pakt_overflow.caf` | `cafdec.c` `read_pakt_chunk`: `st->nb_frames += priming` | range guard before the add | signed int64 overflow (UBSAN) |
 | `rpl_idx_overflow.rpl` | `rpl.c` index loop: `av_add_index_entry(ast, offset + video_size, …)` | moves + extends the overflow check | signed int64 overflow (UBSAN) |
 | `wav_bext_bigalloc.wav` | `wavdec.c` `wav_parse_bext_tag`: `av_malloc(size - 602 + 1)` | caps coding history at 1 MiB | ~1 GiB alloc (OOM probe) |
+| `sbg_nan_cast.sbg` | `sbgdec.c` `scale_double`: NaN fails both range compares, `*r = m` casts it | adds `isnan(m)` | float-cast-overflow (UBSAN), fires in `sbg_read_probe` |
+| `flv_amf_nan_duration.flv` | `flvdec.c` `amf_parse_object`: `s->duration = num_val * AV_TIME_BASE` | gates duration/videodatarate/audiodatarate | float-cast-overflow (UBSAN) |
+| `webm_duration_cast.webm` | `matroskadec.c`: `ctx->duration = duration * time_scale * 1000 / AV_TIME_BASE` | rejects negative/huge duration | float-cast-overflow (UBSAN) |
+| `rf64_dataend_overflow.wav` | `wavdec.c` `wav_read_header`: `next_tag_ofs = data_end + (data_size & 1)` on a saturated `data_end` | wraps the add in `av_sat_add64` | signed int64 overflow (UBSAN) |
 
-`nsvdec.c` (vsize underflow → large `av_get_packet`) and `flvdec.c` (keyframe `arraylen` →
-~2 GiB `av_mallocz`) are weaker ENOMEM probes, not crafted. The `mov.c` v2 sample-rate
-NaN/range gap needs a full `moov/trak/stsd`, so it belongs in the mint-baseline path.
+`nsvdec.c` (vsize underflow → large `av_get_packet`) and `flvdec.c` (keyframe `arraylen`,
+now bounded by the metadata tag size) are weaker ENOMEM probes, not crafted. The `mov.c` v2
+sample-rate NaN/range gap (plus its elst/tmap overflows) needs a full `moov/trak/stsd`, so it
+belongs in the mint-baseline path. `flacdec.c`'s SEEKTABLE index overflow is gated behind
+`AVFMT_FLAG_FAST_SEEK`, which `ffmpeg_read.c` never sets; `mtv.c`'s zero fps is a correctness
+fix only (`avpriv_set_pts_info` rejects the 0 timebase).
 Verified structurally by `tests/test_regression_ffmpeg_91_seeds.py`; none run against a real
 build here (system ffmpeg is 6.x), so they are potential-crash probes like the 8.0.3 pack.
 
