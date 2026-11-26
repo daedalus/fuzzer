@@ -6950,6 +6950,11 @@ __AFL_GCC_NO_COV static int __afl_guard_mine(void) {
     return __afl_guard_tid == (pid_t)syscall(SYS_gettid);
 }
 static __thread volatile sig_atomic_t __afl_guard_timed = 0;  /* active frame is timed */
+/* Last escape result of a nested frame (-sig, exit status, -1 timeout). An
+ * entry that hands it back unchanged keeps it unmasked at the outermost
+ * frame. Cleared when an outermost run starts. */
+static __thread int __afl_guard_nested_rc = 0;
+static __thread int __afl_guard_nested_set = 0;
 static volatile sig_atomic_t __afl_handlers_live = 0;
 static int __afl_guard_index(int sig);
 /* A guarded call is in flight, process-wide, and the thread running it.
@@ -8611,7 +8616,8 @@ __AFL_GCC_NO_COV static void __afl_worker_exit(int status) {
  * It sets up a sigsetjmp frame, calls the entry, and returns normally;
  * a crash, exit or timeout inside the entry siglongjmps back here.
  *
- * Returns the entry's own return value, or:
+ * Returns the entry's own return value (outermost frame: masked to
+ * 0..255, as an exit status), or:
  *   -sig     a crash signal on the guarded thread (-6 SIGABRT, -11 SIGSEGV)
  *   status   exit(status) / _exit(status) inside the entry (see below)
  *   -1       the timeout expired (__afl_guarded_call_timeout only)
@@ -8643,6 +8649,7 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     if (!prev) {
         __afl_run_reset();
         __afl_guard_enter();
+        __afl_guard_nested_set = 0;
     }
 
     /* An escape from inside a forwarded libc compare skips __AFL_MUTED's
@@ -8666,7 +8673,11 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
         if (restore_budget) __afl_timer_budget(prev_budget);
         __afl_ph_leave(ph_prev);
         __afl_sancov_fold();
-        return rc;
+        /* Outermost frame: report a return as exit() would (-6 -> 250,
+         * -1 -> 255), so it never collides with -sig or the -1 timeout.
+         * A nested frame's escape handed back by the entry stays as is. */
+        if (prev || (__afl_guard_nested_set && rc == __afl_guard_nested_rc)) return rc;
+        return rc & 0xFF;
     }
 
     __afl_wguard_land(wg_prev);
@@ -8693,9 +8704,16 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     __afl_sancov_fold();
     if (code < __AFL_JMP_EXIT) __afl_sym_emit();   /* a real crash signal */
     else __afl_sym_have = 0;
-    if (code == __AFL_JMP_TIMEOUT) return __AFL_GUARD_TIMEOUT_RC;
-    if (code & __AFL_JMP_EXIT) return code & 0xFF;
-    return -code;
+    int esc = -code;
+    if (code == __AFL_JMP_TIMEOUT) esc = __AFL_GUARD_TIMEOUT_RC;
+    else if (code & __AFL_JMP_EXIT) esc = code & 0xFF;
+
+    /* Nested: the outer frame may get this back from its entry, unmasked. */
+    if (prev) {
+        __afl_guard_nested_rc = esc;
+        __afl_guard_nested_set = 1;
+    }
+    return esc;
 }
 
 __attribute__((visibility("default")))

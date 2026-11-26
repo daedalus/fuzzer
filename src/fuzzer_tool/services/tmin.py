@@ -185,6 +185,7 @@ def tmin(
     also_dir: str | None = None,
     prefix: Prefix = Prefix.KEEP,
     run: Callable[[bytes], tuple[int, str]] | None = None,
+    verify: Callable[[bytes], tuple[int, str]] | None = None,
 ) -> bytes | None:
     """Minimize a crash input to find the smallest reproducer.
 
@@ -217,6 +218,8 @@ def tmin(
         prefix: ``Prefix.GALLOP`` runs the shortest-prefix pre-pass first.
         run: Bound one-input executor ``data -> (rc, stderr)`` (an in-process
             runner); None spawns the target per run.
+        verify: Executor for the final check (a fresh-process runner when
+            ``run`` shares state between candidates); None reuses ``run``.
 
     Returns:
         Minimized bytes, or None if the crash could not be reproduced.
@@ -254,6 +257,7 @@ def tmin(
             return rc, stderr
 
         execute = _executor(run, _run_target)
+        confirm = _executor(verify, execute)
 
         def _probe(data_bytes: bytes) -> tuple[str | None, int, str]:
             returncode, stderr = execute(data_bytes)
@@ -313,7 +317,8 @@ def tmin(
             f"({100 - len(minimized) / len(data) * 100:.0f}% reduction)"
         )
 
-        if _is_crash(minimized, expected_sig=original_sig) is None:
+        # The result must crash on its own, not only after earlier candidates.
+        if crash_sig(*confirm(minimized)) != original_sig:
             print(
                 "[-] Minimized input no longer triggers the original crash! "
                 "Falling back to original.",

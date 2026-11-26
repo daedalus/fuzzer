@@ -253,7 +253,8 @@ while True:
                 rc = _guarded(_func_ptr_raw, buf, len(data))
             else:
                 try:
-                    rc = func(buf, len(data))
+                    # A return reads as exit() would (-6 -> 250), as the guard does.
+                    rc = func(buf, len(data)) & 0xFF
                 except Exception:
                     rc = -11
 

@@ -14,6 +14,7 @@ import enum
 import logging
 import mmap
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -709,6 +710,51 @@ def func_table(elf: bytes) -> FuncTable | None:
         starts = keep["value"].copy()
         return FuncTable(starts, starts + np.maximum(keep["size"], 1), names)
     return None
+
+
+# A loadable library's file name: "t.so", "libx.so.1.2", "t.dylib", "t.dll".
+_SO_NAME_RE = re.compile(r"\.(?:so(?:\.\d+)*|dylib|dll)$", re.IGNORECASE)
+
+
+def is_so_path(path: str) -> bool:
+    """True when *path* names a shared library, versioned sonames included."""
+    return _SO_NAME_RE.search(path) is not None
+
+
+def exported_names(target: str) -> frozenset[str]:
+    """Names *target* defines in .dynsym (what dlsym can find); empty when unreadable.
+
+    Undefined imports (st_shndx 0, e.g. `abort`) are excluded. Read without
+    loading the file: a dlopen runs constructors and needs ASAN first.
+    """
+    import numpy as np
+
+    try:
+        with open(target, "rb") as f:
+            elf = f.read()
+    except OSError:
+        return frozenset()
+    if not _elf64_le(elf):
+        return frozenset()
+    secs = _sym_sections(elf)
+    if secs is None:
+        return frozenset()
+
+    # One numpy view over .dynsym, filtered to defined entries in bulk.
+    _, _, dynsym, dynstr = secs
+    if dynsym is None or dynstr is None:
+        return frozenset()
+    off, size = struct.unpack_from("<QQ", elf, dynsym + 24)
+    str_off, str_size = struct.unpack_from("<QQ", elf, dynstr + 24)
+    if not _payload_in_bounds(len(elf), off, size):
+        return frozenset()
+    if not _payload_in_bounds(len(elf), str_off, str_size):
+        return frozenset()
+
+    syms = np.frombuffer(elf, dtype=_SYM_DTYPE, count=size // _SYM_SIZE, offset=off)
+    defined = syms["name"][syms["shndx"] != 0].tolist()
+    str_end = str_off + str_size
+    return frozenset(_cstr(elf, str_off + n, str_end).decode(errors="replace") for n in defined)
 
 
 def _symbol_names(target: str) -> list[str]:

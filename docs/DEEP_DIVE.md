@@ -2973,6 +2973,15 @@ AFLFast n_fuzz was the seed's own `fuzz_count`, not per-path exec count. `--path
 ### Crash localization (`core/local_align.py`)
 `root-cause` reports where the crash differs from its baseline, robust to indels (Levenshtein/Myers give a global distance only). Common prefix/suffix trimmed with numpy; the middle is Smith-Waterman-Gotoh aligned (+2/−3, gap −5 open, −1 extend), row-wise numpy DP. Adds a "Mutated region" line and `result["mutated_spans"]`. Over `MAX_CELLS` (4 MiB traceback): one coarse span.
 
+### In-process `.so` checks (`cli/commands.py::_checked_mode`)
+
+Before a `.so` is loaded (replay, tmin, verify, probe-size), its `.dynsym` exports are read without loading it (`core/elf.exported_names`):
+
+- Entry not exported (given or probed): error naming it. The loader used to fail in its child and read as "not reproduced".
+- Direct mode without `__afl_guarded_call` (no afl_shim): warning, loader instead. Unguarded, a crash killed fuzzer-tool and a hang ignored `-t`.
+
+A harness's return value is reported as `exit()` would (`rc & 0xFF`): the shim's guard (outermost frame) and the unguarded direct and loader paths. `-6` read as SIGABRT, and `-1` (libFuzzer's "reject input") as a timeout. Versioned names (`libx.so.1`) count as shared objects (`core/elf.is_so_path`); a `.so` needs read access, not the execute bit. Direct runners of one `.so` share one lock (`_target_lock`, by real path). Tests: `tests/test_regression_negative_return.py`, `tests/test_regression_so_entry_checks.py`, `tests/test_regression_so_names.py`.
+
 ### tmin backends (`cli/commands.py::_tmin_backend`)
 
 ```bash
@@ -2980,7 +2989,7 @@ fuzzer-tool tmin ./t.so crash.bin -O min.bin                                    
 fuzzer-tool tmin ./t.so crash.bin -O min.bin --inprocess-direct --snapshot-restore globals
 ```
 
-`--inprocess`, `--inprocess-direct`, `--inprocess-func`, `--snapshot-restore`/`--no-snapshot-restore` as `replay` (§Replay backends); no `-N`. One runner for the whole reduction, passed to `services/tmin.tmin(run=...)`; executables still spawn per candidate. Direct modes: use `--snapshot-restore globals` on a stateful target. With `off`, globals leak between candidates, the reducer accepts candidates that only crash after earlier runs, and the final re-check then rejects the result, so tmin falls back to the unminimized input. The wrapper preloads libasan for `tmin` too. Tests: `tests/test_tmin_inprocess.py`.
+`--inprocess`, `--inprocess-direct`, `--inprocess-func`, `--snapshot-restore`/`--no-snapshot-restore` as `replay` (§Replay backends); no `-N`. One runner for the whole reduction (`services/tmin.tmin(run=...)`); executables spawn per candidate. Default restore: `globals` (replay: `off`), so each candidate starts from load-time globals. Direct + restore also re-checks the result in a fresh process (`tmin(verify=...)`, the loader): libc and heap state are not restored, so a minimum that only crashes after earlier candidates is refused and the input returned unminimized. With `off`, the same happens through globals. `-F`/`-A`/`-c` are ignored in-process (warned). The wrapper preloads libasan for `tmin` too. Tests: `tests/test_tmin_inprocess.py`, `tests/test_regression_tmin_review.py`.
 
 ### Galloping prefix truncation (`tmin --gallop-prefix`)
 Optional reducer pre-pass: cut 1, 2, 4, … bytes off the end until a probe fails, then bisect. ≤ 2·(⌈log2 n⌉+1) execs, 1 when the last byte is needed. Off by default: over 42 synthetic cases it cost a median +13% execs vs ChunkPass alone (wins only when the crash needs a short prefix of a long input; ledger #176).

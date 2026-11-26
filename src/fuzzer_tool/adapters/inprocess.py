@@ -35,6 +35,7 @@ from fuzzer_tool.adapters.shim_factory import (
 )
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY
 from fuzzer_tool.adapters.stderr_capture import StderrCapture
+from fuzzer_tool.core.elf import is_so_path
 from fuzzer_tool.core.run_mode import InputPlacement, StateRestore
 from fuzzer_tool.core.token_bucket import ReportThrottle
 
@@ -179,6 +180,9 @@ sys.exit(max(0, min(rc, 125)))
 #: What ``__afl_guarded_call_timeout`` returns when the budget runs out
 #: (afl_shim.c ``__AFL_GUARD_TIMEOUT_RC``).
 GUARD_TIMEOUT_RC = -1
+# An unguarded entry's return, reported as exit() would (-1 -> 255), as the
+# shim's guard does: a negative return must not read as -sig or a timeout.
+EXIT_STATUS_MASK = 0xFF
 _US_PER_S = 1_000_000
 # Signals whose si_addr is the faulting data address.
 _FAULT_SIGS = frozenset((signal.SIGSEGV, signal.SIGBUS))
@@ -418,10 +422,7 @@ class InProcessRunner:
         )
 
     def _start(self):
-        target_lower = self.target.lower()
-        if target_lower.endswith((".so", ".dylib", ".dll")) or (
-            "." not in self.target and self.function_name
-        ):
+        if is_so_path(self.target) or ("." not in self.target and self.function_name):
             self._start_c()
         else:
             self._start_python()
@@ -701,7 +702,7 @@ class InProcessRunner:
         # Try persistent subprocess first (faster: one process, many calls).
         # Also use for .so targets without coverage — provides crash isolation
         # via fork-per-call (SIGSEGV from ctypes kills the process).
-        is_so = self.target.lower().endswith((".so", ".dylib", ".dll"))
+        is_so = is_so_path(self.target)
         if cov or is_so:
             from fuzzer_tool.adapters.persistent_subprocess import PersistentLoader
 
@@ -965,7 +966,7 @@ class InProcessRunner:
             buf = self._fill(self, data)
             rc = self._guard_call(self, buf, len(data))
             if rc is None:
-                rc = self._func_ptr(buf, len(data))
+                rc = self._func_ptr(buf, len(data)) & EXIT_STATUS_MASK
             elif self._guard_timed_out:
                 timed_out = True
                 self._abandoned(0)
@@ -1040,7 +1041,7 @@ class InProcessRunner:
             # how run_target_stdin returns signal codes.
             rc = self._guard_call(self, self._c_buf, n)
             if rc is None:
-                rc = self._func_ptr(self._c_buf, n)
+                rc = self._func_ptr(self._c_buf, n) & EXIT_STATUS_MASK
             elif self._guard_timed_out:
                 self._timed_out = True
                 self._abandoned(0)
