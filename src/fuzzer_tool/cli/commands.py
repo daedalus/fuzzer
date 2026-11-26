@@ -250,10 +250,6 @@ def _stack_ignore_file(path: str) -> list[str]:
     return patterns
 
 
-# Loaded, never exec'd: verify/replay route these through the loader child.
-SHARED_OBJECT_SUFFIXES = (".so", ".dylib", ".dll")
-
-
 def _detect_asan(target: str) -> bool:
     """Detect if a binary is ASAN-instrumented by checking for __asan_init symbol."""
     for flags in [[], ["-D"]]:
@@ -318,7 +314,9 @@ def _get_dirs(args, target):
 
 
 def _is_shared_object(target: str) -> bool:
-    return target.lower().endswith(SHARED_OBJECT_SUFFIXES)
+    from fuzzer_tool.core.elf import is_so_path
+
+    return is_so_path(target)
 
 
 def _preload_asan(target: str) -> None:
@@ -376,6 +374,63 @@ def _so_exec(
     return run, stop
 
 
+# Exported by afl_shim.c: direct modes contain crashes and hangs only through it.
+_GUARD_SYMBOL = "__afl_guarded_call"
+
+# One lock per loaded .so (by real path): one entry per distinct target.
+_TARGET_LOCKS: dict[str, threading.Lock] = {}
+_TARGET_LOCKS_GUARD = threading.Lock()
+
+
+def _target_lock(target: str) -> threading.Lock:
+    """The lock every runner of *target* shares; symlinks resolve to one."""
+    key = os.path.realpath(target)
+    with _TARGET_LOCKS_GUARD:
+        return _TARGET_LOCKS.setdefault(key, threading.Lock())
+
+
+# Spawn-only options and their argparse dests: an in-process run passes a buffer.
+_SPAWN_ONLY = (("-F", "file_mode"), ("-A", "target_args"), ("-c", "coverage"))
+
+
+def _warn_spawn_only(args) -> None:
+    """Warn once for spawn-only options an in-process runner ignores."""
+    used = [flag for flag, dest in _SPAWN_ONLY if getattr(args, dest, None)]
+    if not used:
+        return
+    print(
+        f"[!] {', '.join(used)} ignored: an in-process run passes the input as a buffer",
+        file=sys.stderr,
+    )
+
+
+def _checked_mode(target: str, func: str, mode):
+    """Check *target*'s exports before loading it; the mode to run *func* in.
+
+    Raises AttributeError when *func* is not exported (the loader would fail
+    in its child and read as "not reproduced"). A direct mode without the
+    shim's guard falls back to the loader: an unguarded crash kills the host.
+    Unreadable or non-ELF targets (no exports read) are passed through.
+    """
+    from fuzzer_tool.core.elf import exported_names
+    from fuzzer_tool.services.minimize import ExecMode
+
+    exports = exported_names(target)
+    if not exports:
+        return mode
+    if func not in exports:
+        raise AttributeError(f"{func}: not exported by {target}")
+
+    if mode not in (ExecMode.DIRECT, ExecMode.DIRECT_LITE) or _GUARD_SYMBOL in exports:
+        return mode
+    print(
+        f"[!] {target} lacks {_GUARD_SYMBOL} (no afl_shim): a crash or hang would "
+        "take fuzzer-tool down, using the loader instead",
+        file=sys.stderr,
+    )
+    return ExecMode.LOADER
+
+
 def _so_runner(target, timeout, mode, func, restore):
     """``_so_exec`` plus ``reset``: load-time globals back, False when unavailable."""
     from fuzzer_tool.adapters.inprocess import InProcessRunner
@@ -383,9 +438,11 @@ def _so_runner(target, timeout, mode, func, restore):
     from fuzzer_tool.services.minimize import ExecMode
 
     _asan_so_ready(target)
+    func = func or Fuzzer._probe_so_function(target)
+    mode = _checked_mode(target, func, mode)
     runner = InProcessRunner(
         target=target,
-        function_name=func or Fuzzer._probe_so_function(target),
+        function_name=func,
         timeout=timeout,
         capture_stderr=True,
         direct=mode is ExecMode.DIRECT,
@@ -393,8 +450,8 @@ def _so_runner(target, timeout, mode, func, restore):
         restore=restore,
     )
 
-    # One call at a time: direct runs share the .so's globals and the restore.
-    lock = threading.Lock()
+    # One call at a time per .so, across runners: direct runs share its globals.
+    lock = _target_lock(target)
 
     def run(data: bytes):
         with lock:
@@ -417,10 +474,15 @@ def _always_isolated() -> bool:
 
 
 def _validate_target(target):
-    """Check target binary exists and is executable."""
+    """Check target binary exists and is executable (a .so: readable, dlopen needs no x bit)."""
     if not os.path.isfile(target):
         print(f"[-] Target not found: {target}")
         sys.exit(1)
+    if _is_shared_object(target):
+        if not os.access(target, os.R_OK):
+            print(f"[-] Target not readable: {target}")
+            sys.exit(1)
+        return
     if not os.access(target, os.X_OK):
         print(f"[-] Target not executable: {target}")
         sys.exit(1)
@@ -1667,31 +1729,50 @@ def _tmin_run(args):
                 print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
 
     try:
-        run, stop = _tmin_backend(args)
+        backend = _tmin_backend(args)
     except (AttributeError, OSError) as e:
         print(f"[-] In-process runner failed for {args.inprocess_func}: {e}", file=sys.stderr)
         return None
 
     try:
-        return _tmin_call(args, grammar, run)
+        return _tmin_call(args, grammar, backend)
     finally:
-        stop()
+        backend.stop()
 
 
-def _tmin_backend(args):
-    """Replay's backend for a .so: (run, stop); (None, no-op) spawns per run."""
+class TminBackend(NamedTuple):
+    """tmin's executors: ``run`` per candidate (None: spawn), ``verify`` for the result."""
+
+    run: Callable[[bytes], tuple[int, str]] | None
+    verify: Callable[[bytes], tuple[int, str]] | None
+    stop: Callable[[], None]
+
+
+def _tmin_backend(args) -> TminBackend:
+    """Replay's backend for a .so; executables spawn per candidate.
+
+    Direct modes with a snapshot restore still share libc and heap state
+    between candidates, so the result is re-checked in a fresh process (the
+    loader): a minimum that only crashes after earlier candidates is refused.
+    """
     from fuzzer_tool.services.minimize import ExecMode
 
     mode = _replay_exec_mode(args)
     if mode is ExecMode.SPAWN:
-        return None, (lambda: None)
+        return TminBackend(None, None, lambda: None)
 
     # No --inprocess-func: probe the entry point, as fuzz does.
+    _warn_spawn_only(args)
     restore = StateRestore(args.snapshot_restore)
-    return _so_exec(args.target, args.timeout, mode, args.inprocess_func, restore)
+    run, stop = _so_exec(args.target, args.timeout, mode, args.inprocess_func, restore)
+    if mode is ExecMode.LOADER or restore is StateRestore.OFF:
+        return TminBackend(run, None, stop)
+
+    verify, stop_verify = _so_exec(args.target, args.timeout, ExecMode.LOADER, args.inprocess_func)
+    return TminBackend(run, verify, lambda: (stop(), stop_verify()))
 
 
-def _tmin_call(args, grammar, run):
+def _tmin_call(args, grammar, backend: TminBackend):
     """Call the tmin service with the CLI args and a bound executor."""
     from fuzzer_tool.core.reducer import Prefix
     from fuzzer_tool.services.tmin import tmin
@@ -1709,7 +1790,8 @@ def _tmin_call(args, grammar, run):
         corpus_dir=getattr(args, "corpus_dir", None),
         also_dir=getattr(args, "also_interesting", None),
         prefix=Prefix.GALLOP if getattr(args, "gallop_prefix", False) else Prefix.KEEP,
-        run=run,
+        run=backend.run,
+        verify=backend.verify,
     )
 
 
@@ -2332,7 +2414,11 @@ def cmd_verify(args):
     # Decided once: a .so runs in the loader child, anything else is exec'd.
     run, stop = (lambda data: _verify_exec(args, data)), None
     if _is_shared_object(args.asan_target):
-        run, stop = _so_exec(args.asan_target, args.timeout)
+        try:
+            run, stop = _so_exec(args.asan_target, args.timeout)
+        except (AttributeError, OSError) as e:
+            print(f"[-] In-process runner failed: {e}", file=sys.stderr)
+            return 1
 
     try:
         for crash_file in crash_files:
@@ -2479,6 +2565,7 @@ def _replay_runner(args):
         return (lambda data: _replay_exec(args, data, env)), (lambda: None), _always_isolated
 
     # No --inprocess-func: probe the entry point, as fuzz does.
+    _warn_spawn_only(args)
     restore = StateRestore(args.snapshot_restore)
     return _so_runner(args.target, args.timeout, mode, args.inprocess_func, restore)
 
@@ -2750,7 +2837,11 @@ def cmd_probe_size(args):
     from fuzzer_tool.core.egg_drop import find_threshold
 
     if _is_shared_object(args.target):
-        run, stop = _so_exec(args.target, args.timeout)
+        try:
+            run, stop = _so_exec(args.target, args.timeout)
+        except (AttributeError, OSError) as e:
+            print(f"[-] In-process runner failed: {e}", file=sys.stderr)
+            return 1
     else:
         env = os.environ.copy()
         run, stop = (lambda data: _replay_exec(args, data, env)), (lambda: None)
@@ -8533,9 +8624,9 @@ def _build_parser() -> _Parsers:
     tmin_parser.add_argument(
         "--snapshot-restore",
         choices=[m.value for m in StateRestore],
-        default=StateRestore.OFF.value,
+        default=StateRestore.GLOBALS.value,
         help="Direct modes: 'globals' restores .data/.bss before each candidate, so "
-        "verdicts do not depend on run order. Default: off.",
+        "verdicts do not depend on run order. Default: globals.",
     )
     tmin_parser.add_argument(
         "--no-snapshot-restore",

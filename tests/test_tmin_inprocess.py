@@ -216,7 +216,7 @@ class TestSnapshotRestore:
     @pytest.mark.parametrize(
         ("flags", "want"),
         [
-            ((), "off"),
+            ((), "globals"),  # tmin default: candidates start from load-time globals
             (("--snapshot-restore", "globals"), "globals"),
             (("--snapshot-restore", "globals", "--no-snapshot-restore"), "off"),
         ],
@@ -257,5 +257,41 @@ class TestSnapshotRestore:
         # Falsification: without restore the armed global leaks into later
         # candidates and a lone "x" passes; a crash then resets globals, the
         # final re-check rejects "x", and tmin falls back to the original.
-        got = self._tmin(tmp_path, build_so, "--inprocess-direct")
+        got = self._tmin(tmp_path, build_so, "--inprocess-direct", "--no-snapshot-restore")
         assert got == STATEFUL_INPUT
+
+
+FAKE_LIBASAN = "/fake/libasan.so.8"
+
+
+@pytest.mark.parametrize(("cmd", "preloaded"), [("tmin", True), ("rank", False)])
+def test_wrapper_main_preload(monkeypatch, tmp_path, cmd, preloaded):
+    """The wrapper's real main(): an ASAN target under `tmin` gets libasan first.
+
+    Falsification: `rank` loads nothing in-process, so no preload.
+    """
+    from fuzzer_tool.cli import ldpreload_wrapper as w
+
+    target = tmp_path / "t.so"
+    target.write_bytes(b"")
+    for var in ("LD_PRELOAD", "ASAN_OPTIONS", "UBSAN_OPTIONS", "MSAN_OPTIONS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(w, "_detect_asan", lambda _t: True)
+    monkeypatch.setattr(w, "_detect_ubsan", lambda _t: False)
+    monkeypatch.setattr(w, "_detect_msan", lambda _t: False)
+    monkeypatch.setattr(w, "_resolve_asan", lambda: FAKE_LIBASAN)
+
+    exec_env = {}
+
+    def fake_exec(_file, _argv, env):
+        exec_env.update(env)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(w.os, "execvpe", fake_exec)
+    monkeypatch.setattr(sys, "argv", ["fuzzer-tool", cmd, str(target), "crash.bin"])
+    with pytest.raises(SystemExit):
+        w.main()
+
+    got = exec_env.get("LD_PRELOAD", "")
+    assert got.startswith(FAKE_LIBASAN) is preloaded
+    assert ("halt_on_error=0" in exec_env.get("ASAN_OPTIONS", "")) is preloaded
