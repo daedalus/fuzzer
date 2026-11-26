@@ -170,6 +170,11 @@ CLEAN_RUN = (0, "")
 ABORT_RUN = (134, "")
 
 
+def _isolated() -> bool:
+    """Scripted reset: state isolation available, nothing to undo."""
+    return True
+
+
 class TestRepeat:
     """-N: one runner, N calls, first hit reported, k/N summary."""
 
@@ -188,7 +193,7 @@ class TestRepeat:
             def stop():
                 self.stops += 1
 
-            monkeypatch.setattr(commands, "_replay_runner", lambda _args: (run, stop))
+            monkeypatch.setattr(commands, "_replay_runner", lambda _args: (run, stop, _isolated))
 
         return install
 
@@ -294,6 +299,8 @@ class TestReplayDir:
         self.seen = []
         self.builds = 0
         self.stops = 0
+        self.resets = 0
+        self.isolates = True
 
         def run(data):
             self.seen.append(data)
@@ -301,10 +308,14 @@ class TestReplayDir:
 
         def build(_args):
             self.builds += 1
-            return run, stop
+            return run, stop, reset
 
         def stop():
             self.stops += 1
+
+        def reset():
+            self.resets += 1
+            return self.isolates
 
         monkeypatch.setattr(commands, "_replay_runner", build)
 
@@ -361,20 +372,142 @@ class TestReplayDir:
         assert (self.builds, self.seen) == (0, [])
         assert "No crash inputs" in capsys.readouterr().err
 
+    # --- PR #466 review regressions ---
+
+    def test_regression_skips_crash_artifacts(self, monkeypatch, tmp_path, scripted):
+        # save_crash writes .sh/.hex beside the .bin; GDB adds .trace. .min is an input.
+        artifacts = {f"crash_x{ext}": CRASH for ext in (".json", ".txt", ".sh", ".hex", ".trace")}
+        inputs = {"crash_x.bin": BENIGN, "crash_x.min": BENIGN}
+        assert self._run(monkeypatch, self._dir(tmp_path, {**artifacts, **inputs})) == 1
+        assert self.seen == list(inputs.values())
+
+    def test_regression_unreadable_continues(self, monkeypatch, tmp_path, scripted, capsys):
+        # A file gone after the scan is reported; the rest still replay.
+        d = self._dir(tmp_path, {"a.bin": BENIGN, "b.bin": CRASH, "gone.bin": BENIGN})
+        real = Path.read_bytes
+
+        def read(p):
+            if p.name == "gone.bin":
+                raise FileNotFoundError(p)
+            return real(p)
+
+        monkeypatch.setattr(Path, "read_bytes", read)
+        assert self._run(monkeypatch, d) == REPRODUCED
+        assert self.seen == [BENIGN, CRASH]
+        out = capsys.readouterr()
+        assert "gone.bin" in out.err
+        assert "1/3 files reproduced, 1 unreadable" in out.out
+
+    def test_regression_scan_error_reported(self, monkeypatch, tmp_path, scripted, capsys):
+        # An unreadable subdir must not pass for a complete scan.
+        d = self._dir(tmp_path, {"a.bin": CRASH, "locked/b.bin": BENIGN})
+        real = os.scandir
+
+        def scandir(path):
+            if Path(path).name == "locked":
+                raise PermissionError(path)
+            return real(path)
+
+        monkeypatch.setattr(os, "scandir", scandir)
+        assert self._run(monkeypatch, d) == REPRODUCED
+        assert self.seen == [CRASH]
+        out = capsys.readouterr()
+        assert "locked" in out.err
+        assert "scan incomplete (1 dir)" in out.out
+
+    def test_regression_dfs_order(self, tmp_path):
+        # Entries sorted by name at each level, depth first.
+        d = self._dir(tmp_path, {"c.bin": b"", "a/y.bin": b"", "a/x.bin": b"", "b.bin": b""})
+        got = [p.relative_to(d).as_posix() for p in commands._replay_inputs(d, [])]
+        assert got == ["a/x.bin", "a/y.bin", "b.bin", "c.bin"]
+
+    def test_regression_streams(self, monkeypatch, tmp_path):
+        # Memory bounded: the first input comes before any subdir is listed.
+        d = self._dir(tmp_path, {"a.bin": b"", "z/b.bin": b"", "z/c/d.bin": b""})
+        real = os.scandir
+        listed = []
+
+        def scandir(path):
+            listed.append(Path(path))
+            return real(path)
+
+        monkeypatch.setattr(os, "scandir", scandir)
+        it = commands._replay_inputs(d, [])
+        assert next(it) == d / "a.bin"
+        assert listed == [d]
+
+    @pytest.mark.parametrize("kind", ["dir", "file"])
+    def test_regression_symlink_arg(self, monkeypatch, tmp_path, scripted, kind, capsys):
+        # A symlinked crash_file is refused, as symlinks below a dir are.
+        d = self._dir(tmp_path, {"a.bin": CRASH})
+        link = tmp_path / "link"
+        link.symlink_to(d if kind == "dir" else d / "a.bin")
+        assert self._run(monkeypatch, link) == NOT_REPRODUCED
+        assert (self.builds, self.seen) == (0, [])
+        assert "symlink" in capsys.readouterr().err
+
+    def test_regression_control_bytes(self, monkeypatch, tmp_path, scripted, capsys):
+        # Adversarial: an ANSI sequence in a filename is printed escaped.
+        esc = "\x1b[2J"
+        self._run(monkeypatch, self._dir(tmp_path, {f"a{esc}.bin": BENIGN}))
+        out = capsys.readouterr().out
+        assert esc not in out
+        assert "a\\x1b[2J.bin" in out
+
+    def test_regression_reset_per_file(self, monkeypatch, tmp_path, scripted, capsys):
+        # Each file starts from the load-time state.
+        inputs = {"a.bin": BENIGN, "b.bin": BENIGN, "c.bin": BENIGN}
+        self._run(monkeypatch, self._dir(tmp_path, inputs), "-N", "2")
+        assert self.resets == len(inputs)
+        assert "not isolated" not in capsys.readouterr().err
+
+    def test_regression_no_isolation_warns(self, monkeypatch, tmp_path, scripted, capsys):
+        # No snapshot (e.g. shared registry): warn once, verdicts may be order-dependent.
+        self.isolates = False
+        self._run(monkeypatch, self._dir(tmp_path, {"a.bin": BENIGN, "b.bin": BENIGN}))
+        assert capsys.readouterr().err.count("not isolated") == 1
+
+
+# Direct modes keep globals across calls; the dir replay must not.
+DIRECT_MODES = [ExecMode.DIRECT_LITE, ExecMode.DIRECT]
+
+
+@pytest.mark.parametrize("mode", DIRECT_MODES, ids=lambda m: m.value)
+class TestReplayDirIsolation:
+    """Real .so: STATEFUL_SRC aborts on its CALLS-th call."""
+
+    def _flags(self, mode):
+        return (*IN_PROCESS_MODES[mode], "--inprocess-func", "fuzz_test")
+
+    def test_regression_files_isolated(self, monkeypatch, tmp_path, build_so, mode, capsys):
+        d = tmp_path / "crashes"
+        d.mkdir()
+        for i in range(STATEFUL_CALLS):
+            (d / f"{i}.bin").write_bytes(BENIGN)
+        assert _main(monkeypatch, build_so(STATEFUL_SRC), str(d), *self._flags(mode)) == 1
+        assert f"0/{STATEFUL_CALLS} files reproduced" in capsys.readouterr().out
+
+    def test_control_repeats_keep_state(self, monkeypatch, tmp_path, build_so, mode, capsys):
+        # Control: the same target does carry state across -N repeats of one file.
+        so = build_so(STATEFUL_SRC)
+        flags = (*self._flags(mode), "-N", str(STATEFUL_CALLS))
+        assert _main(monkeypatch, so, _input(tmp_path, BENIGN), *flags) == REPRODUCED
+        assert f"Reproduced 1/{STATEFUL_CALLS}" in capsys.readouterr().out
+
 
 class TestReviewRegressions:
     """PR #462 review: entry name, script targets, ASAN preload for replay."""
 
     @pytest.fixture
     def seen_func(self, monkeypatch):
-        """Capture the func _so_exec receives; never load anything."""
+        """Capture the func _so_runner receives; never load anything."""
         seen = []
 
-        def fake(_target, _timeout, _mode, func, restore=None):
+        def fake(_target, _timeout, _mode, func, _restore):
             seen.append(func)
-            return (lambda _d: CLEAN_RUN), (lambda: None)
+            return (lambda _d: CLEAN_RUN), (lambda: None), _isolated
 
-        monkeypatch.setattr(commands, "_so_exec", fake)
+        monkeypatch.setattr(commands, "_so_runner", fake)
         return seen
 
     @pytest.mark.parametrize(
@@ -430,7 +563,9 @@ class TestRunnerError:
         def install(outcomes):
             it = iter(outcomes)
             monkeypatch.setattr(
-                commands, "_replay_runner", lambda _a: ((lambda _d: next(it)), (lambda: None))
+                commands,
+                "_replay_runner",
+                lambda _a: ((lambda _d: next(it)), (lambda: None), _isolated),
             )
 
         return install
