@@ -1533,6 +1533,56 @@ def data_ranges(elf: bytes) -> DataRanges | None:
     return DataRanges(_merge_spans(spans), isolated)
 
 
+# ── DT_NEEDED: shared libraries the image links ──────────────────────────
+_SHT_DYNAMIC = 6
+_DT_NULL = 0
+_DT_NEEDED = 1
+_DYN_ENTRY = 16  # Elf64_Dyn: d_tag u64, d_val u64
+
+
+def needed_libs(elf: bytes) -> tuple[bytes, ...] | None:
+    """DT_NEEDED sonames, e.g. ``(b"libgobject-2.0.so.0", b"libc.so.6")``.
+
+    None when malformed; ``()`` for a static image without ``.dynamic``.
+    """
+    if not _elf64_le(elf):
+        return None
+    n = len(elf)
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shentsize, e_shnum = struct.unpack_from("<HH", elf, 58)
+    if e_shnum == 0 or not _shdrs_in_bounds(n, e_shoff, e_shnum, e_shentsize):
+        return None
+
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        if struct.unpack_from("<I", elf, sh + 4)[0] != _SHT_DYNAMIC:
+            continue
+
+        # .dynamic payload and its sh_link string table (.dynstr), both bounded.
+        d_off, d_size = struct.unpack_from("<QQ", elf, sh + 24)
+        link = struct.unpack_from("<I", elf, sh + 40)[0]
+        if link >= e_shnum or not _payload_in_bounds(n, d_off, d_size):
+            return None
+        s_off, s_size = struct.unpack_from("<QQ", elf, e_shoff + link * e_shentsize + 24)
+        if not _payload_in_bounds(n, s_off, s_size):
+            return None
+        return _dyn_needed(elf, d_off, d_off + d_size, s_off, s_off + s_size)
+    return ()
+
+
+def _dyn_needed(elf: bytes, pos: int, end: int, s_off: int, s_end: int) -> tuple[bytes, ...]:
+    """Walk Elf64_Dyn entries up to DT_NULL, collecting DT_NEEDED names."""
+    out = []
+    while pos + _DYN_ENTRY <= end:
+        tag, val = struct.unpack_from("<QQ", elf, pos)
+        pos += _DYN_ENTRY
+        if tag == _DT_NULL:
+            break
+        if tag == _DT_NEEDED and val < s_end - s_off:
+            out.append(_cstr(elf, s_off + val, s_end))
+    return tuple(out)
+
+
 def _word_is_noise(value: int, width: int) -> bool:
     """True when a data word is not worth a dictionary token.
 

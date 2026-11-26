@@ -12,18 +12,25 @@ those spans right after load and writes them back before every exec.
 Not restored: heap, TLS, the shim's own sections, ASAN global redzones. A
 global that points into heap freed by a later exec reads the freed pointer
 back after restore.
+
+Refused for targets linking a shared type registry (libgobject): a static
+cache in .bss (g_once GType) is zeroed, the registry keeps the type, and the
+re-registration returns 0. GStreamer 1.28.9: NULL GstMetaInfo -> SIGSEGV.
 """
 
 import ctypes
 import logging
 
 from fuzzer_tool.adapters.libc_symbols import module_base
-from fuzzer_tool.core.elf import data_ranges
+from fuzzer_tool.core.elf import data_ranges, needed_libs
 
 log = logging.getLogger(__name__)
 
 # Exported by every afl_shim.c build: its presence means shim globals exist.
 _SHIM_MARK = "__afl_area"
+
+# Soname prefixes of shared registries the target caches handles into.
+_REGISTRY_LIBS = (b"libgobject-2.0.so",)
 
 _ASAN_GRANULE = 8  # app bytes per ASAN shadow byte
 
@@ -80,6 +87,11 @@ class _AsanShadow:
         return tuple(out)
 
 
+def _registry_lib(needed: tuple[bytes, ...]) -> bytes:
+    """First soname in *needed* that is a shared registry; ``b""`` when none."""
+    return next((n for n in needed if n.startswith(_REGISTRY_LIBS)), b"")
+
+
 class GlobalSnapshot:
     """Saved bytes of target-owned writable spans, restorable in place."""
 
@@ -106,7 +118,20 @@ class GlobalSnapshot:
         refusal (DEBUG when nobody asked for a restore).
         """
         with open(path, "rb") as f:
-            ranges = data_ranges(f.read())
+            elf = f.read()
+        ranges = data_ranges(elf)
+
+        # Restore would desync the target's caches from a shared registry.
+        registry = _registry_lib(needed_libs(elf) or ())
+        if registry:
+            log.log(
+                level,
+                "snapshot-restore: %s links shared %s (type registry); restore off.",
+                path,
+                registry.decode(errors="replace"),
+            )
+            return None
+
         base = module_base(ctypes.cast(entry, ctypes.c_void_p).value or 0)
         if ranges is None or not base:
             log.log(level, "snapshot-restore: cannot map globals of %s, restore off", path)
