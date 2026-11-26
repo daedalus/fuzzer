@@ -8,6 +8,8 @@ import ctypes
 import ctypes.util
 import logging
 import os
+import resource
+import sys
 import threading
 
 log = logging.getLogger(__name__)
@@ -47,6 +49,15 @@ def _rss_bytes() -> int:
     """Current (not peak) resident set size; statm field 1 is resident pages."""
     with open(_STATM) as fh:
         return int(fh.read().split()[1]) * _PAGE
+
+
+# ``ru_maxrss`` unit, decided once: KB on Linux, bytes on macOS.
+_MAXRSS_PER_KB = 1024 if sys.platform == "darwin" else 1
+
+
+def peak_rss_kb() -> int:
+    """Kernel peak RSS of this process, KB on every platform."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // _MAXRSS_PER_KB
 
 
 def current_rss() -> int:

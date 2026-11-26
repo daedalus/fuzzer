@@ -98,3 +98,58 @@ def test_trim_heap_gives_up_when_an_arena_lock_is_held(monkeypatch):
         assert libc_mem.heap_tainted()
     finally:
         stuck.set()
+
+
+class _Usage:
+    """``getrusage`` result carrying only ``ru_maxrss``."""
+
+    def __init__(self, maxrss: int):
+        self.ru_maxrss = maxrss
+
+
+@pytest.fixture
+def reload_for(monkeypatch):
+    """Reload ``libc_mem`` as if on *platform*; restored after the test."""
+
+    def load(platform: str):
+        monkeypatch.setattr("sys.platform", platform)
+        return importlib.reload(libc_mem)
+
+    yield load
+    monkeypatch.undo()
+    importlib.reload(libc_mem)
+
+
+def test_peak_rss_kb_linux_is_raw_kb(reload_for, monkeypatch):
+    """Falsification: Linux ``ru_maxrss`` is already KB, passed through."""
+    mem = reload_for("linux")
+    monkeypatch.setattr(mem.resource, "getrusage", lambda _who: _Usage(3 * _KB))
+
+    assert mem.peak_rss_kb() == 3 * _KB
+
+
+def test_regression_peak_rss_kb_darwin_bytes(reload_for, monkeypatch):
+    """Adversarial: macOS reports bytes; 3 MiB of bytes is 3072 KB, not 3 GB."""
+    mem = reload_for("darwin")
+    monkeypatch.setattr(mem.resource, "getrusage", lambda _who: _Usage(3 * _MB))
+
+    assert mem.peak_rss_kb() == 3 * _KB
+
+
+def test_regression_no_raw_ru_maxrss_in_src():
+    """Every ``ru_maxrss`` read goes through ``peak_rss_kb``, the one unit fix."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path(libc_mem.__file__).parents[1]
+    raw = []
+    for path in src.rglob("*.py"):
+        if path.name == "libc_mem.py":
+            continue
+
+        # Attribute reads only: docstrings naming ``ru_maxrss`` are not reads.
+        tree = ast.parse(path.read_text())
+        reads = (n for n in ast.walk(tree) if isinstance(n, ast.Attribute))
+        if any(n.attr == "ru_maxrss" for n in reads):
+            raw.append(str(path.relative_to(src)))
+    assert raw == []

@@ -13,7 +13,6 @@ import gzip
 import hashlib
 import os
 import pickle
-import resource
 import shutil
 import sys
 import tempfile
@@ -47,7 +46,7 @@ from fuzzer_tool.core.state_store import UnsafeStateError, safe_load
 
 
 def _maxrss_kb() -> int:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return libc_mem.peak_rss_kb()
 
 
 def _fmt_kb(kb: int) -> str:

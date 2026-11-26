@@ -22,7 +22,6 @@ import json
 import logging
 import math
 import os
-import resource
 import time
 
 import numpy as np
@@ -425,8 +424,8 @@ STALE_SEED_EXEC_EQUIVALENTS = 50
 
 
 def _maxrss_kb() -> int:
-    """Kernel peak RSS of this process, KB (Linux ``ru_maxrss`` unit)."""
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    """Kernel peak RSS of this process, KB."""
+    return libc_mem.peak_rss_kb()
 
 
 def _fmt_kb(kb: int) -> str:

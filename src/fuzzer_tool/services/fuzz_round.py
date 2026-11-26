@@ -28,12 +28,12 @@ round. Long-lived state stays on the Fuzzer (``self._f``).
 import enum
 import logging
 import os
-import resource
 import sys
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from fuzzer_tool.adapters import libc_mem
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import _NO_VALUE_DISTANCE
 from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
@@ -790,7 +790,7 @@ class FuzzRound:
         f = self._f
         if not due(f.exec_count, 100, "fuzzer.rss_eps"):
             return
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        rss = libc_mem.peak_rss_kb()
         if rss > f._peak_rss:
             f._peak_rss = rss
         f._retain_katz()
