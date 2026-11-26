@@ -1308,6 +1308,7 @@ malformation in a sub-structure the demuxer's own parse code reaches.
 | `gs_mkv_flac_priv_overread.mkv` | FFmpeg's `matroska_parse_flac` requires `size >= 8+34` and clamps before its memcpy; 1.28.0 checked `off + len > size` but copied `len + 4` — a block length at the exact CodecPrivate end overreads 4 bytes | ASAN OOB-R | clean |
 | `gs_avi_vprp_zero_div.avi` | FFmpeg's vprp case consumes a fixed 36-byte prefix and skips the rest; 1.28.0 divided by the chunk-declared `vprp->fields` (fields == 0 → SIGFPE) | SIGFPE | clean |
 | `gs_wav_adtl_null_deref.wav` | FFmpeg reads adtl only as bounded `labl` strings (`avio_get_str`, 512-byte buffer, chapters-gated); 1.28.0's push-mode adtl branch mapped `size - 4` bytes with no NULL check | SEGV | clean |
+| `gs_wav_blockalign_zero_take.wav` | round-down vs round-up on blockalign — unfixed as of 1.28.9, found by the fuzzer itself ([finding](FINDINGS/gstreamer/gst_wavparse_stream_data_null_buffer.md)). FFmpeg's `wav_read_packet` rounds the read size **up** to `block_align` then clamps `FFMIN(size, left)` (`wavdec.c:803-808`). wavparse's PCM sanity rejects an inflated blockalign, but a non-PCM tag (Voxware AC8 `0x0070`) takes the default fmt branch; `max_buf_size = MAX(0.04*bps, 4096)` is rounded **down** to 0 by `max_buf_size -= max_buf_size % blockalign` (`gstwavparse.c:1811`), `desired = 0` hits `gst_adapter_take_buffer(0)` → `g_return_val_if_fail` NULL (`gstadapter.c:1083`), and the unchecked `GST_BUFFER_OFFSET` store SEGVs (`:2212`) | SEGV (both) | clean (both) |
 | `dual_webm_duration_lzo.webm` | Duration 1e18 → 9.0.2's `duration * time_scale * 1000 / AV_TIME_BASE` int64 store (1e21 float-cast overflow) + the LZO wrap on the same track | SEGV | UBSAN (9.0.2 only) |
 
 The `ff_*` cross verdicts: `caf`/`rpl` have no GStreamer demuxer (CAF type-finds
@@ -1318,7 +1319,10 @@ wavparse keeps everything `guint64` + `MIN()`-clamped, and flvdemux/matroskademu
 land the same doubles in unsigned `GstClockTime` stores, which clang's
 float-cast-overflow does not instrument. `tests/test_regression_ffmpeg_gst_seeds.py`
 re-derives the route from the bytes and re-parses each crafted sub-structure the
-way the demuxer reads it.
+way the demuxer reads it. The blockalign seed is the pack's strongest entry: it is
+not fixed in any 1.28.x tested (1.28.0 and 1.28.9 both SEGV), so the pack now
+spans fixed-in-line bugs and one live divergence between the two current
+libraries.
 
 ```bash
 python tools/gen_ffmpeg_gst_seeds.py --out ~/fuzzing/crash_seeds

