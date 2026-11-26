@@ -127,7 +127,6 @@ Error:  Segmentation fault.
 
 Shim symbolization resolved via module DWARF → `gst_wavparse_stream_data` @ `gstwavparse.c:2212`.
 
----
 
 ## Crash Metadata
 
