@@ -5411,6 +5411,27 @@ class OperatorEngine:
         out = transplant_atom(bytes(buf), donor, max_len=self._max_len(), rng=rng)
         return self._or_declined("mp4_atom_transplant", out, buf)
 
+    def _op_avi_field_mutate(self, buf, _byte_idx, _data):
+        """One avih/strh/strf/indx/idx1 field inside the AVI LIST tree."""
+        from fuzzer_tool.core.mutations.riff_fields import mutate_avi  # noqa: PLC0415
+
+        out = mutate_avi(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("avi_field_mutate", out, buf)
+
+    def _op_wav_field_mutate(self, buf, _byte_idx, _data):
+        """One WAV magic/fmt/fact/ds64/data-size/cue field."""
+        from fuzzer_tool.core.mutations.riff_fields import mutate_wav  # noqa: PLC0415
+
+        out = mutate_wav(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("wav_field_mutate", out, buf)
+
+    def _op_flv_field_mutate(self, buf, _byte_idx, _data):
+        """One FLV header flag, audio/video tag-header or onMetaData AMF field."""
+        from fuzzer_tool.core.mutations.flv_fields import mutate_flv_fields  # noqa: PLC0415
+
+        out = mutate_flv_fields(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("flv_field_mutate", out, buf)
+
     def _op_aac_asc_mutate(self, buf, _byte_idx, _data):
         """One AAC AudioSpecificConfig field inside an MP4 esds."""
         from fuzzer_tool.core.mutations.aac_asc import mutate_aac_asc  # noqa: PLC0415
