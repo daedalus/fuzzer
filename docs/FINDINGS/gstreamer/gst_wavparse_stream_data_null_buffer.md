@@ -162,42 +162,59 @@ Shim symbolization resolved via module DWARF → `gst_wavparse_stream_data` @ `g
 
 ## Suggested Fix
 
-### 1. Immediate NULL guard (from fuzzer-tool)
+Upstream fix, applied as `patches/gstwavparse_null_max_buf_size.patch` via
+`tools/vendor_gstreamer.sh`. The patch adds three defensive guards:
 
-```c
-  buf = gst_buffer_make_writable (buf);
-  if (buf == NULL)
-    return GST_FLOW_ERROR;
-  GST_BUFFER_OFFSET (buf) = pos / wav->bytes_per_sample;
-```
+**1. Keep `max_buf_size` >= `blockalign` after rounding** (`gstwavparse.c:1693-1699`).
 
-### 2. Upstream fix (keep `max_buf_size` >= `blockalign` after rounding)
-
-Two related guards are needed:
-
-**a) Keep `max_buf_size` ≥ `blockalign` after rounding.** The harness pushes buffers, so `wavparse` runs in push mode. If `max_buf_size` rounds down to 0 while `blockalign > 0`, then `desired = MIN(dataleft, 0*rate) = 0` and `avail < desired` evaluates oddly, causing `gst_adapter_take_buffer(adapter, 0)` to fail and return **NULL**. This drives `max_buf_size` to 0 at `gstwavparse.c:2126`:
-```c
-max_buf_size =
-MAX(ceil(0.04 * bps), 4096);   // ~7066
-max_buf_size -= max_buf_size % blockalign;  // 7066 % 8192 = 7066 -> 0
-```
-Fix:
 ```c
 if (wav->blockalign > 0) {
     wav->max_buf_size -= (wav->max_buf_size % wav->blockalign);
+    /* Make sure we can fit at least one complete block. */
     if (wav->max_buf_size == 0)
         wav->max_buf_size = wav->blockalign;
 }
 ```
-This matches the existing validation in `vpk_read_header` (`ch_layout.nb_channels <= 0` rejected).
+If `blockalign` (e.g. 8192) is larger than `max_buf_size` (e.g. 7066),
+`max_buf_size` rounds down to 0, then `desired = MIN(dataleft, 0 * rate) = 0`.
+This drives `gst_adapter_take_buffer(adapter, 0)` to return NULL, which
+fuzzer-tool reproduced by hand-stepping `gstwavparse.c`. Guard prevents
+this by clamping to `blockalign`.
 
-**b) Don't request zero bytes.** Place a guard before the adapter/pull branch:
+**2. Never request a zero-sized buffer** (`gstwavparse.c:2000-2006`).
+
 ```c
-if (desired <= 0 || wav->blockalign > 0) {
-    goto found_eos;   // no valid data to emit
+/* Never request a zero-sized buffer. */
+if (G_UNLIKELY (desired == 0)) {
+    GST_WARNING_OBJECT (wav, "Cannot fetch zero bytes of audio data");
+    return GST_FLOW_ERROR;
 }
 ```
-Placed before `gst_adapter_take_buffer(adapter, desired)`.
+Bails early with `GST_FLOW_ERROR` before calling `gst_adapter_take_buffer`.
+
+**3. NULL-check every `gst_buffer_make_writable()` result** (`gstwavparse.c:2060-2066`).
+
+Both call sites (short-buffer resize path and main offset-update path)
+now guard against NULL:
+
+```c
+buf = gst_buffer_make_writable (buf);
+if (G_UNLIKELY (buf == NULL))
+    goto buffer_error;
+```
+
+with a single error label:
+
+```c
+buffer_error:
+{
+    GST_WARNING_OBJECT (wav, "Failed to make audio buffer writable");
+    return GST_FLOW_ERROR;
+}
+```
+
+This matches the existing validation in `vpk_read_header`
+(`ch_layout.nb_channels <= 0` rejected).
 
 ---
 

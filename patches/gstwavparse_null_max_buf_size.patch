@@ -1,0 +1,52 @@
+diff --git a/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c b/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c
+--- a/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c
++++ b/subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c
+@@ -1690,8 +1690,14 @@
+     wav->max_buf_size = 0;
+   wav->max_buf_size = MAX (wav->max_buf_size, MAX_BUFFER_SIZE);
+-  if (wav->blockalign > 0)
++  if (wav->blockalign > 0) {
+     wav->max_buf_size -= (wav->max_buf_size % wav->blockalign);
++    /* Make sure we can fit at least one complete block. */
++    if (wav->max_buf_size == 0)
++      wav->max_buf_size = wav->blockalign;
++  }
+   GST_DEBUG_OBJECT (wav, "max buffer size %u", wav->max_buf_size);
+ 
+   return GST_FLOW_OK;
+@@ -1991,6 +1997,11 @@
+   if (desired >= wav->blockalign && wav->blockalign > 0)
+     desired -= (desired % wav->blockalign);
+ 
++  /* Never request a zero-sized buffer. */
++  if (G_UNLIKELY (desired == 0)) {
++    GST_WARNING_OBJECT (wav, "Cannot fetch zero bytes of audio data");
++    return GST_FLOW_ERROR;
++  }
++
+   GST_LOG_OBJECT (wav, "Fetching %" G_GINT64_FORMAT " bytes of data "
+       "from the sinkpad", desired);
+@@ -2046,6 +2057,8 @@
+         if (wav->blockalign > 0) {
+           buf = gst_buffer_make_writable (buf);
++          if (G_UNLIKELY (buf == NULL))
++            goto buffer_error;
+           gst_buffer_resize (buf, 0, size - (size % wav->blockalign));
+         }
+@@ -2062,6 +2075,8 @@
+   nextpos = pos + obtained;
+   /* update offsets, does not overflow. */
+   buf = gst_buffer_make_writable (buf);
++  if (G_UNLIKELY (buf == NULL))
++    goto buffer_error;
+   GST_BUFFER_OFFSET (buf) = pos / wav->bytes_per_sample;
+   GST_BUFFER_OFFSET_END (buf) = nextpos / wav->bytes_per_sample;
+@@ -2162,6 +2177,11 @@
+     return res;
+   }
++buffer_error:
++  {
++    GST_WARNING_OBJECT (wav, "Failed to make audio buffer writable");
++    return GST_FLOW_ERROR;
++  }
+ }  
