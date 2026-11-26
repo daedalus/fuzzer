@@ -159,6 +159,28 @@ Shim symbolization resolved via module DWARF → `gst_wavparse_stream_data` @ `g
 
 ---
 
+## Seed Minimization
+
+Ran `fuzzer-tool tmin` with `--inprocess --snapshot-restore globals` on the original 173-byte seed:
+
+```
+fuzzer-tool tmin -t 10 -O /tmp/minimized_crash.bin \
+  /home/dclavijo/fuzzing/builds/gstreamer_read_1.28.9_noasan.so \
+  /home/dclavijo/fuzzing/gstreamer_read_1.28.9_noasan.so/crashes/crash_1795708263_f443105b_sig_signal11.bin \
+  --inprocess --snapshot-restore globals
+```
+
+| Metric | Value |
+|--------|-------|
+| Original size | 173 bytes |
+| Minimized size | **44 bytes** |
+| Reduction | 75% |
+| Post-minimization crash | Confirmed (exit 139 / SIGSEGV) |
+
+The minimized 44-byte input still triggers the same SIGSEGV at `gstwavparse.c:2212` — the NULL-buffer dereference in `gst_wavparse_stream_data`. This demonstrates the crash condition is extremely fragile and can be triggered by minimal malformed input.
+
+---
+
 ## Suggested Fix
 
 Upstream fix, applied as `patches/gstwavparse_null_max_buf_size.patch` via
