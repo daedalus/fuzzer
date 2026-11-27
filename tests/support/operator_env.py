@@ -243,6 +243,9 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_.rs_block = 255
             self_.rs_fcr = 0
             self_.rs_poly = 0x11D
+            self_.ldpc_code = None
+            self_.turbo_k = None
+            self_.turbo_qpp = (3, 10)
             self_.hlx_algo = None
             self_.hlx_key_len = 16
             self_.hlx_digest_at = None

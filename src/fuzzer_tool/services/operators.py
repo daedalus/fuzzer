@@ -5708,6 +5708,70 @@ class OperatorEngine:
             return self._op_declined("rs_fix", buf)
         return bytearray(out[: self.ctx.max_len])
 
+    def _op_fat_field_mutate(self, buf, _byte_idx, _data):
+        """One FAT BPB, FAT-chain, dirent/LFN or FSInfo edit."""
+        from fuzzer_tool.core.mutations.fat import mutate_fat  # noqa: PLC0415
+
+        out = mutate_fat(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("fat_field_mutate", out, buf)
+
+    def _op_ntfs_record_mutate(self, buf, _byte_idx, _data):
+        """One NTFS BPB, FILE/attribute/runlist or INDX edit, fixups re-applied."""
+        from fuzzer_tool.core.mutations.ntfs import mutate_ntfs  # noqa: PLC0415
+
+        out = mutate_ntfs(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("ntfs_record_mutate", out, buf)
+
+    def _op_ext2_field_mutate(self, buf, _byte_idx, _data):
+        """One ext2 superblock, group descriptor, inode or dirent edit."""
+        from fuzzer_tool.core.mutations.ext import mutate_ext2  # noqa: PLC0415
+
+        out = mutate_ext2(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("ext2_field_mutate", out, buf)
+
+    def _op_ext4_field_mutate(self, buf, _byte_idx, _data):
+        """One ext4 feature/extent/htree edit, metadata_csum repaired."""
+        from fuzzer_tool.core.mutations.ext import mutate_ext4  # noqa: PLC0415
+
+        out = mutate_ext4(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("ext4_field_mutate", out, buf)
+
+    def _op_zfs_label_mutate(self, buf, _byte_idx, _data):
+        """One ZFS uberblock/blkptr/nvlist edit, label checksum resealed."""
+        from fuzzer_tool.core.mutations.zfs import mutate_zfs  # noqa: PLC0415
+
+        out = mutate_zfs(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("zfs_label_mutate", out, buf)
+
+    def _op_tcpip_packet_mutate(self, buf, _byte_idx, _data):
+        """One IPv4/IPv6/TCP/UDP/ICMP header edit, checksums repaired."""
+        from fuzzer_tool.core.mutations.tcpip import mutate_tcpip  # noqa: PLC0415
+
+        out = mutate_tcpip(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("tcpip_packet_mutate", out, buf)
+
+    def _op_ldpc_fix(self, buf, _byte_idx, _data):
+        """Repair one LDPC codeword's parity or inject bit errors (--ldpc-alist)."""
+        from fuzzer_tool.core.mutations.ldpc_fix import ldpc_fix  # noqa: PLC0415
+
+        if self.f.ldpc_code is None:
+            return self._op_declined("ldpc_fix", buf)
+        out = ldpc_fix(bytes(buf), self.ctx._rng, self.f.ldpc_code)
+        if out is None:
+            return self._op_declined("ldpc_fix", buf)
+        return bytearray(out[: self.ctx.max_len])
+
+    def _op_turbo_fix(self, buf, _byte_idx, _data):
+        """Repair one LTE turbo codeword or inject bit/tail errors (--turbo-k)."""
+        from fuzzer_tool.core.mutations.turbo_fix import turbo_fix  # noqa: PLC0415
+
+        if self.f.turbo_k is None:
+            return self._op_declined("turbo_fix", buf)
+        out = turbo_fix(bytes(buf), self.ctx._rng, self.f.turbo_k, *self.f.turbo_qpp)
+        if out is None:
+            return self._op_declined("turbo_fix", buf)
+        return bytearray(out[: self.ctx.max_len])
+
     def _op_taint_boost(self, buf, _byte_idx, data):
         """Revizor boosting: redraw the seed's path-irrelevant bytes.
 

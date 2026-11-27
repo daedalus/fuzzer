@@ -185,7 +185,9 @@ def _checksums(img: bytearray, isz: int, desc: int, root: int, lpf: int) -> None
     crc = crc32c_raw(raw, crc32c_raw(bytes(4), seed))
     struct.pack_into("<H", img, gd + 0x1E, crc & 0xFFFF)
 
-    struct.pack_into("<I", img, SB_OFF + 0x3FC, crc32c_raw(img[SB_OFF : SB_OFF + 0x3FC], SEED_ALL_ONES))
+    struct.pack_into(
+        "<I", img, SB_OFF + 0x3FC, crc32c_raw(img[SB_OFF : SB_OFF + 0x3FC], SEED_ALL_ONES)
+    )
 
 
 def _build(isz: int, flavor: Flavor, desc: int = 32) -> bytes:
@@ -201,7 +203,9 @@ def _build(isz: int, flavor: Flavor, desc: int = 32) -> bytes:
     img[IBM_BLK * BS : (IBM_BLK + 1) * BS] = _pad_bitmap(_bitmap(FIRST_INO), NINODES)
 
     tail = TAIL_LEN if flavor is Flavor.EXT4 else 0
-    img[root * BS : (root + 1) * BS] = _dir_block(ROOT_INO, ROOT_INO, (LPF_INO, b"lost+found"), tail)
+    img[root * BS : (root + 1) * BS] = _dir_block(
+        ROOT_INO, ROOT_INO, (LPF_INO, b"lost+found"), tail
+    )
     img[lpf * BS : (lpf + 1) * BS] = _dir_block(LPF_INO, ROOT_INO, None, tail)
     _put_inode(img, isz, ROOT_INO, root, 3, flavor)
     _put_inode(img, isz, LPF_INO, lpf, 2, flavor)

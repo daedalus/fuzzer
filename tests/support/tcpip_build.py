@@ -61,7 +61,9 @@ def _fill(l4: bytes, proto: int, pseudo: bytes) -> bytes:
 def ipv4(proto: int, l4: bytes, options: bytes = b"", ttl: int = 64) -> bytes:
     ihl = 5 + len(options) // 4
     total = ihl * 4 + len(l4)
-    hdr = struct.pack(">BBHHHBBH4s4s", 0x40 | ihl, 0, total, 0x1234, 0x4000, ttl, proto, 0, SRC4, DST4)
+    hdr = struct.pack(
+        ">BBHHHBBH4s4s", 0x40 | ihl, 0, total, 0x1234, 0x4000, ttl, proto, 0, SRC4, DST4
+    )
     hdr += options
     hdr = hdr[:10] + struct.pack(">H", _csum(hdr)) + hdr[12:]
     pseudo = b"" if proto == ICMP else SRC4 + DST4 + struct.pack(">BBH", 0, proto, len(l4))

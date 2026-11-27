@@ -124,7 +124,20 @@ class TestChecksum:
             blob = rng.randbytes(n)
             assert inet_checksum(blob) == _oracle(blob)
 
-    @pytest.mark.parametrize("blob", [b"", bytes(20), b"\xff" * 20, b"\xff\xff", b"\x01"])
+    # Both paths (big-int < NUMPY_MIN_LEN <= numpy): zero, -0 alias, odd tail.
+    @pytest.mark.parametrize(
+        "blob",
+        [
+            b"",
+            bytes(20),
+            b"\xff" * 20,
+            b"\xff\xff",
+            b"\x01",
+            bytes(800),
+            b"\xff" * 800,
+            b"\xff" * 801,
+        ],
+    )
     def test_edge_buffers(self, blob):
         assert inet_checksum(blob) == _oracle(blob)
 
@@ -152,7 +165,10 @@ class TestLocate:
         second = first + len(V4TCP) + 16 + 14
         assert locate_packets(data) == [(first, first + len(V4TCP)), (second, second + len(V6UDP))]
 
-    @pytest.mark.parametrize(("link", "pkt", "found"), [(101, V6TCP, 1), (228, V4UDP, 1), (229, V6UDP, 1), (228, V6UDP, 0)])
+    @pytest.mark.parametrize(
+        ("link", "pkt", "found"),
+        [(101, V6TCP, 1), (228, V4UDP, 1), (229, V6UDP, 1), (228, V6UDP, 0)],
+    )
     def test_pcap_linktypes(self, link, pkt, found):
         assert len(locate_packets(tb.pcap([pkt], linktype=link))) == found
 
@@ -172,7 +188,14 @@ class TestLocate:
 class TestSniff:
     @pytest.mark.parametrize(
         "data",
-        [V4TCP, V6TCP, V6HBH, tb.ether(V4UDP), tb.ether(V6UDP, tb.Tag.VLAN), tb.pcap([V4UDP], linktype=228)],
+        [
+            V4TCP,
+            V6TCP,
+            V6HBH,
+            tb.ether(V4UDP),
+            tb.ether(V6UDP, tb.Tag.VLAN),
+            tb.pcap([V4UDP], linktype=228),
+        ],
     )
     def test_true(self, data):
         assert sniff_tcpip(data)
@@ -449,9 +472,9 @@ class TestContainers:
 
     def test_ether_edit(self):
         f = tb.ether(V4UDP, tb.Tag.VLAN)
-        out = mutate_tcpip(f, rng=_rng(Op.UDP_PORT, V4UDP, randints=[1], choices=[1]))
+        out = mutate_tcpip(f, rng=_rng(Op.UDP_PORT, V4UDP, randints=[1], choices=[2]))
         assert out[:18] == f[:18]
-        assert _u16(out, 18 + 22) == PORT_EDGES[1]
+        assert _u16(out, 18 + 22) == PORT_EDGES[2]
         assert _l4_ok(out[18:], 20, len(V4UDP), tb.UDP)
 
 
@@ -498,5 +521,5 @@ class TestContract:
         for data in hostile:
             sniff_tcpip(data)
             for _ in range(4):
-                out = mutate_tcpip(data, max_len=64, rng=rng)
-                assert out is None or (len(out) <= 64 and out != data[:64] or len(data) > 64)
+                out = mutate_tcpip(data, max_len=4096, rng=rng)
+                assert out is None or (len(out) <= 4096 and out != data)

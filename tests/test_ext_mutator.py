@@ -84,7 +84,9 @@ def _diff(a: bytes, b: bytes) -> list[int]:
 
 
 def _resum_sb(img: bytearray) -> None:
-    struct.pack_into("<I", img, SB_OFF + 0x3FC, crc32c_raw(img[SB_OFF : SB_OFF + 0x3FC], SEED_ALL_ONES))
+    struct.pack_into(
+        "<I", img, SB_OFF + 0x3FC, crc32c_raw(img[SB_OFF : SB_OFF + 0x3FC], SEED_ALL_ONES)
+    )
 
 
 class TestOracle:
@@ -209,7 +211,9 @@ class TestExt2Ops:
         img = bytearray(E2)
         struct.pack_into("<I", img, SB_OFF + 0x64, RO_GDT_CSUM)
         i = _field_idx(GD_FIELDS, 0x0E)
-        out = mutate_ext2(bytes(img), rng=ScriptedRng(randints=[Op.GD_FIELD, 0, i], choice_idxs=[1]))
+        out = mutate_ext2(
+            bytes(img), rng=ScriptedRng(randints=[Op.GD_FIELD, 0, i], choice_idxs=[1])
+        )
         assert _u(out, GDT_BLK * BS + 0x0E, "<H") == GD_FIELDS[i].edges[1]
         assert gd_crc16_ok(out)
 
@@ -246,7 +250,9 @@ class TestRepair:
         img[SB_OFF + 0x68 : SB_OFF + 0x78] = b"\xaa" * 16
         _resum_sb(img)
         assert csums_ok(bytes(img))
-        out = mutate_ext2(bytes(img), rng=ScriptedRng(randints=[Op.INODE_FIELD, 0, 1], choice_idxs=[2]))
+        out = mutate_ext2(
+            bytes(img), rng=ScriptedRng(randints=[Op.INODE_FIELD, 0, 1], choice_idxs=[2])
+        )
         assert csums_ok(out)
 
     @pytest.mark.parametrize(
@@ -281,6 +287,12 @@ class TestExt4Ops:
         out = mutate_ext4(E4, rng=ScriptedRng(randints=[Op4.DESC_SIZE], choice_idxs=[4]))
         assert _u(out, SB_OFF + 0xFE, "<H") == DESC_SIZE_EDGES[4]
         assert sb_csum_ok(out)
+
+    # Edge: a new descriptor size re-repairs group 0 over the new length.
+    def test_desc_size_repairs_gd_with_new_length(self):
+        k = DESC_SIZE_EDGES.index(128)
+        out = mutate_ext4(E4_64, rng=ScriptedRng(randints=[Op4.DESC_SIZE], choice_idxs=[k]))
+        assert gd_csum_ok(out, desc=128) and sb_csum_ok(out)
 
     def test_flex(self):
         out = mutate_ext4(E4, rng=ScriptedRng(randints=[Op4.FLEX], choice_idxs=[5]))
@@ -364,15 +376,24 @@ class TestDecline:
 
     def test_inode_ops_need_inode_table(self):
         for op in (Op.INODE_FIELD, Op.INODE_BLOCK, Op.DIRENT):
-            assert mutate_ext2(E2[:4096], rng=ScriptedRng(randints=[op, 0, 0], choice_idxs=[0])) is None
+            assert (
+                mutate_ext2(E2[:4096], rng=ScriptedRng(randints=[op, 0, 0], choice_idxs=[0]))
+                is None
+            )
 
     def test_dirent_needs_dir_block(self):
         cut = root_dir_block(E2) * BS
-        assert mutate_ext2(E2[:cut], rng=ScriptedRng(randints=[Op.DIRENT, 0, 0], choice_idxs=[0])) is None
+        assert (
+            mutate_ext2(E2[:cut], rng=ScriptedRng(randints=[Op.DIRENT, 0, 0], choice_idxs=[0]))
+            is None
+        )
 
     def test_gd_needs_gdt_but_sb_ops_work(self):
         sb_only = E2[:2048]
-        assert mutate_ext2(sb_only, rng=ScriptedRng(randints=[Op.GD_FIELD, 0, 0], choice_idxs=[0])) is None
+        assert (
+            mutate_ext2(sb_only, rng=ScriptedRng(randints=[Op.GD_FIELD, 0, 0], choice_idxs=[0]))
+            is None
+        )
         out = mutate_ext2(sb_only, rng=ScriptedRng(randints=[Op.SB_FEATURE, 0, 0]))
         assert out is not None and out != sb_only
 
@@ -404,7 +425,9 @@ class TestAdversarial:
         for cut in list(range(0, 2100, 97)) + list(range(2048, len(img) + 1, 512)):
             data = img[:cut]
             for op in ALL_OPS:
-                out = mutate_ext4(data, rng=ScriptedRng(randints=[op] + [1] * 6, choice_idxs=[1] * 4))
+                out = mutate_ext4(
+                    data, rng=ScriptedRng(randints=[op] + [0] * 6, choice_idxs=[0] * 4)
+                )
                 assert out is None or (out != data and len(out) == len(data))
 
     # Hostile superblocks/descriptors/inodes: random corruption, seeded RandPool.
@@ -415,7 +438,11 @@ class TestAdversarial:
         for n in range(600):
             img = bytearray(bases[n % 3])
             for _ in range(rng.randint(1, 12)):
-                pos = rng.choice(hot) + rng.randint(0, 3) if rng.randint(0, 1) else rng.randint(0, len(img) - 1)
+                pos = (
+                    rng.choice(hot) + rng.randint(0, 3)
+                    if rng.randint(0, 1)
+                    else rng.randint(0, len(img) - 1)
+                )
                 img[pos] = rng.randint(0, 255)
             data = bytes(img[: rng.randint(2048, len(img))])
             max_len = rng.randint(1, 20000)
@@ -428,5 +455,9 @@ class TestAdversarial:
         for _ in range(300):
             img = bytearray(rng.randint(0, 255) for _ in range(rng.randint(2048, 9000)))
             struct.pack_into("<H", img, SB_OFF + 0x38, 0xEF53)
-            out = mutate_ext4(bytes(img), rng=rng) if sniff_ext4(bytes(img)) else mutate_ext2(bytes(img), rng=rng)
+            out = (
+                mutate_ext4(bytes(img), rng=rng)
+                if sniff_ext4(bytes(img))
+                else mutate_ext2(bytes(img), rng=rng)
+            )
             assert out is None or (out != bytes(img) and len(out) == len(img))
