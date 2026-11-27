@@ -31,6 +31,8 @@ class Kind(Enum):
     BOOL = "bool"
     PROC = "proc"  # subprocess.Popen handle, or None
     READER = "reader"  # PipeReader over a proc's stdout, or None
+    FILE = "file"  # open file object (TemporaryFile), or None
+    PROCSET = "procset"  # list of procs this object will reap (appended to)
 
 
 class Op(Enum):
@@ -40,12 +42,15 @@ class Op(Enum):
     READER = "NewReader"  # PipeReader(fd) -> reader over fd's proc
     CLOSE_STREAMS = "CloseStreams"  # close a proc's pipes
     MAYBE = "Maybe"  # returns a value or None
+    OPEN_FILE = "FileOpen"  # tempfile.TemporaryFile() -> fresh open file
+    KILLPG = "KillPg"  # os.killpg(proc.pid, sig)
+    WRAP = "Wrap"  # record constructor holding a proc, e.g. _Sender(proc, ...) -> proc
 
 
 class Phase(Enum):
     """When the caller invokes an entry."""
 
-    SETUP = "setup"  # once, from Init; only successful (truthy) runs are kept
+    SETUP = "setup"  # once, from Init after __init__; a failure is checked by SetupCleanup
     CALL = "call"  # any number of times after setup
 
 
@@ -66,6 +71,7 @@ class EntrySpec:
 
     phase: Phase
     requires: str | None
+    raises: tuple[str, ...] = ()
 
 
 def machine(
@@ -97,9 +103,17 @@ def machine(
     return mark
 
 
-def entry(phase: Phase = Phase.CALL, requires: str | None = None) -> Callable[[T], T]:
-    """Mark a method the caller invokes; *requires* is its caller-side guard."""
-    spec = EntrySpec(phase, requires)
+def entry(
+    phase: Phase = Phase.CALL, requires: str | None = None, raises: tuple[str, ...] = ()
+) -> Callable[[T], T]:
+    """Mark a method the caller invokes.
+
+    Args:
+        phase: when the caller invokes it.
+        requires: caller-side guard, a Python expression over ``self``.
+        raises: exception classes the caller catches; escaping them is not NoUncaught.
+    """
+    spec = EntrySpec(phase, requires, raises)
 
     def mark(fn: T) -> T:
         setattr(fn, ENTRY_ATTR, spec)

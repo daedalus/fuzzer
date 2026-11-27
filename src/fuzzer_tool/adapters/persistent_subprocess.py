@@ -35,6 +35,7 @@ import time
 
 from fuzzer_tool.adapters.pipe_reader import PipeReader
 from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
+from fuzzer_tool.core import tla
 
 log = logging.getLogger(__name__)
 
@@ -404,6 +405,41 @@ def _drain_stderr(stream, cond: threading.Condition, buffer, marks: list[int]) -
         log.debug("loader stderr drain ended: %s", exc)
 
 
+# TLA+ model boundary: python tools/tla_extract.py persistent --check
+@tla.machine(
+    state={
+        "_ready": tla.Kind.BOOL,
+        "_restarting": tla.Kind.BOOL,
+        "_proc": tla.Kind.PROC,
+        "_reader": tla.Kind.READER,
+    },
+    invariants={
+        "NoStuckRestart": "not self._restarting",
+        "LiveLoaderReady": "self._proc is None or self._proc.poll() is not None or self._ready",
+    },
+    model={
+        "subprocess.Popen": tla.Op.SPAWN,
+        "PipeReader": tla.Op.READER,
+        "_close_streams": tla.Op.CLOSE_STREAMS,
+    },
+    ignore=(
+        "log.",
+        "time.monotonic",
+        "tempfile.mkstemp",
+        "os.write",
+        "os.close",
+        "os.unlink",
+        "os.environ",
+        "threading.",
+        "collections.deque",
+        "self._backoff.",
+        "self._perf_counters.",
+        "self._stderr_thread.",
+        "self._stderr_lock",
+        "self._exec_times.",
+    ),
+    replies={"INIT": "READY", "RUN": "RC"},
+)
 class PersistentLoader:
     """Persistent subprocess — one process, many calls.
 
@@ -471,6 +507,7 @@ class PersistentLoader:
         self._backoff = backoff
         backoff.started()
 
+    @tla.entry(tla.Phase.SETUP)
     def start(self) -> bool:
         if self._proc and self._proc.poll() is None:
             return True
@@ -497,13 +534,19 @@ class PersistentLoader:
             self._stderr_marks = 0
             self._replies = 0
 
-        self._proc = subprocess.Popen(
-            [sys.executable, self._loader_path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, self._loader_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+        except OSError as exc:
+            # EAGAIN/ENOMEM on a respawn must not escape run_one.
+            log.warning("Persistent loader cannot spawn: %s", exc)
+            self.stop()
+            return False
         self._reader = PipeReader(self._proc.stdout.fileno())
         if self._perf_counters is not None:
             self._perf_counters.open_for_pid(self._proc.pid)
@@ -522,8 +565,14 @@ class PersistentLoader:
         self._stderr_thread.start()
 
         init = f"INIT {self.target} {self.function_name}\n"
-        self._proc.stdin.write(init.encode())
-        self._proc.stdin.flush()
+        try:
+            self._proc.stdin.write(init.encode())
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            # The loader died (or closed stdin) before INIT: do not leak it.
+            log.warning("Persistent loader: failed to send INIT")
+            self.stop()
+            return False
 
         resp = self._reader.readline(time.monotonic() + _INIT_TIMEOUT)
         if resp is None:
@@ -574,6 +623,7 @@ class PersistentLoader:
             self._stderr_buffer.clear()
         return "".join(lines)
 
+    @tla.entry()  # inprocess.py calls it whenever _persistent is set
     def run_one(self, data: bytes) -> tuple[int, bytes | None]:
         # Reset per-run crash state so a stale value never leaks from an
         # earlier run into this iteration's metadata.
@@ -589,8 +639,9 @@ class PersistentLoader:
             self._proc.stdin.write(data)
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
-            # Subprocess died — try restart
-            self._ready = False
+            # Dead or dying loader. Kill it first: start() returns at once while
+            # the old process is still alive, leaving it running and unready.
+            self._kill_loader()
             return self._restart_retry(data)
 
         # Deadline-bounded read — prevents hang if loader gets stuck
@@ -619,6 +670,9 @@ class PersistentLoader:
         bitmap = None
         if bmp_len > 0:
             bitmap = self._reader.read_exact(bmp_len, deadline)
+            if bitmap is None:
+                # A short payload leaves its tail in the pipe, read as the next header.
+                self._replace()
 
         self._last_bitmap = bitmap
 
@@ -642,15 +696,12 @@ class PersistentLoader:
     def _on_hang(self) -> tuple[int, None]:
         """Kill a hung loader (grandchild first), restart it, report timeout."""
         log.warning("Persistent loader timed out after %.1fs", self.timeout)
-        # Kill orphaned grandchild first (it's in its own process group)
-        self._kill_orphaned_child()
-        # Then kill the loader itself
-        proc = self._proc
-        with contextlib.suppress(Exception):
-            proc.kill()
-            proc.wait()
-        _close_streams(proc)
-        self._ready = False
+        self._replace()
+        return -1, None
+
+    def _replace(self) -> None:
+        """Kill the loader (grandchild first) and start a fresh one."""
+        self._kill_loader()
         # Don't retry — hangs are input-deterministic, retrying just
         # costs another full timeout wait for the same hung input.
         # Restart the loader so future inputs work, but return immediately.
@@ -661,8 +712,18 @@ class PersistentLoader:
                 self.start()
             finally:
                 self._restarting = False
-        return -1, None
 
+    def _kill_loader(self) -> None:
+        """Kill and reap the loader, grandchild first (it has its own process group)."""
+        self._kill_orphaned_child()
+        proc = self._proc
+        with contextlib.suppress(Exception):
+            proc.kill()
+            proc.wait()
+        _close_streams(proc)
+        self._ready = False
+
+    @tla.opaque(None)
     def _parse_regs(self, parts: list[str]) -> None:
         """Record fault address and registers from reply tokens 3..6."""
 
@@ -707,6 +768,7 @@ class PersistentLoader:
                     self._baseline_eps = 0.0
                     self.start()
 
+    @tla.entry()
     def stop(self):
         proc = self._proc
         self._proc = None
@@ -718,8 +780,9 @@ class PersistentLoader:
         try:
             proc.stdin.write(b"QUIT\n")
             proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            # ValueError: _replace() already closed the pipes of a loader it killed.
+            log.debug("loader QUIT not sent: %s", exc)
         try:
             proc.wait(timeout=2)
         except Exception:
@@ -744,6 +807,7 @@ class PersistentLoader:
         self._loader_path = None
         self._child_pid_file = None
 
+    @tla.opaque(None)  # the grandchild is outside the model
     def _kill_orphaned_child(self):
         """Kill the grandchild process (target function) if it was orphaned by timeout.
 

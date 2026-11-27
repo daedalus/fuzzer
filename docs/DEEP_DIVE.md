@@ -3065,16 +3065,31 @@ At startup scans rodata/data/relro (same filter as the data-word dictionary, `el
                                               EXTENDS tools/tla/Syscalls.tla
 ```
 
-- **Markers** (`core/tla.py`, zero runtime cost): `@tla.machine(state, invariants, model, ignore, replies)`, `@tla.entry(phase, requires)`, `@tla.opaque(*returns)`. `ForkserverRunner` is the first machine.
-- **Subset**: assignments, `if`, `return`, `raise`, `try/except/finally`, `with contextlib.suppress`, calls to `self` methods (inlined, at most 3 nested activations), modeled I/O and pure builtins. Anything else (loops, unmodeled calls, stores into modeled fields through aliases) raises `ExtractError` with `file:line`, and nothing is written.
+- **Markers** (`core/tla.py`, zero runtime cost): `@tla.machine(state, invariants, model, ignore, replies)`, `@tla.entry(phase, requires, raises)`, `@tla.opaque(*returns)`. `raises` lists exceptions the caller catches; they are not `NoUncaught`.
+- **Machines** (`MACHINES` in `tools/tla_extract.py`): `forkserver` (`ForkserverRunner`), `persistent` (`PersistentLoader`), `gdbjob` (`GdbJob`), `push` (`PushNotifier`). `push.py` also runs as `python -I push.py` without the package, so its spec is attached from the extractor (`_EXTERNAL_SPECS`).
+- **Field kinds**: `BOOL`, `PROC`, `READER`, `FILE` (open/closed file), `PROCSET` (procs the object will reap: `.append(proc)` adds one; rebinding to a computed list keeps the unreaped ones; `= []` empties it).
+- **Subset**: assignments, `if`, `return`, `raise` (bare too), `try/except/finally`, `with contextlib.suppress`, `with` over an `ignore=` prefix or `ExitStack` (body runs once), `for` loops with no modeled effect (skipped; anything else is rejected), `assert` (no-op), calls to `self` methods (inlined, at most 3 nested activations), modeled I/O and pure builtins. Anything else raises `ExtractError` with `file:line`, and nothing is written.
 - **Abstraction**: unmodeled fields and values are dropped. A condition over them takes both branches and is listed as `[havoc]`. Integers are opaque strings. Request words in `replies` (`RUN` -> `RC`) count replies owed per loader.
-- **Syscalls.tla**: hand-written outcomes for `Popen`, `poll`, `kill`, `wait`, pipe writes, `PipeReader.readline`, `_close_streams`. A live loader may stall, die, or close its pipe before it can be reaped. `wait()` after kill always reaps.
-- **Built-in invariants**: `NoOrphan` (live loader not held by any field), `NoHang`, `NoUncaught`, `RecursionBound`, `NoDesync` (a readline consumed a stale reply). Class invariants skip hung states.
-- **Run**: `tools/vendor_tla.sh` (jar into `$FUZZ_VENDOR_ROOT/tla/`), then `python tools/tla_extract.py forkserver --check [--max-procs 3 --max-calls 4]`. Output goes to `~/fuzzing/tla/<machine>/`. Exit codes: 0 clean, 1 violations, 2 rejected source.
-- **Findings on `ForkserverRunner`**, all fixed. Before the fixes: 3273 states, 3 violations. After: 475 states clean at procs=3 calls=4, and 2393 states clean at procs=5 calls=6. Regressions are in `tests/test_regression_forkserver_tla_findings.py`.
-  - `NoHang`: `start()` read `READY` with no deadline. It now waits at most `_START_DEADLINE` (120 s).
-  - `NoDesync`: `set_timeout()` kept a loader that still owed `TIMEOUT_OK`, so a late reply became the next `RC` header. It now respawns the loader.
-  - `LiveLoaderReady`: a failed `start()` after `Popen`, or a pipe error, left the loader alive. `_abandon()` now kills and reaps it.
+- **Syscalls.tla**: hand-written outcomes for `Popen` (may raise `OSError`), `poll`, `kill`, `killpg`, `wait`, pipe writes and `stdin.close`, `PipeReader.readline`/`read_exact` (a short read leaves bytes behind), `TemporaryFile` use/close, `_close_streams`. A live loader may stall, die, or close its pipe before it can be reaped. `wait()` after kill always reaps.
+- **Built-in invariants**: `NoOrphan` (a live or zombie proc no field or `PROCSET` holds), `NoHang`, `NoUncaught`, `RecursionBound`, `NoDesync` (a readline consumed a stale reply or leftover payload), `SetupCleanup` (a failed `__init__`/setup leaves no unreaped proc and no open file). Class invariants skip hung states.
+- **Run**: `tools/vendor_tla.sh` (jar into `$FUZZ_VENDOR_ROOT/tla/`), then `python tools/tla_extract.py <machine> --check [--max-procs 3 --max-calls 4]`. Output goes to `~/fuzzing/tla/<machine>/`. Exit codes: 0 clean, 1 violations, 2 rejected source.
+- **Findings**, all fixed; every machine is now clean at procs=3 calls=4. Regressions are in `tests/test_regression_forkserver_tla_findings.py` and `tests/test_regression_tla_machines.py`.
+  - `ForkserverRunner`:
+    - `NoHang`: `start()` read `READY` with no deadline. It now waits at most `_START_DEADLINE` (120 s).
+    - `NoDesync`: `set_timeout()` kept a loader that still owed `TIMEOUT_OK`. It now respawns it, paced by `--respawn-backoff`.
+    - `LiveLoaderReady`: a failed handshake or pipe error left the loader alive. `_abandon()` now reaps it.
+    - `NoUncaught`: a respawn whose `Popen` raised (EAGAIN) escaped `run_one`. `start()` now returns False.
+  - `PersistentLoader`:
+    - `NoUncaught`: the same respawn bug, plus `stop()` raising `ValueError` on pipes `_replace()` had closed.
+    - `SetupCleanup`: an EPIPE on `INIT` leaked the loader and escaped `start()`.
+    - `LiveLoaderReady`: a write error on a live loader left it unready, so `run_one` returned -2 for good. It is now killed before restarting.
+    - `NoDesync`: a short `read_exact` left its tail as the next header. The loader is now replaced. This path is unreachable with today's loader, which always sends `bmp_len 0`.
+  - `GdbJob`:
+    - `SetupCleanup`: a `Popen` failure left the temp files on disk.
+    - `NoUncaught`: `poll()` after the report was returned raised `ValueError` on the closed output (no caller does this today).
+  - `PushNotifier`:
+    - `NoOrphan`: a sender that died before reading its message was never tracked, leaving a zombie and an fd. It is now held before the write.
+- **Not modeled**: wedge-type liveness ("`run_one` eventually works again", e.g. `PersistentLoader` after a failed restart) needs temporal properties; `PROCSET` iteration (`_reap`, `close`) is skipped as an inert loop.
 - Tests: `tests/test_tla_extract.py`, with fixtures in `tests/support/tla_fixtures.py`. Each bug fixture has a fixed twin that must pass first.
 
 ## Troubleshooting

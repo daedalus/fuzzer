@@ -263,13 +263,18 @@ class ForkserverRunner:
         if "AFL_MAP_SIZE" not in env:
             env["AFL_MAP_SIZE"] = "8192"
 
-        self._proc = subprocess.Popen(
-            [loader_bin],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
+        try:
+            self._proc = subprocess.Popen(
+                [loader_bin],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+        except OSError as exc:
+            # EAGAIN/ENOMEM on a restart must not escape run_one into the fuzz loop.
+            log.warning("Forkserver: cannot spawn loader: %s", exc)
+            return False
         self._reader = PipeReader(self._proc.stdout.fileno())
         if self._perf_counters is not None:
             self._perf_counters.open_for_pid(self._proc.pid)

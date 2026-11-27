@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 
 from fuzzer_tool.adapters.process import detached_env
+from fuzzer_tool.core import tla
 from fuzzer_tool.core.crash_metadata import REPRO_ASAN_OPTIONS, repro_runner
 
 log = logging.getLogger(__name__)
@@ -616,6 +617,16 @@ class CrashTracer:
             log.debug("Failed to save trace report: %s", e)
 
 
+# TLA+ model boundary: python tools/tla_extract.py gdbjob --check
+@tla.machine(
+    state={"_proc": tla.Kind.PROC, "_out": tla.Kind.FILE},
+    model={
+        "subprocess.Popen": tla.Op.SPAWN,
+        "tempfile.TemporaryFile": tla.Op.OPEN_FILE,
+        "os.killpg": tla.Op.KILLPG,
+    },
+    ignore=("time.monotonic", "detached_env", "os.unlink", "self._tracer."),
+)
 class GdbJob:
     """One GDB replay running in the background (see ``CrashTracer.gdb_start``).
 
@@ -630,22 +641,33 @@ class GdbJob:
         self._temps = [p for p in (input_path, harness) if p]
         self._out = tempfile.TemporaryFile()  # noqa: SIM115  (closed in _cleanup)
         self._deadline = time.monotonic() + tracer.timeout
-        with contextlib.ExitStack() as stack:
-            stdin = (
-                stack.enter_context(open(stdin_path, "rb")) if stdin_path else subprocess.DEVNULL
-            )
-            # Own session: a kill reaches the inferior gdb started, too.
-            self._proc = subprocess.Popen(
-                argv,
-                stdin=stdin,
-                stdout=self._out,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                env=detached_env(),  # off the live run's shim channels
-            )
+        try:
+            with contextlib.ExitStack() as stack:
+                stdin = (
+                    stack.enter_context(open(stdin_path, "rb"))
+                    if stdin_path
+                    else subprocess.DEVNULL
+                )
+                # Own session: a kill reaches the inferior gdb started, too.
+                self._proc = subprocess.Popen(
+                    argv,
+                    stdin=stdin,
+                    stdout=self._out,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    env=detached_env(),  # off the live run's shim channels
+                )
+        except OSError:
+            # The caller drops a job that failed to start: take the temps with it.
+            self._cleanup()
+            raise
 
+    @tla.entry()
     def poll(self) -> TraceReport | None:
         """The parsed report once gdb exits (empty past the deadline), else None."""
+        if self._out.closed:
+            return self._report  # already returned once; the output is gone
+
         if self._proc.poll() is None:
             if time.monotonic() < self._deadline:
                 return None
@@ -663,6 +685,7 @@ class GdbJob:
             time.sleep(GDB_POLL_S)
         return report
 
+    @tla.entry()
     def kill(self) -> None:
         """Stop gdb and drop its temps; the report stays as started."""
         if self._proc.poll() is None:

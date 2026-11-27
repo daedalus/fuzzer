@@ -161,7 +161,7 @@ fuzzer, not just the target.
 | `tools/benchmark.py list` / `tools/benchmark.py <name> [args]` | All benchmarks behind one entry point (`smoke`, `sweep`, `paired`, `replicated`, …) |
 | `tools/sim_funnel_probe.py [--mode load\|growth\|hot\|real]` / `tools/edge_hit_spectrum.py TARGET -d CORPUS -o OUT.pkl` | SHM probe-table simulator (linear/funnel/elastic/hybrid) and measured per-edge hit spectrum; see `docs/handover/handover_funnel_elastic_hashing_2026-11-05.md` |
 | `python tools/fuzz.py [elf\|state\|learner\|ops\|mutate] [--seed N] [--replay FILE]` | Self-fuzz fuzzer-tool's own parsers; crashes in `~/fuzzing/selffuzz-crashes/` |
-| `tools/vendor_tla.sh` / `python tools/tla_extract.py forkserver --check` | Fetch TLC; extract a TLA+ model from a `@tla.machine` class and check it (DEEP_DIVE §Formal model) |
+| `tools/vendor_tla.sh` / `python tools/tla_extract.py <forkserver\|persistent\|gdbjob\|push> --check` | Fetch TLC; extract a TLA+ model from a `@tla.machine` class and check it (DEEP_DIVE §Formal model) |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
 | `tools/find_dup_tests.py [PATH ...]` | Identical-body tests (AST, docstrings ignored); cross-file hits may bind different per-file names |
