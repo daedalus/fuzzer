@@ -2130,6 +2130,9 @@ STUBEOF
         -Dgst-plugins-good:isomp4=enabled -Dgst-plugins-good:matroska=enabled
         -Dgst-plugins-good:wavparse=enabled -Dgst-plugins-good:avi=enabled
         -Dgst-plugins-good:flv=enabled
+        -Dgst-plugins-base:subparse=enabled -Dgst-plugins-good:id3demux=enabled
+        -Dgst-plugins-good:apetag=enabled -Dgst-plugins-good:auparse=enabled
+        -Dgst-plugins-good:audioparsers=enabled -Dgst-plugins-bad:videoparsers=enabled
     )
     cfg_stamp=$(printf '%s|%s|%s|%s|%s|%s' "$COV_FLAGS" "$LINK_FLAGS" "$cc_id" "$cc|$cxx" \
                        "${meson_opts[*]}" "$GSTREAMER_VERSION" | md5sum | cut -d' ' -f1)
