@@ -19,6 +19,10 @@ repos:
   - id: debug-statements
   - id: check-added-large-files
     args: ["--maxkb=1024"]
+- repo: https://github.com/jorisroovers/gitlint
+  rev: v0.19.1
+  hooks:
+  - id: gitlint
 
 - repo: local
   hooks:
