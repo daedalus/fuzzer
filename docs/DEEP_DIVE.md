@@ -1580,6 +1580,8 @@ The shim defines `malloc/free/calloc/realloc/reallocarray/memalign/aligned_alloc
 
 
 **Foreign pointers.** A free or realloc of a pointer the heap does not own goes on to glibc. For a chunk in the main brk heap glibc takes the arena lock and checks the neighbouring chunk only then, so its abort left the lock held and, once the process had a second thread, the host's next malloc deadlocked (direct_lite, fuzzgoat). `__afl_ph_foreign_err` makes the same checks without the lock (aligned, size sane, next header inside `[heap]`, next `prev_inuse` set) and ends in `__afl_ph_die`: the identical SIGABRT, raised where the guard recovers. `[heap]` is read once from `/proc/self/maps`. Pointers outside it (mmapped chunks, thread arenas) are forwarded unchanged. Not covered: corruption glibc finds deeper in consolidation (`corrupted size vs. prev_size`), and an abort inside a thread arena the host also uses. Test: `tests/test_regression_private_heap_foreign_free.py` (a second thread is required: single-threaded glibc takes no arena lock).
+**glibc C23 const-generic macros.** Newer glibc defines `memchr`/`strstr`/`strpbrk` (and `strchr`/`strrchr`) as `_Generic` macros under `_GNU_SOURCE`; the shim `#undef`s the three it interposes before defining them (`tests/test_regression_shim_glibc_const_generic.py`).
+
 ### Shim health checks
 Failures the shim survives but the fuzzer cannot otherwise see.
 
