@@ -28,12 +28,23 @@ PUSH_STUB = """GstFlowReturn gst_pad_push(GstPad *p, GstBuffer *b)
     return last_push;
 }"""
 
-COUNTING_STUB = """static int pushes, pushes_before_eos;
+# The stub buffer has no size field: record the memdup length in ->type.
+MEMDUP_STUB = (
+    "GstBuffer *gst_buffer_new_memdup(gconstpointer d, gsize n) { (void)d; (void)n; "
+    "GstBuffer *b = malloc(sizeof *b); b->type = 0; b->offset = 0; return b; }"
+)
+SIZED_MEMDUP = (
+    "GstBuffer *gst_buffer_new_memdup(gconstpointer d, gsize n) { (void)d; "
+    "GstBuffer *b = malloc(sizeof *b); b->type = (int)n; b->offset = 0; return b; }"
+)
+
+COUNTING_STUB = """static int pushes, pushes_before_eos, empty_tail;
 GstFlowReturn gst_pad_push(GstPad *p, GstBuffer *b)
 {
     (void)p;
     pushes++;
     if (!strchr(events, '4')) pushes_before_eos++;
+    empty_tail = b->type == 0 ? empty_tail + 1 : 0;  /* trailing zero-length run */
     last_push = strchr(events, '2') ? GST_FLOW_OK : GST_FLOW_NOT_NEGOTIATED;
     gst_buffer_unref(b);
     return last_push;
@@ -44,9 +55,9 @@ MAIN = f"""int main(void)
     static unsigned char buf[{LARGE}];
     for (int i = 0; i < 2; i++) {{
         size_t n = i ? {LARGE} : {SMALL};
-        reset_probe(); pushes = pushes_before_eos = 0;
+        reset_probe(); pushes = pushes_before_eos = empty_tail = 0;
         fuzz_gstreamer(buf, n);
-        printf("n%zu=%d,%d ", n, pushes, pushes_before_eos);
+        printf("n%zu=%d,%d,%d ", n, pushes, pushes_before_eos, empty_tail);
     }}
     printf("\\n");
     return 0;
@@ -59,8 +70,8 @@ def counts(tmp_path_factory):
     clang = shutil.which("clang")
     if not clang:
         pytest.skip("clang not available")
-    assert PUSH_STUB in HARNESS
-    harness = HARNESS.replace(PUSH_STUB, COUNTING_STUB)
+    assert PUSH_STUB in HARNESS and MEMDUP_STUB in HARNESS
+    harness = HARNESS.replace(PUSH_STUB, COUNTING_STUB).replace(MEMDUP_STUB, SIZED_MEMDUP)
     harness = harness[: harness.index("int main(void)")] + HARNESS_DECLS + MAIN
 
     d = tmp_path_factory.mktemp("gst_drain")
@@ -87,15 +98,18 @@ def counts(tmp_path_factory):
 
 
 def test_regression_gst_drain(counts):
-    """A sub-chunk input gets data push + drain pushes, all before EOS."""
-    total, before_eos = counts[SMALL]
+    """A sub-chunk input gets data push + zero-length drain pushes, all before EOS."""
+    total, before_eos, empty_tail = counts[SMALL]
     assert total >= 1 + MIN_DRAIN
     assert before_eos == total
+    assert empty_tail == total - 1  # every push after the data is empty
 
 
 def test_large_input_keeps_chunks(counts):
     """Falsification: data still goes in 4 KiB chunks; drain is added, not substituted."""
     data_pushes = -(-LARGE // CHUNK)
-    total, before_eos = counts[LARGE]
-    assert total == data_pushes + (counts[SMALL][0] - 1)
+    drain = counts[SMALL][0] - 1
+    total, before_eos, empty_tail = counts[LARGE]
+    assert total == data_pushes + drain
     assert before_eos == total
+    assert empty_tail == drain
