@@ -41,8 +41,20 @@ sys.path[:0] = [str(_ROOT / "src"), str(_ROOT)]
 
 from fuzzer_tool.core import tla  # noqa: E402
 
-MACHINES = {"forkserver": "fuzzer_tool.adapters.forkserver:ForkserverRunner"}
-BUILTIN_INVARIANTS = ("NoOrphan", "NoHang", "NoUncaught", "RecursionBound", "NoDesync")
+MACHINES = {
+    "forkserver": "fuzzer_tool.adapters.forkserver:ForkserverRunner",
+    "persistent": "fuzzer_tool.adapters.persistent_subprocess:PersistentLoader",
+    "gdbjob": "fuzzer_tool.core.analyzers.analyzer_trace:GdbJob",
+    "push": "fuzzer_tool.services.push:PushNotifier",
+}
+BUILTIN_INVARIANTS = (
+    "NoOrphan",
+    "NoHang",
+    "NoUncaught",
+    "RecursionBound",
+    "NoDesync",
+    "SetupCleanup",
+)
 
 _SYSCALLS = Path(__file__).resolve().parent / "tla" / "Syscalls.tla"
 _JAR_NAME = "tla2tools.jar"
@@ -57,6 +69,8 @@ _NONE_STR = '"None"'
 # Exception classes the model can raise, child -> parent.
 _PARENT = {
     "BrokenPipeError": "OSError",
+    "ProcessLookupError": "OSError",
+    "FileNotFoundError": "OSError",
     "OSError": "Exception",
     "ValueError": "Exception",
     "AttributeError": "Exception",
@@ -86,9 +100,21 @@ class HType(Enum):
     PROC = "proc"
     READER = "reader"
     FD = "fd"
+    FILE = "file"
+    SET = "set"  # a PROCSET field: a TLA set of proc ids
 
 
-_FIELD_HTYPE = {tla.Kind.PROC: HType.PROC, tla.Kind.READER: HType.READER}
+_FIELD_HTYPE = {
+    tla.Kind.PROC: HType.PROC,
+    tla.Kind.READER: HType.READER,
+    tla.Kind.FILE: HType.FILE,
+    tla.Kind.PROCSET: HType.SET,
+}
+_HANDLE_KINDS = (tla.Kind.PROC, tla.Kind.READER, tla.Kind.FILE)
+# Context managers whose body runs once and whose exit has no modeled effect.
+_PASSTHROUGH_CTX = ("contextlib.ExitStack",)
+_SUPPRESS_CTX = ("contextlib.suppress", "suppress")
+_EXC = "__exc__"  # env slot: the exception a handler is running for (bare `raise`)
 
 
 @dataclass(frozen=True)
@@ -140,8 +166,15 @@ _TYPED_OPS = {
     (HType.PROC, "wait"): ("Wait", VKind.STR, None),
     (HType.PROC, "stdin.write"): ("Write", VKind.STR, None),
     (HType.PROC, "stdin.flush"): ("Flush", VKind.STR, None),
+    (HType.PROC, "stdin.close"): ("CloseStdin", VKind.STR, None),
     (HType.PROC, "stdout.fileno"): ("Fileno", VKind.HANDLE, HType.FD),
     (HType.READER, "readline"): ("ReadLineT", VKind.STR, None),
+    (HType.READER, "read_exact"): ("ReadExact", VKind.STR, None),
+    (HType.FILE, "seek"): ("FileUse", VKind.STR, None),
+    (HType.FILE, "read"): ("FileUse", VKind.STR, None),
+    (HType.FILE, "write"): ("FileUse", VKind.STR, None),
+    (HType.FILE, "flush"): ("FileUse", VKind.STR, None),
+    (HType.FILE, "close"): ("FileClose", VKind.STR, None),
 }
 
 _MODEL_RESULT = {
@@ -149,8 +182,17 @@ _MODEL_RESULT = {
     tla.Op.READER: (VKind.HANDLE, HType.READER),
     tla.Op.CLOSE_STREAMS: (VKind.STR, None),
     tla.Op.MAYBE: (VKind.STR, None),
+    tla.Op.OPEN_FILE: (VKind.HANDLE, HType.FILE),
+    tla.Op.KILLPG: (VKind.STR, None),
 }
-_MODEL_ARGS = {tla.Op.SPAWN: 0, tla.Op.READER: 1, tla.Op.CLOSE_STREAMS: 1, tla.Op.MAYBE: 0}
+_MODEL_ARGS = {
+    tla.Op.SPAWN: 0,
+    tla.Op.READER: 1,
+    tla.Op.CLOSE_STREAMS: 1,
+    tla.Op.MAYBE: 0,
+    tla.Op.OPEN_FILE: 0,
+    tla.Op.KILLPG: 1,
+}
 
 
 @dataclass
@@ -309,6 +351,8 @@ class Compiler:
             ast.Raise: self._s_raise,
             ast.Try: self._s_try,
             ast.With: self._s_with,
+            ast.For: self._s_for,
+            ast.Assert: lambda n, w, env, k: k.nxt(w, env),  # stripped under -O
         }
 
     # ── helpers ────────────────────────────────────────────────────
@@ -339,6 +383,8 @@ class Compiler:
                 names.add(node.id)
             if isinstance(node, ast.ExceptHandler) and node.name:
                 names.add(node.name)
+            if isinstance(node, ast.Raise) and node.exc is None:
+                names.add(_EXC)
         return names
 
     def _let(self, expr: str, then: WorldK) -> str:
@@ -399,10 +445,23 @@ class Compiler:
         return None
 
     def _assign(self, target: ast.expr, value: ast.expr, w: str, env: Env, k: Cont) -> str:
+        fld = self._modeled_field(target)
+        if fld is not None and self.spec.state[fld] is tla.Kind.PROCSET:
+            return self._rebind_set(target, fld, value, w, env, k)
+
         def bind(w2: str, v: Val) -> str:
             return self._bind(target, v, w2, env, k)
 
         return self.expr(value, w, env, bind, self._raise_to(k, env))
+
+    def _rebind_set(self, target, fld: str, value: ast.expr, w: str, env: Env, k: Cont) -> str:
+        """``self.<procset> = []`` empties it; any computed list keeps the unreaped
+        members (the reap-filter idiom, e.g. ``self._senders = alive``)."""
+        self._assert_pure(value, env)
+        name = self._fields[fld]
+        empty = isinstance(value, ast.List) and not value.elts
+        kept = "{}" if empty else f'{{p \\in {w}.s.{name} : {w}.procs[p] \\in {{"live", "dead"}}}}'
+        return self._let(f"[{w} EXCEPT !.s.{name} = {kept}]", lambda w2: k.nxt(w2, env))
 
     def _bind(self, target: ast.expr, v: Val, w: str, env: Env, k: Cont) -> str:
         if isinstance(target, ast.Name):
@@ -414,8 +473,10 @@ class Compiler:
             if any(self._modeled_field(n) for n in ast.walk(target)):
                 raise self.fail(target, "indirect store into a modeled field")
             return k.nxt(w, env)
-        if isinstance(target, ast.Tuple) and all(isinstance(e, ast.Name) for e in target.elts):
-            return k.nxt(w, {**env, **{e.id: HAVOC for e in target.elts}})
+        if isinstance(target, ast.Tuple) and not any(self._modeled_field(e) for e in target.elts):
+            # Unpacking an unmodeled value: locals go havoc, unmodeled fields are dropped.
+            names = {e.id: HAVOC for e in target.elts if isinstance(e, ast.Name)}
+            return k.nxt(w, {**env, **names})
         raise self.fail(target, "unsupported assignment target")
 
     def _store(self, node: ast.AST, fld: str, v: Val, w: str, then: WorldK) -> str:
@@ -427,9 +488,9 @@ class Compiler:
             self._note_havoc(node)
             b = self.fresh("b")
             return f"\\E {b} \\in BOOLEAN :\n" + self._let(f"[{w} EXCEPT !.s.{name} = {b}]", then)
-        if kind in _FIELD_HTYPE and v.kind is VKind.NONE:
+        if kind in _HANDLE_KINDS and v.kind is VKind.NONE:
             return self._let(f"[{w} EXCEPT !.s.{name} = {_NONE_HANDLE}]", then)
-        if kind in _FIELD_HTYPE and v.kind is VKind.HANDLE:
+        if kind in _HANDLE_KINDS and v.kind is VKind.HANDLE:
             return self._let(f"[{w} EXCEPT !.s.{name} = {v.tla}]", then)
         raise self.fail(node, f"cannot store {v.kind.value} into {kind.value} field")
 
@@ -445,6 +506,11 @@ class Compiler:
 
     def _s_raise(self, node: ast.Raise, w: str, env: Env, k: Cont) -> str:
         exc = node.exc
+        if exc is None:
+            cur = env.get(_EXC)
+            if cur is None or cur.tla is None:
+                raise self.fail(node, "bare raise outside an except handler")
+            return k.exc(w, cur.tla, env)
         name = exc.func if isinstance(exc, ast.Call) else exc
         text = ast.unparse(name).rsplit(".", 1)[-1] if name is not None else ""
         if text not in _PARENT:
@@ -462,10 +528,18 @@ class Compiler:
         return join.wrap(then.wrap(other.wrap(text)))
 
     def _s_with(self, node: ast.With, w: str, env: Env, k: Cont) -> str:
-        item = node.items[0].context_expr if len(node.items) == 1 else None
+        if len(node.items) != 1:
+            raise self.fail(node, "only single-item `with` is supported")
+        item = node.items[0].context_expr
+        text = ast.unparse(item)
+        if self._passthrough(text):
+            return self._with_body(node, w, env, k)
+
         func = ast.unparse(item.func) if isinstance(item, ast.Call) else ""
-        if func not in ("contextlib.suppress", "suppress") or node.items[0].optional_vars:
-            raise self.fail(node, "only `with contextlib.suppress(...)` is supported")
+        if func not in _SUPPRESS_CTX or node.items[0].optional_vars:
+            raise self.fail(
+                node, "`with` supports contextlib.suppress and ignore=/ExitStack contexts"
+            )
         caught = _handlers_match([ast.unparse(a).rsplit(".", 1)[-1] for a in item.args])
         join = _Join(self, k.nxt)
 
@@ -478,6 +552,47 @@ class Compiler:
             lambda: self.stmts(node.body, w, env, Cont(join.stub, k.ret, self._share_exc(on_exc)))
         )
         return join.wrap(body)
+
+    def _passthrough(self, text: str) -> bool:
+        """A context whose enter/exit has no modeled effect: a lock, an ExitStack."""
+        prefixes = (*self.spec.ignore, *_PASSTHROUGH_CTX)
+        return any(text.startswith(p) for p in prefixes)
+
+    def _with_body(self, node: ast.With, w: str, env: Env, k: Cont) -> str:
+        var = node.items[0].optional_vars
+        if var is not None and not isinstance(var, ast.Name):
+            raise self.fail(node, "unsupported `with ... as` target")
+        if var is not None:
+            env = {**env, var.id: HAVOC}
+        return self.stmts(node.body, w, env, k)
+
+    def _s_for(self, node: ast.For, w: str, env: Env, k: Cont) -> str:
+        """A loop with no modeled effect is skipped; anything else is rejected.
+
+        Sound for the state the model tracks: the body may only call pure or
+        ignored functions and never writes a modeled field or returns.
+        """
+        if node.orelse:
+            raise self.fail(node, "for/else is unsupported")
+        bound = {
+            n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+        }
+        loop_env = {**env, **dict.fromkeys(bound, HAVOC)}
+        for sub in ast.walk(node):
+            self._check_inert(node, sub, loop_env)
+        return k.nxt(w, loop_env)
+
+    def _check_inert(self, loop: ast.For, sub: ast.AST, env: Env) -> None:
+        if isinstance(sub, ast.Return | ast.Raise | ast.Yield):
+            raise self.fail(loop, "loop that leaves the method is unsupported")
+        targets = sub.targets if isinstance(sub, ast.Assign) else []
+        targets = [sub.target] if isinstance(sub, ast.AugAssign | ast.AnnAssign) else targets
+        if any(self._modeled_field(t) for t in targets):
+            raise self.fail(loop, "loop writes a modeled field")
+        if not isinstance(sub, ast.Call) or ast.unparse(sub.func) in _SUPPRESS_CTX:
+            return
+        if self.classify(sub, env) not in (CallKind.PURE, CallKind.IGNORE, CallKind.OPAQUE):
+            raise self.fail(loop, "loop calls modeled I/O (bounded unrolling is not implemented)")
 
     def _share_exc(self, fn: ExcK) -> ExcK:
         """Exception continuation emitted once; raise sites call the stub."""
@@ -540,7 +655,9 @@ class Compiler:
         if not arms:
             return kf.exc(w, e, env)
         (h, caught), rest = arms[0], arms[1:]
-        henv = {**env, h.name: HAVOC} if h.name else env
+        henv = {**env, _EXC: Val(e, VKind.STR)}
+        if h.name:
+            henv[h.name] = HAVOC
         here = self._with_pending(lambda: self.stmts(h.body, w, henv, kf))
         return f"IF {e} \\in {_tla_set(caught)} THEN\n{here}\nELSE {self._dispatch(rest, w, e, env, kf)}"
 
@@ -661,11 +778,32 @@ class Compiler:
     def _attr(self, node: ast.Attribute, w: str, env: Env, kv: ValK, kx: RaiseK) -> str:
         fld = self._modeled_field(node)
         if fld is not None:
-            kind = self.spec.state[fld]
-            vkind = VKind.BOOL if kind is tla.Kind.BOOL else VKind.HANDLE
-            return kv(w, Val(f"{w}.s.{self._fields[fld]}", vkind, _FIELD_HTYPE.get(kind)))
+            return kv(w, self._field_val(fld, w))
+        if node.attr == "closed":
+            # f.closed on a modeled file.
+            def closed(w2: str, b: Val) -> str:
+                if b.htype is not HType.FILE:
+                    return kv(w2, HAVOC)
+                return kv(w2, Val(f'({w2}.files[{b.tla}] = "closed")', VKind.BOOL))
+
+            return self.expr(node.value, w, env, closed, kx)
+        if node.attr == "pid":
+            # proc.pid names the proc (and, after setsid, its group).
+            def pid(w2: str, b: Val) -> str:
+                return kv(w2, b if b.htype is HType.PROC else HAVOC)
+
+            return self.expr(node.value, w, env, pid, kx)
         self._assert_pure(node.value, env)
         return kv(w, HAVOC)
+
+    def _field_val(self, fld: str, w: str) -> Val:
+        kind = self.spec.state[fld]
+        ref = f"{w}.s.{self._fields[fld]}"
+        if kind is tla.Kind.BOOL:
+            return Val(ref, VKind.BOOL)
+        if kind is tla.Kind.PROCSET:
+            return Val(ref, VKind.HAVOC, HType.SET)
+        return Val(ref, VKind.HANDLE, _FIELD_HTYPE[kind])
 
     def _compare(self, node: ast.Compare, w: str, env: Env, kv: ValK, kx: RaiseK) -> str:
         if len(node.ops) != 1:
@@ -813,6 +951,10 @@ class Compiler:
 
     def _model_call(self, node: ast.Call, w: str, env: Env, kv: ValK, kx) -> str:
         op = self.spec.model[ast.unparse(node.func)]
+        if op is tla.Op.WRAP:
+            return self._args(
+                list(node.args), w, env, lambda w2, vals: kv(w2, self._wrapped(node, vals)), kx
+            )
         kind, htype = _MODEL_RESULT[op]
         n_args = _MODEL_ARGS[op]
 
@@ -822,6 +964,27 @@ class Compiler:
 
         return self._args(list(node.args) + [kw.value for kw in node.keywords], w, env, then, kx)
 
+    def _wrapped(self, node: ast.Call, vals: list[Val]) -> Val:
+        """Op.WRAP: the record stands for the first proc among its arguments."""
+        procs = [v for v in vals if v.htype is HType.PROC]
+        if not procs:
+            raise self.fail(node, "Op.WRAP needs a proc argument")
+        return procs[0]
+
+    def _hold(self, node: ast.Call, r: Val, w: str, env: Env, kv: ValK, kx) -> str:
+        """``self.<procset>.append(proc)``: the object now owns (and will reap) proc."""
+        if ast.unparse(node.func).rsplit(".", 1)[-1] != "append" or len(node.args) != 1:
+            raise self.fail(node, "a PROCSET field supports only .append(proc)")
+
+        def then(w2: str, vals: list[Val]) -> str:
+            h = self._handle_arg(node, vals[0])
+            field = r.tla.split(".s.", 1)[1]
+            return self._let(
+                f"[{w2} EXCEPT !.s.{field} = @ \\cup {{{h}}}]", lambda w3: kv(w3, NONE_VAL)
+            )
+
+        return self._args(list(node.args), w, env, then, kx)
+
     def _typed_call(self, node: ast.Call, w: str, env: Env, kv: ValK, kx) -> str:
         root, attrs = self._chain(node.func)
         recv = (
@@ -830,6 +993,8 @@ class Compiler:
         path = ".".join(attrs[1:] if root.id == "self" else attrs)
 
         def with_recv(w2: str, r: Val) -> str:
+            if r.htype is HType.SET:
+                return self._hold(node, r, w2, env, kv, kx)
             entry = _TYPED_OPS.get((r.htype, path))
             if entry is None:
                 raise self.fail(node, f"no Syscalls.tla model for {r.htype} .{path}()")
@@ -945,9 +1110,7 @@ class Compiler:
             return self._const(node.value)
         fld = self._modeled_field(node)
         if fld is not None:
-            kind = self.spec.state[fld]
-            vkind = VKind.BOOL if kind is tla.Kind.BOOL else VKind.HANDLE
-            return Val(f"w.s.{self._fields[fld]}", vkind, _FIELD_HTYPE.get(kind))
+            return self._field_val(fld, "w")
         if isinstance(node, ast.Compare) and len(node.ops) == 1:
             return self._cmp(
                 node.ops[0], self._pure_val(node.left), self._pure_val(node.comparators[0])
@@ -983,16 +1146,21 @@ class Emitter:
                 out.append((name, es))
         return out
 
+    _DEFAULT = {tla.Kind.BOOL: "FALSE", tla.Kind.PROCSET: "{}"}
+
     def _initial(self) -> str:
         fields = ", ".join(
-            f"{n} |-> {'FALSE' if self.spec.state[f] is tla.Kind.BOOL else _NONE_HANDLE}"
+            f"{n} |-> {self._DEFAULT.get(self.spec.state[f], _NONE_HANDLE)}"
             for f, n in self.comp._fields.items()
         )
         return (
             f"W0 == [s |-> [{fields}],\n"
             '        procs |-> [p \\in 1..MaxProcs |-> "free"], pend |-> [p \\in 1..MaxProcs |-> 0],\n'
+            "        stale |-> [p \\in 1..MaxProcs |-> FALSE],\n"
+            '        files |-> [f \\in 1..MaxProcs |-> "free"], nfile |-> 0,\n'
             '        closed |-> {}, nproc |-> 0, ret |-> "", calls |-> 0, last |-> "",\n'
-            '        hung |-> FALSE, overflow |-> FALSE, uncaught |-> "", desync |-> FALSE]'
+            '        hung |-> FALSE, overflow |-> FALSE, uncaught |-> "", desync |-> FALSE,\n'
+            '        setup |-> ""]'
         )
 
     @staticmethod
@@ -1011,31 +1179,45 @@ class Emitter:
 
         return done
 
-    def _crash(self, name: str) -> ExcK:
+    def _crash(self, name: str, es: tla.EntrySpec) -> ExcK:
+        # Uncatchable pseudo-exceptions and the ones the caller handles are not NoUncaught.
+        quiet = ", ".join(
+            [*_UNCATCHABLE, *(f'"{c}"' for c in sorted(_handlers_match(list(es.raises))))]
+        )
+
         def crash(w: str, e: str, _env: Env) -> str:
             return (
                 f'w\' = [{w} EXCEPT !.ret = {e}, !.calls = @ + 1, !.last = "{name}",\n'
                 f'   !.hung = @ \\/ {e} = "Hang", !.overflow = @ \\/ {e} = "Overflow",\n'
-                f"   !.uncaught = IF {e} \\in {{{', '.join(_UNCATCHABLE)}}} THEN @ ELSE {e}]"
+                f"   !.uncaught = IF {e} \\in {{{quiet}}} THEN @ ELSE {e}]"
             )
 
         return crash
 
-    def _setup(self, setup: str) -> str:
+    def _setup(self, setup: str | None) -> str:
+        """Init: __init__ then the SETUP entry. A raise or a falsy return is kept as
+        a failed setup (w.setup), which the caller drops: SetupCleanup checks it
+        left nothing running or open."""
         init_fn = self.comp._methods.get("__init__")
-        start_fn = self.comp._methods[setup]
-        no = lambda *_a: "FALSE"  # noqa: E731
+
+        def failed(w: str, e: str, _env: Env | None = None) -> str:
+            return f'w = [{w} EXCEPT !.setup = {e}, !.hung = {e} = "Hang"]'
 
         def keep(w: str, v: Val) -> str:
             truth = self.comp.truth(v)
-            return f"IF {truth} THEN w = {w} ELSE FALSE" if truth else f"w = {w}"
+            if truth is None:
+                return f"w = {w}"
+            return f"IF {truth} THEN w = {w} ELSE {failed(w, chr(34) + 'False' + chr(34))}"
 
         def run_start(w: str, _v: Val) -> str:
-            return self.comp.body(start_fn, w, self._havoc_params(start_fn), keep, no)
+            if setup is None:
+                return f"w = {w}"
+            fn = self.comp._methods[setup]
+            return self.comp.body(fn, w, self._havoc_params(fn), keep, failed)
 
         if init_fn is None:
             return run_start("W0", NONE_VAL)
-        return self.comp.body(init_fn, "W0", self._havoc_params(init_fn), run_start, no)
+        return self.comp.body(init_fn, "W0", self._havoc_params(init_fn), run_start, failed)
 
     @staticmethod
     def _havoc_params(fn: ast.FunctionDef) -> Env:
@@ -1044,18 +1226,32 @@ class Emitter:
     def _call(self, name: str, es: tla.EntrySpec) -> str:
         fn = self.comp._methods[name]
         guard = f" /\\ {self.comp.pure(es.requires)}" if es.requires else ""
-        body = self.comp.body(fn, "w", self._havoc_params(fn), self._done(name), self._crash(name))
-        return f"Call_{name} ==\n  ~w.hung /\\ w.calls < MaxCalls{guard} /\\ (\n{body}\n)\n"
+        body = self.comp.body(
+            fn, "w", self._havoc_params(fn), self._done(name), self._crash(name, es)
+        )
+        live = '~w.hung /\\ w.setup = "" /\\ w.calls < MaxCalls'
+        return f"Call_{name} ==\n  {live}{guard} /\\ (\n{body}\n)\n"
+
+    def _held(self) -> str:
+        """Proc ids the object can still reach: PROC fields plus PROCSET members."""
+        kinds = self.spec.state
+        procs = [f"w.s.{n}" for f, n in self.comp._fields.items() if kinds[f] is tla.Kind.PROC]
+        sets = [f"w.s.{n}" for f, n in self.comp._fields.items() if kinds[f] is tla.Kind.PROCSET]
+        return " \\cup ".join(["{" + ", ".join(procs) + "}", *sets])
 
     def _invariants(self) -> list[str]:
-        procs = [n for f, n in self.comp._fields.items() if self.spec.state[f] is tla.Kind.PROC]
-        held = "{" + ", ".join(f"w.s.{n}" for n in procs) + "}"
+        unreaped = '{"live", "dead"}'
         out = [
-            f'NoOrphan == \\A p \\in 1..MaxProcs : w.procs[p] = "live" => p \\in {held}',
+            # A running or zombie proc nobody holds is never reaped.
+            f"NoOrphan == \\A p \\in 1..MaxProcs : w.procs[p] \\in {unreaped} => p \\in {self._held()}",
             "NoHang == ~w.hung",
             'NoUncaught == w.uncaught = ""',
             "RecursionBound == ~w.overflow",
             "NoDesync == ~w.desync",
+            # A failed setup is dropped by its caller: it must leave nothing behind.
+            'SetupCleanup == w.setup # "" => '
+            f"(\\A p \\in 1..MaxProcs : w.procs[p] \\notin {unreaped}) /\\ "
+            '(\\A f \\in 1..MaxProcs : w.files[f] # "open")',
         ]
         # A hung call is blocked mid-method; NoHang reports it, field invariants skip it.
         out += [
@@ -1066,13 +1262,13 @@ class Emitter:
     def emit(self) -> Model:
         entries = self._entries()
         setups = [n for n, es in entries if es.phase is tla.Phase.SETUP]
-        if len(setups) != 1:
+        if len(setups) > 1:
             raise ExtractError(
-                f"{self.cls.__qualname__}: need exactly one Phase.SETUP entry, got {setups}"
+                f"{self.cls.__qualname__}: at most one Phase.SETUP entry, got {setups}"
             )
         calls = [(n, es) for n, es in entries if es.phase is tla.Phase.CALL]
         name = self.cls.__name__
-        init = self._setup(setups[0])
+        init = self._setup(setups[0] if setups else None)
         actions = [self._call(n, es) for n, es in calls]
         invariants = self._invariants()
         nxt = " \\/ ".join([f"Call_{n}" for n, _ in calls] + ["Die"])
@@ -1179,12 +1375,34 @@ def _summarize(trace: str) -> str:
     return "\n".join(lines)
 
 
+def _mark_push(cls: type) -> None:
+    """PushNotifier's spec, attached here: push.py also runs as ``python -I push.py``
+    (the sender child), where the package is not importable, so it cannot
+    import fuzzer_tool.core.tla itself."""
+    tla.machine(
+        state={"_senders": tla.Kind.PROCSET},
+        model={"subprocess.Popen": tla.Op.SPAWN, "_Sender": tla.Op.WRAP},
+        ignore=("time.monotonic", "os.path.", "replace", "_encode"),
+    )(cls)
+    tla.entry(raises=("OSError",))(cls.notify)  # corpus_manager._push_crash catches OSError
+    tla.entry()(cls.close)
+    tla.opaque(None)(cls._report)
+
+
+# Machines whose module cannot import fuzzer_tool.core.tla: name -> spec attacher.
+_EXTERNAL_SPECS: dict[str, Callable[[type], None]] = {"push": _mark_push}
+
+
 def _resolve(target: str) -> type:
     spec = MACHINES.get(target, target)
     if ":" not in spec:
         raise ExtractError(f"unknown machine {target!r}; known: {sorted(MACHINES)} or module:Class")
-    mod, _, cls = spec.partition(":")
-    return getattr(importlib.import_module(mod), cls)
+    mod, _, name = spec.partition(":")
+    cls = getattr(importlib.import_module(mod), name)
+    attach = _EXTERNAL_SPECS.get(target)
+    if attach is not None and not hasattr(cls, tla.MACHINE_ATTR):
+        attach(cls)
+    return cls
 
 
 def main(argv: list[str] | None = None) -> int:

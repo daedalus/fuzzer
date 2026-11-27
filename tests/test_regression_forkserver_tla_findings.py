@@ -206,3 +206,21 @@ def test_retune_backoff_control(fake_loader, monkeypatch):
         assert backoff.failures == []
     finally:
         r.stop()
+
+
+def test_regression_respawn_eagain(fake_loader, monkeypatch):
+    """NoUncaught: a respawn whose Popen raises reports -2 instead of escaping run_one."""
+    env, _pids = fake_loader
+    r = ForkserverRunner("/fake/target", env=env("ok"))
+    try:
+        assert r.start()
+        r._proc.kill()
+        r._proc.wait()
+
+        def eagain(*_a, **_k):
+            raise OSError(11, "Resource temporarily unavailable")
+
+        monkeypatch.setattr(forkserver.subprocess, "Popen", eagain)
+        assert r.run_one(b"x") == (-2, "")
+    finally:
+        r.stop()

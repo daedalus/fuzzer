@@ -49,6 +49,39 @@ def test_unguarded_recursion(tmp_path):
     assert "RecursionBound" in res.violations
 
 
+@needs_tlc
+def test_setup_leak_only_unguarded(tmp_path):
+    clean = _check(fx.CleanJob, tmp_path / "clean")
+    assert clean.completed and not clean.violations
+
+    leaky = _check(fx.LeakyJob, tmp_path / "leaky")
+    assert "SetupCleanup" in leaky.violations
+
+
+@needs_tlc
+def test_use_after_close_flagged(tmp_path):
+    res = _check(fx.RereadJob, tmp_path)
+    assert "NoUncaught" in res.violations
+
+
+@needs_tlc
+def test_orphan_only_write_first(tmp_path):
+    held = _check(fx.HoldFirstNotifier, tmp_path / "held")
+    assert held.completed and not held.violations
+
+    leaky = _check(fx.WriteFirstNotifier, tmp_path / "leaky")
+    assert "NoOrphan" in leaky.violations
+
+
+@needs_tlc
+def test_short_read_desyncs(tmp_path):
+    full = _check(fx.FullReadRunner, tmp_path / "full")
+    assert full.completed and not full.violations
+
+    short = _check(fx.ShortReadRunner, tmp_path / "short")
+    assert "NoDesync" in short.violations
+
+
 # ── Adversarial: outside the subset fails loudly ────────────────────
 
 
@@ -69,6 +102,12 @@ def test_unmodeled_call_rejected():
         tla_extract.extract(fx.UnmodeledRunner)
     line = _line_of(fx.UnmodeledRunner, "os.system(")
     assert f"tla_fixtures.py:{line}" in str(err.value)
+
+
+def test_effectful_loop_rejected():
+    with pytest.raises(tla_extract.ExtractError) as err:
+        tla_extract.extract(fx.EffectLoopRunner)
+    assert f"tla_fixtures.py:{_line_of(fx.EffectLoopRunner, 'for _ in')}" in str(err.value)
 
 
 def test_cli_writes_nothing(tmp_path):
@@ -105,3 +144,10 @@ def test_forkserver_check_runs(tmp_path):
     assert res.completed
     known = set(tla_extract.BUILTIN_INVARIANTS) | set(ForkserverRunner.__tla_machine__.invariants)
     assert set(res.violations) <= known
+
+
+@pytest.mark.parametrize("name", sorted(tla_extract.MACHINES))
+def test_machine_extracts(name):
+    """Every registered machine stays inside the subset (no TLC needed)."""
+    model = tla_extract.extract(tla_extract._resolve(name))
+    assert "Init ==" in model.tla

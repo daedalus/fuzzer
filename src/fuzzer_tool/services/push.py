@@ -362,10 +362,11 @@ class PushNotifier:
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        # Held before the write: a sender that died early still gets reaped.
+        self._senders.append(_Sender(proc, time.monotonic()))
         assert proc.stdin is not None
         proc.stdin.write(_encode(self._targets, msg))
         proc.stdin.close()
-        self._senders.append(_Sender(proc, time.monotonic()))
 
     def close(self, timeout: float = DRAIN_TIMEOUT_S) -> None:
         """Wait up to *timeout* for in-flight alerts, then kill the rest."""
