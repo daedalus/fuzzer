@@ -33,6 +33,7 @@ from fuzzer_tool.adapters.persistent_subprocess import _close_streams
 from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
 from fuzzer_tool.adapters.process import _clean_env
 from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
+from fuzzer_tool.core import tla
 from fuzzer_tool.core.elf import AflMode, detect_afl_modes
 
 log = logging.getLogger(__name__)
@@ -143,6 +144,38 @@ def _ensure_compiled() -> str | None:
     return None
 
 
+# TLA+ model boundary: python tools/tla_extract.py forkserver --check
+@tla.machine(
+    state={
+        "_ready": tla.Kind.BOOL,
+        "_restarting": tla.Kind.BOOL,
+        "_proc": tla.Kind.PROC,
+        "_reader": tla.Kind.READER,
+    },
+    invariants={
+        "NoStuckRestart": "not self._restarting",
+        "LiveLoaderReady": "self._proc is None or self._proc.poll() is not None or self._ready",
+    },
+    model={
+        "subprocess.Popen": tla.Op.SPAWN,
+        "PipeReader": tla.Op.READER,
+        "_close_streams": tla.Op.CLOSE_STREAMS,
+        "_ensure_compiled": tla.Op.MAYBE,
+    },
+    ignore=(
+        "log.",
+        "time.monotonic",
+        "_check_argv",
+        "_clean_env",
+        "MemfdInput",
+        "threading.Thread",
+        "self._backoff.",
+        "self._perf_counters.",
+        "self._stderr_thread.",
+        "self._memfd.",
+    ),
+    replies={"INIT": "READY", "RUN": "RC", "TIMEOUT": "TIMEOUT_OK"},
+)
 class ForkserverRunner:
     """Run targets via the compiled C fuzz_loader binary.
 
@@ -201,6 +234,7 @@ class ForkserverRunner:
         if argv is not None:
             _check_argv(argv)
 
+    @tla.entry(tla.Phase.SETUP)
     def start(self) -> bool:
         if self._proc and self._proc.poll() is None:
             return True
@@ -319,6 +353,7 @@ class ForkserverRunner:
             return
         _drain_stream(proc.stderr, self._stderr_lines)
 
+    @tla.entry(requires="self._ready")  # runner.py gates on _ready
     def run_one(self, data: bytes) -> tuple[int, str]:
         """Run *data* once, returning ``(returncode, stderr)``.
 
@@ -376,6 +411,7 @@ class ForkserverRunner:
             self._restarting = False
         return fail_rc, ""
 
+    @tla.opaque("rc", -2)
     def _read_result(self, header: bytes, deadline: float) -> tuple[int, str]:
         """Parse the ``RC <rc> <err_len>`` reply and read the stderr payload."""
         if not header:
@@ -397,6 +433,7 @@ class ForkserverRunner:
         self._last_stderr = stderr
         return rc, stderr
 
+    @tla.entry()
     def set_timeout(self, seconds: float) -> bool:
         """Retune the loader's per-exec deadline in place.
 
@@ -451,6 +488,7 @@ class ForkserverRunner:
         log.warning("Forkserver: unexpected reply to TIMEOUT: %r", reply)
         return False
 
+    @tla.entry()
     def update_shm_after_resize(self, new_env_id: str, new_size: int) -> None:
         """Restart the loader so its children inherit the resized SHM.
 
@@ -468,6 +506,7 @@ class ForkserverRunner:
         if not self.start():
             log.warning("Forkserver failed to restart after SHM resize")
 
+    @tla.entry()
     def stop(self):
         proc = self._proc
         self._proc = None
