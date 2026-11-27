@@ -38,6 +38,7 @@ import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import TypeVar, cast
 
 import numpy as np
 
@@ -565,9 +566,17 @@ def _repair(pkt: bytearray) -> _Layout | None:
 # --- Edits -----------------------------------------------------------------
 
 
-def _pick(rng: RandPool, table: tuple, cur: object) -> object:
+_T = TypeVar("_T")
+
+
+def _choose(rng: RandPool, seq: tuple[_T, ...] | list[_T]) -> _T:
+    """``rng.choice`` narrowed to the element type (same single draw)."""
+    return cast(_T, rng.choice(seq))
+
+
+def _pick(rng: RandPool, table: tuple[_T, ...], cur: object) -> _T:
     """Drawn edge, or the next one in the table when it equals *cur*."""
-    first = rng.choice(table)
+    first = _choose(rng, table)
     start = table.index(first)
     k = len(table)
     for i in range(k):
@@ -726,7 +735,7 @@ def _icmp_quote(pkt: bytearray, lay: _Layout, rng: RandPool) -> None:
     room = len(pkt) - quote
     pkt[quote : quote + min(room, len(hdr))] = hdr[:room]
 
-    claimed = quote + rng.choice(QUOTE_CUTS)
+    claimed = quote + _choose(rng, QUOTE_CUTS)
     if lay.version == 4:
         _put16(pkt, V4_TOTLEN_OFF, claimed)
         return
@@ -738,7 +747,7 @@ def _break_csum(pkt: bytearray, _lay: _Layout, rng: RandPool) -> None:
     lay = _repair(pkt)
     if lay is None:
         return
-    site = rng.choice(_sites(lay))
+    site = _choose(rng, _sites(lay))
     off = V4_CSUM_OFF if site is Site.IP else lay.l4 + L4_CSUM_OFF[lay.proto]
     pkt[off + 1] ^= 1
 
@@ -798,7 +807,7 @@ def mutate_tcpip(data: bytes, max_len: int = 65536, *, rng: RandPool) -> bytes |
     if not ops:
         return None
 
-    op = rng.choice(ops)
+    op = _choose(rng, ops)
     _EDITS[op](pkt, lay, rng)
     if op not in _SELF_REPAIR:
         _repair(pkt)

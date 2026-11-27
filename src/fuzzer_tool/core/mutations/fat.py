@@ -215,11 +215,11 @@ class Entry(NamedTuple):
     parent: int
 
 
-def _u16(data: bytes, off: int) -> int:
+def _u16(data: bytes | bytearray, off: int) -> int:
     return data[off] | data[off + 1] << 8
 
 
-def _u32(data: bytes, off: int) -> int:
+def _u32(data: bytes | bytearray, off: int) -> int:
     return int.from_bytes(data[off : off + 4], "little")
 
 
@@ -485,7 +485,7 @@ def _root_entries(buf: bytearray, geo: Geometry) -> list[Entry]:
         _scan(buf, geo.root_off, geo.root_bytes, 0, out)
         return out
 
-    c, seen = geo.root_clus, set()
+    c, seen = geo.root_clus, set[int]()
     while len(seen) < MAX_DIR_CLUSTERS and c not in seen:
         off = _clus_off(geo, c)
         if off is None or _scan(buf, off, geo.clus_bytes, geo.root_clus, out):

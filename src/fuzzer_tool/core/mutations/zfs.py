@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import hashlib
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
+from typing import TypeVar, cast
 
 from fuzzer_tool.core.rand_pool import RandPool
 
@@ -119,6 +121,14 @@ NV_LEN_EDGES = (0, 1, 0xFFFF, 0x7FFFFFFF, 0x80000000, U32_MAX)
 NV_TYPES = (0, 1, 8, 9, 16, 17, 19, 20, 27, 28, 0x7FFFFFFF, U32_MAX)
 NV_NELEM_EDGES = (0, 2, 0x10000, 0x7FFFFFFF, 0x80000000, U32_MAX)
 NV_TERM_EDGES = (PAIR_MIN, 0x7FFFFFFF, U32_MAX)
+
+
+_T = TypeVar("_T")
+
+
+def _choose(rng: RandPool, seq: tuple[_T, ...] | list[_T]) -> _T:
+    """``rng.choice`` narrowed to the element type (same single draw)."""
+    return cast(_T, rng.choice(seq))
 
 
 class Op(IntEnum):
@@ -346,7 +356,7 @@ def _width_edges(width: int) -> tuple[int, ...]:
 
 
 # u64 field groups: offsets inside the slot, value table.
-_U64_GROUPS = {
+_U64_GROUPS: dict[Op, tuple[tuple[int, ...], tuple[int, ...]]] = {
     Op.UB_VERSION: ((UB_VERSION_OFF,), UB_VERSIONS),
     Op.UB_GUID: ((UB_GUID_OFF,), U64_EDGES),
     Op.UB_TIME: ((UB_TIME_OFF, UB_SW_VERSION_OFF, UB_CHECKPOINT_OFF), U64_EDGES),
@@ -363,7 +373,7 @@ class _Editor:
         self.scan = scan
         self.rng = rng
 
-    def _pick(self, items: list):
+    def _pick(self, items: list[_T]) -> _T:
         return items[self.rng.randint(0, len(items) - 1)]
 
     def u64_group(self, op: Op) -> int:
@@ -371,7 +381,7 @@ class _Editor:
         offs, values = _U64_GROUPS[op]
         rel = offs[self.rng.randint(0, len(offs) - 1)] if len(offs) > 1 else offs[0]
         off = slot.off + rel
-        _put(self.buf, off, slot.fmt + "Q", self.rng.choice(values))
+        _put(self.buf, off, slot.fmt + "Q", _choose(self.rng, values))
         return off
 
     def txg(self, _op: Op) -> int:
@@ -379,7 +389,7 @@ class _Editor:
         slot = self._pick(self.scan.slots)
         off = slot.off + UB_TXG_OFF
         cur = struct.unpack_from(slot.fmt + "Q", self.buf, off)[0]
-        _put(self.buf, off, slot.fmt + "Q", self.rng.choice((*U64_EDGES, (cur - 1) & U64_MAX)))
+        _put(self.buf, off, slot.fmt + "Q", _choose(self.rng, (*U64_EDGES, (cur - 1) & U64_MAX)))
         return off
 
     def dva(self, _op: Op) -> int:
@@ -387,46 +397,46 @@ class _Editor:
         base = slot.off + UB_ROOTBP + DVA_LEN * self.rng.randint(0, N_DVAS - 1)
         word, shift, width = DVA_FIELDS[self.rng.randint(0, len(DVA_FIELDS) - 1)]
         off = base + 8 * word
-        _put_bits(self.buf, off, slot.fmt, (shift, width), self.rng.choice(_width_edges(width)))
+        _put_bits(self.buf, off, slot.fmt, (shift, width), _choose(self.rng, _width_edges(width)))
         return off
 
     def prop(self, _op: Op) -> int:
         slot = self._pick(self.scan.slots)
         bits = PROP_FIELDS[self.rng.randint(0, len(PROP_FIELDS) - 1)]
         off = slot.off + BP_PROP_OFF
-        _put_bits(self.buf, off, slot.fmt, bits, self.rng.choice(_width_edges(bits[1])))
+        _put_bits(self.buf, off, slot.fmt, bits, _choose(self.rng, _width_edges(bits[1])))
         return off
 
     def nv_size(self, _op: Op) -> int:
         """Encode (0) or decode (1) size of one pair."""
         off = self._pick(self.scan.pairs).off + 4 * self.rng.randint(0, 1)
-        _put(self.buf, off, ">I", self.rng.choice(NV_SIZE_EDGES))
+        _put(self.buf, off, ">I", _choose(self.rng, NV_SIZE_EDGES))
         return off
 
     def nv_name_len(self, _op: Op) -> int:
         off = self._pick(self.scan.pairs).off + 8
-        _put(self.buf, off, ">I", self.rng.choice(NV_LEN_EDGES))
+        _put(self.buf, off, ">I", _choose(self.rng, NV_LEN_EDGES))
         return off
 
     def nv_type(self, _op: Op) -> int:
         off = self._pick(self.scan.pairs).type_off
-        _put(self.buf, off, ">I", self.rng.choice(NV_TYPES))
+        _put(self.buf, off, ">I", _choose(self.rng, NV_TYPES))
         return off
 
     def nv_nelem(self, _op: Op) -> int:
         off = self._pick(self.scan.pairs).type_off + 4
-        _put(self.buf, off, ">I", self.rng.choice(NV_NELEM_EDGES))
+        _put(self.buf, off, ">I", _choose(self.rng, NV_NELEM_EDGES))
         return off
 
     def nv_strlen(self, _op: Op) -> int:
         off = self._pick(self.scan.strings).value_off
-        _put(self.buf, off, ">I", self.rng.choice(NV_LEN_EDGES))
+        _put(self.buf, off, ">I", _choose(self.rng, NV_LEN_EDGES))
         return off
 
     def nv_term(self, _op: Op) -> int:
         """Overwrite a zero terminator's encode size: the list runs on."""
         off = self._pick(self.scan.terms)
-        _put(self.buf, off, ">I", self.rng.choice(NV_TERM_EDGES))
+        _put(self.buf, off, ">I", _choose(self.rng, NV_TERM_EDGES))
         return off
 
     def eck_break(self, _op: Op) -> None:
@@ -437,7 +447,7 @@ class _Editor:
         self.buf[reg.off + reg.size - 32 + bit // 8] ^= 1 << (bit % 8)
 
 
-_HANDLERS = {
+_HANDLERS: dict[Op, Callable[[_Editor, Op], int | None]] = {
     **{op: _Editor.u64_group for op in _U64_GROUPS},
     Op.UB_TXG: _Editor.txg,
     Op.BP_DVA: _Editor.dva,
@@ -478,7 +488,7 @@ def mutate_zfs(data: bytes, max_len: int = 65536, *, rng: RandPool) -> bytes | N
         return None
 
     buf = bytearray(data)
-    op = rng.choice(pool)
+    op = _choose(rng, pool)
     at = _HANDLERS[op](_Editor(buf, scan, rng), op)
     if at is not None:
         _reseal(buf, scan, at)

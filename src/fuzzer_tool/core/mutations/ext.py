@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import struct
 from enum import Enum, IntEnum
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 from fuzzer_tool.core.berlekamp_massey import compute_checksum
 from fuzzer_tool.core.rand_pool import RandPool
@@ -265,11 +265,11 @@ class _Geo(NamedTuple):
     itable0: int
 
 
-def _u16(buf: bytes, off: int) -> int:
+def _u16(buf: bytes | bytearray, off: int) -> int:
     return int.from_bytes(buf[off : off + 2], "little")
 
 
-def _u32(buf: bytes, off: int) -> int:
+def _u32(buf: bytes | bytearray, off: int) -> int:
     return int.from_bytes(buf[off : off + 4], "little")
 
 
@@ -297,7 +297,7 @@ def sniff_ext4(data: bytes) -> bool:
     return bool(incompat & EXT4_INCOMPAT or ro & EXT4_RO)
 
 
-def _desc_size(buf: bytes, bs: int) -> int:
+def _desc_size(buf: bytes | bytearray, bs: int) -> int:
     """32, or s_desc_size when 64bit and it is a sane size (>= 64, <= block)."""
     if not _u32(buf, SB_OFF + INCOMPAT_OFF) & INCOMPAT_64BIT:
         return DESC_LEN
@@ -305,7 +305,7 @@ def _desc_size(buf: bytes, bs: int) -> int:
     return ds if DESC64_MIN <= ds <= bs else DESC_LEN
 
 
-def _geo(buf: bytes) -> _Geo | None:
+def _geo(buf: bytes | bytearray) -> _Geo | None:
     """Bounded geometry of group 0 onward; None when hostile or truncated."""
     if len(buf) < SB_END:
         return None
@@ -338,18 +338,18 @@ def _geo(buf: bytes) -> _Geo | None:
     return _Geo(bs, isz, ipg, ninodes, nblocks, desc, gdt_blk, ngroups, itable0)
 
 
-def _csum_mode(buf: bytes) -> CsumMode:
+def _csum_mode(buf: bytes | bytearray) -> CsumMode:
     ro = _u32(buf, SB_OFF + RO_COMPAT_OFF)
     if ro & RO_METADATA_CSUM:
         return CsumMode.METADATA
     return CsumMode.GDT_CRC16 if ro & RO_GDT_CSUM else CsumMode.NONE
 
 
-def _seed(buf: bytes) -> int:
+def _seed(buf: bytes | bytearray) -> int:
     """s_checksum_seed with INCOMPAT_CSUM_SEED, else crc32c(~0, s_uuid)."""
     if _u32(buf, SB_OFF + INCOMPAT_OFF) & INCOMPAT_CSUM_SEED:
         return _u32(buf, SB_OFF + CSUM_SEED_OFF)
-    return _crc32c(buf[SB_OFF + UUID_OFF : SB_OFF + UUID_OFF + 16], ALL_ONES32)
+    return _crc32c(bytes(buf[SB_OFF + UUID_OFF : SB_OFF + UUID_OFF + 16]), ALL_ONES32)
 
 
 def _block_edges(geo: _Geo, self_blk: int) -> tuple[int, ...]:
@@ -373,6 +373,11 @@ class _Mut:
         self.broken: int | None = None
 
     # ---- raw access ----
+
+    def pick_edge(self, edges: tuple[int, ...] | list[int] | None) -> int:
+        """One ``rng.choice`` draw from an edge table (never None at call sites)."""
+        assert edges is not None, "edge table expected"
+        return cast(int, self.rng.choice(edges))
 
     def put(self, off: int, fmt: str, value: int) -> None:
         """Write *value* masked to the field width; skip out-of-range offsets."""
@@ -407,7 +412,7 @@ class _Mut:
         geo = self.geo
         if geo is None:
             return []
-        out = []
+        out: list[tuple[int, int]] = []
         for ino in range(1, min(geo.ipg, geo.ninodes, MAX_INODE_SCAN) + 1):
             off = self.ino_off(geo, ino)
             if off is None:
@@ -452,7 +457,7 @@ class _Mut:
 
     def dirents(self, base: int, bs: int) -> list[int]:
         """Entry offsets of a linear dir block, bounded by MAX_DIRENTS."""
-        out = []
+        out: list[int] = []
         pos = 0
         while pos + DIRENT_HDR <= bs and len(out) < MAX_DIRENTS:
             out.append(pos)
@@ -467,7 +472,7 @@ class _Mut:
     def op_sb_field(self) -> bool:
         """Draws: field index, edge."""
         f = SB_FIELDS[self.rng.randint(0, len(SB_FIELDS) - 1)]
-        self.put(SB_OFF + f.off, f.fmt, self.rng.choice(f.edges))
+        self.put(SB_OFF + f.off, f.fmt, self.pick_edge(f.edges))
         return True
 
     def op_sb_feature(self) -> bool:
@@ -485,7 +490,7 @@ class _Mut:
         group = self.rng.randint(0, geo.ngroups - 1)
         f = GD_FIELDS[self.rng.randint(0, len(GD_FIELDS) - 1)]
         edges = f.edges or _block_edges(geo, geo.gdt_blk)
-        self.put(geo.gdt_blk * geo.bs + group * geo.desc + f.off, f.fmt, self.rng.choice(edges))
+        self.put(geo.gdt_blk * geo.bs + group * geo.desc + f.off, f.fmt, self.pick_edge(edges))
         self.touch_gd = group
         return True
 
@@ -495,7 +500,7 @@ class _Mut:
         if picked is None:
             return False
         f = INODE_FIELDS[self.rng.randint(0, len(INODE_FIELDS) - 1)]
-        self.put(picked[1] + f.off, f.fmt, self.rng.choice(f.edges))
+        self.put(picked[1] + f.off, f.fmt, self.pick_edge(f.edges))
         return True
 
     def op_inode_block(self) -> bool:
@@ -506,7 +511,7 @@ class _Mut:
         off = picked[1]
         slot = self.rng.randint(0, I_BLOCK_SLOTS - 1)
         edges = _block_edges(self.geo, off // self.geo.bs)
-        self.put(off + I_BLOCK + 4 * slot, "<I", self.rng.choice(edges))
+        self.put(off + I_BLOCK + 4 * slot, "<I", self.pick_edge(edges))
         return True
 
     @staticmethod
@@ -532,7 +537,7 @@ class _Mut:
         rec = _u16(self.buf, base + pos + 4)
         rel, fmt = DIRENT_FIELDS[field]
         self.put(
-            base + pos + rel, fmt, self.rng.choice(self.dirent_edges(self.geo, field, pos, rec))
+            base + pos + rel, fmt, self.pick_edge(self.dirent_edges(self.geo, field, pos, rec))
         )
         self.touch_dir = root[1]
         return True
@@ -563,20 +568,20 @@ class _Mut:
 
     def op_feature4(self) -> bool:
         """Draw: (word, bit) from EXT4_FEATURE_BITS to flip."""
-        word, bit = self.rng.choice(EXT4_FEATURE_BITS)
+        word, bit = cast(tuple[int, int], self.rng.choice(EXT4_FEATURE_BITS))
         self.put(SB_OFF + word, "<I", _u32(self.buf, SB_OFF + word) ^ bit)
         self.touch_gd = 0  # 64BIT / csum flips change how group 0 is summed
         return True
 
     def op_desc_size(self) -> bool:
         """Draw: s_desc_size edge."""
-        self.put(SB_OFF + DESC_SIZE_OFF, "<H", self.rng.choice(DESC_SIZE_EDGES))
+        self.put(SB_OFF + DESC_SIZE_OFF, "<H", self.pick_edge(DESC_SIZE_EDGES))
         self.touch_gd = 0  # group 0 is re-summed over the new length
         return True
 
     def op_flex(self) -> bool:
         """Draw: s_log_groups_per_flex edge."""
-        self.put(SB_OFF + FLEX_OFF, "<B", self.rng.choice(FLEX_EDGES))
+        self.put(SB_OFF + FLEX_OFF, "<B", self.pick_edge(FLEX_EDGES))
         return True
 
     def op_ext_hdr(self) -> bool:
@@ -585,7 +590,7 @@ class _Mut:
         if picked is None:
             return False
         f = EH_FIELDS[self.rng.randint(0, len(EH_FIELDS) - 1)]
-        self.put(picked[1] + I_BLOCK + f.off, f.fmt, self.rng.choice(f.edges))
+        self.put(picked[1] + I_BLOCK + f.off, f.fmt, self.pick_edge(f.edges))
         return True
 
     def op_ext_entry(self) -> bool:
@@ -598,7 +603,7 @@ class _Mut:
         entry = ib + EH_LEN + EXT_LEN * self.rng.randint(0, n - 1)
         f = EE_FIELDS[self.rng.randint(0, len(EE_FIELDS) - 1)]
         edges = f.edges or _block_edges(self.geo, picked[1] // self.geo.bs)
-        self.put(entry + f.off, f.fmt, self.rng.choice(edges))
+        self.put(entry + f.off, f.fmt, self.pick_edge(edges))
         return True
 
     def op_ext_order(self) -> bool:
@@ -627,7 +632,7 @@ class _Mut:
         edges = _block_edges(self.geo, picked[1] // self.geo.bs)
         self.put(ib + 6, "<H", 1)
         self.put(ib + EH_LEN + EI_LEAF_HI, "<H", 0)
-        self.put(ib + EH_LEN + EI_LEAF_LO, "<I", self.rng.choice(edges))
+        self.put(ib + EH_LEN + EI_LEAF_LO, "<I", self.pick_edge(edges))
         return True
 
     def op_inline(self) -> bool:
@@ -636,7 +641,7 @@ class _Mut:
         if picked is None:
             return False
         off = picked[1]
-        size = self.rng.choice(INLINE_SIZE_EDGES)
+        size = self.pick_edge(INLINE_SIZE_EDGES)
         incompat = SB_OFF + INCOMPAT_OFF
         self.put(incompat, "<I", _u32(self.buf, incompat) | INCOMPAT_INLINE_DATA)
         self.put(off + I_FLAGS, "<I", _u32(self.buf, off + I_FLAGS) | INLINE_DATA_FL)
@@ -650,7 +655,7 @@ class _Mut:
             return False
         off, blk = root
         f = DX_FIELDS[self.rng.randint(0, len(DX_FIELDS) - 1)]
-        value = self.rng.choice(f.edges or _block_edges(self.geo, blk))
+        value = self.pick_edge(f.edges or _block_edges(self.geo, blk))
         compat = SB_OFF + COMPAT_OFF
         self.put(compat, "<I", _u32(self.buf, compat) | COMPAT_DIR_INDEX)
         self.put(off + I_FLAGS, "<I", _u32(self.buf, off + I_FLAGS) | INDEX_FL)

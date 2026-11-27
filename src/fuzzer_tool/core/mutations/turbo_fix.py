@@ -43,9 +43,12 @@ Stdlib + numpy only (Hard Rule 51).
 from __future__ import annotations
 
 import functools
+from collections.abc import Callable
 from enum import IntEnum
 
 import numpy as np
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 #: LTE turbo block sizes (36.212 Table 5.1.3-3).
 MIN_K, MAX_K = 40, 6144
@@ -153,7 +156,7 @@ def _encode(c: np.ndarray, pi: np.ndarray) -> np.ndarray:
     return np.concatenate((c, z1, z2, tx1, tz1, tx2, tz2))
 
 
-def encode(info_bits, k: int, f1: int, f2: int) -> np.ndarray:
+def encode(info_bits: np.ndarray | list[int], k: int, f1: int, f2: int) -> np.ndarray:
     """Return the N = 3k+12 codeword bits (uint8 0/1) of *k* info bits."""
     pi, _ = _qpp(k, f1, f2)
     c = np.asarray(info_bits, dtype=np.uint8) & 1
@@ -162,7 +165,7 @@ def encode(info_bits, k: int, f1: int, f2: int) -> np.ndarray:
     return _encode(c, pi)
 
 
-def _pick(rng, n: int, count: int) -> list[int]:
+def _pick(rng: RandPool, n: int, count: int) -> list[int]:
     """*count* distinct indices in range(n) (sparse partial Fisher-Yates)."""
     swapped: dict[int, int] = {}
     out = []
@@ -173,12 +176,12 @@ def _pick(rng, n: int, count: int) -> list[int]:
     return out
 
 
-def _correctable(rng, k: int, _inv: np.ndarray) -> list[int]:
+def _correctable(rng: RandPool, k: int, _inv: np.ndarray) -> list[int]:
     """1..3 bits anywhere in the codeword."""
     return _pick(rng, _STREAMS * k + TAIL_BITS, rng.randint(1, _MAX_CORRECTABLE))
 
 
-def _burst(rng, k: int, inv: np.ndarray) -> np.ndarray:
+def _burst(rng: RandPool, k: int, inv: np.ndarray) -> np.ndarray:
     """A systematic burst plus its parity in both encoders (wraps mod k).
 
     Info bit j drives z_j in RSC #1 and z'_{PI^-1(j)} in RSC #2.
@@ -188,16 +191,20 @@ def _burst(rng, k: int, inv: np.ndarray) -> np.ndarray:
     return np.concatenate((sys, k + sys, 2 * k + inv[sys]))
 
 
-def _tail(rng, k: int, _inv: np.ndarray) -> list[int]:
+def _tail(rng: RandPool, k: int, _inv: np.ndarray) -> list[int]:
     """1..12 termination bits."""
     base = _STREAMS * k
     return [base + p for p in _pick(rng, TAIL_BITS, rng.randint(1, TAIL_BITS))]
 
 
-_INJECT = {Mode.CORRECTABLE: _correctable, Mode.UNCORRECTABLE: _burst, Mode.TAIL_BREAK: _tail}
+_INJECT: dict[Mode, Callable[[RandPool, int, np.ndarray], list[int] | np.ndarray]] = {
+    Mode.CORRECTABLE: _correctable,
+    Mode.UNCORRECTABLE: _burst,
+    Mode.TAIL_BREAK: _tail,
+}
 
 
-def turbo_fix(data: bytes, rng, k: int, f1: int, f2: int) -> bytes | None:
+def turbo_fix(data: bytes, rng: RandPool, k: int, f1: int, f2: int) -> bytes | None:
     """Mutate one turbo codeword of *data*; None if no full codeword fits.
 
     Args:
