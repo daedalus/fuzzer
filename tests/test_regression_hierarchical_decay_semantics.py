@@ -20,6 +20,9 @@ from fuzzer_tool.core.schedulers.op_hierarchical import HierarchicalBanditSchedu
 
 BASE_OPS = ["bit_flip", "byte_flip", "arith8"]
 
+#: Uncategorized: recording it leaves bit_flip's op and category posteriors alone.
+OTHER = "zz_other"
+
 
 def _armed(**kwargs):
     sched = HierarchicalBanditScheduler(**kwargs)
@@ -39,9 +42,9 @@ class TestDecayTowardPrior:
         sched = _armed()
         sched.op_alpha["bit_flip"] = 101.0
         sched.op_beta["bit_flip"] = 1.0
-        sched._total_pulls = sched.decay_interval
+        sched._total_pulls = sched.decay_interval - 1
 
-        sched.select_op(BASE_OPS)
+        sched.record(OTHER, success=False)
 
         d = sched.arm_decay
         assert sched.op_alpha["bit_flip"] == pytest.approx(1.0 + 100.0 * d)
@@ -54,8 +57,7 @@ class TestDecayTowardPrior:
         sched.op_beta["byte_flip"] = 1000.0
 
         for _ in range(80):  # 1000 * 0.5**80 is far below any epsilon
-            sched._total_pulls += 1
-            sched.select_op(BASE_OPS)
+            sched.record(OTHER, success=False)
 
         assert sched.op_alpha["bit_flip"] == pytest.approx(1.0, abs=1e-6)
         assert sched.op_beta["byte_flip"] == pytest.approx(1.0, abs=1e-6)
@@ -66,11 +68,51 @@ class TestDecayTowardPrior:
         sched.cat_alpha[cat] = 500.0
         sched.cat_beta[cat] = 1.0
 
-        sched._total_pulls = 1
-        sched.select_op(BASE_OPS)
+        sched.record(OTHER, success=False)
 
         assert sched.cat_alpha[cat] == pytest.approx(1.0 + 499.0 * 0.5)
         assert sched.cat_beta[cat] == pytest.approx(1.0)
+
+
+class TestDecayClock:
+    """Decay ticks on the record clock, once per ``decay_interval`` records.
+
+    It ran in select_op() against a counter only record() advances: several
+    selects per exec on a tick decayed several times, and records that
+    stepped over a tick between selects skipped it.
+    """
+
+    def test_regression_select_does_not_decay(self):
+        sched = _armed(arm_decay=0.5, decay_interval=1)
+        sched.op_alpha["bit_flip"] = 101.0
+        sched._total_pulls = 1
+
+        for _ in range(5):
+            sched.select_op(BASE_OPS)
+
+        assert sched.op_alpha["bit_flip"] == 101.0
+
+    def test_regression_decay_fires_once_per_interval(self):
+        """7 records at interval 3 tick twice: 1 + 8 * 0.5**2."""
+        sched = _armed(arm_decay=0.5, decay_interval=3)
+        sched.op_alpha["bit_flip"] = 9.0
+
+        for _ in range(7):
+            sched.record(OTHER, success=False)
+
+        assert sched.op_alpha["bit_flip"] == pytest.approx(1.0 + 8.0 * 0.5**2)
+
+    def test_interleaved_selects_do_not_change_the_count(self):
+        """Adversarial: selects between records on a tick add no decay."""
+        sched = _armed(arm_decay=0.5, decay_interval=3)
+        sched.op_alpha["bit_flip"] = 9.0
+
+        for _ in range(7):
+            sched.record(OTHER, success=False)
+            for _ in range(10):
+                sched.select_op(BASE_OPS)
+
+        assert sched.op_alpha["bit_flip"] == pytest.approx(1.0 + 8.0 * 0.5**2)
 
 
 class TestFractionalReward:

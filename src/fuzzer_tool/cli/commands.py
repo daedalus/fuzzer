@@ -1033,6 +1033,7 @@ def cmd_fuzz(args):
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
+        mc_arm_decay=getattr(args, "mc_arm_decay", 0.999),
         pairwise_blend=getattr(args, "pairwise_blend", 0.0),
         second_order_blend=getattr(args, "second_order_blend", 0.0),
         sharpe_kelly_blend=getattr(args, "sharpe_kelly_blend", 0.0),
@@ -6987,6 +6988,13 @@ def _build_parser() -> _Parsers:
         type=int,
         default=100,
         help="Bandit decay interval: apply arm_decay every N calls (default: 100)",
+    )
+    fuzz_parser.add_argument(
+        "--mc-arm-decay",
+        type=float,
+        default=0.999,
+        help="Bandit evidence retention per decay tick, in (0, 1]; posteriors move "
+        "toward their prior by this factor (default: 0.999)",
     )
     fuzz_parser.add_argument(
         "--stats-file", default=None, help="Save stats to JSON file periodically"
