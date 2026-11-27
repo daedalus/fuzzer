@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 from collections import Counter
 from dataclasses import dataclass, field
 
 from fuzzer_tool.core.dsu import DisjointSet
+from fuzzer_tool.core.elf import is_so_path
 from fuzzer_tool.core.similarity import (
     hamming_similarity,
     levenshtein_diff_offsets,
@@ -55,6 +57,24 @@ _SHIM_SOURCES = {
     "dwarf": "module DWARF + symtab",
     "": _SHIM_RAW,
 }
+
+
+# A .so is not executable (Hard Rule 63): dlopen it and call the entry point
+# with stdin. ASan in a dlopened lib cannot come first in the link order.
+REPRO_ASAN_OPTIONS = "abort_on_error=1:symbolize=1:detect_leaks=0:verify_asan_link_order=0"
+_SO_LOADER = (
+    "import ctypes,sys; d=sys.stdin.buffer.read(); "
+    "f=ctypes.CDLL(sys.argv[1]).fuzz_shm_run; "
+    "f.argtypes=(ctypes.c_char_p,ctypes.c_size_t); f(d,len(d))"
+)
+
+
+def repro_runner(target: str) -> str:
+    """Shell command that runs *target* on stdin: exec for binaries, dlopen for .so."""
+    path = shlex.quote(target)
+    if not is_so_path(target):
+        return path
+    return f"python3 -c {shlex.quote(_SO_LOADER)} {path}"
 
 
 def configure_crash_cluster(threshold: float = 0.7, core_threshold: float = 0.5) -> None:
@@ -485,8 +505,8 @@ class CrashMetadata:
             lines.append(f"printf '%s' '{b64}' | base64 -d | \\")
         lines.extend(
             [
-                "  ASAN_OPTIONS=abort_on_error=1:symbolize=1:detect_leaks=0 \\",
-                f"  {target}",
+                f"  ASAN_OPTIONS={REPRO_ASAN_OPTIONS} \\",
+                f"  {repro_runner(target)}",
                 "",
             ]
         )

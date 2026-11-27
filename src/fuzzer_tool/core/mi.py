@@ -40,6 +40,12 @@ MAX_JOINT_CELLS = 250_000
 # skipped in record(); the cap keeps the joint bounded.
 MI_MAX_POSITIONS = 4096
 
+# Saturated records buffered in dense arrays before folding into the
+# marginal dicts. A fold costs one dict update per distinct (pos, byte)
+# pair, never more than the per-byte loop it replaces.
+FOLD_EVERY = 256
+BYTE_VALUES = 256
+
 
 def _nlog2n(k: int) -> float:
     """k * log2(k), with 0 log 0 = 0."""
@@ -120,12 +126,16 @@ class MutualInformationTracker:
             lambda: defaultdict(lambda: defaultdict(int))
         )
         # Per-position: byte_value -> count
-        self.byte_marginal: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+        self._byte_marginal: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
         # Global: edge_index -> count (dense array for O(1) access)
         self.edge_marginal: array = array("Q")
         self._edge_marginal_size = 0
         # Total observations per position
-        self.position_counts: dict[int, int] = defaultdict(int)
+        self._position_counts: dict[int, int] = defaultdict(int)
+        # Saturated-path buffers (see FOLD_EVERY); sized on first use.
+        self._pend_pc = np.zeros(0, dtype=np.int64)
+        self._pend_bm = np.zeros(0, dtype=np.int64)
+        self._pend_n = 0
         self.total_observations: int = 0
         # Live count of joint (position, byte_val, edge) cells, bounded by
         # MAX_JOINT_CELLS via least-observed-position eviction.
@@ -160,11 +170,12 @@ class MutualInformationTracker:
         if map_size > 0:
             hit_edges = _fold_edges(hit_edges, map_size)
 
+        pc, bm = self.position_counts, self.byte_marginal
         for pos, byte_val in enumerate(input_bytes):
             if pos >= self.max_positions:
                 break
-            self.position_counts[pos] += 1
-            self.byte_marginal[pos][byte_val] += 1
+            pc[pos] += 1
+            bm[pos][byte_val] += 1
             # Only update the expensive joint distribution once the position
             # has enough observations to compute MI.  New (position, byte_val,
             # edge) cells are rejected once MAX_JOINT_CELLS is exhausted so
@@ -172,7 +183,7 @@ class MutualInformationTracker:
             # (evicting least-observed positions instead would thrash, since
             # evicted positions are re-observed and immediately re-victimized).
             if (
-                self.position_counts[pos] >= self.min_observations
+                pc[pos] >= self.min_observations
                 and self._joint_cells < MAX_JOINT_CELLS
                 and hit_edges
             ):
@@ -182,12 +193,75 @@ class MutualInformationTracker:
         """True while a weighted_position cache exists to invalidate."""
         return getattr(self, "_wp_sorted_pos", None) is not None
 
+    @property
+    def position_counts(self) -> dict[int, int]:
+        """{pos: observations}; folds buffered saturated records first."""
+        self._fold()
+        return self._position_counts
+
+    @position_counts.setter
+    def position_counts(self, value: dict[int, int]) -> None:
+        self._drop_pending()
+        self._position_counts = value
+
+    @property
+    def byte_marginal(self) -> dict[int, dict[int, int]]:
+        """{pos: {byte: count}}; folds buffered saturated records first."""
+        self._fold()
+        return self._byte_marginal
+
+    @byte_marginal.setter
+    def byte_marginal(self, value: dict[int, dict[int, int]]) -> None:
+        self._drop_pending()
+        self._byte_marginal = value
+
     def _count_marginals(self, input_bytes: bytes) -> None:
-        """Position and byte-value counts only (no joint update possible)."""
-        pc, bm = self.position_counts, self.byte_marginal
-        for pos, byte_val in enumerate(input_bytes[: self.max_positions]):
-            pc[pos] += 1
-            bm[pos][byte_val] += 1
+        """Position and byte-value counts only, buffered as two numpy adds.
+
+        The per-byte dict loop cost 2.2 ms/exec on 4 KB GStreamer inputs
+        (7.1% of wall); the fold every FOLD_EVERY records collapses repeats.
+        """
+        n = min(len(input_bytes), self.max_positions)
+        if n == 0:
+            return
+        if len(self._pend_pc) != self.max_positions:
+            self._fold()
+            self._pend_pc = np.zeros(self.max_positions, dtype=np.int64)
+            self._pend_bm = np.zeros(self.max_positions * BYTE_VALUES, dtype=np.int64)
+
+        # Row-major (pos, byte) cells, unique per record: plain fancy += is exact.
+        vals = np.frombuffer(input_bytes, dtype=np.uint8, count=n)
+        self._pend_pc[:n] += 1
+        self._pend_bm[np.arange(0, n * BYTE_VALUES, BYTE_VALUES) + vals] += 1
+        self._pend_n += 1
+        if self._pend_n >= FOLD_EVERY:
+            self._fold()
+
+    def _fold(self) -> None:
+        """Add buffered saturated records into the marginal dicts."""
+        if not self._pend_n:
+            return
+        pc, bm = self._position_counts, self._byte_marginal
+        pos = np.flatnonzero(self._pend_pc)
+        for p, c in zip(pos.tolist(), self._pend_pc[pos].tolist(), strict=True):
+            pc[p] += c
+        cells = np.flatnonzero(self._pend_bm)
+        for cell, c in zip(cells.tolist(), self._pend_bm[cells].tolist(), strict=True):
+            bm[cell >> 8][cell & 0xFF] += c
+        self._pend_pc[pos] = 0
+        self._pend_bm[cells] = 0
+        self._pend_n = 0
+
+    def _drop_pending(self) -> None:
+        """Forget buffered records (state is being replaced)."""
+        self._pend_pc[:] = 0
+        self._pend_bm[:] = 0
+        self._pend_n = 0
+
+    def _count_at(self, pos: int) -> int:
+        """Observations of *pos*, buffered records included, without a fold."""
+        pend = int(self._pend_pc[pos]) if pos < len(self._pend_pc) else 0
+        return self._position_counts.get(pos, 0) + pend
 
     def _record_cells(self, pos: int, byte_val: int, hit_edges: set[int]) -> None:
         """Count (pos, byte_val, edge) cells, keeping the profile sums in step.
@@ -260,7 +334,7 @@ class MutualInformationTracker:
             max_pos = self.max_positions - 1
         # Below min_observations the position cannot enter the cache, so a
         # rebuild changes nothing structural (was 69% of rebuilds).
-        if self.position_counts.get(max_pos, 0) < self.min_observations:
+        if self._count_at(max_pos) < self.min_observations:
             return
         import bisect
 
@@ -479,7 +553,7 @@ class MutualInformationTracker:
         Precomputes sorted positions + cumulative weights; uses bisect
         for O(log n) filtering instead of rebuilding lists each call.
         """
-        if not self.position_counts:
+        if not self._position_counts and not self._pend_n:
             return None
 
         if not hasattr(self, "_wp_sorted_pos"):

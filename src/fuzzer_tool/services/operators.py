@@ -2575,19 +2575,14 @@ class OperatorEngine:
         # length changed, which made the cost quadratic in corpus size over
         # a campaign: 47 ms per call, 30 calls and 1.4 s of a 4000-exec run
         # on a 65-seed corpus.
-        corpus = self.ctx.corpus
         acc = getattr(self, "_corpus_literal_acc", None)
-        if acc is None or acc.scanned > len(corpus):
-            # First use, or the corpus shrank (a prune), so the cached
-            # literals may name seeds that are gone. Rescan from scratch.
+        if acc is None:
             from fuzzer_tool.core.mutations.generic import LiteralAccumulator
 
             acc = LiteralAccumulator()
             self._corpus_literal_acc = acc
-        if acc.scanned < len(corpus):
-            from fuzzer_tool.core.mutations import extract_corpus_literals
-
-            extract_corpus_literals(list(corpus[acc.scanned :]), acc)
+        # Scans only seeds not seen yet, also across prunes (see sync).
+        acc.sync(self.ctx.corpus)
         int_lits, str_lits = acc.result()
         if not int_lits and not str_lits:
             return None
