@@ -2,7 +2,7 @@
 
 ``record()`` writes ``op_alpha`` on success and ``op_beta`` on failure, each
 via ``.get(name, 1.0)``. An arm that has only ever succeeded therefore exists
-in ``op_alpha`` and not in ``op_beta``. The decay block in ``select_op()``
+in ``op_alpha`` and not in ``op_beta``. The decay walk in ``_decay()``
 iterates ``op_alpha`` and subscripts ``op_beta[k]`` bare, so the next decay
 checkpoint raises KeyError.
 
@@ -20,6 +20,9 @@ from fuzzer_tool.core.schedulers.op_hierarchical import HierarchicalBanditSchedu
 
 BASE_OPS = ["bit_flip", "byte_flip", "arith8"]
 LATE_OP = "voronoi_cell_swap"
+
+#: Uncategorized: recording it ticks the decay clock without touching LATE_OP.
+OTHER = "zz_other"
 
 
 def _armed():
@@ -54,19 +57,20 @@ def test_decay_survives_success_only_runtime_arm():
     """The reported crash: decay checkpoint after a success-only late arm."""
     sched = _armed()
     sched.record(LATE_OP, success=True)
-    sched._total_pulls = sched.decay_interval  # land exactly on a decay tick
+    sched._total_pulls = sched.decay_interval - 1  # next record lands on a tick
 
-    chosen = sched.select_op([*BASE_OPS, LATE_OP])
+    sched.record(OTHER, success=False)
 
-    assert chosen in {*BASE_OPS, LATE_OP}
+    assert sched.select_op([*BASE_OPS, LATE_OP]) in {*BASE_OPS, LATE_OP}
 
 
 def test_decay_survives_failure_only_runtime_arm():
     """Mirror case — beta-only arms must not break the decay walk either."""
     sched = _armed()
     sched.record(LATE_OP, success=False)
-    sched._total_pulls = sched.decay_interval
+    sched._total_pulls = sched.decay_interval - 1
 
+    sched.record(OTHER, success=False)
     assert sched.select_op([*BASE_OPS, LATE_OP]) in {*BASE_OPS, LATE_OP}
 
 
@@ -80,8 +84,8 @@ def test_decay_scales_both_sides_of_a_late_arm():
     sched = _armed()
     sched.record(LATE_OP, success=True)
     before = (sched.op_alpha[LATE_OP], sched.op_beta[LATE_OP])
-    sched._total_pulls = sched.decay_interval
-    sched.select_op([*BASE_OPS, LATE_OP])
+    sched._total_pulls = sched.decay_interval - 1
+    sched.record(OTHER, success=False)
     d = sched.arm_decay
 
     assert sched.op_alpha[LATE_OP] == pytest.approx(1.0 + (before[0] - 1.0) * d)
