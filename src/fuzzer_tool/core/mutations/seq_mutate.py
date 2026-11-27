@@ -16,6 +16,8 @@ Fixed-stride records are left to ``chunk_shuffle``/``region_shuffle``.
 
 import struct
 
+import numpy as np
+
 MIN_MSGS = 2
 MIN_MSGS_WEAK = 3  # LF occurs in plenty of binary data
 
@@ -30,6 +32,11 @@ _DELIMS = (
 )
 
 _MODES = ("swap", "dup", "drop", "splice", "flood", "id_shift", "replay")
+
+# id_shift window width, and the total size from which numpy beats the
+# pure-Python 4-gram count (measured: 512 B py 0.24 ms / np 0.23 ms).
+_ID_WIDTH = 4
+_ID_NUMPY_MIN = 512
 
 
 def _walk_frames(data: bytes, fmt: str, width: int, inclusive: bool) -> list[bytes] | None:
@@ -135,6 +142,53 @@ def _flood(msgs, rng, _donor):
     return msgs
 
 
+def _shared_py(msgs, rng):
+    """Shared-window pick for small inputs: one 4-gram count per message.
+
+    Same candidate list, in the same order, as counting ``substr in m`` per
+    window (the cubic original), so the RNG draw picks the same window.
+    """
+    w = _ID_WIDTH
+    df: dict[bytes, int] = {}
+    for m in msgs:
+        for g in {m[j : j + w] for j in range(len(m) - w + 1)}:
+            df[g] = df.get(g, 0) + 1
+
+    cand = [g for m in msgs for j in range(len(m) - w + 1) if df[g := m[j : j + w]] >= 2]
+    return rng.choice(cand) if cand else None
+
+
+def _shared_np(msgs, rng):
+    """Shared-window pick, vectorized: windows of the joined buffer.
+
+    Windows crossing a message boundary are masked out; (window, message)
+    pairs are deduped so each window counts messages, not occurrences.
+    """
+    lens = np.fromiter(map(len, msgs), dtype=np.int64, count=len(msgs))
+    a = np.frombuffer(b"".join(msgs), dtype=np.uint8).astype(np.uint32)
+    if a.size < _ID_WIDTH:
+        return None
+
+    # Big-endian 4-byte window value at every offset of the joined buffer.
+    g = (a[:-3] << 24) | (a[1:-2] << 16) | (a[2:-1] << 8) | a[3:]
+    ids = np.repeat(np.arange(len(msgs), dtype=np.uint64), lens)[: g.size]
+    inside = np.arange(g.size) + _ID_WIDTH <= np.cumsum(lens)[ids.astype(np.int64)]
+    g, ids = g[inside], ids[inside]
+    if not g.size:
+        return None
+
+    # Document frequency: distinct (window, message) pairs per window.
+    pairs = np.unique((g.astype(np.uint64) << np.uint64(32)) | ids)
+    uniq, df = np.unique((pairs >> np.uint64(32)).astype(np.uint32), return_counts=True)
+    shared = np.flatnonzero(df[np.searchsorted(uniq, g)] >= 2)
+    if not shared.size:
+        return None
+
+    # choice() reads only len() and one index: range() draws as the list did.
+    k = shared[rng.choice(range(shared.size))]
+    return int(g[k]).to_bytes(_ID_WIDTH, "big")
+
+
 def _id_shift(msgs, rng, _donor):
     """Find a repeated value across messages and rewrite it consistently.
 
@@ -144,22 +198,12 @@ def _id_shift(msgs, rng, _donor):
     if len(msgs) < 2:
         return None
 
-    # Find common byte sequences (4-8 bytes) across messages
-    # Use a simple approach: look for identical substrings in multiple messages
-    candidates = []
-    for _i, msg in enumerate(msgs):
-        for j in range(len(msg) - 3):
-            substr = msg[j : j + 4]
-            if len(substr) == 4:
-                count = sum(1 for m in msgs if substr in m)
-                if count >= 2:
-                    candidates.append((substr, j, count))
-
-    if not candidates:
+    # Pick a 4-byte window held by >= 2 messages, uniformly over windows.
+    total = sum(map(len, msgs))
+    pick = _shared_np if total >= _ID_NUMPY_MIN else _shared_py
+    substr = pick(msgs, rng)
+    if substr is None:
         return None
-
-    # Pick a candidate that appears in multiple messages
-    substr, offset, _ = rng.choice(candidates)
 
     # Generate a shift delta (±1 to ±255)
     delta = rng.randint(-255, 255)
