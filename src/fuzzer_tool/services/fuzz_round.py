@@ -1953,6 +1953,7 @@ class FuzzRound:
                 f._op_qlearn,
                 f._op_tabu,
                 f._op_hill_climb,
+                f._op_pair_cover,
                 f._op_good_turing,
                 f._softmax,
                 f._topk,

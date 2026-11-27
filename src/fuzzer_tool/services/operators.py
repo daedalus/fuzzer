@@ -894,7 +894,7 @@ _FALLBACK_PRECEDENCE = (
     "uniform",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
     # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, op_hrrn, op_qlearn,
-    # op_tabu, op_hill_climb, gradient, reactive, whittle, corral, softmax, topk,
+    # op_tabu, op_hill_climb, op_pair_cover, gradient, reactive, whittle, corral, softmax, topk,
     # tsallis, kalman_ts, gamma_poisson, ids, phe, exp3_ix, regret_matching, automaton,
     # ant_colony are deliberately absent
     # here: they are unproven exploratory arms
@@ -988,6 +988,7 @@ _PLAIN_STRATEGIES = {
     "op_qlearn": "_op_qlearn",
     "op_tabu": "_op_tabu",
     "op_hill_climb": "_op_hill_climb",
+    "op_pair_cover": "_op_pair_cover",
     "op_good_turing": "_op_good_turing",
     "softmax": "_softmax",
     "topk": "_topk",
@@ -1145,6 +1146,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_tabu")
     if f._use_op_hill_climb and f._op_hill_climb:
         available.append("op_hill_climb")
+    if f._use_op_pair_cover and f._op_pair_cover:
+        available.append("op_pair_cover")
     if f._use_op_good_turing and f._op_good_turing:
         available.append("op_good_turing")
     if f._use_softmax and f._softmax:

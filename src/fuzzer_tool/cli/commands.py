@@ -1340,6 +1340,7 @@ def cmd_fuzz(args):
         op_qlearn=getattr(args, "op_qlearn", False),
         op_tabu=getattr(args, "op_tabu", False),
         op_hill_climb=getattr(args, "op_hill_climb", False),
+        op_pair_cover=getattr(args, "op_pair_cover", False),
         op_good_turing=getattr(args, "op_good_turing", False),
         strata=getattr(args, "strata", False),
         shaped_reward=getattr(args, "shaped_reward", False),
@@ -3539,7 +3540,7 @@ def cmd_sweep(args):
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
 #
-# op_hrrn, op_qlearn, op_tabu, op_hill_climb (--op-hrrn ...) are excluded as
+# op_hrrn, op_qlearn, op_tabu, op_hill_climb, op_pair_cover (--op-hrrn ...) are excluded as
 # unmeasured: unit tests only, no paired run (docs/AB_PENDING.md).
 #
 # seed_fess_scheduler (--seed-fess-scheduler), fess_inherit (--fess-inherit)
@@ -3781,7 +3782,7 @@ _HAIL_MARY_FLAGS = (
     "region_profile",
     "ga",
     "round_robin",
-    "uniform",
+    "op_uniform",
     "qea",
     "mcts",
     "alphabeta",
@@ -6862,6 +6863,12 @@ def _build_parser() -> _Parsers:
         action="store_true",
         default=False,
         help="Hill-climbing operator arm: holds one operator, moves to a random neighbour when its posterior mean is higher or on a random restart (experimental, Elo-only -- see core/schedulers/op_hill_climb.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-pair-cover",
+        action="store_true",
+        default=False,
+        help="Pair-coverage operator arm: tries every (previous op, next op) pair, then Thompson-samples the pair posterior shrunk toward the op's marginal (experimental, Elo-only -- see core/schedulers/op_pair_cover.py).",
     )
     fuzz_parser.add_argument(
         "--op-good-turing",

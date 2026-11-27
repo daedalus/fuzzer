@@ -82,6 +82,7 @@ BALLOT_SCHEDULERS = (
     "op_qlearn",
     "op_tabu",
     "op_hill_climb",
+    "op_pair_cover",
     "op_good_turing",
     "replicator",
     "round_robin",

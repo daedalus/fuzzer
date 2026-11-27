@@ -74,6 +74,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "op_qlearn",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "op_tabu",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "op_hill_climb",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "op_pair_cover",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "seed_fess_scheduler",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "fess_inherit",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm
         "fess_cell_novelty",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the FESS arm

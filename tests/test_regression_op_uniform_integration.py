@@ -41,4 +41,4 @@ def test_op_uniform_picks_randomly():
 
 def test_op_uniform_in_hail_mary():
     """op_uniform should be in _HAIL_MARY_FLAGS."""
-    assert "uniform" in commands._HAIL_MARY_FLAGS
+    assert "op_uniform" in commands._HAIL_MARY_FLAGS

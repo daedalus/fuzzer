@@ -175,6 +175,7 @@ class _FakeFuzzer:
         "op_qlearn": ("_use_op_qlearn", "_op_qlearn"),
         "op_tabu": ("_use_op_tabu", "_op_tabu"),
         "op_hill_climb": ("_use_op_hill_climb", "_op_hill_climb"),
+        "op_pair_cover": ("_use_op_pair_cover", "_op_pair_cover"),
         "op_good_turing": ("_use_op_good_turing", "_op_good_turing"),
         "corral": ("_use_corral", "_corral"),
         "tsallis": ("_use_tsallis", "_tsallis"),

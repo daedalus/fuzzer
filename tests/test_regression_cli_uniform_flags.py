@@ -10,7 +10,7 @@ def test_seed_uniform_scheduler_flag_in_hail_mary():
 
 def test_op_uniform_flag_in_hail_mary():
     """op_uniform should be in _HAIL_MARY_FLAGS."""
-    assert "uniform" in commands._HAIL_MARY_FLAGS
+    assert "op_uniform" in commands._HAIL_MARY_FLAGS
 
 
 def test_pos_uniform_flag_in_hail_mary():

@@ -369,6 +369,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
   | `op_qlearn` | Q[last op, next op], one Bellman step per record (alpha 0.1, gamma 0.5), epsilon-greedy 0.1 | epsilon-greedy at gamma 0 and one state |
   | `op_tabu` | best mean among ops not picked in the last `tenure` (3) selections; all tabu -> least recent | greedy at tenure 0 |
   | `op_hill_climb` | hold one op; move to a uniform neighbour if its mean is higher, else with prob `restart` (0.05) | uniform at restart 1 |
+| `op_pair_cover` (`--op-pair-cover`, `core/schedulers/op_pair_cover.py`): state is the last recorded op, as in `op_qlearn`. A previous op that was never registered has no row and falls back to the marginal. The pair table is bounded by K^2 for the K arms ever registered. Experimental, Elo-only (absent from ``_FALLBACK_PRECEDENCE``). | `op_pair_cover` (`--op-pair-cover`, `core/schedulers/op_pair_cover.py`): state is the last recorded op, as in `op_qlearn`. A previous op that was never registered has no row and falls back to the marginal. The pair table is bounded by K^2 for the K arms ever registered. Experimental, Elo-only (absent from ``_FALLBACK_PRECEDENCE``).
 
   Select cost (us, 32/128/400 ops): hrrn 2.7/10.5/39, tabu 2.3/9.5/37 (inlined mean, 35-42% faster than `max(key=mean)`; numpy was slower at every size), qlearn 2.4/8/23, hill_climb 0.8/1.3/2.5.
 

@@ -173,6 +173,7 @@ from fuzzer_tool.core.schedulers.op_ducb import DUCB_PER_ARM
 from fuzzer_tool.core.schedulers.op_hill_climb import OpHillClimbScheduler
 from fuzzer_tool.core.schedulers.op_hrrn import OpHRRNScheduler
 from fuzzer_tool.core.schedulers.op_p2c import OpP2CScheduler
+from fuzzer_tool.core.schedulers.op_pair_cover import PairCoverScheduler
 from fuzzer_tool.core.schedulers.op_qlearn import OpQLearnScheduler
 from fuzzer_tool.core.schedulers.op_stride import OpStrideScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCB_PER_ARM
@@ -2318,6 +2319,8 @@ class Fuzzer:
         # --pos-pca-rotation: how the pca arm turns byteflip traces into groups
         # ("pca" argmax, default; "varimax", core/byte_pca.py). Appended.
         pos_pca_rotation="pca",
+        # --op-pair-cover: 2-way operator-sequence coverage arm. Off, Elo-only. Appended.
+        op_pair_cover=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -4819,6 +4822,9 @@ class Fuzzer:
         self._op_tabu = OpTabuScheduler() if op_tabu else None
         self._use_op_hill_climb = op_hill_climb
         self._op_hill_climb = OpHillClimbScheduler(rng=self._rng) if op_hill_climb else None
+        # --op-pair-cover: 2-way operator-sequence coverage, then pair exploitation.
+        self._use_op_pair_cover = op_pair_cover
+        self._op_pair_cover = PairCoverScheduler(rng=self._rng) if op_pair_cover else None
 
         # Per-operator Good-Turing discovery probability. Off by default,
         # Elo-only; see core/schedulers/op_good_turing.py.
@@ -5517,6 +5523,8 @@ class Fuzzer:
             _register_arms(self._op_tabu)
         if self._op_hill_climb:
             _register_arms(self._op_hill_climb)
+        if self._op_pair_cover:
+            _register_arms(self._op_pair_cover)
         if self._op_good_turing:
             _register_arms(self._op_good_turing)
         if self._elo:
