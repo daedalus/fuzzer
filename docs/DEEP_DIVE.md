@@ -3071,10 +3071,10 @@ At startup scans rodata/data/relro (same filter as the data-word dictionary, `el
 - **Syscalls.tla**: hand-written outcomes for `Popen`, `poll`, `kill`, `wait`, pipe writes, `PipeReader.readline`, `_close_streams`. A live loader may stall, die, or close its pipe before it can be reaped. `wait()` after kill always reaps.
 - **Built-in invariants**: `NoOrphan` (live loader not held by any field), `NoHang`, `NoUncaught`, `RecursionBound`, `NoDesync` (a readline consumed a stale reply). Class invariants skip hung states.
 - **Run**: `tools/vendor_tla.sh` (jar into `$FUZZ_VENDOR_ROOT/tla/`), then `python tools/tla_extract.py forkserver --check [--max-procs 3 --max-calls 4]`. Output goes to `~/fuzzing/tla/<machine>/`. Exit codes: 0 clean, 1 violations, 2 rejected source.
-- **First run on `ForkserverRunner`** (3273 states, under 20 s):
-  - `NoHang`: a timeout restart calls `start()`, which reads `READY` with `NO_DEADLINE`. A respawned loader that never answers `INIT` blocks the fuzzer forever.
-  - `NoDesync`: `set_timeout()` gives up on `TIMEOUT_OK` but keeps the loader. A late `TIMEOUT_OK` is then read as the next `RC` header, and every later exec reads the previous reply.
-  - `LiveLoaderReady`: `start()` returning False after `Popen` (a non-`READY` reply, or a pipe error on the following exec) never kills the loader. From the restart path the runner stays not-ready, the loader runs until exit, and execs fall back to spawn.
+- **Findings on `ForkserverRunner`**, all fixed. Before the fixes: 3273 states, 3 violations. After: 475 states clean at procs=3 calls=4, and 2393 states clean at procs=5 calls=6. Regressions are in `tests/test_regression_forkserver_tla_findings.py`.
+  - `NoHang`: `start()` read `READY` with no deadline. It now waits at most `_START_DEADLINE` (120 s).
+  - `NoDesync`: `set_timeout()` kept a loader that still owed `TIMEOUT_OK`, so a late reply became the next `RC` header. It now respawns the loader.
+  - `LiveLoaderReady`: a failed `start()` after `Popen`, or a pipe error, left the loader alive. `_abandon()` now kills and reaps it.
 - Tests: `tests/test_tla_extract.py`, with fixtures in `tests/support/tla_fixtures.py`. Each bug fixture has a fixed twin that must pass first.
 
 ## Troubleshooting
