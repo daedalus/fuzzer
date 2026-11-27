@@ -25,6 +25,7 @@ retried. Cost: O(L^2) per record (L = 3), O(1) per arm per select.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers._multiscale import ScaleBank
@@ -148,7 +149,7 @@ class MultiScaleUCBScheduler(UCBBase):
         self._count[name] = self._bank.n_eff(name, j)
         self._mean[name] = self._bank.mean(name, j)
 
-    def bandit_stats(self) -> dict:
+    def bandit_stats(self) -> dict[str, Any]:
         """Return multi-scale UCB diagnostics."""
         fast_arms = sum(1 for j in self._scale.values() if j < self._slowest)
         return {

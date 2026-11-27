@@ -46,9 +46,9 @@ class ScaleBank:
         self._lam = tuple(1.0 - 1.0 / m for m in memories)
         self._lam2 = tuple(v * v for v in self._lam)
         self._tail = _PER_SCALE * len(memories)
-        self._arms: dict[str, array] = {}
+        self._arms: dict[str, array[float]] = {}
 
-    def _slots(self, arm: str) -> array:
+    def _slots(self, arm: str) -> array[float]:
         slots = self._arms.get(arm)
         if slots is None:
             slots = array("d", bytes(8 * (self._tail + _TRAILER)))
@@ -83,7 +83,7 @@ class ScaleBank:
         if s is None:
             return 0.0
         i = _PER_SCALE * scale
-        return s[i + 2] / s[i]
+        return float(s[i + 2] / s[i])
 
     def n_eff(self, arm: str, scale: int) -> float:
         """Effective iid sample count n^2/n2 of *arm* at *scale*."""
@@ -91,7 +91,7 @@ class ScaleBank:
         if s is None:
             return 0.0
         i = _PER_SCALE * scale
-        return s[i] * s[i] / s[i + 1]
+        return float(s[i] * s[i] / s[i + 1])
 
     def noise_var(self, arm: str) -> float:
         """Per-pull reward variance from successive differences; 0 below two pulls."""
@@ -102,7 +102,7 @@ class ScaleBank:
         nd = s[t + _ND]
         if nd <= 0.0:
             return 0.0
-        return s[t + _D] / (2.0 * nd)
+        return float(s[t + _D] / (2.0 * nd))
 
     def pulls(self, arm: str) -> int:
         """Raw pull count of *arm*."""

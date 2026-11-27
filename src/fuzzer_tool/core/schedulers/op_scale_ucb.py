@@ -20,6 +20,7 @@ is re-read at a short memory.
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 from fuzzer_tool.core.operator_categories import category_of
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
@@ -98,7 +99,7 @@ class ScaleUCBScheduler:
         self._bands.record(band, success, weight)
         self._ops.record(name, success, weight)
 
-    def bandit_stats(self) -> dict:
+    def bandit_stats(self) -> dict[str, Any]:
         """Return total and per-band pull counts (numeric, JSON-safe)."""
         stats = {"scale_ucb_pulls": self._pulls}
         for band in _ALL_BANDS:
