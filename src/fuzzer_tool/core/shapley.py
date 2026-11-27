@@ -254,16 +254,16 @@ class _EdgeCounts:
         if self.bound == UINT32_WIDEN_AT:
             self.mat = self.mat.astype(np.int64)
 
-        new = edges.difference(self.slot)  # exact-dict fast path; usually empty
-        if new:
-            self._add_slots(list(new))
-
         lanes = self.lanes
         idx = [lanes.get(op) or self._add_lane(op) for op in ops]  # lanes start at 1
         work = len(edges) * (len(idx) + 1)
         if work >= FUSED_MIN_WORK:
             self._add_fused(idx, edges)
             return
+
+        new = edges.difference(self.slot)  # exact-dict fast path; usually empty
+        if new:
+            self._add_slots(list(new))
 
         pending = self.pending
         pending[TOTAL_LANE].update(edges)
@@ -274,14 +274,26 @@ class _EdgeCounts:
             self.fold()
 
     def _add_fused(self, idx: list[int], edges: set[int]) -> None:
-        # ndmin: itemgetter returns a bare value, not a tuple, for one edge.
-        cols = np.array(itemgetter(*edges)(self.slot), dtype=np.intp, ndmin=1)
+        cols = self._cols(edges)
         self.total[cols] += 1
         if not idx:
             return
         # Unique (lane, slot) pairs, so a plain fancy += counts each once.
         flat = (np.array(idx, dtype=np.intp)[:, None] * self.mat.shape[1] + cols).ravel()
         self.mat.reshape(-1)[flat] += 1
+
+    def _cols(self, edges: set[int]) -> np.ndarray:
+        """Matrix columns of *edges*, slotting unseen ones on a lookup miss.
+
+        Looks up first: new edges are rare after warmup, and a
+        ``difference`` pre-pass hashes every edge twice (1.3 vs 0.93 ms at 12k).
+        """
+        # ndmin: itemgetter returns a bare value, not a tuple, for one edge.
+        try:
+            return np.array(itemgetter(*edges)(self.slot), dtype=np.intp, ndmin=1)
+        except KeyError:
+            self._add_slots(list(edges.difference(self.slot)))
+        return np.array(itemgetter(*edges)(self.slot), dtype=np.intp, ndmin=1)
 
     def _add_slots(self, fresh: list[int]) -> None:
         start = len(self.ids)
