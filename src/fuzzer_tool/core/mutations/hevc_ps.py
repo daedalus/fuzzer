@@ -130,7 +130,8 @@ def _sps(p: FieldParser) -> None:
     p.u("sps_extension_present_flag", 1)
 
 
-def _pps(p: FieldParser) -> None:
+def _pps_prefix(p: FieldParser) -> int:
+    """PPS fields up to and including tiles_enabled_flag; returns its value."""
     p.ue("pps_pic_parameter_set_id")
     p.ue("pps_seq_parameter_set_id")
     p.u("dependent_slice_segments_enabled_flag", 1)
@@ -151,8 +152,11 @@ def _pps(p: FieldParser) -> None:
     p.u("weighted_pred_flag", 1)
     p.u("weighted_bipred_flag", 1)
     p.u("transquant_bypass_enabled_flag", 1)
-    if p.u("tiles_enabled_flag", 1):
-        return
+    return p.u("tiles_enabled_flag", 1)
+
+
+def _pps_tail(p: FieldParser) -> None:
+    """PPS fields after the tiles section (WPP, deblocking, merge, extensions)."""
     if p.u("entropy_coding_sync_enabled_flag", 1):
         return
     p.u("pps_loop_filter_across_slices_enabled_flag", 1)
@@ -164,6 +168,12 @@ def _pps(p: FieldParser) -> None:
     p.ue("log2_parallel_merge_level_minus2")
     p.u("slice_segment_header_extension_present_flag", 1)
     p.u("pps_extension_present_flag", 1)
+
+
+def _pps(p: FieldParser) -> None:
+    if _pps_prefix(p):
+        return  # tiles section: rest kept verbatim (hevc_tiles edits it)
+    _pps_tail(p)
 
 
 _PARSERS: dict[int, Callable[[FieldParser], None]] = {
@@ -186,13 +196,13 @@ def parse_ps(nal_type: int, rbsp: bytes) -> tuple[list[Field], str] | None:
 def _edge(field: Field, rng: RandPool) -> int:
     """New value for *field*: flag flip, or a draw from its kind's edges."""
     if field.kind is Kind.UE:
-        return rng.choice(UE_EDGES)
+        return UE_EDGES[rng.randint(0, len(UE_EDGES) - 1)]
     if field.kind is Kind.SE:
-        return rng.choice(SE_EDGES)
+        return SE_EDGES[rng.randint(0, len(SE_EDGES) - 1)]
     if field.width == 1:
         return field.value ^ 1
     if field.width == 8:
-        return rng.choice(U8_EDGES)
+        return U8_EDGES[rng.randint(0, len(U8_EDGES) - 1)]
     return rng.randint(0, (1 << field.width) - 1)
 
 

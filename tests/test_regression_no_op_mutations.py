@@ -478,6 +478,23 @@ def _battery() -> list[bytes]:
             "0101600000030090000003000003001ea0208316595952930bc05a020000030002000003003210"
         )
         + b"\x00\x00\x00\x01\x44\x01\xc0\x73\xc0\x89",
+        # hevc_tile_mutate: Annex B PPS with a uniform 2x2 tile grid + a slice.
+        bytes.fromhex("000000014401c071852d12000000012601af"),
+        # mkv_codec_cfg_mutate: minimal matroska, one A_FLAC track with a
+        # CodecPrivate of "fLaC" + STREAMINFO + a second metadata block.
+        bytes.fromhex(
+            "1a45dfa3a34286810142f7810142f2810442f381084282886d6174726f736b614287810442"
+            "85810218538067d01654ae6bcbaec9d781018381028686415f464c414363a2b8664c6143"
+            "0000002200000000000000000000000000000000000000000000000000000000000000000000"
+            "8100000a00000000000000000000"
+        ),
+        # vobsub_idx_mutate: VobSub index (header + 2 ids + timestamps).
+        b"# VobSub index file, v7 (20:34:44)\n\nid: en, index: 0\n\nid: de, index: 1\n\n"
+        b"timestamp: 0:00:01:000, filepos: 000000800\n"
+        b"timestamp: 0:00:04:047, filepos: 000001234\n",
+        # rasc_chunk_mutate: one INIT record whose offset/seq high bytes spell
+        # the RASC marker at 8:12 (the gate's offset), with a payload.
+        b"\x00\x08\x00\x00\x00\x00\x00\x00\x52\x41\x53\x43\x00payload!",
         # flac_frame_mutate: one raw frame, CRC-8 and CRC-16 valid.
         bytes.fromhex("fff8c908009510101010101010109c9c"),
         # mp4_codec_cfg_mutate: moov > ... > stsd > avc1 > avcC.
@@ -488,6 +505,9 @@ def _battery() -> list[bytes]:
         # montgomery_word_mutate: a known 32-bit modulus (NTT prime) literal.
         bytes(8) + (998244353).to_bytes(4, "little") + bytes(24),
         b"12345 6789 -3 0.5 abcdef ghij",
+        # inet_forms: text holding dotted quads, the only battery input that
+        # opens its has_quad gate (it sat outside the sweep entirely before).
+        b"ip 127.0.0.1 8.8.8.8 169.254.0.1",
         _minimal_elf64(),
         _binary_stl(),
         _webp(),

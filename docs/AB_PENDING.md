@@ -131,6 +131,7 @@ Off arm needs a tree without the op.
 | `rev_circuit`, `bit_swap_*` | Reversible-circuit / fixed-width swaps | S | vs previous commit; check `Declin` |
 | `bit_set`, `bit_clear`, `or_mask` | zzuf set/unset: monotone 0->1 / 1->0 / multi-bit OR | S | fuzzgoat + a flag/permission-field target; check `Declin` and per-arm share |
 | Ten format ops (`json_mutate` … `recompress_png_idat`) | Text/format-aware | S | each masked vs live |
+| CVE-derived ops (`hevc_tile_mutate`, `mkv_codec_cfg_mutate`, `vobsub_idx_mutate`) | HEVC PPS tile grid, Matroska CodecPrivate/CompAlgo, VobSub `.idx` stream table | U | FFmpeg target: hevc_tile + vobsub_idx (needs `.idx`/tile-PPS seeds in the corpus or the trickle), mkv_codec_cfg on both FFmpeg and GStreamer (FLAC/Vorbis MKV seeds exist); tree without each op vs with, A/A first; metric real edges + crash count |
 | `mp4_box_grow` | Grow missing required MP4 boxes | S | GStreamer qtdemux, empty corpus, edges of ffmpeg-made MP4/MOV/3GP reached, tree without the op |
 | `fat_field_mutate`, `ntfs_record_mutate`, `ext2/ext4_field_mutate`, `zfs_label_mutate`, `tcpip_packet_mutate` | FS image / packet structure, checksums repaired | S | needs fs/net targets (e2fsprogs, ntfs-3g, lwIP); masked vs live |
 | `ldpc_fix` (`--ldpc-alist`), `turbo_fix` (`--turbo-k`) | ECC codeword repair / error injection | N | needs a decoder target (aff3ct, liquid-dsp); op vs none |

@@ -38,9 +38,11 @@ from fuzzer_tool.core.mutations.flv_fields import sniff_flv_fields as _sniff_flv
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
 from fuzzer_tool.core.mutations.h264_ps import sniff_h264_ps as _sniff_h264_ps
 from fuzzer_tool.core.mutations.hevc_ps import sniff_hevc_ps as _sniff_hevc_ps
+from fuzzer_tool.core.mutations.hevc_tiles import sniff_hevc_tiles as _sniff_hevc_tiles
 from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.ivf import sniff_ivf as _sniff_ivf
+from fuzzer_tool.core.mutations.mkv_codec_cfg import sniff_mkv_codec_cfg as _sniff_mkv_codec_cfg
 from fuzzer_tool.core.mutations.ntfs import sniff_ntfs as _sniff_ntfs
 from fuzzer_tool.core.mutations.per import parse_per
 from fuzzer_tool.core.mutations.riff_fields import sniff_avi as _sniff_avi
@@ -49,6 +51,7 @@ from fuzzer_tool.core.mutations.rpl import sniff_rpl as _sniff_rpl
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutations.tcpip import sniff_tcpip as _sniff_tcpip
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
+from fuzzer_tool.core.mutations.vobsub_idx import sniff_vobsub_idx as _sniff_vobsub_idx
 from fuzzer_tool.core.mutations.zfs import sniff_zfs as _sniff_zfs
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
 from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
@@ -305,7 +308,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "dca_frame_mutate",
         "h264_ps_mutate",
         "hevc_ps_mutate",
+        "hevc_tile_mutate",
         "flac_frame_mutate",
+        "mkv_codec_cfg_mutate",
+        "vobsub_idx_mutate",
         "mp4_codec_cfg_mutate",
         "mp4_stsd_mutate",
         "mp4_atom_mutate",
@@ -849,8 +855,17 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "h264_ps_mutate": _sniff_h264_ps,
     # Annex B at offset 0 holding an H.265 VPS/SPS/PPS unit.
     "hevc_ps_mutate": _sniff_hevc_ps,
+    # Annex B at offset 0 holding an H.265 PPS with tiles enabled
+    # (FFmpeg DXVA tile-parameter overflow, CVE-2026-125239).
+    "hevc_tile_mutate": _sniff_hevc_tiles,
     # Strict CRC-8-valid frame header at offset 0 or after fLaC metadata.
     "flac_frame_mutate": _sniff_flac_frame,
+    # Matroska track codec config: FLAC/Xiph CodecPrivate, bz2 ContentCompAlgo
+    # (GStreamer matroskademux CVE-2026-39043 / -17072 / SA-2026-0089).
+    "mkv_codec_cfg_mutate": _sniff_mkv_codec_cfg,
+    # VobSub index: header line plus id/timestamp lines (FFmpeg vobsub demuxer
+    # stream-table overflow, CVE-2026-64830).
+    "vobsub_idx_mutate": _sniff_vobsub_idx,
     # ISO-BMFF holding a decoder config box (substring scan, C speed).
     "mp4_codec_cfg_mutate": lambda d: (
         d[4:8] in _ISOBMFF_HEAD_TYPES and any(t in d for t in (b"avcC", b"hvcC", b"esds"))

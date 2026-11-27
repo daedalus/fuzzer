@@ -227,14 +227,14 @@ class TestParse:
 class TestMutate:
     def test_sps_width(self):
         idx = _names(SPS_FIELDS).index("pic_width_in_luma_samples")
-        out = mutate_hevc_ps(STREAM, rng=ScriptedRng(randints=[1, idx], choice_idxs=[5]))
+        out = mutate_hevc_ps(STREAM, rng=ScriptedRng(randints=[1, idx, 5]))
         assert _value(out, 1, "pic_width_in_luma_samples") == UE_EDGES[5]
         assert _value(out, 1, "pic_height_in_luma_samples") == 48
         assert out.endswith(SC + b"\x44\x01" + escape(PPS_RBSP) + SC + b"\x26\x01\xaf")
 
     def test_pps_se_field(self):
         idx = _names(PPS_FIELDS).index("init_qp_minus26")
-        out = mutate_hevc_ps(STREAM, rng=ScriptedRng(randints=[2, idx], choice_idxs=[6]))
+        out = mutate_hevc_ps(STREAM, rng=ScriptedRng(randints=[2, idx, 6]))
         assert _value(out, 2, "init_qp_minus26") == SE_EDGES[6]
 
     def test_vps_fixed_field(self):
@@ -251,7 +251,7 @@ class TestMutate:
         # 2^32 - 2 has 31 leading zeros: zero runs must be emulation-escaped.
         idx = _names(SPS_FIELDS).index("sps_seq_parameter_set_id")
         big = UE_EDGES.index(2**32 - 2)
-        out = mutate_hevc_ps(STREAM, rng=ScriptedRng(randints=[1, idx], choice_idxs=[big]))
+        out = mutate_hevc_ps(STREAM, rng=ScriptedRng(randints=[1, idx, big]))
         assert [u[0] for u in find_ps_units(out)] == [VPS, SPS, PPS]  # no false start code
         assert _value(out, 1, "sps_seq_parameter_set_id") == 2**32 - 2
 
@@ -319,7 +319,7 @@ class TestFfmpeg:
         names = _names(parse_ps(SPS, unescape(data[start:end]))[0])
         idx = names.index("pic_width_in_luma_samples")
         edge = UE_EDGES.index(16)  # a min-CU-aligned edge width
-        out = mutate_hevc_ps(data, rng=ScriptedRng(randints=[sps, idx], choice_idxs=[edge]))
+        out = mutate_hevc_ps(data, rng=ScriptedRng(randints=[sps, idx, edge]))
         path = tmp_path / "out.h265"
         path.write_bytes(out)
         cmd = [FFPROBE, "-v", "error", "-show_streams", "-of", "json", str(path)]

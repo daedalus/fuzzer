@@ -5404,6 +5404,29 @@ class OperatorEngine:
         out = mutate_hevc_ps(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("hevc_ps_mutate", out, buf)
 
+    def _op_hevc_tile_mutate(self, buf, _byte_idx, _data):
+        """Rewrite one HEVC PPS tile-grid field (DXVA tile params, CVE-2026-125239)."""
+        from fuzzer_tool.core.mutations.hevc_tiles import mutate_hevc_tiles  # noqa: PLC0415
+
+        out = mutate_hevc_tiles(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("hevc_tile_mutate", out, buf)
+
+    def _op_mkv_codec_cfg_mutate(self, buf, _byte_idx, _data):
+        """Edit one Matroska track's codec config (matroskademux CVEs)."""
+        from fuzzer_tool.core.mutations.mkv_codec_cfg import (  # noqa: PLC0415
+            mutate_mkv_codec_cfg,
+        )
+
+        out = mutate_mkv_codec_cfg(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("mkv_codec_cfg_mutate", out, buf)
+
+    def _op_vobsub_idx_mutate(self, buf, _byte_idx, _data):
+        """Edit one VobSub index entry (stream-table overflow, CVE-2026-64830)."""
+        from fuzzer_tool.core.mutations.vobsub_idx import mutate_vobsub_idx  # noqa: PLC0415
+
+        out = mutate_vobsub_idx(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("vobsub_idx_mutate", out, buf)
+
     def _op_flac_frame_mutate(self, buf, _byte_idx, _data):
         """FLAC frame header fields or subframe bits, CRC-8/CRC-16 repaired; frame order."""
         from fuzzer_tool.core.mutations.flac_frame import mutate_flac_frame  # noqa: PLC0415
