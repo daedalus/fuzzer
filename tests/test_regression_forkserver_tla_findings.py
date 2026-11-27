@@ -164,3 +164,45 @@ def test_regression_retune_desync(fake_loader, monkeypatch):
         assert _gone(pids()[0])
     finally:
         r.stop()
+
+
+class _RecordingBackoff:
+    """Backoff double: records failures, never sleeps."""
+
+    def __init__(self):
+        self.failures = []
+
+    def started(self):
+        return None
+
+    def failed(self, how):
+        self.failures.append(how)
+        return 0.0
+
+
+def test_regression_retune_backoff(fake_loader, monkeypatch):
+    """The set_timeout() respawn is paced by --respawn-backoff like run_one's."""
+    env, _pids = fake_loader
+    r = _late_runner(env, 0.8, monkeypatch)
+    backoff = _RecordingBackoff()
+    try:
+        assert r.start()
+        r.attach_backoff(backoff)
+        assert r.set_timeout(0.3) is False
+        assert backoff.failures == [forkserver.Failure.DEATH]
+    finally:
+        r.stop()
+
+
+def test_retune_backoff_control(fake_loader, monkeypatch):
+    """Control: a prompt reply respawns nothing, so records no failure."""
+    env, _pids = fake_loader
+    r = _late_runner(env, 0.0, monkeypatch)
+    backoff = _RecordingBackoff()
+    try:
+        assert r.start()
+        r.attach_backoff(backoff)
+        assert r.set_timeout(0.3) is True
+        assert backoff.failures == []
+    finally:
+        r.stop()

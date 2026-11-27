@@ -352,6 +352,12 @@ class ForkserverRunner:
         )
         return True
 
+    def _respawn(self) -> bool:
+        """Replace the loader, paced by --respawn-backoff like _restart_retry."""
+        self._abandon()
+        self._backoff.failed(Failure.DEATH)
+        return self.start()
+
     def _abandon(self) -> None:
         """Kill and reap the loader, dropping any reply it still owes.
 
@@ -503,8 +509,7 @@ class ForkserverRunner:
             self._proc.stdin.write(f"TIMEOUT {seconds:.6f}\n".encode())
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
-            self._abandon()
-            self.start()
+            self._respawn()
             return False
 
         # Bounded wait on the ack. The loader answers immediately -- it is
@@ -516,8 +521,7 @@ class ForkserverRunner:
             # The loader may still answer later, and that reply would be read
             # as the next RC header: replace it, keeping the old deadline.
             log.warning("Forkserver: no reply to TIMEOUT; respawning at %.3fs", self.timeout)
-            self._abandon()
-            self.start()
+            self._respawn()
             return False
 
         parts = (reply or b"").decode(errors="replace").split()
