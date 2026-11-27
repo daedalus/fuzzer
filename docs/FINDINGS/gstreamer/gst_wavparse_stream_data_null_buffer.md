@@ -265,10 +265,10 @@ matters: it fixes the state corruption at its origin, in `gst_wavparse_stream_he
 /* Never request a zero-sized buffer. */
 if (G_UNLIKELY (desired == 0)) {
     GST_WARNING_OBJECT (wav, "Cannot fetch zero bytes of audio data");
-    return GST_FLOW_ERROR;
+    return GST_FLOW_EOS;
 }
 ```
-Bails early with `GST_FLOW_ERROR` before calling `gst_adapter_take_buffer`.
+Bails early with `GST_FLOW_EOS` before calling `gst_adapter_take_buffer`.
 
 **3. NULL-check every `gst_buffer_make_writable()` result** (the two call sites at
 `gstwavparse.c:2194` short-buffer resize and `:2211` offset update — the latter directly

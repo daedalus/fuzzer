@@ -23,7 +23,7 @@ index 8e66b63..ae44dcd 100644
 +  /* Never request a zero-sized buffer. */
 +  if (G_UNLIKELY (desired == 0)) {
 +    GST_WARNING_OBJECT (wav, "Cannot fetch zero bytes of audio data");
-+    return GST_FLOW_ERROR;
++    return GST_FLOW_EOS;
 +  }
 +
    GST_LOG_OBJECT (wav, "Fetching %" G_GINT64_FORMAT " bytes of data "
