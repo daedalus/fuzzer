@@ -303,6 +303,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "mp4_atom_mutate",
         "mp4_atom_transplant",
         "mp4_box_grow",
+        "mkv_elem_grow",
+        "avi_chunk_grow",
         "aac_asc_mutate",
         "caf_chunk_mutate",
         "rpl_chunk_mutate",
@@ -848,6 +850,9 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     ),
     # Any ISO-BMFF head: growing needs no existing moov (it adds one).
     "mp4_box_grow": lambda d: d[4:8] in _ISOBMFF_HEAD_TYPES,
+    # EBML magic / RIFF AVI: growing needs only the header (it adds the rest).
+    "mkv_elem_grow": lambda d: d[:4] == b"\x1a\x45\xdf\xa3",
+    "avi_chunk_grow": _sniff_avi,
     # CAF magic + one chunk header; ARMovie signature + 20 header lines.
     "caf_chunk_mutate": _sniff_caf,
     "rpl_chunk_mutate": _sniff_rpl,

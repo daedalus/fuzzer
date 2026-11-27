@@ -5442,6 +5442,20 @@ class OperatorEngine:
         out = grow_mp4(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("mp4_box_grow", out, buf)
 
+    def _op_mkv_elem_grow(self, buf, _byte_idx, _data):
+        """Add a missing required Matroska element (Segment..Cues) with its children."""
+        from fuzzer_tool.core.mutations.mkv_grow import grow_mkv  # noqa: PLC0415
+
+        out = grow_mkv(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("mkv_elem_grow", out, buf)
+
+    def _op_avi_chunk_grow(self, buf, _byte_idx, _data):
+        """Add a missing required AVI chunk/LIST (hdrl..idx1) with its children."""
+        from fuzzer_tool.core.mutations.avi_grow import grow_avi  # noqa: PLC0415
+
+        out = grow_avi(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("avi_chunk_grow", out, buf)
+
     def _op_avi_field_mutate(self, buf, _byte_idx, _data):
         """One avih/strh/strf/indx/idx1 field inside the AVI LIST tree."""
         from fuzzer_tool.core.mutations.riff_fields import mutate_avi  # noqa: PLC0415
