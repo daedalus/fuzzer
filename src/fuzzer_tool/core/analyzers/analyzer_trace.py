@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 
 from fuzzer_tool.adapters.process import detached_env
+from fuzzer_tool.core.crash_metadata import REPRO_ASAN_OPTIONS, repro_runner
 
 log = logging.getLogger(__name__)
 
@@ -594,7 +595,9 @@ class CrashTracer:
         import base64
 
         encoded = base64.b64encode(data).decode()
-        report.repro_cmd = f"printf '%s' '{encoded}' | base64 -d | {self.target_path}"
+        runner = repro_runner(self.target_path)
+        env = f"ASAN_OPTIONS={REPRO_ASAN_OPTIONS}"
+        report.repro_cmd = f"printf '%s' '{encoded}' | base64 -d | {env} {runner}"
 
     def save_report(self, report: TraceReport, crash_dir: str, name: str):
         """Save trace report as .trace file alongside crash files.
