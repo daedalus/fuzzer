@@ -9,6 +9,8 @@ and in the no-``--elo`` fallback chain (via ``_FALLBACK_ARMS`` and
 
 from __future__ import annotations
 
+from typing import cast
+
 from fuzzer_tool.core.rand_pool import RandPool
 
 
@@ -45,7 +47,7 @@ class SeedUniformScheduler:
             return seed_ids[0]
         for seed_id in seed_ids:
             self.init_arm(seed_id)
-        return self._rng.choice(seed_ids)
+        return cast("str", self._rng.choice(seed_ids))
 
     def record(self, seed_id: str, success: bool, weight: float = 1.0) -> None:
         """Record outcome for Elo compatibility; ignored by selection."""

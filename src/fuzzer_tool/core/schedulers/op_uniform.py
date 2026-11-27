@@ -9,6 +9,8 @@ and in the no-``--elo`` fallback chain (via ``_FALLBACK_PRECEDENCE`` and
 
 from __future__ import annotations
 
+from typing import cast
+
 from fuzzer_tool.core.rand_pool import RandPool
 
 
@@ -44,7 +46,7 @@ class UniformScheduler:
         # Register any new ops on the fly
         for op in ops:
             self.init_arm(op)
-        return self._rng.choice(ops)
+        return cast("str", self._rng.choice(ops))
 
     def record(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record outcome for Elo compatibility; ignored by selection."""

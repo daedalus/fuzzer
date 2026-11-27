@@ -23,6 +23,9 @@ Elo-only (absent from ``_FALLBACK_PRECEDENCE``).
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers._arm_counts import ArmCounts, reward
 
 #: State before the first record.
@@ -35,7 +38,9 @@ class PairCoverScheduler(ArmCounts):
     #: Pair posteriors start from the op's marginal; no per-arm prior override.
     supports_priors = False
 
-    def __init__(self, rng, cover_target: int = 1, prior_strength: float = 2.0) -> None:
+    def __init__(
+        self, rng: RandPool | None, cover_target: int = 1, prior_strength: float = 2.0
+    ) -> None:
         if rng is None:
             raise ValueError("PairCoverScheduler requires a RandPool (Hard Rule 16)")
         if cover_target < 1:
@@ -90,7 +95,7 @@ class PairCoverScheduler(ArmCounts):
         target = self._cover_target
         open_pairs = [op for op in cands if pair_n.get((prev, op), 0) < target]
         if open_pairs:
-            return self._rng.choice(open_pairs)
+            return cast("str", self._rng.choice(open_pairs))
         return self._thompson(cands, prev)
 
     def _thompson(self, cands: list[str], prev: str | None) -> str:
@@ -108,7 +113,7 @@ class PairCoverScheduler(ArmCounts):
                 best, best_draw = op, draw
         return best
 
-    def bandit_stats(self) -> dict:
+    def bandit_stats(self) -> dict[str, Any]:
         arms = len(self._counts)
         return {
             "pc_success": dict(self._pair_s),
