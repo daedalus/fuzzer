@@ -30,6 +30,9 @@ from fuzzer_tool.core.mutations.ac3 import sniff_ac3 as _sniff_ac3
 from fuzzer_tool.core.mutations.base64 import parse_base64
 from fuzzer_tool.core.mutations.caf import sniff_caf as _sniff_caf
 from fuzzer_tool.core.mutations.dca import sniff_dca as _sniff_dca
+from fuzzer_tool.core.mutations.ext import sniff_ext2 as _sniff_ext2
+from fuzzer_tool.core.mutations.ext import sniff_ext4 as _sniff_ext4
+from fuzzer_tool.core.mutations.fat import sniff_fat as _sniff_fat
 from fuzzer_tool.core.mutations.flac_frame import sniff_flac_frame as _sniff_flac_frame
 from fuzzer_tool.core.mutations.flv_fields import sniff_flv_fields as _sniff_flv_fields
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
@@ -38,12 +41,15 @@ from fuzzer_tool.core.mutations.hevc_ps import sniff_hevc_ps as _sniff_hevc_ps
 from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.ivf import sniff_ivf as _sniff_ivf
+from fuzzer_tool.core.mutations.ntfs import sniff_ntfs as _sniff_ntfs
 from fuzzer_tool.core.mutations.per import parse_per
 from fuzzer_tool.core.mutations.riff_fields import sniff_avi as _sniff_avi
 from fuzzer_tool.core.mutations.riff_fields import sniff_wav as _sniff_wav
 from fuzzer_tool.core.mutations.rpl import sniff_rpl as _sniff_rpl
 from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
+from fuzzer_tool.core.mutations.tcpip import sniff_tcpip as _sniff_tcpip
 from fuzzer_tool.core.mutations.tlul import sniff_tlul as _sniff_tlul
+from fuzzer_tool.core.mutations.zfs import sniff_zfs as _sniff_zfs
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
 from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
 
@@ -227,6 +233,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "hash_len_ext",
         "sha1_collide",
         "rs_fix",
+        "ldpc_fix",
+        "turbo_fix",
         "jpeg_chunk_mutate",
         "jpeg_crc_fix",
         "bmp_chunk_mutate",
@@ -311,6 +319,13 @@ _CATEGORIES: dict[str, set[str]] = {
         "avi_field_mutate",
         "wav_field_mutate",
         "flv_field_mutate",
+        # Filesystem images and network packets (checksums/fixups repaired).
+        "fat_field_mutate",
+        "ntfs_record_mutate",
+        "ext2_field_mutate",
+        "ext4_field_mutate",
+        "zfs_label_mutate",
+        "tcpip_packet_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -860,6 +875,14 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "avi_field_mutate": _sniff_avi,
     "wav_field_mutate": _sniff_wav,
     "flv_field_mutate": _sniff_flv_fields,
+    # FAT/NTFS boot sector or MFT/INDX record; ext superblock magic (ext4: + ext4-only
+    # feature); ZFS uberblock or XDR nvlist; raw IP / Ethernet / pcap packet.
+    "fat_field_mutate": _sniff_fat,
+    "ntfs_record_mutate": _sniff_ntfs,
+    "ext2_field_mutate": _sniff_ext2,
+    "ext4_field_mutate": _sniff_ext4,
+    "zfs_label_mutate": _sniff_zfs,
+    "tcpip_packet_mutate": _sniff_tcpip,
     "json_mutate": _sniff_json,
     "sql_mutate": _sniff_sql,
     "ecdsa_field_mutate": _sniff_secp_payload,
@@ -1225,6 +1248,9 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "sha1_collide": lambda f, _d: getattr(f, "sha1_collide_bits", None) is not None,
     # Reed-Solomon parity repair / symbol errors need the parity length; --rs-nsym
     "rs_fix": lambda f, _d: getattr(f, "rs_nsym", None) is not None,
+    # LDPC / turbo codeword streams have no magic: --ldpc-alist / --turbo-k.
+    "ldpc_fix": lambda f, _d: getattr(f, "ldpc_code", None) is not None,
+    "turbo_fix": lambda f, _d: getattr(f, "turbo_k", None) is not None,
     # Manchester and friends; --op-line-code
     "line_code": lambda f, _d: bool(getattr(f, "op_line_code", False)),
     "c_source_mutate": _is_text_input,

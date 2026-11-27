@@ -754,6 +754,16 @@ def cmd_fuzz(args):
         except ValueError as e:
             print(f"[-] --rs-nsym/--rs-block: {e}")
             sys.exit(1)
+    if getattr(args, "turbo_k", None) is not None:
+        from fuzzer_tool.core.mutations.turbo_fix import (
+            check_params as turbo_check,  # noqa: PLC0415
+        )
+
+        try:
+            turbo_check(args.turbo_k, *args.turbo_qpp)
+        except ValueError as e:
+            print(f"[-] --turbo-k/--turbo-qpp: {e}")
+            sys.exit(1)
     try:
         _parse_orbit_arg(getattr(args, "orbit_dedup", None))
     except ValueError as e:
@@ -1533,6 +1543,9 @@ def cmd_fuzz(args):
         rs_block=getattr(args, "rs_block", 255),
         rs_fcr=getattr(args, "rs_fcr", 0),
         rs_poly=getattr(args, "rs_poly", 0x11D),
+        ldpc_code=getattr(args, "ldpc_alist", None),
+        turbo_k=getattr(args, "turbo_k", None),
+        turbo_qpp=getattr(args, "turbo_qpp", (3, 10)),
         hlx_algo=getattr(args, "hlx_algo", None),
         hlx_key_len=getattr(args, "hlx_key_len", 16),
         hlx_digest_at=getattr(args, "hlx_digest_at", None),
@@ -4001,6 +4014,28 @@ def _rs_poly(value: str) -> int:
 
     try:
         return parse_poly(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def _ldpc_alist(value: str):
+    """argparse ``type=`` for --ldpc-alist: load and validate the parity-check matrix."""
+    from fuzzer_tool.core.mutations.ldpc_fix import check_params, load_alist  # noqa: PLC0415
+
+    try:
+        code = load_alist(value)
+        check_params(code)
+    except (OSError, ValueError) as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return code
+
+
+def _turbo_qpp(value: str) -> tuple[int, int]:
+    """argparse ``type=`` for --turbo-qpp."""
+    from fuzzer_tool.core.mutations.turbo_fix import parse_qpp  # noqa: PLC0415
+
+    try:
+        return parse_qpp(value)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e)) from None
 
@@ -8524,6 +8559,35 @@ def _build_parser() -> _Parsers:
         default=0x11D,
         metavar="POLY",
         help="GF(256) field polynomial, must be primitive (default 0x11d).",
+    )
+    fuzz_parser.add_argument(
+        "--ldpc-alist",
+        type=_ldpc_alist,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Enable ldpc_fix: MacKay alist parity-check matrix; input is back-to-back "
+            "n-bit LDPC codewords (MSB-first). Repairs parity or injects correctable, "
+            "check-cluster or single-check errors. n <= 8192."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--turbo-k",
+        type=int,
+        default=None,
+        metavar="K",
+        help=(
+            "Enable turbo_fix: input is LTE turbo (PCCC, TS 36.212) codewords of 3K+12 "
+            "bits, info block K (40..6144). Repairs parity or injects correctable, "
+            "uncorrectable or tail errors."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--turbo-qpp",
+        type=_turbo_qpp,
+        default=(3, 10),
+        metavar="F1,F2",
+        help="QPP interleaver for --turbo-k (default 3,10, LTE K=40); must permute 0..K-1.",
     )
     fuzz_parser.add_argument(
         "--hlx-algo",

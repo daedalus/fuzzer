@@ -47,10 +47,15 @@ from unittest.mock import patch
 
 import fuzzer_tool.core.mutations as _mutations
 from fuzzer_tool.core.format_fsm import parse_fsm
+from fuzzer_tool.core.mutations.ldpc_fix import parse_alist
 from fuzzer_tool.core.mutations.montgomery import SECP256K1_FIELD_P
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.services.fuzzer import Fuzzer
 
+from .support import ntfs_build, tcpip_build, zfs_build
+from .support.ext_build import build_ext2, build_ext4
+from .support.fat_build import Kind, build_fat
+from .support.ldpc_codes import HAMMING_N, HAMMING_ROWS, alist_text
 from .support.mp4_build import avcc, esds, mp4, stsd
 
 _REPS = 12
@@ -424,6 +429,27 @@ def _battery() -> list[bytes]:
         + (1).to_bytes(4, "big")
         + bytes(8)
         + bytes(range(0, 256, 8)),
+        # x509_field_mutate: SEQUENCE { SEQUENCE {...} } (reached only by trickle luck before).
+        b"\x30\x12\x30\x10\x02\x01\x01" + bytes(13),
+        # ffconcat_chunk_mutate / rasc_chunk_mutate: reached only by trickle luck before.
+        b"ffconcat version 1.0\nfile 'a.mp4'\nduration 5\nfile 'b.mp4'\ninpoint 1\n",
+        b"RIFF\x40\x00\x00\x00RASC\x01"
+        + struct.pack("<III", 16, 0, 1)
+        + bytes(16)
+        + b"\x02"
+        + struct.pack("<III", 8, 16, 2)
+        + bytes(8),
+        # inet_forms: a canonical dotted quad.
+        b"GET http://10.1.2.3/ HTTP/1.0\r\n",
+        # fat_field_mutate / ntfs_record_mutate / zfs_label_mutate: minimal images.
+        build_fat(Kind.FAT12),
+        ntfs_build.build_image(),
+        zfs_build.fragment(),
+        # ext2_field_mutate / ext4_field_mutate: 16 KiB images (1 KiB blocks).
+        build_ext2(),
+        build_ext4(),
+        # tcpip_packet_mutate: IPv4/UDP datagram with valid checksums.
+        tcpip_build.ipv4(tcpip_build.UDP, tcpip_build.udp_dgram(b"query")),
         # ivf_chunk_mutate: 32-byte DKIF header + one 3-byte frame.
         b"DKIF" + bytes(4) + b"VP80" + bytes(20) + (3).to_bytes(4, "little") + bytes(8) + b"abc",
         # ac3_frame_mutate: one 128-byte AC-3 frame (fscod 0, frmsizecod 0, bsid 8).
@@ -517,7 +543,7 @@ def _make_fuzzer() -> Fuzzer:
             target="/bin/true",
             corpus_dir=f"{tmp}/corpus",
             crashes_dir=f"{tmp}/crashes",
-            max_len=4096,
+            max_len=16384,  # fits the 16 KiB ext images: truncation must not read as a change
             timeout=1,
             mutations_per_input=2,
         )
@@ -706,6 +732,10 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.rs_block = 255
         f.rs_fcr = 0
         f.rs_poly = 0x11D
+        # ldpc_fix / turbo_fix: offered only with a code (--ldpc-alist / --turbo-k).
+        f.ldpc_code = parse_alist(alist_text(HAMMING_N, HAMMING_ROWS))
+        f.turbo_k = 40
+        f.turbo_qpp = (3, 10)
         # hash_len_ext: offered only when a hash is named.
         f.hlx_algo = "sha256"
         f.hlx_key_len = 16

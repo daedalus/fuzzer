@@ -132,6 +132,8 @@ Off arm needs a tree without the op.
 | `bit_set`, `bit_clear`, `or_mask` | zzuf set/unset: monotone 0->1 / 1->0 / multi-bit OR | S | fuzzgoat + a flag/permission-field target; check `Declin` and per-arm share |
 | Ten format ops (`json_mutate` … `recompress_png_idat`) | Text/format-aware | S | each masked vs live |
 | `mp4_box_grow` | Grow missing required MP4 boxes | S | GStreamer qtdemux, empty corpus, edges of ffmpeg-made MP4/MOV/3GP reached, tree without the op |
+| `fat_field_mutate`, `ntfs_record_mutate`, `ext2/ext4_field_mutate`, `zfs_label_mutate`, `tcpip_packet_mutate` | FS image / packet structure, checksums repaired | S | needs fs/net targets (e2fsprogs, ntfs-3g, lwIP); masked vs live |
+| `ldpc_fix` (`--ldpc-alist`), `turbo_fix` (`--turbo-k`) | ECC codeword repair / error injection | N | needs a decoder target (aff3ct, liquid-dsp); op vs none |
 | `mkv_elem_grow`, `avi_chunk_grow` | Grow missing Matroska elements / AVI chunks | S | GStreamer, empty corpus, edges of ffmpeg-made MKV/AVI reached; AVI needs the harness drain fix first |
 | `parity_lock` / `parity_break` | Parity-preserving flips | S | needs a 7E1 / DES-key target |
 | Line codes (`--op-line-code`) | Manchester/HDLC/COBS re-encode | S | needs a line-code target |
