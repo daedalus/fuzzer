@@ -288,3 +288,20 @@ print(a == b)  # True -- everywhere, forever
 ```
 
 *Audit performed on 2026-11-28 against commit `c994adc`. Findings R‑01/R‑02/R‑03/R‑04 are new relative to the four prior audit-fix rounds visible in the file's history (`3712812e`, `de86a607`, `ca1fa4ff`, `f4b9beec`).*
+
+---
+
+## Resolution (2026-11-27)
+
+| ID | Status |
+|---|---|
+| R-01 | Fixed in CLI: `--seed` default `None` -> `resolve_seed` (random 63-bit, printed). `RandPool` unchanged. |
+| R-02 | Fixed: `_MODULO_SAFE_MAX = 2**20`, comment rewritten with the real formula; wider ranges rejection-sample (seeded streams change for n > 2**20 only; buffers > 1 MiB take the scalar path in `randint_list`/`randrange_list`). |
+| R-03 | Fixed: `ValueError` on negative/NaN/inf weights, after the existing `IndexError` sum check. |
+| R-04 | Draw position added to the mixed state; conditional determinism documented in the module and `inject_entropy` docstrings. Aux-stream restart kept (documented). |
+| R-05 | Opt-in owner check in `_refill` (`FUZZER_RAND_THREAD_CHECK=1` / `-X dev`); owner is the first refilling thread. |
+| R-06 | Documented, not changed: list forms return `[]` on empty ranges (bulk callers size possibly-empty buffers), `sample` clamps `k > n`, not-refilled contract stated per method. |
+| R-07 | Documented: `random()` resolution is 2**-32; use `_random53` for rarer events. |
+| R-08 | `configure_rand_floyd()` default is now `True`. Retry-reseed tagging left as is (deterministic). |
+
+Tests: `tests/test_regression_rand_pool_audit_2026_11_27.py` (22). Pre-existing, unrelated failure: `test_scheduler_convergence.py::TestSchedulerSeedability` (UniformScheduler).

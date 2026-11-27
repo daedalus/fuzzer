@@ -36,11 +36,14 @@ Opt-in Floyd sampling (``--rand-floyd-sample`` / ``FUZZER_RAND_FLOYD=1``):
   The k==1 and k==2 fast paths are never touched so seeded runs remain
   byte-identical when the flag is off.
 
-Modulo bias is acceptable for the hot-path ``randrange`` / ``randint`` —
-we are generating test inputs, not cryptographic keys.  When exact
-uniformity matters (weighted-choice tables, distribution tests) use
-:meth:`RandPool.random_between` instead; it rejection-samples and is
-bias-free.  The pool is not thread-safe.
+Modulo bias is acceptable for the hot-path ``randrange`` / ``randint`` up
+to ``_MODULO_SAFE_MAX`` (2**20; relative bias 1/(2**32 // n), at most 2.4e-4)
+-- we are generating test inputs, not cryptographic keys.  Wider ranges
+rejection-sample.  When exact uniformity matters (weighted-choice tables,
+distribution tests) use :meth:`RandPool.random_between` instead.  The pool
+is not thread-safe: set ``FUZZER_RAND_THREAD_CHECK=1`` (or run ``python
+-X dev``) to make a draw from a second thread raise instead of silently
+duplicating or skipping words.
 
 Determinism
 -----------
@@ -51,6 +54,13 @@ built with ``seed=None`` does NOT fall through to OS entropy the way
 ``_NO_SEED_FALLBACK`` instead, so *every* pool, seeded or not, produces a
 byte-for-byte reproducible stream. This applies transitively to
 :func:`get_default_rand_pool`.
+
+That guarantee is about the pool object. The *campaign* is reproducible only
+given a deterministic admission sequence: :meth:`RandPool.inject_entropy` is
+fed by corpus admissions, so ``--clock wall`` or externally ingested seeds
+(``--tcp-listen-port``) make which inputs get mixed in, and therefore every
+later draw, vary run to run. The CLI's ``--seed`` therefore defaults to a
+fresh random value (printed in the banner); pass ``-s N`` to replay.
 
 Full determinism across the fuzzer also requires there being exactly one
 pool in play rather than many independently-constructed ones (even if each
@@ -68,17 +78,23 @@ import bisect
 import itertools
 import math
 import os
+import sys
+import threading
 import warnings
 
 import numpy as np
 
 _POOL_ENTRIES = 4096  # refill every 4K draws
 
-# ``draw % n`` over-weights the lowest ``2**32 % n`` values by one count in
-# ``2**32 // n``: <= 1e-7 relative bias for n <= 2**20, 2:1 near
-# n = 2/3 * 2**32.  Above this bound the range APIs rejection-sample
-# (_randbelow) instead.
-_MODULO_SAFE_MAX = 1 << 30
+# ``draw % n`` over-weights the lowest ``r = 2**32 % n`` values by one count
+# in ``q = 2**32 // n``, so the *relative* bias of those values is 1/q.
+# Worst case at the top of the fast-path range (n = 2**20 - 1, q = 4096):
+# 2.4e-4.  It grows with n -- ~25% near n = 9.5e8 (q = 4) and 2:1 near
+# n = 2/3 * 2**32 -- which is why the bound is 2**20 and not higher.  Small
+# n is negligible (n = 256: 6e-8).  Above this bound the range APIs
+# rejection-sample (_randbelow) instead.  Pinned by
+# tests/test_regression_rand_pool_audit_2026_11_27.py.
+_MODULO_SAFE_MAX = 1 << 20
 
 # Fixed replacement for "seed from OS/hardware entropy". Arbitrary but
 # constant -- what matters is that it never changes between runs, not what
@@ -98,12 +114,18 @@ _AUX_STREAM_TAG = 0x4155_5831
 # Entropy-gate retries per refill before raising starvation.
 _GATE_RETRIES = 3
 
+# Opt-in ownership check (R-05): a pool is single-threaded by contract.
+_THREAD_CHECK: bool = (
+    os.environ.get("FUZZER_RAND_THREAD_CHECK", "").strip() in ("1", "true", "yes")
+    or sys.flags.dev_mode
+)
+
 # Opt-in Floyd path (Phase 1 / B1 of the seventeen-source survey).
 _RAND_FLOYD: bool = os.environ.get("FUZZER_RAND_FLOYD", "").strip() in ("1", "true", "yes")
 
 
-def configure_rand_floyd(enabled: bool = False) -> None:
-    """Enable/disable Floyd sampling for ``RandPool.sample`` (k >= 3)."""
+def configure_rand_floyd(enabled: bool = True) -> None:
+    """Enable (default) or disable Floyd sampling for ``RandPool.sample`` (k >= 3)."""
     global _RAND_FLOYD
     _RAND_FLOYD = bool(enabled)
 
@@ -227,6 +249,7 @@ class RandPool:
         "_aux_rng",
         "_min_entropy",
         "_min_hinf",
+        "_owner_tid",
     )
 
     def __init__(
@@ -255,6 +278,9 @@ class RandPool:
         # H_inf ~7.2 bits/byte, but 2.6% of batches read < 7.0 and 25%
         # < 7.1 (seed 3, 2000 batches): keep thresholds <= 6.5.
         self._min_hinf = min_hinf
+        # Thread that first refilled (set lazily: a pool may be built in one
+        # thread and handed to another before its first draw).
+        self._owner_tid: int | None = None
 
     def _generate_pool(self) -> None:
         """Fill ``_pool`` and ``_m256`` from the current generator."""
@@ -262,7 +288,20 @@ class RandPool:
         # Unsafe uint32 → uint8 cast truncates, i.e. % 256 (~16x cheaper than np.mod).
         np.copyto(self._m256, self._pool, casting="unsafe")
 
+    def _check_owner(self) -> None:
+        """Raise if a second thread refills this pool (opt-in, R-05)."""
+        tid = threading.get_ident()
+        if self._owner_tid is None:
+            self._owner_tid = tid
+        elif self._owner_tid != tid:
+            raise RuntimeError(
+                "RandPool is not thread-safe: refilled from a second thread "
+                f"({tid} != owner {self._owner_tid}); give each thread its own pool"
+            )
+
     def _refill(self) -> None:
+        if _THREAD_CHECK:
+            self._check_owner()
         self._generate_pool()
 
         # Entropy only when gated: ~9% of a refill, read by nobody otherwise.
@@ -362,7 +401,15 @@ class RandPool:
         (prior state, raw) rather than of ``raw`` alone — the same bytes
         injected into two pools with different histories still diverge.
         Discards the current pre-fetched batch so the next draw reflects
-        the mix immediately.
+        the mix immediately. The mixed history is the generator state plus
+        the draw position within the current batch.
+
+        Reproducibility is conditional: the result is a pure function of
+        (state, position, ``raw``), but *which* ``raw`` arrives depends on
+        the campaign (``--clock wall`` and ``--tcp-listen-port`` make corpus
+        admission timing-dependent). The auxiliary Poisson stream is
+        re-derived here too, so ``poisson_array`` draws after an injection
+        depend on the number of injections so far.
 
         The snapshot is taken from the underlying ``Generator``'s own
         ``bit_generator.state`` rather than from ``self._pool`` — the
@@ -380,7 +427,11 @@ class RandPool:
             return
         import hashlib
 
+        # The draw position is part of the history: the bit-generator state
+        # alone only advances at refill boundaries (every 4096 draws), so two
+        # pools 50 and 90 draws into one batch would mix identically.
         state_bytes = _canonical_state_bytes(self._rng.bit_generator.state)
+        state_bytes += self._idx.to_bytes(4, "little")
         digest = hashlib.sha256(state_bytes + bytes(raw)).digest()
         seed_words = [int.from_bytes(digest[i : i + 4], "little") for i in range(0, len(digest), 4)]
         self._rng = np.random.default_rng(np.random.SeedSequence(seed_words))
@@ -392,7 +443,9 @@ class RandPool:
         """Return the Shannon entropy (bits/byte) of the most recent refill.
 
         Returns ``None`` until the first refill after construction or a
-        reseed. Computed on demand from the batch still held in ``_m256``.
+        reseed (the "not refilled" contract here; :meth:`measure_entropy`
+        and :meth:`pool_min_entropy_now` raise ``RuntimeError`` instead).
+        Computed on demand from the batch still held in ``_m256``.
         """
         if not self._pool_l:
             return None
@@ -413,6 +466,10 @@ class RandPool:
         values are sliced from the pool in one C-level operation when
         ``n <= _MODULO_SAFE_MAX``.  Wider ranges fall back to the scalar
         rejection path so the full span is reachable without bias.
+
+        An empty range (``n <= 0``) returns ``[]`` instead of raising like
+        scalar :meth:`randrange`: bulk callers size buffers that may be
+        empty and treat "nothing to draw" as a normal case.
         """
         if n <= 0 or count <= 0:
             return []
@@ -423,7 +480,11 @@ class RandPool:
         return (self._take(count) % n).tolist()
 
     def random(self) -> float:
-        """Return a random float in [0.0, 1.0).  ``random.random()`` equivalent."""
+        """Return a random float in [0.0, 1.0).  ``random.random()`` equivalent.
+
+        Resolution is 2**-32 (one pool word), not 2**-53: ``random() < p`` can
+        never fire for p < 2.3e-10. Use ``_random53`` for rarer events.
+        """
         return self._draw() / 4294967296.0  # 2^32
 
     def _take(self, count: int) -> np.ndarray:
@@ -500,6 +561,9 @@ class RandPool:
         all values are sliced from the pool in a single C-level operation
         when the width is at most ``_MODULO_SAFE_MAX``.  Wider ranges fall
         back to the scalar rejection path so the full span is reachable.
+
+        An empty range (``b < a``) returns ``[]`` instead of raising like
+        scalar :meth:`randint`; see :meth:`randrange_list`.
         """
         width = b - a + 1
         if width <= 0 or count <= 0:
@@ -801,7 +865,8 @@ class RandPool:
         """Return *k* unique elements from *population*.
 
         Accepts either an int (range size) or a sequence (list/tuple/bytes/
-        bytearray/range), matching the ``random.sample`` API.
+        bytearray/range), matching the ``random.sample`` API. Unlike
+        ``random.sample``, ``k > n`` is clamped to ``n`` rather than raising.
 
         ``range`` has to be in the sequence tuple, not just tolerated: it is
         the idiomatic population for ``random.sample`` and a dozen mutators
@@ -994,9 +1059,15 @@ class RandPool:
             return []
         if len(probs) == 0:
             raise IndexError("categorical: empty weights")
+        probs = np.asarray(probs, dtype=np.float64)
         cum = np.cumsum(probs)
         if cum[-1] <= 0:
             raise IndexError("categorical: weights sum to <= 0")
+        # Same contract as weighted_choice / weighted_choice_list: a negative
+        # weight makes the cumsum non-monotone (an arm becomes unreachable)
+        # and NaN slips past the ``<= 0`` check above.
+        if not (np.isfinite(probs).all() and (probs >= 0).all()):
+            raise ValueError("categorical: weights must be finite and non-negative")
         idx = np.searchsorted(cum, self._rng.random(count) * cum[-1], side="right")
         return np.minimum(idx, len(cum) - 1).tolist()
 

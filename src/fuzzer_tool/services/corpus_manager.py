@@ -1453,10 +1453,11 @@ class CorpusManager:
             # near-duplicate check below: "new bytes we hadn't stored before"
             # is the raw-entropy property we want, independent of whether a
             # fuzzy similarity heuristic later decides not to keep it around.
-            # Determinism is preserved: for a fixed --seed, the sequence of
-            # admitted seeds is itself a deterministic function of the run,
-            # so this injection point never introduces run-to-run variance
-            # that wasn't already present in which inputs get admitted.
+            # Determinism is preserved given a deterministic admission
+            # sequence (--clock virtual, no --tcp-listen-port): for a fixed
+            # --seed the admitted seeds are then a function of the run, so
+            # this injection adds no variance of its own. Under --clock wall
+            # or TCP ingestion admission itself varies, and so does this.
             f._rng.inject_entropy(data)
             if (
                 # Under Elo arbitration the corpus-based seed strategies

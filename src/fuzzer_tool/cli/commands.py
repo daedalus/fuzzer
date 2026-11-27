@@ -9,6 +9,7 @@ import itertools
 import math
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -104,6 +105,18 @@ def _enable_timestamp_print() -> None:
             _logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
         )
         root.addHandler(handler)
+
+
+def resolve_seed(seed: int | None) -> int:
+    """Return *seed*, or a fresh random 63-bit seed when the user gave none.
+
+    ``RandPool`` is deliberately deterministic (never reads OS entropy), so
+    the diversity between campaigns has to be chosen here: a fixed default
+    made every unseeded run replay the same mutation stream. The chosen
+    value is printed in the startup banner (``[*] Seed: N``); ``-s N``
+    replays it.
+    """
+    return secrets.randbits(63) if seed is None else seed
 
 
 def _mail_config_from_args(args):
@@ -1104,7 +1117,7 @@ def cmd_fuzz(args):
         inprocess=args.inprocess,
         inprocess_direct=args.inprocess_direct,
         inprocess_func=args.inprocess_func,
-        seed=args.seed,
+        seed=resolve_seed(args.seed),
         clock=ClockMode(getattr(args, "clock", ClockMode.VIRTUAL.value)),
         shm_write_guard=WriteGuard[getattr(args, "shm_write_guard", "off").upper()],
         input_placement=InputPlacement(
@@ -8098,8 +8111,9 @@ def _build_parser() -> _Parsers:
         "-s",
         "--seed",
         type=int,
-        default=42,
-        help="RNG seed for reproducibility (default: 42)",
+        default=None,
+        help="RNG seed; pass it to replay a run exactly (default: fresh random "
+        "seed, printed in the banner)",
     )
     fuzz_parser.add_argument(
         "--clock",
