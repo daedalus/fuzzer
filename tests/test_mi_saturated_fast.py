@@ -90,3 +90,43 @@ def test_no_edges_marginals_only():
     t.record(b"\x01" * 50, set(), MAP)
     assert t._joint_cells == 0
     assert t.position_counts[7] == 1 and 8 not in t.position_counts
+
+
+def test_saturated_defers_dicts():
+    """Saturated records land in dense buffers; reading the dicts folds them in."""
+    t = _saturated()
+    t.record(b"ab", {1}, MAP)
+    assert not t._position_counts
+    assert t.position_counts == {0: 1, 1: 1}
+    assert t.byte_marginal[1] == {ord("b"): 1}
+
+
+def test_round_trip_keeps_pending():
+    """to_dict includes not-yet-folded records."""
+    t = _saturated()
+    t.record(b"xyz", {1}, MAP)
+    u = MutualInformationTracker()
+    u.from_dict(t.to_dict())
+    assert u.position_counts == {0: 1, 1: 1, 2: 1}
+
+
+def test_load_discards_pending():
+    """Adversarial: from_dict replaces state; stale pending must not leak in."""
+    t = _saturated()
+    t.record(b"q" * 10, {1}, MAP)
+    t.from_dict({"max_positions": 4, "position_counts": {"0": 7}, "byte_marginal": {}})
+    t._joint_cells = MAX_JOINT_CELLS
+    t.record(b"zzzzzz", {1}, MAP)  # max_positions shrank to 4
+    assert t.position_counts == {0: 8, 1: 1, 2: 1, 3: 1}
+
+
+def test_stale_wp_sees_pending():
+    """Adversarial: weighted_position cache drops when a pending count crosses min_obs."""
+    t = _saturated(max_positions=8)
+    t.min_observations = 2
+    t._wp_sorted_pos = [0]
+    for _ in range(2):  # the check reads the pre-record count: 0, then 1
+        t.record(b"abcd", {1}, MAP)
+    assert t._wp_sorted_pos == [0]
+    t.record(b"abcd", {1}, MAP)  # pre-record count 2 = min_obs, pos 3 not cached
+    assert t._wp_sorted_pos is None
