@@ -32,7 +32,16 @@ def _build(tmp_path: Path, name: str, *extra: str) -> str:
     src.write_text(_SRC)
     out = tmp_path / name
     proc = subprocess.run(
-        ["clang", "-O1", "-fsanitize-coverage=trace-pc-guard", *extra, "-o", str(out), str(src), "-ldl"],
+        [
+            "clang",
+            "-O1",
+            "-fsanitize-coverage=trace-pc-guard",
+            *extra,
+            "-o",
+            str(out),
+            str(src),
+            "-ldl",
+        ],
         capture_output=True,
         text=True,
     )

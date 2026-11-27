@@ -57,9 +57,7 @@ def _rec(op, width=W32, d=0, s=1, flags=0, disp=0, a=0, b=0) -> bytes:
 
 
 def _run(exe: Path, *args: str, data: bytes | None = None):
-    return subprocess.run(
-        [str(exe), *args], input=data, capture_output=True, timeout=120
-    )
+    return subprocess.run([str(exe), *args], input=data, capture_output=True, timeout=120)
 
 
 def test_control_model_matches_hardware(good):
