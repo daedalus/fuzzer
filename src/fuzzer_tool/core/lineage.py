@@ -473,6 +473,77 @@ class LineageTree:
             result[(a, b)] = -1 if lk is None else self._depth_dist(a, b, lk)
         return result
 
+    def peer_distance_sums(self, peers: list[str]) -> dict[str, tuple[int, int]]:
+        """Per node: (sum of tree distances to *peers* in its component, their count).
+
+        O(n) replacement for ``batch_lca_distances`` over every
+        (node, peer) pair. With w(a) = depth(a) - depth(parent(a)) (root:
+        depth(root)) and c(a) = peers in subtree(a), the LCA depths summed
+        over peers telescope to S(i) = S(parent) + c(i)·w(i), so::
+
+            total(i) = m·depth(i) + Dsum - 2·S(i)
+
+        m / Dsum = peer count / peer depth sum of i's component. Duplicate
+        peers count twice; unknown peers are skipped (distance -1).
+        Traversal matches ``batch_lca_distances``: ``_children`` from
+        ``roots()``, then nodes unreachable from a root (cyclic parent
+        chains) as their own components.
+        """
+        order, parent, comp = self._forest_order()
+        cnt: dict[str, int] = dict.fromkeys(order, 0)
+        for p in peers:
+            if p in cnt:
+                cnt[p] += 1
+
+        # Bottom-up subtree peer counts; per-component peer depth sums.
+        depth = {k: self.nodes[k].depth for k in order}
+        dsum: dict[str, int] = {}
+        for k in order:
+            c = cnt[k]
+            if c:
+                r = comp[k]
+                dsum[r] = dsum.get(r, 0) + c * depth[k]
+        for k in reversed(order):
+            pk = parent[k]
+            if pk is not None:
+                cnt[pk] += cnt[k]
+
+        # Top-down prefix of c·w along each root path.
+        out: dict[str, tuple[int, int]] = {}
+        s: dict[str, int] = {}
+        for k in order:
+            pk = parent[k]
+            if pk is None:
+                s[k] = cnt[k] * depth[k]
+            else:
+                s[k] = s[pk] + cnt[k] * (depth[k] - depth[pk])
+            r = comp[k]
+            m = cnt[r]
+            out[k] = (m * depth[k] + dsum.get(r, 0) - 2 * s[k], m)
+        return out
+
+    def _forest_order(self) -> tuple[list[str], dict[str, str | None], dict[str, str]]:
+        """Preorder of the forest with DFS parent and component root per node."""
+        order: list[str] = []
+        parent: dict[str, str | None] = {}
+        comp: dict[str, str] = {}
+        starts = [r for r in self.roots() if r in self.nodes] + list(self.nodes)
+        for start in starts:
+            if start in parent:
+                continue
+            parent[start] = None
+            stack = [start]
+            while stack:
+                k = stack.pop()
+                order.append(k)
+                comp[k] = start
+                for ch in self._children.get(k, ()):
+                    if ch in parent or ch not in self.nodes:
+                        continue
+                    parent[ch] = k
+                    stack.append(ch)
+        return order, parent, comp
+
     def _bucket_queries(
         self, pairs: list[tuple[str, str]], result: dict[tuple[str, str], int]
     ) -> dict[str, list[tuple[str, str]]]:

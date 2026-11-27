@@ -2708,31 +2708,27 @@ class SeedPicker:
         else:
             pool_idx = range(n_sk)
         pool_idx = list(pool_idx)
-        # One batch_lca_distances() call for every (seed, peer) pair
-        # in the pass instead of n * sample_cap individual
-        # lca_distance() calls: each of those walks up to O(depth)
-        # per pair, and depth grows close to linearly with corpus
-        # size on a realistic mostly-chain mutation lineage (no
-        # rebalancing force keeps it at O(log n) or O(sqrt(n))), so
-        # the per-pair loop was O(n * sample_cap * depth) --
-        # quadratic in corpus size. Tarjan's offline algorithm
-        # answers the whole batch in one O((n + q)*alpha(n)) pass.
-        # See docs/handover/handover_trees.md's "other tree
-        # structures" section for the benchmark (~19x at n=8000
-        # with this exact per-seed x64-sample query shape).
-        all_pairs: list[tuple[str, str]] = []
-        per_seed_samples: list[list[str]] = []
+        # Seed i's sample is the pool minus i, capped at sample_cap: pool
+        # members see the other sample_cap entries, non-members see
+        # pool[:sample_cap]. Per-seed totals to the whole pool come from one
+        # O(n) peer_distance_sums() pass (n=4000: 658 -> 8.9 ms vs 64
+        # pairs/seed through batch LCA); non-members subtract the
+        # dropped last entry, members subtract themselves (distance 0).
+        full = tree.peer_distance_sums([all_sk[j] for j in pool_idx])
+        members = set(pool_idx)
+        last = {}
+        if len(pool_idx) > sample_cap and len(members) < n_sk:
+            last = tree.peer_distance_sums([all_sk[pool_idx[sample_cap]]])
+        scale = 2.0 * max_depth
         for i, sk_i in enumerate(all_sk):
-            sample = [all_sk[j] for j in pool_idx if j != i][:sample_cap]
-            per_seed_samples.append(sample)
-            all_pairs.extend((sk_i, k) for k in sample)
-        batch_dist = tree.batch_lca_distances(all_pairs)
-        for i, sk_i in enumerate(all_sk):
-            sample = per_seed_samples[i]
-            valid = [d for d in (batch_dist[(sk_i, k)] for k in sample) if d >= 0]
-            avg = sum(valid) / len(valid) if valid else 0.0
-            diversity = min(avg / (2.0 * max_depth), 1.0)
-            lineage_div[sk_i] = 1.0 + 0.5 * diversity
+            total, m = full.get(sk_i, (0, 0))
+            if i in members:
+                m -= sk_i in tree.nodes
+            else:
+                lt, lm = last.get(sk_i, (0, 0))
+                total, m = total - lt, m - lm
+            avg = total / m if m else 0.0
+            lineage_div[sk_i] = 1.0 + 0.5 * min(avg / scale, 1.0)
         return lineage_div
 
     def _backtrack_keymap(self, seed_keys: list) -> dict:

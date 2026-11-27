@@ -142,6 +142,15 @@ class MutualInformationTracker:
         """
         self.total_observations += 1
         self._total_edges = None
+        if self._wp_live():
+            self._drop_stale_wp(input_bytes)
+
+        # Joint full (every long campaign) or no edges: only the marginals
+        # can change, so skip the edge fold and the per-byte joint gate.
+        if not hit_edges or self._joint_cells >= MAX_JOINT_CELLS:
+            self._count_marginals(input_bytes)
+            return
+
         # The C shim emits full 32-bit edge hashes (caller_ctx ^ prev_loc ^
         # cur_loc) with collisions resolved by SHM linear probing, so edge IDs
         # are opaque hashes, not dense indices.  edge_marginal is a dense array
@@ -150,9 +159,6 @@ class MutualInformationTracker:
         # sighting.  Power-of-two maps (AFL convention) mask; others modulo.
         if map_size > 0:
             hit_edges = _fold_edges(hit_edges, map_size)
-        # Invalidate weighted_position cache when a new position appears
-        if hasattr(self, "_wp_sorted_pos") and self._wp_sorted_pos is not None:
-            self._drop_stale_wp(input_bytes)
 
         for pos, byte_val in enumerate(input_bytes):
             if pos >= self.max_positions:
@@ -171,6 +177,17 @@ class MutualInformationTracker:
                 and hit_edges
             ):
                 self._record_cells(pos, byte_val, hit_edges)
+
+    def _wp_live(self) -> bool:
+        """True while a weighted_position cache exists to invalidate."""
+        return getattr(self, "_wp_sorted_pos", None) is not None
+
+    def _count_marginals(self, input_bytes: bytes) -> None:
+        """Position and byte-value counts only (no joint update possible)."""
+        pc, bm = self.position_counts, self.byte_marginal
+        for pos, byte_val in enumerate(input_bytes[: self.max_positions]):
+            pc[pos] += 1
+            bm[pos][byte_val] += 1
 
     def _record_cells(self, pos: int, byte_val: int, hit_edges: set[int]) -> None:
         """Count (pos, byte_val, edge) cells, keeping the profile sums in step.
