@@ -14,7 +14,7 @@
 > Every A/B result goes in `docs/AB_LEDGER.md` (Hard Rule 59).
 
 ## Coverage & Instrumentation
-- [ ] **`mkv_elem_grow` / `avi_chunk_grow`** (2026-11-27) — shipped (DEEP_DIVE §Grammar-aware). Open: (a) A/B owed; (b) `gstreamer_read` push loop starves avidemux below 4 KiB (one state per chain call): drain with extra pushes; (c) MKV: `Chapters`/`Tags`/`Attachments`, laced blocks not grown; AVI: OpenDML (`odml`, `indx`, `AVIX`) not grown.
+- [ ] **`mkv_elem_grow` / `avi_chunk_grow`** (2026-11-27) — shipped (DEEP_DIVE §Grammar-aware). Open: (a) A/B owed; (b) ~~harness push starvation~~ fixed 2026-11-27 (`FUZZ_GST_DRAIN`); campaigns before it under-report every demuxer: rerun; (c) MKV: `Chapters`/`Tags`/`Attachments`, laced blocks not grown; AVI: OpenDML (`odml`, `indx`, `AVIX`) not grown.
 - [ ] **`mp4_box_grow`** (2026-11-27) — shipped (DEEP_DIVE §Grammar-aware). Open: (a) A/B owed (`AB_PENDING.md`); (b) ~~audio and `avc1` templates~~ shipped 2026-11-27 (also `hvc1`, `alac`, `Opus` not grown); (c) ~~fragmented MP4~~ shipped (`mvex`, `moof`; `sidx`/`mfra` not grown); (d) ~~MP4 seed generator~~ shipped (`tools/corpus_mp4.py`). (e) #487 review: truncated `stco` crash in `mp4_path._shift_chunk_offsets` fixed; no root `moov` before `moof`/`sidx`; grown `stco` still points at offset 0 (no `mdat`), by design.
 - [ ] **Minimize re-hash** (2026-11-27) — fixed: corpus loops use the memoized `seed_key`. Open: `_bulk` (pure-Python XXH64) still runs once per admitted seed; vectorize if admission-time hashing shows in a profile.
 - [ ] **Resume on a rebuilt target** (2026-11-27) — fixed: edge tracker not restored on hash mismatch. Open: other edge-keyed state (`sensitivity`, `crash_mi`, Katz masks, per-seed `coverage_edges`) still restores across builds; audit each.

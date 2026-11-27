@@ -53,6 +53,7 @@ static const struct { const char *caps; const char *elem; } kMap[] = {
 static const char *kFallback[] = { "qtdemux", "matroskademux", "wavparse",
                                    "avidemux", "flvdemux" };
 #define FUZZ_GST_CHUNK 4096u
+#define FUZZ_GST_DRAIN 3u /* empty pushes before EOS: see the push loop */
 /* Per-exec cap on harness-owned objects: a 500-track file must not grow memory. */
 #define FUZZ_GST_MAX_PARSERS 16u
 #define FUZZ_GST_MAX_SINKS 64u
@@ -307,6 +308,13 @@ int fuzz_gstreamer(const unsigned char *buf, size_t size) {
         fr = gst_pad_push(src, b);
         __afl_map_edge(0x3100 + (fr & 0x0F));
     }
+
+    /* Drain: avidemux's push-mode chain advances one state per call
+     * (START -> HEADER -> MOVI -> data), so an input under one chunk got a
+     * single call and never parsed hdrl. Empty buffers give the buffered data
+     * those calls; adapter-based demuxers take them as no-ops. */
+    for (unsigned i = 0; i < FUZZ_GST_DRAIN && fr == GST_FLOW_OK; i++)
+        fr = gst_pad_push(src, gst_buffer_new());
     gst_pad_push_event(src, gst_event_new_eos());
 
     gst_element_set_state(demux, GST_STATE_NULL);
