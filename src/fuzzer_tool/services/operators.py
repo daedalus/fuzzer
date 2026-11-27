@@ -5387,6 +5387,13 @@ class OperatorEngine:
         out = mutate_h264_ps(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("h264_ps_mutate", out, buf)
 
+    def _op_hevc_ps_mutate(self, buf, _byte_idx, _data):
+        """Rewrite one exp-Golomb-aware HEVC VPS/SPS/PPS field (Annex B)."""
+        from fuzzer_tool.core.mutations.hevc_ps import mutate_hevc_ps  # noqa: PLC0415
+
+        out = mutate_hevc_ps(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("hevc_ps_mutate", out, buf)
+
     def _op_flac_frame_mutate(self, buf, _byte_idx, _data):
         """FLAC frame header fields or subframe bits, CRC-8/CRC-16 repaired; frame order."""
         from fuzzer_tool.core.mutations.flac_frame import mutate_flac_frame  # noqa: PLC0415

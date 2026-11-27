@@ -34,6 +34,7 @@ from fuzzer_tool.core.mutations.flac_frame import sniff_flac_frame as _sniff_fla
 from fuzzer_tool.core.mutations.flv_fields import sniff_flv_fields as _sniff_flv_fields
 from fuzzer_tool.core.mutations.g711 import find_payload as _g711_payload
 from fuzzer_tool.core.mutations.h264_ps import sniff_h264_ps as _sniff_h264_ps
+from fuzzer_tool.core.mutations.hevc_ps import sniff_hevc_ps as _sniff_hevc_ps
 from fuzzer_tool.core.mutations.id3 import id3v2_len
 from fuzzer_tool.core.mutations.inet_forms import has_quad as _inet_has_quad
 from fuzzer_tool.core.mutations.ivf import sniff_ivf as _sniff_ivf
@@ -295,6 +296,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "ac3_frame_mutate",
         "dca_frame_mutate",
         "h264_ps_mutate",
+        "hevc_ps_mutate",
         "flac_frame_mutate",
         "mp4_codec_cfg_mutate",
         "mp4_stsd_mutate",
@@ -828,6 +830,8 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "dca_frame_mutate": _sniff_dca,
     # Annex B at offset 0 holding an H.264 SPS/PPS unit.
     "h264_ps_mutate": _sniff_h264_ps,
+    # Annex B at offset 0 holding an H.265 VPS/SPS/PPS unit.
+    "hevc_ps_mutate": _sniff_hevc_ps,
     # Strict CRC-8-valid frame header at offset 0 or after fLaC metadata.
     "flac_frame_mutate": _sniff_flac_frame,
     # ISO-BMFF holding a decoder config box (substring scan, C speed).

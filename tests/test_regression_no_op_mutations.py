@@ -444,6 +444,14 @@ def _battery() -> list[bytes]:
         + b"100 , 10 ; 20\n130 , 11 ; 21\n",
         # h264_ps_mutate: Annex B baseline SPS + PPS.
         b"\x00\x00\x00\x01\x67\x42\xc0\x1e\xed\x08\xf2\x00\x00\x00\x01\x68\xce\x0f\xc8",
+        # hevc_ps_mutate: Annex B VPS + SPS + PPS (libx265 ultrafast, 64x48).
+        b"\x00\x00\x00\x01\x40\x01"
+        + bytes.fromhex("0c01ffff01600000030090000003000003001e959409")
+        + b"\x00\x00\x00\x01\x42\x01"
+        + bytes.fromhex(
+            "0101600000030090000003000003001ea0208316595952930bc05a020000030002000003003210"
+        )
+        + b"\x00\x00\x00\x01\x44\x01\xc0\x73\xc0\x89",
         # flac_frame_mutate: one raw frame, CRC-8 and CRC-16 valid.
         bytes.fromhex("fff8c908009510101010101010109c9c"),
         # mp4_codec_cfg_mutate: moov > ... > stsd > avc1 > avcC.
