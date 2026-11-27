@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 from array import array
+from typing import Any
 
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers._multiscale import ScaleBank
@@ -67,7 +68,7 @@ def optimal_memory(sigma2: float, delta2: float, lo: float, hi: float) -> float:
     if delta2 <= 0.0:
         return hi
     w = (sigma2 / (4.0 * delta2)) ** (1.0 / 3.0)
-    return min(hi, max(lo, w))
+    return float(min(hi, max(lo, w)))
 
 
 def _diff_noise_coeff(fast: float, slow: float) -> float:
@@ -122,7 +123,7 @@ class AutoDUCBScheduler(DUCBScheduler):
         self._hi = per_arm_max
         self._retunes = 0
         self._g_lam = 1.0 - 1.0 / SMOOTH_MEMORY
-        self._g2: dict[str, array] = {}
+        self._g2: dict[str, array[float]] = {}
         start = min(per_arm_max, max(per_arm_min, DUCB_PER_ARM))
         super().__init__(rng=rng, per_arm=start, **kwargs)
 
@@ -184,9 +185,9 @@ class AutoDUCBScheduler(DUCBScheduler):
         if self._k_seen > 0:
             self._grow_k(self._k_seen)
 
-    def bandit_stats(self) -> dict:
+    def bandit_stats(self) -> dict[str, Any]:
         """D-UCB diagnostics plus the current solved memory."""
         stats = super().bandit_stats()
-        stats["ducb_auto_per_arm"] = round(self.per_arm, 2)
+        stats["ducb_auto_per_arm"] = round(self.per_arm or 0.0, 2)
         stats["ducb_auto_retunes"] = self._retunes
         return stats
