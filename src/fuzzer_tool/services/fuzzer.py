@@ -122,6 +122,7 @@ from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
 from fuzzer_tool.core.schedulers import (
     AntColonyScheduler,
+    AutoDUCBScheduler,
     BayesUCBScheduler,
     BOGPUCBScheduler,
     C2UCBScheduler,
@@ -153,11 +154,13 @@ from fuzzer_tool.core.schedulers import (
     MonteCarloScheduler,
     MOptScheduler,
     MOSSScheduler,
+    MultiScaleUCBScheduler,
     PHEScheduler,
     ReactiveGradientScheduler,
     RegretMatchingScheduler,
     ReplicatorScheduler,
     RoundRobinScheduler,
+    ScaleUCBScheduler,
     SoftmaxScheduler,
     SuccessiveEliminationScheduler,
     SWUCBScheduler,
@@ -287,6 +290,9 @@ _OPERATOR_STRATEGY_NAMES = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "ducb_auto",
+    "ms_ucb",
+    "scale_ucb",
     "fewa",
     "moss",
     "bayes_ucb",
@@ -1750,6 +1756,9 @@ class Fuzzer:
         cusum_ucb_epsilon=0.1,
         cusum_ucb_h=40.0,
         cusum_ucb_xi=0.6,
+        ducb_auto=False,
+        ms_ucb=False,
+        scale_ucb=False,
         fewa=False,
         fewa_alpha=0.5,
         fewa_max_window=512,
@@ -4462,6 +4471,16 @@ class Fuzzer:
                 cusum_ucb_xi,
             )
 
+        # Uncertainty-principle trio: estimator memory trades noise against
+        # lag. ducb_auto solves the memory, ms_ucb reads each arm at its own
+        # resolution, scale_ucb learns the mutation scale before the operator.
+        self._use_ducb_auto = ducb_auto
+        self._ducb_auto = AutoDUCBScheduler(rng=self._rng) if ducb_auto else None
+        self._use_ms_ucb = ms_ucb
+        self._ms_ucb = MultiScaleUCBScheduler(rng=self._rng) if ms_ucb else None
+        self._use_scale_ucb = scale_ucb
+        self._scale_ucb = ScaleUCBScheduler(rng=self._rng) if scale_ucb else None
+
         # FEWA (Seznec et al. 2019): windowed elimination for arms whose own
         # yield rots with their own pull count, instead of an environment-wide
         # shift -- see op_fewa.py for how this differs from D-UCB/CUSUM-UCB.
@@ -5205,6 +5224,9 @@ class Fuzzer:
             or self._bayes_ucb
             or self._cucb
             or self._cusum_ucb
+            or self._ducb_auto
+            or self._ms_ucb
+            or self._scale_ucb
             or self._fewa
             or self._fpl
             or self._gradient
@@ -5398,6 +5420,12 @@ class Fuzzer:
             _register_arms(self._cucb)
         if self._cusum_ucb:
             _register_arms(self._cusum_ucb)
+        if self._ducb_auto:
+            _register_arms(self._ducb_auto)
+        if self._ms_ucb:
+            _register_arms(self._ms_ucb)
+        if self._scale_ucb:
+            _register_arms(self._scale_ucb)
         if self._fewa:
             _register_arms(self._fewa)
         if self._softmax:
@@ -9969,6 +9997,9 @@ class Fuzzer:
             ops.append("cucb")
         if getattr(self, "_cusum_ucb", False):
             ops.append("cusum_ucb")
+        for name in ("ducb_auto", "ms_ucb", "scale_ucb"):
+            if getattr(self, f"_{name}", None):
+                ops.append(name)
         if getattr(self, "_fewa", False):
             ops.append("fewa")
         if getattr(self, "_moss", False):
@@ -10671,6 +10702,9 @@ class Fuzzer:
             ops.append("cucb")
         if getattr(self, "_cusum_ucb", False):
             ops.append("cusum_ucb")
+        for name in ("ducb_auto", "ms_ucb", "scale_ucb"):
+            if getattr(self, f"_{name}", None):
+                ops.append(name)
         if getattr(self, "_fewa", False):
             ops.append("fewa")
         if getattr(self, "_moss", False):

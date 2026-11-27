@@ -159,6 +159,9 @@ def _all_operator_schedulers():
         # CUCB batches a round; select_op() closes any round left open.
         ("CUCBScheduler", cucb, cucb.select_op, cucb.record),
         ("CUSUM_UCBScheduler", cusum := S.CUSUM_UCBScheduler(), cusum.select_op, cusum.record),
+        ("AutoDUCBScheduler", auto := S.AutoDUCBScheduler(), auto.select_op, auto.record),
+        ("MultiScaleUCBScheduler", ms := S.MultiScaleUCBScheduler(), ms.select_op, ms.record),
+        ("ScaleUCBScheduler", sc := S.ScaleUCBScheduler(), sc.select_op, sc.record),
         (
             "ConsolidatedV1Scheduler",
             consolidated := S.ConsolidatedV1Scheduler(),

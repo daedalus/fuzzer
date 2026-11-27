@@ -1912,6 +1912,9 @@ class FuzzRound:
                 f._kl_swucb,
                 f._cucb,
                 f._cusum_ucb,
+                f._ducb_auto,
+                f._ms_ucb,
+                f._scale_ucb,
                 f._fewa,
                 f._fpl,
                 # On-policy, like exp3/cmaes above: the importance weight is only

@@ -15,6 +15,7 @@ from fuzzer_tool.core.schedulers.op_corral import CorralScheduler
 from fuzzer_tool.core.schedulers.op_cucb import CUCBScheduler
 from fuzzer_tool.core.schedulers.op_cusum_ucb import CUSUM_UCBScheduler
 from fuzzer_tool.core.schedulers.op_ducb import DUCBScheduler
+from fuzzer_tool.core.schedulers.op_ducb_auto import AutoDUCBScheduler
 from fuzzer_tool.core.schedulers.op_epsilon_greedy import EpsilonGreedyScheduler
 from fuzzer_tool.core.schedulers.op_exp3 import Exp3Scheduler
 from fuzzer_tool.core.schedulers.op_exp3_ix import EXP3IXScheduler
@@ -33,11 +34,13 @@ from fuzzer_tool.core.schedulers.op_las_vegas import LasVegasScheduler
 from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 from fuzzer_tool.core.schedulers.op_mopt import MOptScheduler
 from fuzzer_tool.core.schedulers.op_moss import MOSSScheduler
+from fuzzer_tool.core.schedulers.op_ms_ucb import MultiScaleUCBScheduler
 from fuzzer_tool.core.schedulers.op_phe import PHEScheduler
 from fuzzer_tool.core.schedulers.op_reactive import ReactiveGradientScheduler
 from fuzzer_tool.core.schedulers.op_regret_matching import RegretMatchingScheduler
 from fuzzer_tool.core.schedulers.op_replicator import ReplicatorScheduler
 from fuzzer_tool.core.schedulers.op_round_robin import RoundRobinScheduler
+from fuzzer_tool.core.schedulers.op_scale_ucb import ScaleUCBScheduler
 from fuzzer_tool.core.schedulers.op_softmax import SoftmaxScheduler
 from fuzzer_tool.core.schedulers.op_successive_elim import SuccessiveEliminationScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
@@ -92,6 +95,9 @@ __all__ = [
     "SWUCBScheduler",
     "KL_DUCBScheduler",
     "KL_SWUCBScheduler",
+    "AutoDUCBScheduler",
+    "MultiScaleUCBScheduler",
+    "ScaleUCBScheduler",
     "RoundRobinScheduler",
     "CanaryScheduler",
     "SuccessiveEliminationScheduler",

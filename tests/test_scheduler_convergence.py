@@ -62,6 +62,7 @@ import pytest
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers import (
     AntColonyScheduler,
+    AutoDUCBScheduler,
     CMAESScheduler,
     ConsolidatedV1Scheduler,
     ConsolidatedV2Scheduler,
@@ -83,10 +84,12 @@ from fuzzer_tool.core.schedulers import (
     MonteCarloScheduler,
     MOptScheduler,
     MOSSScheduler,
+    MultiScaleUCBScheduler,
     PHEScheduler,
     ReactiveGradientScheduler,
     RegretMatchingScheduler,
     ReplicatorScheduler,
+    ScaleUCBScheduler,
     SWUCBScheduler,
     TsallisINFScheduler,
 )
@@ -435,6 +438,12 @@ RECOVERS = {
     # Gradient (STUCK below) plus success-clocked forgetting. Over 20 seeds:
     # min 0.946; FIXED_SEED 0.955.
     "Reactive": (lambda: ReactiveGradientScheduler(rng=RandPool(FIXED_SEED)), 0.85),
+    # Noise/lag-solved memory. Over 12 seeds: min 0.789 (D-UCB 0.701).
+    "AutoDUCB": (lambda: AutoDUCBScheduler(rng=RandPool(FIXED_SEED)), 0.65),
+    # Per-arm Lepski readout. Over 12 seeds: min 0.991.
+    "MSUCB": (lambda: MultiScaleUCBScheduler(rng=RandPool(FIXED_SEED)), 0.90),
+    # Scale band, then operator. Over 12 seeds: min 0.997.
+    "ScaleUCB": (lambda: ScaleUCBScheduler(rng=RandPool(FIXED_SEED)), 0.90),
 }
 
 
@@ -459,6 +468,10 @@ RECENCY_STATIONARY = {
     "DUCB": (DUCBScheduler, 0.80),
     "SWUCB": (SWUCBScheduler, 0.80),
     "CUCB": (CUCBScheduler, 0.65),
+    # Over 12 seeds: min 0.959, 0.997, 1.000.
+    "AutoDUCB": (AutoDUCBScheduler, 0.85),
+    "MSUCB": (MultiScaleUCBScheduler, 0.90),
+    "ScaleUCB": (ScaleUCBScheduler, 0.90),
 }
 
 
