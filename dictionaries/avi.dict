@@ -1,0 +1,39 @@
+# AVI (RIFF) tokens: https://learn.microsoft.com/en-us/windows/win32/directshow/avi-riff-file-reference
+
+# Form and LIST types
+"AVI "
+"AVIX"
+"LIST"
+"hdrl"
+"strl"
+"movi"
+"odml"
+"rec "
+"INFO"
+
+# Chunks
+"avih"
+"strh"
+"strf"
+"strd"
+"strn"
+"indx"
+"idx1"
+"dmlh"
+"vprp"
+"JUNK"
+"00dc"
+"00db"
+"01wb"
+"ix00"
+
+# Stream types and common handlers
+"vids"
+"auds"
+"txts"
+"mids"
+"FMP4"
+"XVID"
+"DIVX"
+"H264"
+"MJPG"

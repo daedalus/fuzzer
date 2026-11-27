@@ -173,6 +173,7 @@ from fuzzer_tool.core.schedulers.op_ducb import DUCB_PER_ARM
 from fuzzer_tool.core.schedulers.op_hill_climb import OpHillClimbScheduler
 from fuzzer_tool.core.schedulers.op_hrrn import OpHRRNScheduler
 from fuzzer_tool.core.schedulers.op_p2c import OpP2CScheduler
+from fuzzer_tool.core.schedulers.op_pair_cover import PairCoverScheduler
 from fuzzer_tool.core.schedulers.op_qlearn import OpQLearnScheduler
 from fuzzer_tool.core.schedulers.op_stride import OpStrideScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCB_PER_ARM
@@ -1708,6 +1709,7 @@ class Fuzzer:
         elo_time_credit=False,
         invasion=False,
         round_robin=False,
+        op_uniform=False,
         canary_scheduler=False,
         garch=False,
         continuum=False,
@@ -2028,6 +2030,7 @@ class Fuzzer:
         # the same standalone treatment round_robin already gets on the
         # operator side.
         seed_round_robin_scheduler=False,
+        seed_uniform_scheduler=False,
         # Least-slack revisit bound in seconds (P3-3 step 6); 0 disables.
         # See SeedPicker._pick_lst_seed.
         lst_revisit=0.0,
@@ -2319,6 +2322,8 @@ class Fuzzer:
         # --pos-pca-rotation: how the pca arm turns byteflip traces into groups
         # ("pca" argmax, default; "varimax", core/byte_pca.py). Appended.
         pos_pca_rotation="pca",
+        # --op-pair-cover: 2-way operator-sequence coverage arm. Off, Elo-only. Appended.
+        op_pair_cover=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3879,6 +3884,13 @@ class Fuzzer:
 
             self._seed_round_robin = SeedRoundRobinScheduler()
             log.info("Seed round-robin scheduling enabled")
+        self._use_seed_uniform = seed_uniform_scheduler
+        self._seed_uniform = None
+        if seed_uniform_scheduler:
+            from fuzzer_tool.core.schedulers.seed_uniform import SeedUniformScheduler
+
+            self._seed_uniform = SeedUniformScheduler(rng=self._rng)
+            log.info("Seed-uniform scheduling enabled")
         # Seed-arena deficit round robin (see core/schedulers/seed_drr.py).
         self._use_seed_drr = seed_drr_scheduler
         self._seed_drr = None
@@ -4816,6 +4828,9 @@ class Fuzzer:
         self._op_tabu = OpTabuScheduler() if op_tabu else None
         self._use_op_hill_climb = op_hill_climb
         self._op_hill_climb = OpHillClimbScheduler(rng=self._rng) if op_hill_climb else None
+        # --op-pair-cover: 2-way operator-sequence coverage, then pair exploitation.
+        self._use_op_pair_cover = op_pair_cover
+        self._op_pair_cover = PairCoverScheduler(rng=self._rng) if op_pair_cover else None
 
         # Per-operator Good-Turing discovery probability. Off by default,
         # Elo-only; see core/schedulers/op_good_turing.py.
@@ -4937,6 +4952,14 @@ class Fuzzer:
         if round_robin:
             self._round_robin = RoundRobinScheduler()
             log.info("Round-robin operator scheduling enabled")
+
+        self._use_uniform = op_uniform
+        self._uniform = None
+        if op_uniform:
+            from fuzzer_tool.core.schedulers.op_uniform import UniformScheduler
+
+            self._uniform = UniformScheduler()
+            log.info("Uniform operator scheduling enabled")
 
         # Canary: deliberately worst-in-class operator scheduler. Fed the
         # same record(op, success, weight) signal as every real scheduler
@@ -5486,6 +5509,8 @@ class Fuzzer:
             _register_arms(self._c2ucb)
         if self._round_robin:
             _register_arms(self._round_robin)
+        if self._uniform:
+            _register_arms(self._uniform)
         if self._canary:
             _register_arms(self._canary)
         if self._op_tpe:
@@ -5504,6 +5529,8 @@ class Fuzzer:
             _register_arms(self._op_tabu)
         if self._op_hill_climb:
             _register_arms(self._op_hill_climb)
+        if self._op_pair_cover:
+            _register_arms(self._op_pair_cover)
         if self._op_good_turing:
             _register_arms(self._op_good_turing)
         if self._elo:

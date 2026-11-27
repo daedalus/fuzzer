@@ -54,6 +54,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Consolidated seed arm | Merged seed-arm features | U | vs `p2c`/`drr` |
 | OS/net ports (`mlfq`, `stride`, `eevdf`, `bfq`, `sfq`, `codel`, `aimd`, `p2c`, `op_stride`, `op_p2c`) | Kernel/network schedulers as seed/op arms | U | each vs `seed_round_robin`/`drr` |
 | Classic op arms (`op_hrrn`, `op_qlearn`, `op_tabu`, `op_hill_climb`) | HRRN, Q-learning, tabu search, hill climbing as op arms | U | each vs `op_p2c`/`eps_greedy` under `--elo`; fuzzgoat (clang) 20 seeds x 10k + A/A |
+| Pair-cover op arm (`--op-pair-cover`) | Cover every (prev op, next op) pair, then Thompson-sample the pair posterior | U | vs `op_qlearn`/`op_p2c` under `--elo`; fuzzgoat (clang) 20 seeds x 10k + A/A |
 | LST revisit (`--lst-revisit`) | Revisit seeds overdue by cost deadline D | U | `tools/cost_dispersion.py` first; sweep D |
 | Kruskal count (`--kruskal-count`) | Coupling-chain seed score | U | vs default and a `1/len` control |
 | Entropy LOO (`--entropy-loo`) | Leave-one-out entropy seed value | U | LOO vs Shapley rank disagreement first |
@@ -133,6 +134,7 @@ Off arm needs a tree without the op.
 | `mp4_box_grow` | Grow missing required MP4 boxes | S | GStreamer qtdemux, empty corpus, edges of ffmpeg-made MP4/MOV/3GP reached, tree without the op |
 | `fat_field_mutate`, `ntfs_record_mutate`, `ext2/ext4_field_mutate`, `zfs_label_mutate`, `tcpip_packet_mutate` | FS image / packet structure, checksums repaired | S | needs fs/net targets (e2fsprogs, ntfs-3g, lwIP); masked vs live |
 | `ldpc_fix` (`--ldpc-alist`), `turbo_fix` (`--turbo-k`) | ECC codeword repair / error injection | N | needs a decoder target (aff3ct, liquid-dsp); op vs none |
+| `mkv_elem_grow`, `avi_chunk_grow` | Grow missing Matroska elements / AVI chunks | S | GStreamer, empty corpus, edges of ffmpeg-made MKV/AVI reached; AVI needs the harness drain fix first |
 | `parity_lock` / `parity_break` | Parity-preserving flips | S | needs a 7E1 / DES-key target |
 | Line codes (`--op-line-code`) | Manchester/HDLC/COBS re-encode | S | needs a line-code target |
 | `literal_mismatch` + frontier (`tools/frontier.py`) | Literal-chain gap op | N | `--reps 3`, frontier counts as metric |

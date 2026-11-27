@@ -431,6 +431,14 @@ def _battery() -> list[bytes]:
         + bytes(range(0, 256, 8)),
         # x509_field_mutate: SEQUENCE { SEQUENCE {...} } (reached only by trickle luck before).
         b"\x30\x12\x30\x10\x02\x01\x01" + bytes(13),
+        # ffconcat_chunk_mutate / rasc_chunk_mutate: reached only by trickle luck before.
+        b"ffconcat version 1.0\nfile 'a.mp4'\nduration 5\nfile 'b.mp4'\ninpoint 1\n",
+        b"RIFF\x40\x00\x00\x00RASC\x01"
+        + struct.pack("<III", 16, 0, 1)
+        + bytes(16)
+        + b"\x02"
+        + struct.pack("<III", 8, 16, 2)
+        + bytes(8),
         # inet_forms: a canonical dotted quad.
         b"GET http://10.1.2.3/ HTTP/1.0\r\n",
         # fat_field_mutate / ntfs_record_mutate / zfs_label_mutate: minimal images.
@@ -462,6 +470,14 @@ def _battery() -> list[bytes]:
         + b"100 , 10 ; 20\n130 , 11 ; 21\n",
         # h264_ps_mutate: Annex B baseline SPS + PPS.
         b"\x00\x00\x00\x01\x67\x42\xc0\x1e\xed\x08\xf2\x00\x00\x00\x01\x68\xce\x0f\xc8",
+        # hevc_ps_mutate: Annex B VPS + SPS + PPS (libx265 ultrafast, 64x48).
+        b"\x00\x00\x00\x01\x40\x01"
+        + bytes.fromhex("0c01ffff01600000030090000003000003001e959409")
+        + b"\x00\x00\x00\x01\x42\x01"
+        + bytes.fromhex(
+            "0101600000030090000003000003001ea0208316595952930bc05a020000030002000003003210"
+        )
+        + b"\x00\x00\x00\x01\x44\x01\xc0\x73\xc0\x89",
         # flac_frame_mutate: one raw frame, CRC-8 and CRC-16 valid.
         bytes.fromhex("fff8c908009510101010101010109c9c"),
         # mp4_codec_cfg_mutate: moov > ... > stsd > avc1 > avcC.

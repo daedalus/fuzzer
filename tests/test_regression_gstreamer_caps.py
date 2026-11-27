@@ -103,6 +103,7 @@ GstEvent *gst_event_new_caps(GstCaps *);
 GstEvent *gst_event_new_eos(void);
 void gst_event_unref(GstEvent *);
 GstBuffer *gst_buffer_new_memdup(gconstpointer, gsize);
+GstBuffer *gst_buffer_new(void);
 void gst_buffer_unref(GstBuffer *);
 void g_object_unref(gpointer);
 #define gst_object_unref(obj) g_object_unref(obj)
@@ -182,6 +183,7 @@ GstEvent *gst_event_new_caps(GstCaps *c) { (void)c; return new_event(EVENT_CAPS)
 GstEvent *gst_event_new_eos(void) { return new_event(EVENT_EOS); }
 void gst_event_unref(GstEvent *e) { free(e); }
 GstBuffer *gst_buffer_new_memdup(gconstpointer d, gsize n) { (void)d; (void)n; GstBuffer *b = malloc(sizeof *b); b->type = 0; b->offset = 0; return b; }
+GstBuffer *gst_buffer_new(void) { return gst_buffer_new_memdup(NULL, 0); }
 void gst_buffer_unref(GstBuffer *b) { free(b); }
 void g_object_unref(gpointer p) { (void)p; }
 gpointer gst_object_ref_sink(gpointer p) { return p; }

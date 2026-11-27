@@ -110,6 +110,7 @@ other schedulers:
 | `schedulers/op_replicator.py` | `ReplicatorScheduler` | Evolutionary replicator dynamics over the operator population |
 | `schedulers/op_exp3.py` | `Exp3Scheduler` | EXP3 adversarial bandit (non-stationary rewards) |
 | `schedulers/op_hrrn.py` / `op_qlearn.py` / `op_tabu.py` / `op_hill_climb.py` | `OpHRRNScheduler` / `OpQLearnScheduler` / `OpTabuScheduler` / `OpHillClimbScheduler` | Classic op arms: response ratio, Q-learning on op chains, tabu search, hill climbing (Elo-only) |
+| `schedulers/op_pair_cover.py` | `PairCoverScheduler` | 2-way op-sequence coverage, then pair-posterior Thompson (Elo-only) |
 | `schedulers/op_epsilon_greedy.py` | `EpsilonGreedyScheduler` | Epsilon-greedy with exponential annealing |
 | `schedulers/op_hierarchical.py` | `HierarchicalBanditScheduler` | Two-level Thompson bandit: category → operator |
 | `schedulers/op_gp_ucb.py` | `GPUCBScheduler` | GP-UCB with RBF kernel over operator-category features |

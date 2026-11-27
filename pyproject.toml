@@ -299,6 +299,7 @@ module = [
     "fuzzer_tool.core.mutations.hackers_delight",
     "fuzzer_tool.core.mutations.hash_len_ext",
     "fuzzer_tool.core.mutations.heap_chunk",
+    "fuzzer_tool.core.mutations.hevc_ps",
     "fuzzer_tool.core.mutations.inet_forms",
     "fuzzer_tool.core.mutations.int_encodings",
     "fuzzer_tool.core.mutations.isobmff",

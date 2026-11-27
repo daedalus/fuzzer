@@ -965,6 +965,11 @@ def cmd_fuzz(args):
         # Softmax and TopK scheduler flags for --elo all
         args.softmax = True
         args.topk = True
+        # Uniform / pair-cover schedulers
+        args.op_uniform = True
+        args.seed_uniform_scheduler = True
+        args.pos_uniform = True
+        args.op_pair_cover = True
         # Mutation-side schedulers/features that are not Elo-arbitrated but are
         # part of the scheduling stack; flip them on so --elo all is the
         # everything-on switch (power schedule fast = classic AFL default)
@@ -1350,6 +1355,7 @@ def cmd_fuzz(args):
         op_qlearn=getattr(args, "op_qlearn", False),
         op_tabu=getattr(args, "op_tabu", False),
         op_hill_climb=getattr(args, "op_hill_climb", False),
+        op_pair_cover=getattr(args, "op_pair_cover", False),
         op_good_turing=getattr(args, "op_good_turing", False),
         strata=getattr(args, "strata", False),
         shaped_reward=getattr(args, "shaped_reward", False),
@@ -3552,7 +3558,7 @@ def cmd_sweep(args):
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
 #
-# op_hrrn, op_qlearn, op_tabu, op_hill_climb (--op-hrrn ...) are excluded as
+# op_hrrn, op_qlearn, op_tabu, op_hill_climb, op_pair_cover (--op-hrrn ...) are excluded as
 # unmeasured: unit tests only, no paired run (docs/AB_PENDING.md).
 #
 # seed_fess_scheduler (--seed-fess-scheduler), fess_inherit (--fess-inherit)
@@ -3763,6 +3769,7 @@ _HAIL_MARY_FLAGS = (
     "canary_scheduler",
     "seed_canary_scheduler",
     "seed_round_robin_scheduler",
+    "seed_uniform_scheduler",
     "seed_drr_scheduler",
     "cuckoo_seed_filter",
     "swap_walk",
@@ -3793,6 +3800,8 @@ _HAIL_MARY_FLAGS = (
     "region_profile",
     "ga",
     "round_robin",
+    "op_uniform",
+    "op_pair_cover",
     "qea",
     "mcts",
     "alphabeta",
@@ -3875,6 +3884,7 @@ _HAIL_MARY_FLAGS = (
     "burn_front",
     "pos_canary",
     "pos_round_robin",
+    "pos_uniform",
     "pos_fibonacci",
     "pos_kl_ducb",
     "pos_fractal",
@@ -4808,6 +4818,12 @@ def _build_parser() -> _Parsers:
         help="Enable round-robin operator scheduling (deterministic cycling through operators)",
     )
     fuzz_parser.add_argument(
+        "--op-uniform",
+        action="store_true",
+        help="Enable the uniform operator scheduler: picks an operator uniformly at random, "
+        "a signal-free baseline for the operator Elo tournament and the no-``--elo`` fallback chain.",
+    )
+    fuzz_parser.add_argument(
         "--canary-scheduler",
         action="store_true",
         help="Enable the canary operator scheduler: a deliberately worst-in-class scheduler "
@@ -4855,6 +4871,13 @@ def _build_parser() -> _Parsers:
         "--elo to run: it is also reachable directly whenever no arbiter picks a seed first.",
     )
     fuzz_parser.add_argument(
+        "--seed-uniform-scheduler",
+        action="store_true",
+        help="Enable the uniform seed scheduler: picks a corpus seed uniformly at random, "
+        "a signal-free baseline for the seed-arena Elo tournament and the no-``--elo`` fallback chain.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-drr-scheduler",
         "--seed-drr-scheduler",
         action="store_true",
         help="Enable the seed-arena deficit-round-robin scheduler: like "
@@ -5157,6 +5180,12 @@ def _build_parser() -> _Parsers:
         "strategy, not a floor, so it needs no --position-arena to run: it is also "
         "one more candidate in the uniform position pick, alongside burn-front. "
         "Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-uniform",
+        action="store_true",
+        help="Enable the uniform position scheduler: proposes offsets uniformly at random, "
+        "the always-on baseline arm of the position-arena Elo tournament.",
     )
     fuzz_parser.add_argument(
         "--pos-fibonacci",
@@ -6875,6 +6904,12 @@ def _build_parser() -> _Parsers:
         action="store_true",
         default=False,
         help="Hill-climbing operator arm: holds one operator, moves to a random neighbour when its posterior mean is higher or on a random restart (experimental, Elo-only -- see core/schedulers/op_hill_climb.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-pair-cover",
+        action="store_true",
+        default=False,
+        help="Pair-coverage operator arm: tries every (previous op, next op) pair, then Thompson-samples the pair posterior shrunk toward the op's marginal (experimental, Elo-only -- see core/schedulers/op_pair_cover.py).",
     )
     fuzz_parser.add_argument(
         "--op-good-turing",

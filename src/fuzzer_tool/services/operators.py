@@ -888,9 +888,13 @@ _FALLBACK_PRECEDENCE = (
     "successive_elim",
     "las_vegas",
     "round_robin",
+    # Uniform random operator scheduler: signal-free baseline, same posture as
+    # round_robin (real strategy, not a floor; reachable without --elo).
+    # Pinned by test_regression_scheduler_fallback_precedence.
+    "uniform",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
     # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, op_hrrn, op_qlearn,
-    # op_tabu, op_hill_climb, gradient, reactive, whittle, corral, softmax, topk,
+    # op_tabu, op_hill_climb, op_pair_cover, gradient, reactive, whittle, corral, softmax, topk,
     # tsallis, kalman_ts, gamma_poisson, ids, phe, exp3_ix, regret_matching, automaton,
     # ant_colony are deliberately absent
     # here: they are unproven exploratory arms
@@ -969,6 +973,7 @@ _PLAIN_STRATEGIES = {
     "automaton": "_automaton",
     "ant_colony": "_ant_colony",
     "round_robin": "_round_robin",
+    "uniform": "_uniform",
     "canary": "_canary",
     "op_katz": "_op_katz",
     "op_kuramoto": "_op_kuramoto",
@@ -983,6 +988,7 @@ _PLAIN_STRATEGIES = {
     "op_qlearn": "_op_qlearn",
     "op_tabu": "_op_tabu",
     "op_hill_climb": "_op_hill_climb",
+    "op_pair_cover": "_op_pair_cover",
     "op_good_turing": "_op_good_turing",
     "softmax": "_softmax",
     "topk": "_topk",
@@ -1106,6 +1112,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("invasion")
     if f._use_round_robin and f._round_robin:
         available.append("round_robin")
+    if f._use_uniform and f._uniform:
+        available.append("uniform")
     if f._use_canary and f._canary:
         available.append("canary")
     if f._use_op_katz and f._op_katz:
@@ -1138,6 +1146,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_tabu")
     if f._use_op_hill_climb and f._op_hill_climb:
         available.append("op_hill_climb")
+    if f._use_op_pair_cover and f._op_pair_cover:
+        available.append("op_pair_cover")
     if f._use_op_good_turing and f._op_good_turing:
         available.append("op_good_turing")
     if f._use_softmax and f._softmax:
@@ -5387,6 +5397,13 @@ class OperatorEngine:
         out = mutate_h264_ps(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("h264_ps_mutate", out, buf)
 
+    def _op_hevc_ps_mutate(self, buf, _byte_idx, _data):
+        """Rewrite one exp-Golomb-aware HEVC VPS/SPS/PPS field (Annex B)."""
+        from fuzzer_tool.core.mutations.hevc_ps import mutate_hevc_ps  # noqa: PLC0415
+
+        out = mutate_hevc_ps(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("hevc_ps_mutate", out, buf)
+
     def _op_flac_frame_mutate(self, buf, _byte_idx, _data):
         """FLAC frame header fields or subframe bits, CRC-8/CRC-16 repaired; frame order."""
         from fuzzer_tool.core.mutations.flac_frame import mutate_flac_frame  # noqa: PLC0415
@@ -5434,6 +5451,20 @@ class OperatorEngine:
 
         out = grow_mp4(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
         return self._or_declined("mp4_box_grow", out, buf)
+
+    def _op_mkv_elem_grow(self, buf, _byte_idx, _data):
+        """Add a missing required Matroska element (Segment..Cues) with its children."""
+        from fuzzer_tool.core.mutations.mkv_grow import grow_mkv  # noqa: PLC0415
+
+        out = grow_mkv(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("mkv_elem_grow", out, buf)
+
+    def _op_avi_chunk_grow(self, buf, _byte_idx, _data):
+        """Add a missing required AVI chunk/LIST (hdrl..idx1) with its children."""
+        from fuzzer_tool.core.mutations.avi_grow import grow_avi  # noqa: PLC0415
+
+        out = grow_avi(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("avi_chunk_grow", out, buf)
 
     def _op_avi_field_mutate(self, buf, _byte_idx, _data):
         """One avih/strh/strf/indx/idx1 field inside the AVI LIST tree."""
