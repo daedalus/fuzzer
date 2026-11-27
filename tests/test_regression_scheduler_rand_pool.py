@@ -37,9 +37,12 @@ from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.op_cucb import CUCBScheduler
 from fuzzer_tool.core.schedulers.op_cusum_ucb import CUSUM_UCBScheduler
 from fuzzer_tool.core.schedulers.op_ducb import DUCBScheduler
+from fuzzer_tool.core.schedulers.op_ducb_auto import AutoDUCBScheduler
 from fuzzer_tool.core.schedulers.op_gp_ucb import GPUCBScheduler
 from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
 from fuzzer_tool.core.schedulers.op_kl_swucb import KL_SWUCBScheduler
+from fuzzer_tool.core.schedulers.op_ms_ucb import MultiScaleUCBScheduler
+from fuzzer_tool.core.schedulers.op_scale_ucb import ScaleUCBScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
 
 SCHEDULERS_DIR = (
@@ -54,6 +57,9 @@ RULE_16_SCHEDULERS = {
     "op_cusum_ucb.py": CUSUM_UCBScheduler,
     "op_kl_ducb.py": KL_DUCBScheduler,
     "op_kl_swucb.py": KL_SWUCBScheduler,
+    "op_ducb_auto.py": AutoDUCBScheduler,
+    "op_ms_ucb.py": MultiScaleUCBScheduler,
+    "op_scale_ucb.py": ScaleUCBScheduler,
 }
 
 #: Draws no randomness at all, so it takes no rng; pinned deterministic.

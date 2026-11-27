@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/daedalus/fuzzer)
 
-**Information-dense, coverage-guided binary fuzzer**: 364 mutation operators across 9 categories, 60 operator-scheduling strategies under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring. *(The operator and strategy counts are enforced against the registry by `tests/test_readme_claims.py`.)*
+**Information-dense, coverage-guided binary fuzzer**: 367 mutation operators across 9 categories, 63 operator-scheduling strategies under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring. *(The operator and strategy counts are enforced against the registry by `tests/test_readme_claims.py`.)*
 
 > **Honest caveat**: This is probably the most complex fuzzer from an information-theory standpoint, and also the slowest raw-throughput. The tradeoff is speed for edge-discovery novelty. For production fuzzing at scale, AFL family fuzzers remain the best choice.
 
@@ -139,6 +139,9 @@ mutators as registry operators.
 | CMA-ES | `--cma-es` | Covariance-matrix adaptation over the continuous operator-weight vector |
 | LinUCB contextual | `--contextual` | Ridge-regression contextual bandit — operator choice conditioned on a seed feature vector |
 | Discounted UCB | `--ducb` | UCB with geometric discounting for non-stationary reward |
+| Auto-memory D-UCB | `--ducb-auto` | D-UCB whose memory is solved from measured noise vs drift |
+| Multi-scale UCB | `--ms-ucb` | Reads each operator at the longest memory consistent with shorter ones |
+| Scale-band UCB | `--scale-ucb` | Learns the mutation scale (bit … structure) before the operator |
 | Sliding-window UCB | `--swucb` | UCB over the last `--swucb-window` pulls only |
 | Combinatorial UCB | `--cucb` | CUCB over operator *sets* rather than single arms |
 | MCTS / UCT | `--mcts` | Tree search for seed selection over the mutation lineage forest |

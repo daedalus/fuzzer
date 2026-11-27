@@ -877,6 +877,11 @@ _FALLBACK_PRECEDENCE = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    # Convergence harness, 12 seeds: DecayingBest late-share min 0.789
+    # (ducb_auto), 0.991 (ms_ucb), 0.997 (scale_ucb) vs ducb 0.701.
+    "ducb_auto",
+    "ms_ucb",
+    "scale_ucb",
     "moss",
     "bayes_ucb",
     "fpl",
@@ -941,6 +946,9 @@ _PLAIN_STRATEGIES = {
     "kl_swucb": "_kl_swucb",
     "cucb": "_cucb",
     "cusum_ucb": "_cusum_ucb",
+    "ducb_auto": "_ducb_auto",
+    "ms_ucb": "_ms_ucb",
+    "scale_ucb": "_scale_ucb",
     "fewa": "_fewa",
     "moss": "_moss",
     "bayes_ucb": "_bayes_ucb",
@@ -1050,6 +1058,12 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("cucb")
     if f._use_cusum_ucb and f._cusum_ucb:
         available.append("cusum_ucb")
+    if f._use_ducb_auto and f._ducb_auto:
+        available.append("ducb_auto")
+    if f._use_ms_ucb and f._ms_ucb:
+        available.append("ms_ucb")
+    if f._use_scale_ucb and f._scale_ucb:
+        available.append("scale_ucb")
     if f._use_fewa and f._fewa:
         available.append("fewa")
     if f._use_moss and f._moss:

@@ -911,6 +911,9 @@ def cmd_fuzz(args):
         args.kl_swucb_window = 4000
         args.cucb = True
         args.cusum_ucb = True
+        args.ducb_auto = True
+        args.ms_ucb = True
+        args.scale_ucb = True
         args.fewa = True
         args.fpl = True
         args.gradient = True
@@ -1242,6 +1245,9 @@ def cmd_fuzz(args):
         cusum_ucb_epsilon=getattr(args, "cusum_ucb_epsilon", 0.1),
         cusum_ucb_h=getattr(args, "cusum_ucb_h", 40.0),
         cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
+        ducb_auto=getattr(args, "ducb_auto", False),
+        ms_ucb=getattr(args, "ms_ucb", False),
+        scale_ucb=getattr(args, "scale_ucb", False),
         fewa=getattr(args, "fewa", False),
         fewa_alpha=getattr(args, "fewa_alpha", 0.5),
         fewa_max_window=getattr(args, "fewa_max_window", 512),
@@ -3720,6 +3726,9 @@ _HAIL_MARY_FLAGS = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "ducb_auto",
+    "ms_ucb",
+    "scale_ucb",
     "fewa",
     "fpl",
     "corral",
@@ -5541,6 +5550,21 @@ def _build_parser() -> _Parsers:
         type=float,
         default=0.6,
         help="CUSUM-UCB exploration constant inside the post-reset UCB width (default: 0.6)",
+    )
+    fuzz_parser.add_argument(
+        "--ducb-auto",
+        action="store_true",
+        help="D-UCB with memory solved from measured noise and drift: W*=(s2/4d2)^(1/3)",
+    )
+    fuzz_parser.add_argument(
+        "--ms-ucb",
+        action="store_true",
+        help="Multi-scale UCB: per-arm Lepski choice among 16/64/256-pull memories",
+    )
+    fuzz_parser.add_argument(
+        "--scale-ucb",
+        action="store_true",
+        help="Two-level multi-scale UCB: mutation scale band (bit..structure), then operator",
     )
     fuzz_parser.add_argument(
         "--fewa",

@@ -17,7 +17,14 @@ import math
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers import CUCBScheduler, DUCBScheduler, SWUCBScheduler
+from fuzzer_tool.core.schedulers import (
+    AutoDUCBScheduler,
+    CUCBScheduler,
+    DUCBScheduler,
+    MultiScaleUCBScheduler,
+    ScaleUCBScheduler,
+    SWUCBScheduler,
+)
 from fuzzer_tool.core.schedulers.op_gp_ucb import GPUCBScheduler
 from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
 from fuzzer_tool.core.schedulers.op_kl_swucb import KL_SWUCBScheduler
@@ -396,6 +403,9 @@ class TestCUCB:
         KL_DUCBScheduler,
         KL_SWUCBScheduler,
         GPUCBScheduler,
+        AutoDUCBScheduler,
+        MultiScaleUCBScheduler,
+        ScaleUCBScheduler,
     ],
 )
 class TestSharedContract:

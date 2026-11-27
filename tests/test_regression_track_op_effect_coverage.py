@@ -50,6 +50,9 @@ _KWARGS = {
     "kl_swucb": {"kl_swucb": True},
     "cucb": {"cucb": True},
     "cusum_ucb": {"cusum_ucb": True},
+    "ducb_auto": {"ducb_auto": True},
+    "ms_ucb": {"ms_ucb": True},
+    "scale_ucb": {"scale_ucb": True},
     "c2ucb": {"c2ucb": True},
     # bo_gp_ucb is fully wired in services/fuzzer.py (ballot name,
     # _track_op_effect, _register_arms, record fan-out, CLI) but never
