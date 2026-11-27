@@ -93,6 +93,8 @@ def _shift_chunk_offsets(out: bytearray, at: int, delta: int) -> None:
         width = _CHUNK_OFFSETS[bytes(out[hit.start + 4 : hit.start + 8])]
         fmt = ">I" if width == 4 else ">Q"
         first = hit.start + BOX_HDR + FULLBOX_HDR + 4
+        if first > hit.start + hit.size:
+            continue  # truncated table: no entry count to read
         count = struct.unpack_from(">I", out, first - 4)[0]
         last = min(first + count * width, hit.start + hit.size)
 
