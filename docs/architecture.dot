@@ -132,6 +132,8 @@ digraph fuzzer_tool {
         color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
         mkill [label="core/ir_mutants → adapters/mutant_build · mutant_replay.c\lservices/mutant_kill (mutants-build · mutants-score)\ltools/lib/bench_paired --kill-set (metric: kills)\l",
                fillcolor="#e3e7ec", fontcolor="#242a31"];
+        tlamodel [label="core/tla.py markers → tools/tla_extract.py\lAST → TLA+ (CPS) · tools/tla/Syscalls.tla\lTLC: orphan · hang · desync · class invariants\l",
+               fillcolor="#e3e7ec", fontcolor="#242a31"];
     }
 
     // ------------------------------------------------------------ spine
@@ -173,6 +175,7 @@ digraph fuzzer_tool {
     crash -> corpus [style=dashed, label="  minimized · -C variants"];
 
     corpus -> mkill [style=dashed, label="  final corpus"];
+    runner -> tlamodel [style=dotted, label="  @tla.machine"];
     cov -> obs [style=dashed];
     cmplog -> obs [style=dashed];
     infoth -> obs [style=dashed];

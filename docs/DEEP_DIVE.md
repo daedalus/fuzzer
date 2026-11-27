@@ -3050,6 +3050,27 @@ At startup scans rodata/data/relro (same filter as the data-word dictionary, `el
 ### 2-SAT path negation (`core/two_sat.py`)
 `--path-negation` queries with overlapping windows are encoded as CNF over input bits. When all clauses are ≤ 2 literals besides the one `x != original`, they are solved by linear-time 2-SAT (iterative Tarjan) with a case split on that clause: ~40 µs vs 1.4–1.9 ms in z3, not charged to `--smt-round-budget`. Others go to z3 unchanged. `stats()["two_sat_solves"]`.
 
+## Formal model (TLA+)
+
+`tools/tla_extract.py` compiles a marked class to TLA+ and checks it with TLC. It checks how the code behaves under every I/O outcome and call order, not the fuzz target.
+
+```
+@tla.machine class ─ast─> Compiler (CPS) ─> <Class>.tla ─> TLC, one run per invariant
+                                              EXTENDS tools/tla/Syscalls.tla
+```
+
+- **Markers** (`core/tla.py`, zero runtime cost): `@tla.machine(state, invariants, model, ignore, replies)`, `@tla.entry(phase, requires)`, `@tla.opaque(*returns)`. `ForkserverRunner` is the first machine.
+- **Subset**: assignments, `if`, `return`, `raise`, `try/except/finally`, `with contextlib.suppress`, calls to `self` methods (inlined, at most 3 nested activations), modeled I/O and pure builtins. Anything else (loops, unmodeled calls, stores into modeled fields through aliases) raises `ExtractError` with `file:line`, and nothing is written.
+- **Abstraction**: unmodeled fields and values are dropped. A condition over them takes both branches and is listed as `[havoc]`. Integers are opaque strings. Request words in `replies` (`RUN` -> `RC`) count replies owed per loader.
+- **Syscalls.tla**: hand-written outcomes for `Popen`, `poll`, `kill`, `wait`, pipe writes, `PipeReader.readline`, `_close_streams`. A live loader may stall, die, or close its pipe before it can be reaped. `wait()` after kill always reaps.
+- **Built-in invariants**: `NoOrphan` (live loader not held by any field), `NoHang`, `NoUncaught`, `RecursionBound`, `NoDesync` (a readline consumed a stale reply). Class invariants skip hung states.
+- **Run**: `tools/vendor_tla.sh` (jar into `$FUZZ_VENDOR_ROOT/tla/`), then `python tools/tla_extract.py forkserver --check [--max-procs 3 --max-calls 4]`. Output goes to `~/fuzzing/tla/<machine>/`. Exit codes: 0 clean, 1 violations, 2 rejected source.
+- **First run on `ForkserverRunner`** (3273 states, under 20 s):
+  - `NoHang`: a timeout restart calls `start()`, which reads `READY` with `NO_DEADLINE`. A respawned loader that never answers `INIT` blocks the fuzzer forever.
+  - `NoDesync`: `set_timeout()` gives up on `TIMEOUT_OK` but keeps the loader. A late `TIMEOUT_OK` is then read as the next `RC` header, and every later exec reads the previous reply.
+  - `LiveLoaderReady`: `start()` returning False after `Popen` (a non-`READY` reply, or a pipe error on the following exec) never kills the loader. From the restart path the runner stays not-ready, the loader runs until exit, and execs fall back to spawn.
+- Tests: `tests/test_tla_extract.py`, with fixtures in `tests/support/tla_fixtures.py`. Each bug fixture has a fixed twin that must pass first.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)
