@@ -82,6 +82,9 @@ REQUIRED: dict[bytes, tuple[bytes, ...]] = {
 # Offered too, though a valid file may lack them: fragmented-MP4 structure.
 OPTIONAL: dict[bytes, tuple[bytes, ...]] = {ROOT: (b"moof",), b"moov": (b"mvex",)}
 _AT_END = frozenset({b"moof"})  # top-level children appended, not after ftyp
+# Top-level boxes holding offsets an insert before them would invalidate
+# (tfhd base_data_offset, sidx first_offset): no moov is inserted ahead of them.
+_OFFSET_ANCHORS = frozenset({b"moof", b"sidx"})
 _ALIASES = {MEDIA_HDR: frozenset({b"vmhd", b"smhd", b"hmhd", b"nmhd", b"sthd"})}
 _GROWABLE = frozenset(REQUIRED) - {ROOT}
 
@@ -235,8 +238,8 @@ def _grow_root(data: bytes, typ: bytes, child: bytes) -> bytes | None:
     if typ in _AT_END:
         return data + child
 
-    _, first_end = _child_types(data, 0, len(data))
-    if first_end < 0:
+    top, first_end = _child_types(data, 0, len(data))
+    if first_end < 0 or top & _OFFSET_ANCHORS:
         return None
     return data[:first_end] + child + data[first_end:]
 
