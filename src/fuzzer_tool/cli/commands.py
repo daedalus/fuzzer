@@ -3750,6 +3750,7 @@ _HAIL_MARY_FLAGS = (
     "canary_scheduler",
     "seed_canary_scheduler",
     "seed_round_robin_scheduler",
+    "seed_uniform_scheduler",
     "seed_drr_scheduler",
     "cuckoo_seed_filter",
     "swap_walk",
@@ -3780,6 +3781,7 @@ _HAIL_MARY_FLAGS = (
     "region_profile",
     "ga",
     "round_robin",
+    "uniform",
     "qea",
     "mcts",
     "alphabeta",
@@ -3862,6 +3864,7 @@ _HAIL_MARY_FLAGS = (
     "burn_front",
     "pos_canary",
     "pos_round_robin",
+    "pos_uniform",
     "pos_fibonacci",
     "pos_kl_ducb",
     "pos_fractal",
@@ -4773,6 +4776,12 @@ def _build_parser() -> _Parsers:
         help="Enable round-robin operator scheduling (deterministic cycling through operators)",
     )
     fuzz_parser.add_argument(
+        "--op-uniform",
+        action="store_true",
+        help="Enable the uniform operator scheduler: picks an operator uniformly at random, "
+        "a signal-free baseline for the operator Elo tournament and the no-``--elo`` fallback chain.",
+    )
+    fuzz_parser.add_argument(
         "--canary-scheduler",
         action="store_true",
         help="Enable the canary operator scheduler: a deliberately worst-in-class scheduler "
@@ -4820,6 +4829,13 @@ def _build_parser() -> _Parsers:
         "--elo to run: it is also reachable directly whenever no arbiter picks a seed first.",
     )
     fuzz_parser.add_argument(
+        "--seed-uniform-scheduler",
+        action="store_true",
+        help="Enable the uniform seed scheduler: picks a corpus seed uniformly at random, "
+        "a signal-free baseline for the seed-arena Elo tournament and the no-``--elo`` fallback chain.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-drr-scheduler",
         "--seed-drr-scheduler",
         action="store_true",
         help="Enable the seed-arena deficit-round-robin scheduler: like "
@@ -5122,6 +5138,12 @@ def _build_parser() -> _Parsers:
         "strategy, not a floor, so it needs no --position-arena to run: it is also "
         "one more candidate in the uniform position pick, alongside burn-front. "
         "Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-uniform",
+        action="store_true",
+        help="Enable the uniform position scheduler: proposes offsets uniformly at random, "
+        "the always-on baseline arm of the position-arena Elo tournament.",
     )
     fuzz_parser.add_argument(
         "--pos-fibonacci",

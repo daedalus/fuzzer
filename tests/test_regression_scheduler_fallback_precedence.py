@@ -59,6 +59,10 @@ _FALLBACK_PRECEDENCE = [
     "successive_elim",
     "las_vegas",
     "round_robin",
+    # Uniform random operator scheduler: signal-free baseline, same posture as
+    # round_robin (real strategy, not a floor; reachable without --elo).
+    # Pinned by test_regression_scheduler_fallback_precedence.
+    "uniform",
 ]
 
 
@@ -149,6 +153,7 @@ class _FakeFuzzer:
         "successive_elim": ("_use_successive_elim", "_successive_elim"),
         "las_vegas": ("_use_las_vegas", "_las_vegas"),
         "round_robin": ("_use_round_robin", "_round_robin"),
+        "uniform": ("_use_uniform", "_uniform"),
         # canary, op_katz, op_kuramoto, op_tang, gradient, whittle, corral,
         # tsallis, kalman_ts, gamma_poisson, ids, phe, exp3_ix, regret_matching, automaton,
         # ant_colony are deliberately absent from _FALLBACK_PRECEDENCE (see

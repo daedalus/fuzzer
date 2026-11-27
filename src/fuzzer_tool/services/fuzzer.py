@@ -1708,6 +1708,7 @@ class Fuzzer:
         elo_time_credit=False,
         invasion=False,
         round_robin=False,
+        op_uniform=False,
         canary_scheduler=False,
         garch=False,
         continuum=False,
@@ -2025,6 +2026,7 @@ class Fuzzer:
         # the same standalone treatment round_robin already gets on the
         # operator side.
         seed_round_robin_scheduler=False,
+        seed_uniform_scheduler=False,
         # Least-slack revisit bound in seconds (P3-3 step 6); 0 disables.
         # See SeedPicker._pick_lst_seed.
         lst_revisit=0.0,
@@ -3873,6 +3875,13 @@ class Fuzzer:
 
             self._seed_round_robin = SeedRoundRobinScheduler()
             log.info("Seed round-robin scheduling enabled")
+        self._use_seed_uniform = seed_uniform_scheduler
+        self._seed_uniform = None
+        if seed_uniform_scheduler:
+            from fuzzer_tool.core.schedulers.seed_uniform import SeedUniformScheduler
+
+            self._seed_uniform = SeedUniformScheduler(rng=self._rng)
+            log.info("Seed-uniform scheduling enabled")
         # Seed-arena deficit round robin (see core/schedulers/seed_drr.py).
         self._use_seed_drr = seed_drr_scheduler
         self._seed_drr = None
@@ -4932,6 +4941,14 @@ class Fuzzer:
             self._round_robin = RoundRobinScheduler()
             log.info("Round-robin operator scheduling enabled")
 
+        self._use_uniform = op_uniform
+        self._uniform = None
+        if op_uniform:
+            from fuzzer_tool.core.schedulers.op_uniform import UniformScheduler
+
+            self._uniform = UniformScheduler()
+            log.info("Uniform operator scheduling enabled")
+
         # Canary: deliberately worst-in-class operator scheduler. Fed the
         # same record(op, success, weight) signal as every real scheduler
         # in the pool, it always argmin-selects instead of argmax-selects
@@ -5480,6 +5497,8 @@ class Fuzzer:
             _register_arms(self._c2ucb)
         if self._round_robin:
             _register_arms(self._round_robin)
+        if self._uniform:
+            _register_arms(self._uniform)
         if self._canary:
             _register_arms(self._canary)
         if self._op_tpe:

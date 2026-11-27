@@ -888,6 +888,10 @@ _FALLBACK_PRECEDENCE = (
     "successive_elim",
     "las_vegas",
     "round_robin",
+    # Uniform random operator scheduler: signal-free baseline, same posture as
+    # round_robin (real strategy, not a floor; reachable without --elo).
+    # Pinned by test_regression_scheduler_fallback_precedence.
+    "uniform",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
     # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, op_hrrn, op_qlearn,
     # op_tabu, op_hill_climb, gradient, reactive, whittle, corral, softmax, topk,
@@ -969,6 +973,7 @@ _PLAIN_STRATEGIES = {
     "automaton": "_automaton",
     "ant_colony": "_ant_colony",
     "round_robin": "_round_robin",
+    "uniform": "_uniform",
     "canary": "_canary",
     "op_katz": "_op_katz",
     "op_kuramoto": "_op_kuramoto",
@@ -1106,6 +1111,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("invasion")
     if f._use_round_robin and f._round_robin:
         available.append("round_robin")
+    if f._use_uniform and f._uniform:
+        available.append("uniform")
     if f._use_canary and f._canary:
         available.append("canary")
     if f._use_op_katz and f._op_katz:

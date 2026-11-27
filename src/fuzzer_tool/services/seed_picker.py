@@ -154,6 +154,7 @@ _FALLBACK_ARMS = (
     *((attr, "_pick_os_seed", name) for name, attr in _OS_SEED_ARMS.items()),
     ("_seed_drr", "_pick_seed_drr_seed", None),
     ("_seed_round_robin", "_pick_seed_round_robin_seed", None),
+    ("_seed_uniform", "_pick_seed_uniform_seed", None),
 )
 _FALLBACK_ATTRS = tuple(attr for attr, _m, _n in _FALLBACK_ARMS)
 
@@ -713,6 +714,8 @@ class SeedPicker:
             available.append("canary")
         if getattr(f, "_use_seed_round_robin", False) and f._seed_round_robin and f.corpus:
             available.append("round_robin")
+        if getattr(f, "_use_seed_uniform", False) and f._seed_uniform and f.corpus:
+            available.append("uniform")
         if getattr(f, "_use_seed_drr", False) and f._seed_drr and f.corpus:
             available.append("drr")
         for name, attr in _OS_SEED_ARMS.items():
@@ -759,6 +762,7 @@ class SeedPicker:
             "strata": lambda: self._pick_strata_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
             "round_robin": lambda: self._pick_seed_round_robin_seed(),
+            "uniform": lambda: self._pick_seed_uniform_seed(),
             "drr": lambda: self._pick_seed_drr_seed(),
             **{name: functools.partial(self._pick_os_seed, name) for name in _OS_SEED_ARMS},
         }
@@ -1076,6 +1080,25 @@ class SeedPicker:
         """
         f = self.f
         scheduler = getattr(f, "_seed_round_robin", None)
+        if scheduler is None or not f.corpus:
+            return None
+        key_to_seed = {f._seed_key(s): s for s in f.corpus}
+        selected = scheduler.select_seed(list(key_to_seed))
+        return key_to_seed.get(selected)
+
+    def _pick_seed_uniform_seed(self) -> bytes | None:
+        """Uniform random seed picker -- the seed-arena 'uniform' arm.
+
+        Signal-free baseline (see ``core/schedulers/seed_uniform.py``):
+        picks a corpus seed uniformly at random, ignoring the outcome
+        signal entirely. Reachable both from ``_pick_seed_elo`` and from
+        :meth:`pick_seed`'s no-``--elo`` fallback chain, same standalone
+        treatment as ``op_uniform`` on the operator side.
+
+        Returns None on an empty corpus, same as every other arm here.
+        """
+        f = self.f
+        scheduler = getattr(f, "_seed_uniform", None)
         if scheduler is None or not f.corpus:
             return None
         key_to_seed = {f._seed_key(s): s for s in f.corpus}
