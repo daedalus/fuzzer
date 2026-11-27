@@ -292,7 +292,9 @@ class TestForkserver:
             "FUZZ_INPUT_ALIAS": ALIAS,
             "FUZZ_INPUT_PATH": m.path,
         }
-        r = ForkserverRunner(build["exe"], timeout=5.0, env=env, argv=["fopen", ALIAS], input_file=m)
+        r = ForkserverRunner(
+            build["exe"], timeout=5.0, env=env, argv=["fopen", ALIAS], input_file=m
+        )
         try:
             assert r.start()
             rcs = [r.run_one(bytes([b]))[0] for b in (6, 13, 6)]

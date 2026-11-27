@@ -146,6 +146,9 @@ class MonteCarloScheduler:
         self._pooled_successes = 0.0
         self._pooled_failures = 0.0
         self._pool = PoolCache(POOL_MAX_STRENGTH, _POOL_REFIT_EVERY)
+        # (0, 1]: > 1 grows evidence away from the prior; 0 or NaN erases it.
+        if not 0.0 < arm_decay <= 1.0:
+            raise ValueError(f"arm_decay must be in (0, 1], got {arm_decay!r}")
         self.arm_decay = arm_decay
         self.decay_interval = decay_interval
         self.elite_frac = elite_frac

@@ -52,6 +52,7 @@ FALLBACK = (QTDEMUX, MATROSKADEMUX, WAVPARSE, AVIDEMUX, FLVDEMUX)
 # human-side oracle, independent of the generator's byte layout.
 GS_INTENDED = {
     "wav_adtl_null_deref.wav": WAVPARSE,
+    "wav_blockalign_zero_take.wav": WAVPARSE,
     "avi_vprp_zero_div.avi": AVIDEMUX,
     "mkv_flac_priv_overread.mkv": MATROSKADEMUX,
     "mkv_bz2_avail_out_overflow.mkv": MATROSKADEMUX,
@@ -225,6 +226,46 @@ class TestWavSeed:
         assert len(data) == adtl_off + 4  # nothing after the "adtl" fourcc
 
 
+class TestWavBlockalignSeed:
+    def test_fmt_triggers_the_round_down_to_zero(self):
+        """blockalign must exceed both the 40 ms budget and the 4096 floor.
+
+        wavparse computes max_buf_size = MAX(0.04 * bps, 4096) then applies
+        ``max_buf_size -= max_buf_size % blockalign``; only a blockalign
+        above BOTH values rounds the buffer size down to 0, which is what
+        sends desired = 0 into gst_adapter_take_buffer.
+        """
+        data = GSTREAMER_SEEDS["wav_blockalign_zero_take.wav"]()
+        assert data[0:4] == b"RIFF"
+        assert data[8:12] == b"WAVE"
+        fmt_off = data.index(b"fmt ") + 8
+        tag, ch, rate, av_bps, blockalign, bits = struct.unpack(
+            "<HHIIHH", data[fmt_off : fmt_off + 16]
+        )
+        # Falsification: PCM rejects an inflated blockalign at fmt sanity
+        # (blockalign > channels * ceil(bits/8) -> invalid_blockalign), so
+        # the seed must carry a non-PCM tag.
+        assert tag != 1
+        assert tag == gen.WAV_FMT_VOXWARE_AC8
+        budget = gen.GST_BUF_TIME_MS / 1000 * av_bps
+        assert blockalign > max(budget, gen.GST_MAX_BUFFER_SIZE)
+        # The default fmt branch also requires av_bps <= blockalign * rate.
+        assert av_bps <= blockalign * rate
+
+    def test_declared_data_beats_the_dataleft_bail(self):
+        """Declared data size must reach blockalign or wavparse bails first.
+
+        ``dataleft < blockalign`` jumps to found_eos before the adapter
+        take; the declared size must exceed blockalign while the actual
+        payload stays tiny.
+        """
+        data = GSTREAMER_SEEDS["wav_blockalign_zero_take.wav"]()
+        data_off = data.index(b"data")
+        declared = struct.unpack("<I", data[data_off + 4 : data_off + 8])[0]
+        assert declared >= gen.WAV_BLOCKALIGN
+        assert len(data) - (data_off + 8) == gen.WAV_DATA_PRESENT
+
+
 class TestAviSeed:
     def test_vprp_carries_zero_fields_and_fixed_prefix(self):
         """vprp sized exactly to offsetof(field_info) with fields == 0.
@@ -297,7 +338,11 @@ class TestAtomicPublish:
         write_seeds(str(seeds), GSTREAMER_SEEDS, prefix="gs_")
         write_seeds(str(seeds), DUAL_SEEDS, prefix="dual_")
 
-        for group, prefix in ((FFMPEG_SEEDS, "ff_"), (GSTREAMER_SEEDS, "gs_"), (DUAL_SEEDS, "dual_")):
+        for group, prefix in (
+            (FFMPEG_SEEDS, "ff_"),
+            (GSTREAMER_SEEDS, "gs_"),
+            (DUAL_SEEDS, "dual_"),
+        ):
             for name, build in group.items():
                 assert (seeds / f"{prefix}{name}").read_bytes() == build()
 

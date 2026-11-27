@@ -1,8 +1,8 @@
 # SIGSEGV in `gst_wavparse_stream_data` (GStreamer WAV Demuxer)
 
-**File**: `subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c:2212`
+**File**: `subprojects/gst-plugins-good/gst/wavparse/gstwavparse.c:2212` (1.28.9); `:2184` on 1.28.0 — same bug, different line drift
 **Severity**: Medium — crafted RIFF/WAVE input crashes any GStreamer audio pipeline with SIGSEGV
-**Root cause**: `gst_buffer_make_writable()` returned NULL and the buffer-offset assignment dereferenced it unconditionally
+**Root cause**: an inflated `blockalign` on a non-PCM fmt chunk rounds `max_buf_size` down to 0, so `gst_adapter_take_buffer (adapter, 0)` returns NULL (`gstadapter.c:1083`), and the buffer-offset assignment dereferences that NULL unconditionally
 **Discovered by**: fuzzer-tool via `targets/gstreamer_read.c` — no-ASAN build (`_noasan.so`) with AFL edge coverage
 **ASAN replay**: confirmed SIGSEGV on ASAN build (`gstreamer_read_1.28.9_asan.so`) — exit 139
 
@@ -19,6 +19,21 @@
 | gst-plugins-good | 1.28.9 |
 | gst (core) | 1.28.9 |
 | gst-plugins-bad/ugly/libmfx | 1.28.9 (wavparse only) |
+
+**Affected versions** — the unguarded round-down
+`wav->max_buf_size -= (wav->max_buf_size % wav->blockalign)` in `gst_wavparse_stream_headers` is
+present in every tree vendored for this analysis, released and dev alike:
+
+| Version | Round-down at | Verdict |
+|---------|---------------|---------|
+| 1.28.0 | `gstwavparse.c:1786` | SEGV at `:2184` (verified, ASAN harness) |
+| 1.28.4 | `gstwavparse.c:1811` | same code, unguarded (source check) |
+| 1.28.8 | `gstwavparse.c:1814` | same code, unguarded (source check) |
+| 1.28.9 | `gstwavparse.c:1814` | SEGV at `:2212` (verified, ASAN harness) |
+| 1.29.2 dev (`1.28.9-88-g7bbbda8b30`) | `gstwavparse.c:1854` | same code, unguarded (source check) |
+
+Not fixed in any released 1.28.x or the current dev tree; the fix exists only as this repo's
+`patches/gstwavparse_null_max_buf_size.patch` (auto-applied by `tools/vendor_gstreamer.sh`).
 
 ---
 
@@ -42,9 +57,9 @@
 | Metric | Value |
 |--------|-------|
 | Total crashes discovered | 1 (this report) |
-| Crash input size | 173 bytes |
-| Crash input type | RIFF/WAVE stream (PCM fmt chunk + data chunk) |
-| Trigger | `gst_wavparse_stream_data` short-buffer branch → `gst_buffer_make_writable` → offset store |
+| Crash input size | 173 bytes (original find) → 44 bytes (`tmin` minimization) → 60 bytes (deterministic builder, see [Regression Test](#regression-test)) |
+| Crash input type | RIFF/WAVE stream — non-PCM fmt chunk (tag `0x0070` Voxware AC8) with inflated `blockalign` + a `data` chunk declaring more than `blockalign` bytes |
+| Trigger | non-PCM fmt skips the PCM-only `blockalign` sanity → `blockalign` 8192 > `max_buf_size` 7065 rounds it down to 0 → `desired` = 0 → `gst_adapter_take_buffer (0)` returns NULL → unchecked `GST_BUFFER_OFFSET` store |
 | Crash type | `SIGSEGV` (signal 11, returncode -11) |
 | Severity | **Medium** |
 | Exploitability | Low (local DoS via crafted file) |
@@ -75,9 +90,27 @@ release build); the disassembly at the crash PC confirms the faulting instructio
 
 ### Root cause
 
-`gst_buffer_make_writable (buf)` returned `NULL` and the subsequent assignment
-`GST_BUFFER_OFFSET (buf) = ...` dereferenced it. The store executed with a zero base pointer,
-producing the SIGSEGV at fault address `0x60`.
+`gst_buffer_make_writable (buf)` returned `NULL` — but only because `buf` was **already NULL** when it
+reached that call. The NULL originates three frames of state earlier, in `gst_wavparse_stream_headers`:
+
+1. The fmt tag `0x0070` (Voxware AC8) is not `WAVE_FORMAT_PCM`, so the only `blockalign` sanity check —
+   `blockalign <= channels * ceil(bits/8)` at `gstwavparse.c:1258-1260` — does not apply; the `default:`
+   fmt branch (`:1269-1274`) only checks `av_bps <= blockalign * rate`, which an inflated `blockalign`
+   trivially satisfies.
+2. `gst_wavparse_stream_headers` then computes the 40 ms byte budget and floors it at 4096:
+   `max_buf_size = MAX(0.04 * bps, MAX_BUFFER_SIZE)` = 7065 for `av_bps` 176640 (`:1812`), and rounds it
+   down to a whole number of blocks: `max_buf_size -= max_buf_size % blockalign` (`:1813-1814`).
+   With `blockalign` 8192 > 7065, `7065 % 8192 = 7065`, so `max_buf_size` becomes **0**. There is no
+   guard keeping it `>= blockalign`.
+3. In `gst_wavparse_stream_data`, `desired = MIN(dataleft, max_buf_size * |segment.rate|)` =
+   `MIN(~1.26 GB, 0)` = 0 (`:2126-2128`). The `desired >= blockalign` guard on the `desired` round-down
+   (`:2130-2131`) is false, so `desired` stays 0 — and 0 is not less than the adapter's available bytes,
+   so execution falls straight to `buf = gst_adapter_take_buffer (adapter, desired)` (`:2180`).
+4. `gst_adapter_take_buffer (adapter, 0)` hits `g_return_val_if_fail (nsize > 0, NULL)`
+   (`gstadapter.c:1083`), returning NULL; the GLib critical warning is not fatal, so parsing continues.
+5. `gst_buffer_get_size (NULL)` and `gst_buffer_make_writable (NULL)` both return 0/NULL without
+   crashing, and the next statement, `GST_BUFFER_OFFSET (buf) = ...`, executes the store
+   `mov %rax,0x60(%r14)` with `%r14 = 0` — the SIGSEGV at fault address `0x60` (`:2212`).
 
 ---
 
@@ -85,18 +118,25 @@ producing the SIGSEGV at fault address `0x60`.
 
 1. **Fuzz driver** (`fuzz_gstreamer` at `targets/gstreamer_read.c:163`) pushes mutated buffer chunks
    through the demuxer via `gst_pad_push` → `gst_pad_push_data` → `gst_pad_chain_data_unchecked`.
-2. **WAV demuxer** (`gst_wavparse_chain` at `gstwavparse.c:2475`) → `gst_wavparse_stream_data`.
-3. **Short-buffer branch**: input declared smaller than the demanded data chunk; the adapter /
-   pull-range path took the `gst_buffer_make_writable` path.
-4. **NULL-returning buffer**: `gst_buffer_make_writable (buf)` returned `NULL`.
-5. **Unchecked deref**: `GST_BUFFER_OFFSET (buf) = pos / wav->bytes_per_sample;` wrote to a NULL
-   buffer → SIGSEGV (signal 11).
+2. **WAV demuxer** (`gst_wavparse_chain` at `gstwavparse.c:2475`) → `gst_wavparse_stream_headers`
+   parses the fmt chunk: tag `0x0070` takes the `default` branch, so `blockalign` 8192 is accepted.
+3. **Round-down to zero**: `stream_headers` computes `max_buf_size = MAX(0.04*bps, 4096) = 7065` and
+   applies `max_buf_size -= max_buf_size % blockalign` → 0 (`:1813-1814`).
+4. **Zero-byte request**: `gst_wavparse_stream_data` derives `desired = MIN(dataleft, 0 * rate) = 0`
+   (`:2126-2128`) and calls `gst_adapter_take_buffer (adapter, 0)` (`:2180`).
+5. **NULL propagation**: the adapter's `g_return_val_if_fail` returns NULL (`gstadapter.c:1083`);
+   `gst_buffer_make_writable (NULL)` stays NULL (`:2211`).
+6. **Unchecked deref**: `GST_BUFFER_OFFSET (buf) = pos / wav->bytes_per_sample;` writes to the NULL
+   buffer (`:2212`) → SIGSEGV (signal 11). On 1.28.0 the same chain lands at `:2184`.
 
 ---
 
 ## Crash Input
 
-173-byte RIFF/WAVE input (base64 reproducer in the crash `*.sh`):
+The crash exists in three equivalent forms: the original **173-byte** find (base64 reproducer in the
+crash `*.sh`), the **44-byte** `tmin` minimization (envelope below), and a **60-byte** deterministic
+builder (`gst_wav_blockalign_zero_take` in `tools/gen_ffmpeg_gst_seeds.py`). All three produce
+identical verdicts on every harness (see [Cross-Library Verdict](#cross-library-verdict)).
 
 ```
 00000000  52 49 46 46 a4 00 00 00 57 41 56 45 66 6d 74 20   |RIFF....WAVEfmt |
@@ -108,7 +148,7 @@ producing the SIGSEGV at fault address `0x60`.
 
 | Offset | Bytes | Field | Value |
 |--------|-------|-------|-------|
-| 0 | RIFF + a4 00 00 00 | RIFF size | 164 — original file was 172 bytes |
+| 0 | RIFF + a4 00 00 00 | RIFF size | 164 — stale value inherited from the original 173-byte find; wavparse tolerates the mismatch (actual minimized file: 44 bytes) |
 | 8 | WAVE | form type | |
 | 12 | fmt + 10 00 00 00 | fmt chunk size | 16 |
 | 20 | 70 00 | format tag | 0x0070 |
@@ -164,8 +204,8 @@ Shim symbolization resolved via module DWARF → `gst_wavparse_stream_data` @ `g
 
 | Factor | Assessment |
 |--------|-----------|
-| Crash determinism | **Deterministic** — SIGSEGV reproduced on the no-ASAN build and the ASAN build replay |
-| Trigger depth | Deep — requires malformed RIFF/WAVE fmt/data structure |
+| Crash determinism | **Deterministic** — SIGSEGV reproduced on the no-ASAN build and the ASAN build replay; identical verdict on 1.28.0 (`:2184`) and 1.28.9 (`:2212`) |
+| Trigger depth | **Shallow** — any non-PCM fmt tag + `blockalign` > 4096 (and > 0.04·av_bps) + a `data` chunk declaring ≥ `blockalign` bytes; the 44-byte minimization is a complete RIFF/WAVE header with zero data payload |
 | Preconditions | None — input fully self-contained |
 | Signal type | SIGSEGV (write to NULL + buffer field offset) |
 | Memory safety | NULL-deref via unchecked `GST_BUFFER_OFFSET` write |
@@ -192,16 +232,17 @@ fuzzer-tool tmin -t 10 -O /tmp/minimized_crash.bin \
 | Reduction | 75% |
 | Post-minimization crash | Confirmed (exit 139 / SIGSEGV) |
 
-The minimized 44-byte input still triggers the same SIGSEGV at `gstwavparse.c:2212` — the NULL-buffer dereference in `gst_wavparse_stream_data`. This demonstrates the crash condition is extremely fragile and can be triggered by minimal malformed input.
+The minimized 44-byte input still triggers the same SIGSEGV at `gstwavparse.c:2212` — the NULL-buffer dereference in `gst_wavparse_stream_data`. Note what the minimization proves: the trigger is **shallow**, not fragile. Nothing but the 44-byte header needs to exist — no data payload, no chunk-ordering tricks. Three header fields do all the work (fmt tag `0x0070`, `blockalign` 8192, and a `data` size >= `blockalign`); a field-by-field bisect against both GStreamer versions confirmed each field's role independently.
 
 ---
 
 ## Suggested Fix
 
 Upstream fix, applied as `patches/gstwavparse_null_max_buf_size.patch` via
-`tools/vendor_gstreamer.sh`. The patch adds three defensive guards:
+`tools/vendor_gstreamer.sh`. The patch adds three defensive guards (line numbers below are
+pre-patch `gstwavparse.c` 1.28.9; other releases drift — 1.28.0 rounds down at `:1786`):
 
-**1. Keep `max_buf_size` >= `blockalign` after rounding** (`gstwavparse.c:1693-1699`).
+**1. Keep `max_buf_size` >= `blockalign` after rounding** (`gstwavparse.c:1813-1814`).
 
 ```c
 if (wav->blockalign > 0) {
@@ -211,13 +252,14 @@ if (wav->blockalign > 0) {
         wav->max_buf_size = wav->blockalign;
 }
 ```
-If `blockalign` (e.g. 8192) is larger than `max_buf_size` (e.g. 7066),
+If `blockalign` (e.g. 8192) is larger than `max_buf_size` (e.g. 7065),
 `max_buf_size` rounds down to 0, then `desired = MIN(dataleft, 0 * rate) = 0`.
-This drives `gst_adapter_take_buffer(adapter, 0)` to return NULL, which
-fuzzer-tool reproduced by hand-stepping `gstwavparse.c`. Guard prevents
-this by clamping to `blockalign`.
+This drives `gst_adapter_take_buffer(adapter, 0)` to return NULL (the `g_return_val_if_fail`
+at `gstadapter.c:1083`), verified by hand-stepping `gstwavparse.c` and by the ASAN harnesses
+on 1.28.0 and 1.28.9. Guard prevents this by clamping to `blockalign`. This is the guard that
+matters: it fixes the state corruption at its origin, in `gst_wavparse_stream_headers`.
 
-**2. Never request a zero-sized buffer** (`gstwavparse.c:2000-2006`).
+**2. Never request a zero-sized buffer** (after the `desired` round-down, `gstwavparse.c:2130-2131`).
 
 ```c
 /* Never request a zero-sized buffer. */
@@ -228,7 +270,9 @@ if (G_UNLIKELY (desired == 0)) {
 ```
 Bails early with `GST_FLOW_ERROR` before calling `gst_adapter_take_buffer`.
 
-**3. NULL-check every `gst_buffer_make_writable()` result** (`gstwavparse.c:2060-2066`).
+**3. NULL-check every `gst_buffer_make_writable()` result** (the two call sites at
+`gstwavparse.c:2194` short-buffer resize and `:2211` offset update — the latter directly
+preceding the `:2212` crash store).
 
 Both call sites (short-buffer resize path and main offset-update path)
 now guard against NULL:
@@ -254,7 +298,29 @@ This matches the existing validation in `vpk_read_header`
 
 ---
 
+## Cross-Library Verdict
+
+The same bytes are parsed cleanly by both FFmpeg releases vendored for this analysis, which makes
+this the cross-library pack's first **live** (unfixed) divergence — see
+`tools/gen_ffmpeg_gst_seeds.py` (`gst_wav_blockalign_zero_take`) and
+[DEEP_DIVE.md](../../DEEP_DIVE.md):
+
+| Input | FFmpeg 9.0.2 | FFmpeg 9.1 | GStreamer 1.28.0 | GStreamer 1.28.9 |
+|-------|--------------|------------|------------------|------------------|
+| 173-byte original find | clean | clean | SEGV `:2184` | SEGV `:2212` |
+| 44-byte minimized seed | clean | clean | SEGV `:2184` | SEGV `:2212` |
+| 60-byte pack builder | clean | clean | SEGV `:2184` | SEGV `:2212` |
+
+FFmpeg rounds the same field the **other** way: `wav_read_packet` sizes the read **up** to
+`block_align` and clamps with `FFMIN(size, left)` (`libavformat/wavdec.c:803-808`), so an inflated
+`blockalign` only shortens the stream — no zero-size request exists on that side. GStreamer rounds
+**down**, and the subtraction is what zeroes the request.
+
+---
+
 ## Regression Test
+
+The 44-byte minimized seed as a C array (for in-tree C harnesses):
 
 ```c
 /* Trigger: crafted RIFF/WAVE input → SIGSEGV at gst_wavparse_stream_data (gstwavparse.c:2212) */
@@ -265,15 +331,24 @@ static const unsigned char gs_wav_crash[] = {
 };
 ```
 
+The regression also lives in the cross-library pack:
+
+- `tools/gen_ffmpeg_gst_seeds.py` — deterministic 60-byte builder `gst_wav_blockalign_zero_take`
+  (same verdicts: FFmpeg 9.0.2/9.1 clean, GStreamer 1.28.0 `:2184` / 1.28.9 `:2212` SEGV);
+- `tests/test_regression_ffmpeg_gst_seeds.py` — `TestWavBlockalignSeed` asserts the builder's fmt
+  fields exceed both the 40 ms budget and the 4096 floor, and re-derives the crash preconditions
+  from the bytes.
+
 ---
 
 ## Upstream Status
 
-Not reported upstream at the time of discovery. The next step would be a confidential security report through GStreamer's security process. See [GStreamer security](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5485) for the work item associated with this class of bug (wavparse NULL buffer dereference).
+Not reported upstream at the time of discovery. The next step would be a confidential security report through GStreamer's security process. See [GStreamer security](https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5485) for the work item associated with this class of bug (wavparse NULL buffer dereference). The round-down remains unguarded in every release checked for this report — 1.28.0 through 1.28.9 and the 1.29 dev tree — so upstream users of those versions are exposed; the three-guard fix ships only in this repo as `patches/gstwavparse_null_max_buf_size.patch`.
 
 ---
 
 ## See Also
 
 - **[Integer divide-by-zero in `vpk_read_packet`](../ffmpeg/vpk_divide_by_zero.md)** — SIGFPE via zeroed `ch_layout` copied back by `avformat_find_stream_info`; same fuzzer, same class of corrupt-state propagation bug.
+- **[Cross-library FFmpeg vs GStreamer seed pack](../../DEEP_DIVE.md)** — this crash as the pack's `gs_wav_blockalign_zero_take` entry, the only live (unfixed in 1.28.x) divergence of the set.
 - **[`crash-analysis` skill](../../skills/crash-analysis/SKILL.md)** — project crash analysis methodology.

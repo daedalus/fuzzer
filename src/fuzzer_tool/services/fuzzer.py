@@ -1603,6 +1603,7 @@ class Fuzzer:
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
+        mc_arm_decay=0.999,
         pairwise_blend=0.0,
         second_order_blend=0.0,
         stats_file=None,
@@ -3674,6 +3675,7 @@ class Fuzzer:
                 pairwise_blend=pairwise_blend,
                 second_order_blend=second_order_blend,
                 decay_interval=mc_decay_interval,
+                arm_decay=mc_arm_decay,
                 cem_dirichlet_concentration=(
                     _CEM_ALPHA_FALLBACK if dirichlet_alpha is AlphaMode.LEARNED else 0.0
                 ),

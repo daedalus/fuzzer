@@ -151,30 +151,6 @@ class HierarchicalBanditScheduler:
         if not avail_cats:
             return self._rng.choice(ops)
 
-        # Apply periodic decay to both levels
-        if (
-            self.arm_decay < 1.0
-            and self.decay_interval > 0
-            and self._total_pulls > 0
-            and self._total_pulls % self.decay_interval == 0
-        ):
-            # Decay toward each posterior's prior (Beta(1,1) here), never
-            # toward (0, 0): forgotten evidence must read "unknown", not
-            # Beta(eps, eps). Multiplying both parameters by the decay
-            # factor preserved the posterior mean while evaporating the
-            # concentration, so an arm that always succeeded kept mean 1.0
-            # forever as its evidence vanished (2026-11-24 review: the two
-            # Thompson schedulers disagreed about what forgotten evidence
-            # means — op_monte_carlo decays toward the prior and derives
-            # why in its record()).
-            d = self.arm_decay
-            for k in self.cat_alpha:
-                self.cat_alpha[k] = 1.0 + (self.cat_alpha[k] - 1.0) * d
-                self.cat_beta[k] = 1.0 + (self.cat_beta[k] - 1.0) * d
-            for k in self.op_alpha:
-                self.op_alpha[k] = 1.0 + (self.op_alpha[k] - 1.0) * d
-                self.op_beta[k] = 1.0 + (self.op_beta[k] - 1.0) * d
-
         # Top-level: Thompson sample categories
         cat_scores = {}
         for cat in cat_ops:
@@ -204,7 +180,7 @@ class HierarchicalBanditScheduler:
 
         # A Beta posterior is a pair, but the branches below each move one
         # side only, so an arm that has seen a single kind of outcome exists
-        # in one dict and not the other. The decay block in select_op() walks
+        # in one dict and not the other. _decay() below walks
         # op_alpha and subscripts op_beta bare, which is a KeyError at the
         # next decay tick. init_arm() pairs both dicts for operators armed at
         # startup; ones that self-register at runtime through
@@ -219,6 +195,13 @@ class HierarchicalBanditScheduler:
         if cat not in self.cat_beta:
             self.cat_alpha.setdefault(cat, 1.0)
             self.cat_beta[cat] = 1.0
+
+        # Decay on the record clock: once per decay_interval records. In
+        # select_op() it fired on every select while the counter sat on a
+        # tick and skipped ticks records stepped over between selects.
+        d_int = self.decay_interval
+        if self.arm_decay < 1.0 and d_int > 0 and self._total_pulls % d_int == 0:
+            self._decay()
 
         # Update bottom-level (per-operator). Fractional Bernoulli: a
         # success worth w is w of a hit and 1 - w of a miss, so
@@ -242,6 +225,26 @@ class HierarchicalBanditScheduler:
 
         self._cap(self.op_alpha, self.op_beta, name)
         self._cap(self.cat_alpha, self.cat_beta, cat)
+
+    def _decay(self) -> None:
+        """Move every posterior toward its Beta(1, 1) prior by ``arm_decay``.
+
+        Toward the prior, never toward (0, 0): forgotten evidence must read
+        "unknown", not Beta(eps, eps). Multiplying both parameters by the
+        decay factor preserved the posterior mean while evaporating the
+        concentration, so an arm that always succeeded kept mean 1.0
+        forever as its evidence vanished (2026-11-24 review: the two
+        Thompson schedulers disagreed about what forgotten evidence means —
+        op_monte_carlo decays toward the prior and derives why in its
+        record()).
+        """
+        d = self.arm_decay
+        for k in self.cat_alpha:
+            self.cat_alpha[k] = 1.0 + (self.cat_alpha[k] - 1.0) * d
+            self.cat_beta[k] = 1.0 + (self.cat_beta[k] - 1.0) * d
+        for k in self.op_alpha:
+            self.op_alpha[k] = 1.0 + (self.op_alpha[k] - 1.0) * d
+            self.op_beta[k] = 1.0 + (self.op_beta[k] - 1.0) * d
 
     def _cap(self, alpha: dict[str, float], beta: dict[str, float], key: str) -> None:
         """Rescale a Beta posterior so alpha + beta stays within the ceiling.
