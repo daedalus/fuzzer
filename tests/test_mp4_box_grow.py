@@ -11,7 +11,7 @@ import struct
 
 import pytest
 
-from fuzzer_tool.core.mutations.mp4_grow import REQUIRED, _candidates, grow_mp4
+from fuzzer_tool.core.mutations.mp4_grow import KINDS, REQUIRED, TrackKind, _candidates, grow_mp4
 from fuzzer_tool.core.mutations.mp4_path import find_boxes
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.rand_pool import RandPool
@@ -51,14 +51,14 @@ def _types(data: bytes) -> set[bytes]:
 def _complete() -> bytes:
     """Grow from ftyp alone until nothing is missing (always the first candidate)."""
     data = FTYP
-    while (out := grow_mp4(data, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[0]))) is not None:
+    while (out := grow_mp4(data, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[0, 0]))) is not None:
         data = out
     return data
 
 
 def test_ftyp_alone_grows_full_moov():
     """One draw on a bare ftyp yields moov down to the sample tables."""
-    out = grow_mp4(FTYP, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[0]))
+    out = grow_mp4(FTYP, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[0, 0]))
     assert out is not None and _tree_ok(out)
     assert out.startswith(FTYP)
     assert set(SAMPLE_TABLE) <= _types(out)
@@ -68,7 +68,7 @@ def test_missing_stbl_is_grown_under_minf():
     """minf without stbl: drawing the stbl candidate places it under that minf."""
     stub = FTYP + box(b"moov", box(b"trak", box(b"mdia", box(b"minf", b""))))
     idx = [t for _, t in _candidates(stub)].index(b"stbl")
-    out = grow_mp4(stub, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[idx]))
+    out = grow_mp4(stub, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[idx, 0]))
     assert out is not None and _tree_ok(out)
     (stbl,) = find_boxes(out, frozenset({b"stbl"}))
     (minf,) = find_boxes(out, frozenset({b"minf"}))
@@ -89,14 +89,15 @@ def test_complete_file_declines():
     """Falsification: nothing missing, nothing to grow."""
     full = _complete()
     assert _tree_ok(full)
-    assert grow_mp4(full, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[0])) is None
+    assert grow_mp4(full, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[0, 0])) is None
 
 
 def test_chunk_offsets_follow_insertion():
     """Growing inside moov shifts an existing stco that points past it."""
     data = mp4(stsd(b"mp4v", b""))
     old = data.index(b"\xaa" * 16)
-    out = grow_mp4(data, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[0]))
+    idx = [t for _, t in _candidates(data)].index(b"mvhd")
+    out = grow_mp4(data, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[idx]))
     assert out is not None and _tree_ok(out)
     stco = find_boxes(out, frozenset({b"stco"}))[0]
     offset = struct.unpack_from(">I", out, stco.start + HDR + 8)[0]
@@ -105,7 +106,7 @@ def test_chunk_offsets_follow_insertion():
 
 
 def test_max_len_declines():
-    assert grow_mp4(FTYP, max_len=len(FTYP) + 16, rng=ScriptedRng(choice_idxs=[0])) is None
+    assert grow_mp4(FTYP, max_len=len(FTYP) + 16, rng=ScriptedRng(choice_idxs=[0, 0])) is None
 
 
 @pytest.mark.parametrize("seed", HOSTILE_SEEDS)
@@ -126,3 +127,50 @@ def test_registered_gated_and_dispatched():
     assert format_gate_matches("mp4_box_grow", FTYP) is True
     assert format_gate_matches("mp4_box_grow", b"RIFF" + bytes(12)) is False
     assert callable(getattr(OperatorEngine, "_op_mp4_box_grow", None))
+
+
+def _handler(kind_fourcc: bytes) -> bytes:
+    """hdlr box with *kind_fourcc* as handler_type."""
+    return box(b"hdlr", bytes(8) + kind_fourcc + bytes(12) + b"\x00")
+
+
+def _grow_type(data: bytes, typ: bytes, *kind_idx: int) -> bytes:
+    idx = [t for _, t in _candidates(data)].index(typ)
+    out = grow_mp4(data, max_len=MAX_LEN, rng=ScriptedRng(choice_idxs=[idx, *kind_idx]))
+    assert out is not None and _tree_ok(out)
+    return out
+
+
+def test_sound_handler_grows_audio_track_parts():
+    """hdlr soun: minf grows smhd + mp4a/esds, no kind draw needed."""
+    stub = FTYP + box(b"moov", box(b"trak", box(b"mdia", _handler(b"soun"))))
+    out = _grow_type(stub, b"minf")
+    types = _types(out) | {t for t in (b"smhd", b"mp4a", b"esds", b"vmhd") if t in out}
+    assert {b"smhd", b"mp4a", b"esds"} <= types
+    assert b"vmhd" not in types
+
+
+def test_video_handler_draws_video_kind():
+    """hdlr vide: the kind draw ranges over video kinds; index picks avc1 + avcC."""
+    stub = FTYP + box(b"moov", box(b"trak", box(b"mdia", _handler(b"vide") + box(b"minf", b""))))
+    avc = KINDS[b"vide"].index(TrackKind.AVC1)
+    out = _grow_type(stub, b"stbl", avc)
+    assert b"avc1" in out and b"avcC" in out and b"mp4a" not in out
+
+
+def test_no_handler_any_kind_coherent():
+    """No hdlr: a grown trak is internally consistent (soun + smhd + mp4a)."""
+    stub = FTYP + box(b"moov", b"")
+    out = _grow_type(stub, b"trak", list(TrackKind).index(TrackKind.MP4A))
+    assert b"soun" in out and b"smhd" in out and b"mp4a" in out and b"vide" not in out
+
+
+def test_fragment_boxes_grow():
+    """mvex under moov; moof (mfhd, traf(tfhd, tfdt, trun)) appended at the end."""
+    full = _complete()
+    assert {b"mvex", b"moof"} <= {
+        full[h.start + 4 : h.start + 8] for h in find_boxes(full, frozenset({b"mvex", b"moof"}))
+    }
+    moof = find_boxes(full, frozenset({b"moof"}))[0]
+    assert moof.start + moof.size == len(full)
+    assert all(t in full for t in (b"trex", b"mfhd", b"tfhd", b"tfdt", b"trun"))
