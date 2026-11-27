@@ -112,7 +112,9 @@ def uninit_exe(tmp_path_factory):
     d = tmp_path_factory.mktemp("strict")
     src, exe = d / "u.c", d / "u"
     src.write_text(_UNINIT)
-    r = subprocess.run([cc, "-O0", "-fsanitize=address", "-o", str(exe), str(src)], capture_output=True)
+    r = subprocess.run(
+        [cc, "-O0", "-fsanitize=address", "-o", str(exe), str(src)], capture_output=True
+    )
     if r.returncode != 0:
         pytest.skip("compiler lacks ASan")
     return exe

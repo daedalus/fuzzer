@@ -49,10 +49,14 @@ def test_persistent_target_uses_testcase_macros(path):
     src = path.read_text(errors="replace")
     assert BUF.search(src), f"{path.name}: input buffer must come from __AFL_FUZZ_TEST_CASE_BUF"
     body = _loop_body(src)
-    assert LEN.search(body), f"{path.name}: length must be read per iteration from __AFL_FUZZ_TEST_CASE_LEN"
+    assert LEN.search(body), (
+        f"{path.name}: length must be read per iteration from __AFL_FUZZ_TEST_CASE_LEN"
+    )
 
 
 @pytest.mark.parametrize("path", _persistent_targets(), ids=lambda p: p.stem)
 def test_persistent_loop_has_no_raw_input_read(path):
     body = _loop_body(path.read_text(errors="replace"))
-    assert not RAW_READ.search(body), f"{path.name}: raw read inside __AFL_LOOP bypasses ASAN poisoning"
+    assert not RAW_READ.search(body), (
+        f"{path.name}: raw read inside __AFL_LOOP bypasses ASAN poisoning"
+    )

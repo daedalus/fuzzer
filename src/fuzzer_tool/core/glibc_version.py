@@ -168,7 +168,9 @@ def chunksize_from_region(region_size: int) -> int:
     """
     if region_size < 0:
         raise ValueError("region_size must be >= 0")
-    aligned = (region_size + _SIZE_SZ + _MALLOC_ALIGNMENT - 1) // _MALLOC_ALIGNMENT * _MALLOC_ALIGNMENT
+    aligned = (
+        (region_size + _SIZE_SZ + _MALLOC_ALIGNMENT - 1) // _MALLOC_ALIGNMENT * _MALLOC_ALIGNMENT
+    )
     return max(_MINSIZE, aligned)
 
 

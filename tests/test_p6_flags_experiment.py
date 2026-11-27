@@ -26,7 +26,9 @@ def test_seeds_one_record_per_op(tmp_path):
 
     assert len(files) == exp.NOPS
     assert {f.stat().st_size for f in files} == {12}
-    assert [f.read_bytes()[0] for f in sorted(files, key=lambda f: int(f.name[2:]))] == list(range(exp.NOPS))
+    assert [f.read_bytes()[0] for f in sorted(files, key=lambda f: int(f.name[2:]))] == list(
+        range(exp.NOPS)
+    )
 
 
 def test_seeds_refuses_existing_dir(tmp_path):

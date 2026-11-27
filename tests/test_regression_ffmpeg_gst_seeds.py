@@ -338,7 +338,11 @@ class TestAtomicPublish:
         write_seeds(str(seeds), GSTREAMER_SEEDS, prefix="gs_")
         write_seeds(str(seeds), DUAL_SEEDS, prefix="dual_")
 
-        for group, prefix in ((FFMPEG_SEEDS, "ff_"), (GSTREAMER_SEEDS, "gs_"), (DUAL_SEEDS, "dual_")):
+        for group, prefix in (
+            (FFMPEG_SEEDS, "ff_"),
+            (GSTREAMER_SEEDS, "gs_"),
+            (DUAL_SEEDS, "dual_"),
+        ):
             for name, build in group.items():
                 assert (seeds / f"{prefix}{name}").read_bytes() == build()
 
