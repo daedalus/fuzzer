@@ -6,6 +6,7 @@ serialization, and the corpus-manager attach hook (scan once, cached).
 
 from __future__ import annotations
 
+import struct
 from types import SimpleNamespace
 
 from fuzzer_tool.core import gadgets
@@ -14,6 +15,9 @@ from fuzzer_tool.core.crash_metadata import CrashMetadata
 BASE = 0x400000
 # pop rax;ret pop rdi;ret pop rsi;ret pop rdx;ret syscall;ret -> a feasible chain.
 _FEASIBLE = b"\x58\xc3\x5f\xc3\x5e\xc3\x5a\xc3\x0f\x05\xc3"
+# aarch64 equivalent: ldp x8, x0, [sp]; ret  svc #0; ret
+# (words verified against capstone; see tests/test_gadgets.py).
+_FEASIBLE_A64 = struct.pack("<IIII", 0xA94003E8, 0xD65F03C0, 0xD4000001, 0xD65F03C0)
 
 
 def _feasible_report_dict():
@@ -100,3 +104,54 @@ def test_attach_gadgets_survives_scan_failure(tmp_path, monkeypatch):
     mgr._attach_gadgets(meta)  # must not raise
     assert meta.gadgets == {}
     assert f._gadget_report is None
+
+
+def test_sidecar_renders_new_gadget_fields():
+    # arch, per-section attribution, libc targets and the ret2libc skeleton
+    # all render; the header line stays byte-identical to the old format.
+    gs = gadgets.scan(_FEASIBLE_A64, BASE, arch="aarch64")
+    rep = gadgets.build_report(
+        gs, arch="aarch64", sections={".text": 9}, libc_targets={"system": 0x401020}
+    )
+    meta = CrashMetadata()
+    meta.sanitizer = "AddressSanitizer"
+    meta.gadgets = rep.to_dict()
+
+    text = meta.format_sidecar()
+
+    assert "=== rop gadgets ===" in text
+    assert "arch: aarch64" in text
+    assert "sections: .text=9" in text
+    assert "libc targets: system@0x401020" in text
+    # The ret2libc skeleton renders like the syscall one: role + address.
+    assert "system" in text.split("chain:")[1]
+
+
+def test_sidecar_x86_default_adds_no_new_lines():
+    # FALSIFICATION: a plain x86 report without libc data must render no
+    # arch/sections/libc lines -- old sidecars stay byte-identical.
+    meta = CrashMetadata()
+    meta.gadgets = gadgets.build_report(gadgets.scan(_FEASIBLE, BASE)).to_dict()
+    text = meta.format_sidecar()
+    for absent in ("arch:", "sections:", "libc targets:", "ret2libc"):
+        assert absent not in text
+
+
+def test_to_dict_carries_new_keys_additively():
+    rep = gadgets.build_report(
+        gadgets.scan(_FEASIBLE_A64, BASE, arch="aarch64"),
+        arch="aarch64",
+        sections={".text": 9},
+        libc_targets={"system": 0x401020},
+    )
+    d = rep.to_dict()
+    # Old keys still present and shaped as before.
+    assert d["chain_feasible"] is True
+    assert d["reg_control"]["x0"].startswith("0x")
+    assert d["syscall_sites"][0].startswith("0x")
+    # New keys are additive.
+    assert d["arch"] == "aarch64"
+    assert d["sections"] == {".text": 9}
+    assert d["libc_targets"] == {"system": "0x401020"}
+    assert d["chain_libc_feasible"] is True
+    assert d["chain_libc"] == [["x0", f"0x{BASE:x}"], ["system", "0x401020"]]

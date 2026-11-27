@@ -364,14 +364,23 @@ class CrashMetadata:
         lines.append("")
 
     def _sidecar_gadgets(self, lines: list[str]) -> None:
-        """Static ROP gadget inventory and syscall-chain feasibility."""
+        """Static ROP gadget inventory and chain feasibility."""
         g = self.gadgets
         if not g or not g.get("total"):
             return
 
-        suffix = " (.text clipped)" if g.get("truncated") else ""
+        suffix = " (clipped)" if g.get("truncated") else ""
         lines.append(f"=== rop gadgets{suffix} ===")
         lines.append(f"  total:    {g['total']}")
+
+        # New keys render only when they carry data, so a plain x86-64
+        # report keeps its old sidecar text byte for byte.
+        arch = g.get("arch")
+        if isinstance(arch, str) and arch and arch != "x86_64":
+            lines.append(f"  arch: {arch}")
+        secs = g.get("sections") or {}
+        if isinstance(secs, dict) and secs:
+            lines.append("  sections: " + ", ".join(f"{k}={v}" for k, v in sorted(secs.items())))
 
         cats = g.get("categories") or {}
         if cats:
@@ -384,9 +393,16 @@ class CrashMetadata:
             lines.append(f"  syscall sites: {len(g['syscall_sites'])}")
         if g.get("pivot_sites"):
             lines.append(f"  stack pivots:  {len(g['pivot_sites'])}")
+        libc = g.get("libc_targets") or {}
+        if isinstance(libc, dict) and libc:
+            lines.append(
+                "  libc targets: " + ", ".join(f"{k}@{a}" for k, a in sorted(libc.items()))
+            )
 
         lines.append(f"  chain: {g.get('chain_note', '')}")
         for role, addr in g.get("chain_skeleton") or []:
+            lines.append(f"    {role:8s} {addr}")
+        for role, addr in g.get("chain_libc") or []:
             lines.append(f"    {role:8s} {addr}")
         lines.append("")
 

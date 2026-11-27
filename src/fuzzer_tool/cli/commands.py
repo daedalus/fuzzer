@@ -4233,11 +4233,12 @@ def _build_parser() -> _Parsers:
     fuzz_parser.add_argument(
         "--rop-gadgets",
         action="store_true",
-        help="For each novel crash, statically scan the target binary's .text for "
-        "ROP gadgets (pop-reg, syscall, stack-pivot, ...) and record the inventory "
-        "plus syscall-chain feasibility in the crash sidecar as `gadgets`. Scanned "
-        "once per target; nothing is executed. Exploitability triage aid. "
-        "Enabled by --hail-mary.",
+        help="For each novel crash, statically scan the target binary's executable "
+        "sections (not just .text) for ROP/JOP gadgets (pop-reg, syscall, stack-pivot, "
+        "call/jmp-reg dispatch, ...) on x86-64 and aarch64, plus a ret2libc inventory "
+        "(PLT stubs / defined symbols); record inventory, per-section attribution and "
+        "chain feasibility in the crash sidecar as `gadgets`. Scanned once per target; "
+        "nothing is executed. Exploitability triage aid. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--glibc-heap-severity",

@@ -51,14 +51,25 @@ def _build_elf64_header(
 
 
 def _build_section_header(
-    sh_type=0, sh_name=0, sh_offset=0, sh_size=0, sh_link=0, sh_info=0, sh_addralign=0, sh_entsize=0
+    sh_type=0,
+    sh_name=0,
+    sh_offset=0,
+    sh_size=0,
+    sh_link=0,
+    sh_info=0,
+    sh_addralign=0,
+    sh_entsize=0,
+    sh_flags=0,
+    sh_addr=0,
 ):
     """Build a single 64-byte ELF section header."""
     sh = bytearray(64)
     struct.pack_into("<I", sh, 0, sh_name)
     struct.pack_into("<I", sh, 4, sh_type)
-    struct.pack_into("<Q", sh, 16, sh_offset)
-    struct.pack_into("<Q", sh, 24, sh_size)
+    struct.pack_into("<Q", sh, 8, sh_flags)
+    struct.pack_into("<Q", sh, 16, sh_addr)
+    struct.pack_into("<Q", sh, 24, sh_offset)
+    struct.pack_into("<Q", sh, 32, sh_size)
     struct.pack_into("<I", sh, 40, sh_link)
     struct.pack_into("<I", sh, 44, sh_info)
     struct.pack_into("<Q", sh, 48, sh_addralign)
@@ -76,6 +87,73 @@ def _build_program_header(p_type=1, p_vaddr=0, p_filesz=0, p_memsz=0, p_offset=0
     struct.pack_into("<Q", ph, 32, p_filesz)
     struct.pack_into("<Q", ph, 40, p_memsz)
     return bytes(ph)
+
+
+# Executable-section flag, shared by the gadget-triage fixtures below.
+SHF_EXECINSTR = 0x4
+
+
+def _build_elf(sections, machine=62):
+    """Assemble a minimal ELF64-LE image from *sections*.
+
+    Each spec is ``(name, sh_type, sh_flags, vaddr, payload[, link, entsize])``;
+    the image gets a NULL section, a ``.shstrtab`` at index 1 and one header
+    per spec, so a spec's section index is its position + 2. Payloads are
+    placed 8-aligned after the ehdr; the section-header table follows.
+    """
+    names = [b".shstrtab"] + [s[0] for s in sections]
+    shstr = bytearray(b"\x00")
+    name_off = {}
+    for name in names:
+        name_off[name] = len(shstr)
+        shstr += name + b"\x00"
+
+    data = bytearray(64)  # ehdr, patched at the end
+
+    def place(payload):
+        while len(data) % 8:
+            data.append(0)
+        off = len(data)
+        data.extend(payload)
+        return off
+
+    shstr_off = place(bytes(shstr))
+    placed = [place(spec[4]) for spec in sections]
+
+    while len(data) % 8:
+        data.append(0)
+    e_shoff = len(data)
+    headers = [
+        _build_section_header(),  # NULL section
+        _build_section_header(
+            sh_type=3, sh_name=name_off[b".shstrtab"], sh_offset=shstr_off, sh_size=len(shstr)
+        ),
+    ]
+    for spec, off in zip(sections, placed, strict=True):
+        name, sh_type, sh_flags, vaddr, payload = spec[:5]
+        link = spec[5] if len(spec) > 5 else 0
+        entsize = spec[6] if len(spec) > 6 else 0
+        headers.append(
+            _build_section_header(
+                sh_type=sh_type,
+                sh_name=name_off[name],
+                sh_flags=sh_flags,
+                sh_addr=vaddr,
+                sh_offset=off,
+                sh_size=len(payload),
+                sh_link=link,
+                sh_entsize=entsize,
+            )
+        )
+    data.extend(b"".join(headers))
+
+    head = bytearray(
+        _build_elf64_header(e_shoff=e_shoff, e_shnum=len(headers), e_shentsize=64, e_shstrndx=1)
+    )
+    struct.pack_into("<H", head, 16, 2)  # ET_EXEC
+    struct.pack_into("<H", head, 18, machine)
+    data[:64] = head
+    return bytes(data)
 
 
 class TestParseSancovOffsets:
@@ -1679,3 +1757,196 @@ class TestDetectElfType:
 
     def test_nonexistent(self):
         assert detect_elf_type("/nonexistent/binary") is None
+
+
+class TestMachineArch:
+    def test_x86_64(self):
+        from fuzzer_tool.core.elf import machine_arch
+
+        assert machine_arch(_build_elf([], machine=62)) == "x86_64"
+
+    def test_aarch64(self):
+        from fuzzer_tool.core.elf import machine_arch
+
+        assert machine_arch(_build_elf([], machine=183)) == "aarch64"
+
+    def test_unsupported_machine_declined(self):
+        from fuzzer_tool.core.elf import machine_arch
+
+        assert machine_arch(_build_elf([], machine=40)) is None  # EM_ARM
+
+    def test_non_elf(self):
+        from fuzzer_tool.core.elf import machine_arch
+
+        assert machine_arch(b"MZ" + b"\x00" * 128) is None
+        assert machine_arch(b"\x7fELF") is None
+
+
+class TestIterExecSections:
+    def test_yields_only_exec_progbits(self):
+        from fuzzer_tool.core.elf import _iter_exec_sections
+
+        elf = _build_elf(
+            [
+                (b".text", 1, SHF_EXECINSTR, 0x401000, b"\x90\xc3"),
+                (b".plt", 1, SHF_EXECINSTR, 0x402000, b"\xff\x25\x00\x00\x00\x00"),
+                (b".rodata", 1, 0, 0x600000, b"data"),
+                (b".init_array", 14, SHF_EXECINSTR, 0x600100, b"\x00" * 8),
+            ]
+        )
+        got = list(_iter_exec_sections(elf))
+        assert [g[0] for g in got] == [b".text", b".plt"]
+        # Offsets point at the payloads; sizes match them.
+        for name, _addr, off, size in got:
+            payload = {b".text": b"\x90\xc3", b".plt": b"\xff\x25\x00\x00\x00\x00"}[name]
+            assert elf[off : off + size] == payload
+            assert size == len(payload)
+        assert [g[1] for g in got] == [0x401000, 0x402000]
+
+    def test_no_exec_sections(self):
+        from fuzzer_tool.core.elf import _iter_exec_sections
+
+        elf = _build_elf([(b".data", 1, 0x2, 0x600000, b"x" * 16)])
+        assert list(_iter_exec_sections(elf)) == []
+
+    def test_hostile_shdr_table_declined(self):
+        from fuzzer_tool.core.elf import _iter_exec_sections
+
+        # e_shoff past the end of the image: no yield, no raise.
+        head = bytearray(_build_elf64_header(e_shoff=1 << 40, e_shnum=2, e_shstrndx=1))
+        assert list(_iter_exec_sections(bytes(head + b"\x00" * 64))) == []
+
+
+def _dynsym(name_off, shndx=0, value=0):
+    """One Elf64_Sym: STT_FUNC|GLOBAL, *name_off* into .dynstr."""
+    sym = bytearray(24)
+    struct.pack_into("<I", sym, 0, name_off)
+    sym[4] = 0x12
+    struct.pack_into("<H", sym, 6, shndx)
+    struct.pack_into("<Q", sym, 8, value)
+    return bytes(sym)
+
+
+def _rela(r_offset, sym, rtype):
+    """One Elf64_Rela."""
+    r = bytearray(24)
+    struct.pack_into("<Q", r, 0, r_offset)
+    struct.pack_into("<Q", r, 8, (sym << 32) | rtype)
+    return bytes(r)
+
+
+# R_X86_64_JUMP_SLOT: the relocation type .rela.plt rows carry.
+R_X86_64_JUMP_SLOT = 7
+_GOT_SYSTEM = 0x601000
+_PLT_ADDR = 0x401000
+
+
+def _plt_import_elf(rela_rows=None, stub_got=_GOT_SYSTEM, endbr=False):
+    """ELF importing ``system``: .dynsym/.dynstr/.rela.plt plus a 16-byte-per-
+    entry .plt whose slot 1 jumps through *stub_got* (``jmp *[rip+rel32]``).
+
+    The symbol table carries the mandatory NULL entry at index 0, so the
+    import is index 1 and the relocation row names symbol 1.
+    """
+    stub = _PLT_ADDR + 0x10
+    entry = b"\xff\x25" + struct.pack("<i", stub_got - (stub + 6)) + b"\x90" * 10
+    if endbr:
+        # CET layout: the callable entry is the ENDBR64-headed one.
+        entry = (
+            b"\xf3\x0f\x1e\xfa"
+            + b"\xff\x25"
+            + struct.pack("<i", stub_got - (stub + 4 + 6))
+            + b"\x90" * 6
+        )
+    plt = b"\x90" * 0x10 + entry  # slot 0 is PLT0
+    rela_rows = rela_rows if rela_rows is not None else [_rela(_GOT_SYSTEM, 1, R_X86_64_JUMP_SLOT)]
+    return _build_elf(
+        [
+            (b".dynsym", 11, 0, 0x600000, b"\x00" * 24 + _dynsym(1), 3, 24),
+            (b".dynstr", 3, 0, 0x600100, b"\x00system\x00"),
+            (b".rela.plt", 4, 0, 0x600200, b"".join(rela_rows), 2, 24),
+            (b".plt", 1, SHF_EXECINSTR, _PLT_ADDR, plt),
+        ]
+    )
+
+
+class TestPltMap:
+    def test_system_stub_found(self):
+        from fuzzer_tool.core.elf import plt_map
+
+        assert plt_map(_plt_import_elf()) == {"system": _PLT_ADDR + 0x10}
+
+    def test_endbr_headed_stub_preferred(self):
+        from fuzzer_tool.core.elf import plt_map
+
+        # .plt.sec (CET) entry wins over the bare .plt jmp: it is the
+        # IBT-callable form of the same import.
+        plt_sec = _PLT_ADDR + 0x1000
+        sec_entry = (
+            b"\xf3\x0f\x1e\xfa"
+            + b"\xff\x25"
+            + struct.pack("<i", _GOT_SYSTEM - (plt_sec + 4 + 6))
+            + b"\x90" * 6
+        )
+        elf = _build_elf(
+            [
+                (b".dynsym", 11, 0, 0x600000, b"\x00" * 24 + _dynsym(1), 3, 24),
+                (b".dynstr", 3, 0, 0x600100, b"\x00system\x00"),
+                (b".rela.plt", 4, 0, 0x600200, _rela(_GOT_SYSTEM, 1, R_X86_64_JUMP_SLOT), 2, 24),
+                (
+                    b".plt",
+                    1,
+                    SHF_EXECINSTR,
+                    _PLT_ADDR,
+                    b"\x90" * 0x10
+                    + b"\xff\x25"
+                    + struct.pack("<i", _GOT_SYSTEM - (_PLT_ADDR + 0x10 + 6))
+                    + b"\x90" * 10,
+                ),
+                (b".plt.sec", 1, SHF_EXECINSTR, plt_sec, sec_entry),
+            ]
+        )
+        assert plt_map(elf) == {"system": plt_sec}
+
+    def test_zero_symbol_reloc_skipped(self):
+        # FALSIFICATION: an IRELATIVE-style row (symbol index 0) has no
+        # dynsym name; it must not be mapped.
+        from fuzzer_tool.core.elf import plt_map
+
+        elf = _plt_import_elf(rela_rows=[_rela(_GOT_SYSTEM, 0, 1037)])
+        assert plt_map(elf) == {}
+
+    def test_stub_to_other_slot_not_mapped(self):
+        # FALSIFICATION: a .plt jmp through a different GOT slot belongs to
+        # another import (or nothing) -- not to this reloc.
+        from fuzzer_tool.core.elf import plt_map
+
+        assert plt_map(_plt_import_elf(stub_got=_GOT_SYSTEM + 8)) == {}
+
+    def test_no_rela_plt(self):
+        from fuzzer_tool.core.elf import plt_map
+
+        elf = _build_elf([(b".plt", 1, SHF_EXECINSTR, _PLT_ADDR, b"\x90" * 32)])
+        assert plt_map(elf) == {}
+
+    def test_malformed_rela_entsize_declined(self):
+        from fuzzer_tool.core.elf import plt_map
+
+        elf = _build_elf(
+            [
+                (b".dynsym", 11, 0, 0x600000, b"\x00" * 24 + _dynsym(1), 3, 24),
+                (b".dynstr", 3, 0, 0x600100, b"\x00system\x00"),
+                (b".rela.plt", 4, 0, 0x600200, _rela(_GOT_SYSTEM, 1, R_X86_64_JUMP_SLOT), 2, 8),
+                (
+                    b".plt",
+                    1,
+                    SHF_EXECINSTR,
+                    _PLT_ADDR,
+                    b"\x90" * 0x10
+                    + b"\xff\x25"
+                    + struct.pack("<i", _GOT_SYSTEM - (_PLT_ADDR + 0x16))
+                    + b"\x90" * 10,
+                ),
+            ]
+        )
+        assert plt_map(elf) == {}

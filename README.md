@@ -249,6 +249,7 @@ What the counters buy:
 - Crash minimization (delta-debugging with signature pinning)
 - Blocklist/allowlist and smaller-crash replacement
 - **SARIF export** (`fuzzer-tool sarif`, `fuzz --sarif`): crashes as code-scanning alerts on the faulting source line
+- **ROP/JOP gadget triage** (`--rop-gadgets`): every `SHF_EXECINSTR` section swept (not just `.text`) on x86-64 **and aarch64** — pop/syscall/stack-pivot/JOP-dispatch/stack-adj gadgets with per-section attribution, plus a ret2libc inventory (PLT stubs + defined symbols) and a `system`+arg0 chain skeleton when no raw syscall exists. Static, bounded (16 sections / 4 MiB / 4096 gadgets), additive sidecar keys.
 - **Crash exploration** (`--crash-explore`, AFL `-C`): from crashing seeds, keep mutants that still crash on a new path
 - **glibc heap-hardening severity** (`--glibc-heap-severity`): raise a heap-metadata-corruption crash one exploitability tier when the runtime host glibc has dropped a little-chunk fence — unsorted-bin checks for 0x90–0x3F0 at 2.41, fastbin for 0x20–0x80 at 2.43 (Phrack #73 "Poor Little Chunks"); records host + target-build glibc and a size-class exposure note in the crash sidecar
 - **Uninitialized-memory probe** (`--uninit-probe`): new corpus entries re-run under two heap fill bytes; fill-dependent output is saved as a leak

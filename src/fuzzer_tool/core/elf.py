@@ -1481,6 +1481,205 @@ def _find_text_section(elf: bytes) -> tuple[bytes, int, int] | None:
     return None
 
 
+# ── Executable-section enumeration + PLT map (gadget triage) ───────────
+#
+# core.gadgets scans a target's executable code for ROP/JOP gadgets and
+# ret2libc call targets. It needs three things this module owns: which
+# sections hold code (any SHF_EXECINSTR PROGBITS section, not just a
+# literal ".text" -- stripped/obfuscated targets rename theirs), which
+# machine the image is (x86-64 and aarch64 decode differently), and where
+# the PLT stubs of interesting imports live (.rela.plt + .dynsym + .plt).
+
+_SHF_EXECINSTR = 0x4
+
+
+def _shdr_iter(elf: bytes):
+    """Yield ``(name, sh_type, sh_flags, sh_addr, sh_off, sh_size, sh_link,
+    sh_entsize)`` for every section header, in table order.
+
+    Same hostile-header regime as ``_iter_sections`` (table and shstrtab
+    offsets validated before any unpack), but across *every* type: the PLT
+    map needs SHT_RELA rows and symbol tables, not just PROGBITS.
+    """
+    n = len(elf)
+    if n < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+        return
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
+
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return
+    if e_shentsize < _ELF64_SHDR_MIN:
+        return
+    # The whole table must lie inside the buffer; phrased as a subtraction
+    # so a 64-bit e_shoff cannot overflow the comparison.
+    if e_shoff == 0 or e_shoff > n or e_shnum * e_shentsize > n - e_shoff:
+        return
+
+    shstr_off = e_shoff + e_shstrndx * e_shentsize
+    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
+
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
+        name_at = min(shstr_offset + sh_name_idx, n)
+        # Slicing clamps, so an out-of-range name reads as empty.
+        name = elf[name_at : name_at + 128].split(b"\x00")[0]
+        yield (
+            name,
+            struct.unpack_from("<I", elf, sh + 4)[0],
+            struct.unpack_from("<Q", elf, sh + 8)[0],
+            struct.unpack_from("<Q", elf, sh + 16)[0],
+            struct.unpack_from("<Q", elf, sh + 24)[0],
+            struct.unpack_from("<Q", elf, sh + 32)[0],
+            struct.unpack_from("<I", elf, sh + 40)[0],
+            struct.unpack_from("<Q", elf, sh + 56)[0],
+        )
+
+
+def _iter_exec_sections(elf: bytes):
+    """``(name, sh_addr, sh_offset, sh_size)`` of each PROGBITS +
+    SHF_EXECINSTR section, in section-table order.
+
+    For the gadget sweep: .plt/.plt.sec/.init/.fini and renamed code
+    sections carry gadgets too, and a stripped target's code section need
+    not be named ``.text`` at all.
+    """
+    for name, sh_type, sh_flags, sh_addr, sh_off, sh_size, _link, _ent in _shdr_iter(elf):
+        if sh_type == 1 and sh_flags & _SHF_EXECINSTR:
+            yield name, sh_addr, sh_off, sh_size
+
+
+_EM_X86_64 = 62
+_EM_AARCH64 = 183
+
+
+def machine_arch(elf: bytes) -> str | None:
+    """ "x86_64" or "aarch64" from e_machine; None for anything else.
+
+    Non-ELF / ELF32 / big-endian images are declined by ``_elf64_le``.
+    """
+    if not _elf64_le(elf):
+        return None
+    machine = struct.unpack_from("<H", elf, 18)[0]
+    if machine == _EM_X86_64:
+        return "x86_64"
+    if machine == _EM_AARCH64:
+        return "aarch64"
+    return None
+
+
+_RELA_SIZE = 24  # sizeof(Elf64_Rela); a smaller sh_entsize is malformed
+_RELA_MAX = 512  # bound the relocation walk (Hard Rule 54)
+_SHT_RELA = 4
+_ENDBR64 = b"\xf3\x0f\x1e\xfa"
+
+
+def _plt_jmps(plt: bytes, plt_addr: int) -> dict[int, int]:
+    """``{GOT slot -> stub vaddr}`` for every ``jmp *[rip+rel32]`` (FF 25).
+
+    The stub is the jmp's own address, or the ENDBR64 before it when one
+    precedes it (CET .plt.sec layout) -- that is the IBT-callable entry.
+    """
+    out: dict[int, int] = {}
+    n = len(plt)
+    for i in range(n - 5):
+        if plt[i] != 0xFF or plt[i + 1] != 0x25:
+            continue
+        rel = int.from_bytes(plt[i + 2 : i + 6], "little", signed=True)
+        head = i - 4 if i >= 4 and plt[i - 4 : i] == _ENDBR64 else i
+        out.setdefault(plt_addr + i + 6 + rel, plt_addr + head)
+    return out
+
+
+def _plt_sections(
+    elf: bytes,
+) -> tuple[tuple[int, int, int] | None, dict[bytes, tuple[int, int, int]]]:
+    """(.rela.plt (off, size, entsize), {".plt"/".plt.sec" name -> (addr, off, size)})."""
+    rela = None
+    plt_secs: dict[bytes, tuple[int, int, int]] = {}
+    for name, sh_type, _flags, sh_addr, sh_off, sh_size, _link, sh_ent in _shdr_iter(elf):
+        if name == b".rela.plt" and sh_type == _SHT_RELA:
+            rela = (sh_off, sh_size, sh_ent)
+        elif name in (b".plt", b".plt.sec") and sh_type == 1 and len(plt_secs) < 2:
+            plt_secs[name] = (sh_addr, sh_off, sh_size)
+    return rela, plt_secs
+
+
+def _plt_names(
+    elf: bytes,
+    rela: tuple[int, int, int],
+    jmps: dict[int, int],
+    dynsym: tuple[int, int, int, int],
+) -> dict[str, int]:
+    """``{import name -> stub}`` for the .rela.plt rows resolvable through *jmps*.
+
+    *dynsym* is (sym_off, str_off, str_size, entry_count); rows naming symbol
+    0 (IRELATIVE-style) or an out-of-table index are skipped.
+    """
+    rela_off, rela_size, rela_ent = rela
+    sym_off, str_off, str_size, sym_count = dynsym
+    out: dict[str, int] = {}
+    for i in range(min(rela_size // rela_ent, _RELA_MAX)):
+        row = rela_off + i * rela_ent
+        r_offset, r_info = struct.unpack_from("<QQ", elf, row)
+        sym_idx = r_info >> 32
+        if sym_idx == 0 or sym_idx >= sym_count:
+            continue
+        name_idx = struct.unpack_from("<I", elf, sym_off + sym_idx * _SYM_SIZE)[0]
+        name = _cstr(elf, str_off + name_idx, str_off + str_size).decode(errors="replace")
+        stub = jmps.get(r_offset)
+        if name and stub is not None:
+            out.setdefault(name, stub)
+    return out
+
+
+def plt_map(elf: bytes) -> dict[str, int]:
+    """``{imported function name -> PLT stub address}`` from .rela.plt + .plt.
+
+    The stub is the ``jmp *[rip+rel32]`` whose target is the symbol's GOT
+    slot -- the address a ret2libc chain can call directly. .plt.sec (CET)
+    entries win over bare .plt ones. Bounded, best-effort: {} for a static
+    binary, a missing .rela.plt, or any malformed table.
+    """
+    secs = _sym_sections(elf)
+    if secs is None:
+        return {}
+    _symtab, _strtab, dynsym_sec, dynstr_sec = secs
+    if dynsym_sec is None or dynstr_sec is None:
+        return {}
+
+    sym_off, sym_size = struct.unpack_from("<QQ", elf, dynsym_sec + 24)
+    str_off, str_size = struct.unpack_from("<QQ", elf, dynstr_sec + 24)
+    if not _payload_in_bounds(len(elf), sym_off, sym_size):
+        return {}
+    if not _payload_in_bounds(len(elf), str_off, str_size):
+        return {}
+
+    rela, plt_secs = _plt_sections(elf)
+    if rela is None or not plt_secs:
+        return {}
+    rela_off, rela_size, rela_ent = rela
+    if rela_ent < _RELA_SIZE or not _payload_in_bounds(len(elf), rela_off, rela_size):
+        return {}
+
+    # .plt.sec fills the slot map first: its ENDBR64-headed stubs are the
+    # IBT-callable form, and bare .plt fills only what it missed.
+    jmps: dict[int, int] = {}
+    for sec_name in (b".plt.sec", b".plt"):
+        sec = plt_secs.get(sec_name)
+        if sec is None:
+            continue
+        plt_addr, plt_off, plt_size = sec
+        for slot, stub in _plt_jmps(elf[plt_off : plt_off + plt_size], plt_addr).items():
+            jmps.setdefault(slot, stub)
+
+    dynsym = (sym_off, str_off, str_size, sym_size // _SYM_SIZE)
+    return _plt_names(elf, rela, jmps, dynsym)
+
+
 # ── Snapshot spans (--snapshot-restore) ──────────────────────────────
 #
 #   RW PT_LOAD:  [.got][.got.plt][.data][afl_shim_data][.bss][afl_shim_bss]
