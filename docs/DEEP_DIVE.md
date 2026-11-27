@@ -3079,6 +3079,7 @@ At startup scans rodata/data/relro (same filter as the data-word dictionary, `el
     - `NoDesync`: `set_timeout()` kept a loader that still owed `TIMEOUT_OK`. It now respawns it, paced by `--respawn-backoff`.
     - `LiveLoaderReady`: a failed handshake or pipe error left the loader alive. `_abandon()` now reaps it.
     - `NoUncaught`: a respawn whose `Popen` raised (EAGAIN) escaped `run_one`. `start()` now returns False.
+    - `NoDesync` (`_read_result`, modeled since 2026-11-28): a stderr payload cut short by the deadline left its tail to be read as the next `RC` header. The loader is now respawned.
   - `PersistentLoader`:
     - `NoUncaught`: the same respawn bug, plus `stop()` raising `ValueError` on pipes `_replace()` had closed.
     - `SetupCleanup`: an EPIPE on `INIT` leaked the loader and escaped `start()`.
