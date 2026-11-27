@@ -3,7 +3,9 @@
 Without a parser the demuxer's output stops at a drop sink, so codec configs
 (avcC/hvcC/esds, SSA headers) are never parsed: h264parse/aacparse/ssaparse
 code is unreachable. The target compiles against stubs that model refcounts,
-pad links and a single parser factory (``h264parse`` for ``video/x-h264``).
+pad links, one parser factory (``video/x-h264``) and one subtitle decoder
+(``application/x-ass``, as ssaparse registers as ``Codec/Decoder/Subtitle``).
+Every stub element also has a static ``src`` pad, as wavparse/auparse/subparse do.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from enum import IntEnum
 from pathlib import Path
 
 import pytest
@@ -21,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "tools" / "build_targets.sh"
 
 H264 = "video/x-h264"
+ASS = "application/x-ass"
 FLOOD_PADS = 200
 
 HARNESS = r"""
@@ -28,6 +32,7 @@ HARNESS = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 
 int fuzz_gstreamer(const unsigned char *, size_t);
 
@@ -42,10 +47,14 @@ static int n_dyn;
 static StubObj *demux;
 static void (*pad_cb)(GstElement *, GstPad *, gpointer);
 static int parsers_created, parser_links, uaf, caps_live, lists_live, pushed;
-static int parser_not_null;
-static GstCaps the_caps;
-static GstElementFactory h264_factory = { "h264parse" };
-static GList factories = { &h264_factory, NULL };
+static int parser_not_null, static_links, make_fail, abandon;
+static jmp_buf abandon_jmp;
+/* Factory name = the caps it accepts. */
+static GstElementFactory h264_factory = { "video/x-h264" };
+static GstElementFactory ass_factory = { "application/x-ass" };
+static GList ass_node = { &ass_factory, NULL };
+static GList h264_node = { &h264_factory, NULL };
+static GList both_node = { &h264_factory, &ass_node };
 
 /* scenario: pad count, caps name (NULL = no caps), ANY flag */
 static int sc_pads, sc_any;
@@ -91,16 +100,23 @@ void g_log_set_default_handler(GLogFunc f, gpointer d) { (void)f; (void)d; }
 void g_log_set_handler(const gchar *a, GLogLevelFlags b, GLogFunc f, gpointer d)
 { (void)a; (void)b; (void)f; (void)d; }
 void gst_init(int *a, char ***b) { (void)a; (void)b; }
+static GstCaps *tracked_caps(const char *name)
+{
+    GstCaps *c = calloc(1, sizeof *c);
+    c->name = name; c->tracked = 1;
+    caps_live++;
+    return c;
+}
 GstCaps *gst_type_find_helper_for_data(GstObject *o, const guint8 *d, gsize n,
                                        GstTypeFindProbability *p)
-{ (void)o; (void)d; (void)n; *p = GST_TYPE_FIND_NONE; return &the_caps; }
+{ (void)o; (void)d; (void)n; *p = GST_TYPE_FIND_NONE; return tracked_caps("video/quicktime"); }
 GstStructure *gst_caps_get_structure(const GstCaps *c, guint8 i)
 { (void)c; (void)i; static GstStructure s; return &s; }
 const gchar *gst_structure_get_name(const GstStructure *s) { (void)s; return "video/quicktime"; }
-GstCaps *gst_caps_from_string(const gchar *s) { (void)s; return &the_caps; }
+GstCaps *gst_caps_from_string(const gchar *s) { return tracked_caps(s); }
 void gst_caps_unref(GstCaps *c) { if (c->tracked) { caps_live--; free(c); } }
 GstElement *gst_element_factory_make(const gchar *a, const gchar *b)
-{ (void)a; (void)b; return new_elem(0); }
+{ (void)a; (void)b; return make_fail ? NULL : new_elem(0); }
 GstElement *gst_element_factory_create(GstElementFactory *f, const gchar *n)
 { (void)f; (void)n; parsers_created++; return new_elem(1); }
 void g_signal_connect(gpointer a, const gchar *b, GCallback c, gpointer d)
@@ -121,6 +137,7 @@ GstPad *gst_element_get_static_pad(GstElement *e, const gchar *n)
 GstPadLinkReturn gst_pad_link(GstPad *a, GstPad *b)
 {
     a->peer = b; b->peer = a;
+    if (demux && a == demux->srcpad) static_links++;
     if (b->parent && b->parent->parser && a->parent == demux) parser_links++;
     return GST_PAD_LINK_OK;
 }
@@ -149,16 +166,26 @@ gpointer gst_object_ref_sink(gpointer p)
 }
 
 GList *gst_element_factory_list_get_elements(GstElementFactoryListType t, GstRank r)
-{ (void)t; (void)r; return &factories; }
+{
+    (void)r;
+    int parsers = (t & GST_ELEMENT_FACTORY_TYPE_PARSER) != 0;
+    int decoders = (t & GST_ELEMENT_FACTORY_TYPE_DECODER) != 0;
+    return parsers && decoders ? &both_node : parsers ? &h264_node : decoders ? &ass_node : NULL;
+}
 GList *g_list_sort(GList *l, GCompareFunc f) { (void)f; return l; }
 int gst_plugin_feature_rank_compare_func(const void *a, const void *b) { (void)a; (void)b; return 0; }
 /* Real filtering intersects caps: ANY intersects every factory. */
 GList *gst_element_factory_list_filter(GList *l, const GstCaps *c, GstPadDirection d, gboolean s)
 {
-    (void)l; (void)d; (void)s;
-    if (!c->any && strcmp(c->name, "video/x-h264") != 0) return NULL;
+    (void)d; (void)s;
+    GstElementFactory *f = NULL;
+    for (; l && !f; l = l->next) {
+        GstElementFactory *cand = l->data;
+        if (c->any || strcmp(c->name, cand->name) == 0) f = cand;
+    }
+    if (!f) return NULL;
     GList *n = calloc(1, sizeof *n);
-    n->data = &h264_factory;
+    n->data = f;
     lists_live++;
     return n;
 }
@@ -169,9 +196,8 @@ void gst_plugin_feature_list_free(GList *l)
 GstCaps *gst_pad_get_current_caps(GstPad *p)
 {
     if (!p->caps) return NULL;
-    GstCaps *src = p->caps, *c = malloc(sizeof *c);
-    *c = *src; c->tracked = 1;
-    caps_live++;
+    GstCaps *src = p->caps, *c = tracked_caps(src->name);
+    c->any = src->any;
     return c;
 }
 gboolean gst_caps_is_any(const GstCaps *c) { return c->any; }
@@ -191,32 +217,41 @@ GstFlowReturn gst_pad_push(GstPad *p, GstBuffer *b)
         dyn[n_dyn++] = dp;
         pad_cb(demux, dp, NULL);
     }
+    if (abandon) longjmp(abandon_jmp, 1);    /* timeout guard abandons the exec */
     return GST_FLOW_OK;
 }
 
-static void run(const char *label, int pads, const char *caps, int any)
+/* mode: 0 normal, 1 demuxer creation fails, 2 previous exec abandoned mid-push */
+static void run(const char *label, int pads, const char *caps, int any, int mode)
 {
     unsigned char buf[64] = {0};
     sc_pads = pads; sc_caps = caps; sc_any = any;
     parsers_created = parser_links = uaf = caps_live = lists_live = pushed = 0;
     parser_not_null = 0; n_dyn = 0;
     fuzz_gstreamer(buf, sizeof buf);    /* first call runs init + pre-warm */
+    if (mode == 2) {
+        sc_pads = 64; sc_caps = "video/x-h264"; abandon = 1; pushed = 0; n_dyn = 0;
+        if (!setjmp(abandon_jmp)) fuzz_gstreamer(buf, sizeof buf);
+        abandon = 0; sc_pads = pads; sc_caps = caps;
+    }
     exec_first = n_objs;
-    parsers_created = parser_links = pushed = 0; n_dyn = 0;
+    parsers_created = parser_links = pushed = static_links = caps_live = 0; n_dyn = 0;
+    make_fail = mode == 1;
     fuzz_gstreamer(buf, sizeof buf);
+    make_fail = 0;
     int leaked = 0, linked = 0;
     for (int i = exec_first; i < n_objs; i++) leaked += objs[i]->refs > 0;
     for (int i = 0; i < n_dyn; i++) linked += dyn[i]->peer != NULL || dyn[i]->refs == 0;
     printf("%s parsers=%d links=%d leaked=%d uaf=%d caps_live=%d lists_live=%d "
-           "not_null=%d\n", label, parsers_created, parser_links, leaked, uaf,
-           caps_live, lists_live, parser_not_null);
+           "not_null=%d static_links=%d\n", label, parsers_created, parser_links, leaked, uaf,
+           caps_live, lists_live, parser_not_null, static_links);
 }
 
 int main(int argc, char **argv)
 {
     int pads = atoi(argv[2]);
     const char *caps = strcmp(argv[3], "-") == 0 ? NULL : argv[3];
-    run(argv[1], pads, caps, atoi(argv[4]));
+    run(argv[1], pads, caps, atoi(argv[4]), argc > 5 ? atoi(argv[5]) : 0);
     return 0;
 }
 """
@@ -246,9 +281,19 @@ def probe_exe(tmp_path_factory) -> Path:
     return exe
 
 
-def run_probe(exe: Path, pads: int, caps: str | None, any_caps: bool = False) -> dict[str, int]:
+class Mode(IntEnum):
+    """Exec scenario, mirrors ``run()``'s mode argument in the C harness."""
+
+    NORMAL = 0
+    MAKE_FAILS = 1
+    AFTER_ABANDON = 2
+
+
+def run_probe(
+    exe: Path, pads: int, caps: str | None, any_caps: bool = False, mode: Mode = Mode.NORMAL
+) -> dict[str, int]:
     """One exec with *pads* demuxer pads carrying *caps*; returns the probe counters."""
-    args = [str(exe), "case", str(pads), caps or "-", str(int(any_caps))]
+    args = [str(exe), "case", str(pads), caps or "-", str(int(any_caps)), str(int(mode))]
     out = subprocess.run(args, check=True, capture_output=True, text=True).stdout
     return _parse(out.strip())
 
@@ -334,3 +379,31 @@ def test_typefind_routes_new_demuxers():
     assert fallback, "kFallback missing"
     names = re.findall(r'"(\w+)"', fallback.group(1))
     assert names == ["qtdemux", "matroskademux", "wavparse", "avidemux", "flvdemux"]
+
+
+def test_regression_static_src_pad_is_drained(probe_exe):
+    """wavparse/auparse/subparse push on a static "src" pad that pad-added never
+    reports: unlinked, the first push returns NOT_LINKED and parsing stops."""
+    r = run_probe(probe_exe, 0, None)
+    assert r["static_links"] == 1, r
+    assert r["leaked"] == 0, r
+
+
+def test_regression_subtitle_decoder_follows_pad(probe_exe):
+    """ssaparse is a Codec/Decoder: matroska's SSA pad must reach it."""
+    r = run_probe(probe_exe, 1, ASS)
+    assert (r["parsers"], r["links"]) == (1, 1), r
+
+
+def test_regression_failed_demux_frees_caps(probe_exe):
+    """Early return after typefind must release the typefind caps."""
+    r = run_probe(probe_exe, 1, H264, mode=Mode.MAKE_FAILS)
+    assert r["caps_live"] == 0, r
+
+
+def test_adversarial_abandoned_exec_keeps_capacity(probe_exe):
+    """An exec the timeout guard abandons with every parser slot taken must not
+    starve the next exec of parsers."""
+    r = run_probe(probe_exe, 1, H264, mode=Mode.AFTER_ABANDON)
+    assert (r["parsers"], r["links"]) == (1, 1), r
+    assert r["uaf"] == 0, r

@@ -56,6 +56,7 @@ typedef struct { const char *name; } GstElementFactory;
 typedef int (*GCompareFunc)(const void *, const void *);
 typedef enum { GST_RANK_NONE = 0 } GstRank;
 typedef unsigned long long GstElementFactoryListType;
+#define GST_ELEMENT_FACTORY_TYPE_DECODER (1ULL << 0)
 #define GST_ELEMENT_FACTORY_TYPE_PARSER (1ULL << 6)
 typedef enum { GST_TYPE_FIND_NONE = 0 } GstTypeFindProbability;
 typedef enum { GST_FLOW_OK = 0, GST_FLOW_NOT_NEGOTIATED = -4 } GstFlowReturn;
