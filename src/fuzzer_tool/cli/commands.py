@@ -955,6 +955,11 @@ def cmd_fuzz(args):
         # Softmax and TopK scheduler flags for --elo all
         args.softmax = True
         args.topk = True
+        # Uniform / pair-cover schedulers
+        args.op_uniform = True
+        args.seed_uniform_scheduler = True
+        args.pos_uniform = True
+        args.op_pair_cover = True
         # Mutation-side schedulers/features that are not Elo-arbitrated but are
         # part of the scheduling stack; flip them on so --elo all is the
         # everything-on switch (power schedule fast = classic AFL default)
@@ -3783,6 +3788,7 @@ _HAIL_MARY_FLAGS = (
     "ga",
     "round_robin",
     "op_uniform",
+    "op_pair_cover",
     "qea",
     "mcts",
     "alphabeta",

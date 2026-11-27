@@ -93,6 +93,7 @@ BALLOT_SCHEDULERS = (
     "topk",
     "whittle",
     "las_vegas",
+    "uniform",
 )
 
 
