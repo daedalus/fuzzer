@@ -46,6 +46,15 @@ _FAKE = textwrap.dedent(
             sys.exit(0)
         if line.startswith(b"RUN "):
             inp.read(int(line.split()[1]))
+            once = os.environ.get("FAKE_ONCE", "")
+            if mode == "slowerr" and not os.path.exists(once):
+                open(once, "w").close()  # only the first loader stalls mid-payload
+                out.write("RC {_FAKE_RC} 10\\nabcd")
+                out.flush()
+                time.sleep(float(os.environ["FAKE_LATE_S"]))
+                out.write("efghij")
+                out.flush()
+                continue
             say("RC {_FAKE_RC} 0")
         if line.startswith(b"TIMEOUT "):
             if mode == "late":
@@ -222,5 +231,21 @@ def test_regression_respawn_eagain(fake_loader, monkeypatch):
 
         monkeypatch.setattr(forkserver.subprocess, "Popen", eagain)
         assert r.run_one(b"x") == (-2, "")
+    finally:
+        r.stop()
+
+
+def test_regression_stderr_short(fake_loader, monkeypatch, tmp_path):
+    """NoDesync: a stderr payload cut by the deadline must not become the next header."""
+    env, _pids = fake_loader
+    late_s = 0.8
+    monkeypatch.setattr(forkserver, "_LOADER_GRACE", 0.1)
+    loader_env = env("slowerr", FAKE_LATE_S=str(late_s), FAKE_ONCE=str(tmp_path / "once"))
+    r = ForkserverRunner("/fake/target", timeout=0.2, env=loader_env)
+    try:
+        assert r.start()
+        assert r.run_one(b"x")[0] == _FAKE_RC
+        time.sleep(late_s)  # the payload tail, if the loader was kept, is now in the pipe
+        assert r.run_one(b"y")[0] == _FAKE_RC
     finally:
         r.stop()

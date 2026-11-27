@@ -460,7 +460,6 @@ class ForkserverRunner:
             self._restarting = False
         return fail_rc, ""
 
-    @tla.opaque("rc", -2)
     def _read_result(self, header: bytes, deadline: float) -> tuple[int, str]:
         """Parse the ``RC <rc> <err_len>`` reply and read the stderr payload."""
         if not header:
@@ -476,7 +475,11 @@ class ForkserverRunner:
         stderr = ""
         if err_len > 0:
             raw = self._reader.read_exact(err_len, deadline)
-            if raw:
+            if raw is None:
+                # Its tail would be read as the next RC header: replace the loader.
+                log.warning("Forkserver: stderr payload cut short; respawning")
+                self._respawn()
+            else:
                 stderr = raw.decode(errors="replace")
 
         self._last_stderr = stderr
