@@ -20,8 +20,10 @@ and chunk offsets are fixed by ``mp4_path.splice``.
 from __future__ import annotations
 
 import struct
+from typing import cast
 
 from fuzzer_tool.core.mutations.mp4_path import BOX_HDR, BoxHit, find_boxes, splice
+from fuzzer_tool.core.rand_pool import RandPool
 
 ROOT = b""  # pseudo-container: the file's top level
 U16_ONE = 0x0001
@@ -147,7 +149,7 @@ def _grow_root(data: bytes, child: bytes) -> bytes | None:
     return data[:first_end] + child + data[first_end:]
 
 
-def grow_mp4(data: bytes, max_len: int, rng) -> bytes | None:
+def grow_mp4(data: bytes, max_len: int, rng: RandPool) -> bytes | None:
     """Add one missing required box (with its subtree); None if nothing is missing.
 
     One ``rng.choice`` picks the (container, child) pair.
@@ -156,7 +158,7 @@ def grow_mp4(data: bytes, max_len: int, rng) -> bytes | None:
     if not cands:
         return None
 
-    hit, typ = rng.choice(cands)
+    hit, typ = cast("tuple[BoxHit | None, bytes]", rng.choice(cands))
     child = _TEMPLATES[typ]
     if hit is None:
         out = _grow_root(data, child)
