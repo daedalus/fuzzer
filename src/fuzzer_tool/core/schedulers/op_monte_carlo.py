@@ -20,7 +20,6 @@ from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_structure_function import DispersionIndex
 from fuzzer_tool.core.blup import POOL_MAX_STRENGTH, PoolCache
-from fuzzer_tool.core.clock import WALL_CLOCK, Clock
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
 from fuzzer_tool.core.dirichlet import dm_alpha
 from fuzzer_tool.core.op_chain2 import SecondOrderChain
@@ -136,11 +135,8 @@ class MonteCarloScheduler:
         cem_dirichlet_concentration: float = 0.0,
         rng: RandPool | None = None,
         second_order_blend: float = 0.0,
-        clock: Clock = WALL_CLOCK,
     ):
         self._rng = rng if rng is not None else get_default_rand_pool()
-        # Decision clock: the null-replicate budget sets how many replicates run.
-        self._clock = clock
         self._hierarchical_pooling = max(0.0, min(1.0, hierarchical_pooling))
         self._cem_dirichlet_concentration = cem_dirichlet_concentration
         self.arm_alpha: dict[str, float] = {}
@@ -736,15 +732,27 @@ class MonteCarloScheduler:
     # estimate is only consulted once per refit, never on the execution path.
     _JS_NULL_REPLICATES = 40
     _JS_NULL_REPLICATES_NO_NUMPY = 9
-    # Floor on replicates, and a wall-clock budget for the whole estimate. Cost
+    # Floor on replicates, and a work budget for the whole estimate. Cost
     # scales with input length times elite count: 40 replicates is ~20 ms at
     # 64-byte inputs but ~780 ms at 1024-byte inputs with 100 elites, which is
-    # too much even once per refit_interval executions. The loop stops early
-    # once the budget is spent, never below the floor. Fewer replicates make the
-    # quantiles coarse and biased toward "still moving", which is the direction
-    # that refits more often -- the conservative way to be wrong here.
+    # too much even once per refit_interval executions. Fewer replicates make
+    # the quantiles coarse and biased toward "still moving", which is the
+    # direction that refits more often -- the conservative way to be wrong here.
+    #
+    # Work, not time: a clock deadline made the count (and so --seed runs)
+    # depend on machine load, and the virtual clock never expired it (every
+    # refit ran all 40). Units per replicate: numpy, positions x (256 bins +
+    # observations), measured 26-45 ns each; python, observations, 340-960 ns
+    # each. Both budgets sit near the old 50 ms.
     _JS_NULL_MIN_REPLICATES = 8
-    _JS_NULL_BUDGET_SECONDS = 0.05
+    _JS_NULL_WORK_BUDGET = 1_500_000
+    _JS_NULL_WORK_BUDGET_NO_NUMPY = 80_000
+    _JS_BINS = 256
+
+    @classmethod
+    def _null_replicates(cls, units: int, budget: int, floor: int, cap: int) -> int:
+        """Replicates *budget* affords at *units* per replicate, in [floor, cap]."""
+        return max(floor, min(cap, budget // max(1, units)))
 
     def _null_js_quantiles(self, alphas: tuple[float, ...]) -> dict[float, float]:
         """Bootstrap the JS a *stable* distribution would still show at this n.
@@ -786,25 +794,26 @@ class MonteCarloScheduler:
         if not pooled:
             return dict.fromkeys(alphas, 0.0)
 
-        deadline = self._clock.monotonic() + self._JS_NULL_BUDGET_SECONDS
+        # Replicate count from the input size alone: reproducible on any load.
+        obs = sum(n1 + n2 for _, n1, n2 in pooled)
         if _HAS_NUMPY:
-            samples = self._null_js_samples_numpy(
-                pooled,
+            reps = self._null_replicates(
+                len(pooled) * self._JS_BINS + obs,
+                self._JS_NULL_WORK_BUDGET,
+                self._JS_NULL_MIN_REPLICATES,
                 self._JS_NULL_REPLICATES,
-                deadline=deadline,
-                min_replicates=self._JS_NULL_MIN_REPLICATES,
-                seed=self._rng.randint(0, _NULL_SEED_MAX),
-                now=self._clock.monotonic,
+            )
+            samples = self._null_js_samples_numpy(
+                pooled, reps, seed=self._rng.randint(0, _NULL_SEED_MAX)
             )
         else:
-            samples = self._null_js_samples_python(
-                pooled,
+            reps = self._null_replicates(
+                obs,
+                self._JS_NULL_WORK_BUDGET_NO_NUMPY,
+                min(self._JS_NULL_MIN_REPLICATES, 4),
                 self._JS_NULL_REPLICATES_NO_NUMPY,
-                self._rng,
-                deadline=deadline,
-                min_replicates=min(self._JS_NULL_MIN_REPLICATES, 4),
-                now=self._clock.monotonic,
             )
+            samples = self._null_js_samples_python(pooled, reps, self._rng)
         if not samples:
             return dict.fromkeys(alphas, 0.0)
         samples.sort()
