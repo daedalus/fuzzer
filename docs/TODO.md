@@ -14,6 +14,8 @@
 > Every A/B result goes in `docs/AB_LEDGER.md` (Hard Rule 59).
 
 ## Coverage & Instrumentation
+- [ ] **Minimize re-hash** (2026-11-27) — fixed: corpus loops use the memoized `seed_key`. Open: `_bulk` (pure-Python XXH64) still runs once per admitted seed; vectorize if admission-time hashing shows in a profile.
+- [ ] **Resume on a rebuilt target** (2026-11-27) — fixed: edge tracker not restored on hash mismatch. Open: other edge-keyed state (`sensitivity`, `crash_mi`, Katz masks, per-seed `coverage_edges`) still restores across builds; audit each.
 - [ ] **Shim vs glibc C23 macros** (2026-11-27) — fixed: `#undef memchr/strstr/strpbrk` before the interposers (CI runner glibc; 127 tests red on master). Open: recheck when the shim interposes another const-generic name (`strchr`, `strrchr`, `bsearch`, `wcs*`).
 - [ ] **Katz recompute budget on host time** (2026-11-26) — fixed: Fuzzer no longer passes its virtual decision clock to `KatzChannel` (rebuild cost read 0 s; rebuilt every 50 execs). Open: (a) `--seed` replay no longer exact with Katz armed (rebuild timing is host-dependent); (b) ~~`seq_mutate._id_shift` cubic~~ fixed 2026-11-27 (document-frequency count; 84 s -> 15 ms per call). (d) ~~MC null budget on the clock~~ fixed 2026-11-27: work budget, reproducible in both clock modes; GStreamer-size inputs (64 KiB positions) still pay the 8-replicate floor per refit. (c) LF splitting accepts binary media (64 KiB GStreamer seed -> 15.8k "messages"): consider rejecting high-entropy inputs.
 - [ ] **Virtual clock resume** (2026-11-26) — fixed: ticks persisted/restored on `--resume` (GStreamer resume crashed in `_cdf_pick`). Open: `_apply_exploit` still divides by `1 + age*0.01` unguarded; clamp negative ages if another clock source appears.

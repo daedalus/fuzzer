@@ -903,7 +903,10 @@ class CorpusManager:
         f = self.f
         from fuzzer_tool.core.edge_tracker import EDGE_TRACKER_SECTION
 
-        f._state_store.restore(EDGE_TRACKER_SECTION, f._edge_tracker)
+        # Edge IDs are per build: a changed binary's would sit in
+        # cumulative_edges with no holder. Calibration rebuilds the tracker.
+        if getattr(f, "_resume_target_state", "unknown") != "mismatch":
+            f._state_store.restore(EDGE_TRACKER_SECTION, f._edge_tracker)
         # Restore coverage regime detector state
         regime_data = f._state_store.get("regime")
         if regime_data is not None and hasattr(f, "_regime"):
@@ -1793,7 +1796,6 @@ class CorpusManager:
     def _sparsest_untried(self) -> bytes | None:
         """Tracked, untried, trimmable seed with the fewest edges hit per bit."""
         f = self.f
-        from fuzzer_tool.adapters.filesystem import hash_data
 
         seed_edges = f._edge_tracker.seed_edges
         best, best_density = None, math.inf
@@ -1807,7 +1809,7 @@ class CorpusManager:
 
             # Hash only a would-be winner: crash seeds are few, hashing is not.
             density = edges_per_bit(len(edges), len(seed))
-            if density < best_density and hash_data(seed) not in f.irreplaceable_hashes:
+            if density < best_density and self.seed_key(seed) not in f.irreplaceable_hashes:
                 best, best_density = seed, density
         return best
 
@@ -2019,12 +2021,11 @@ class CorpusManager:
         if not f.corpus:
             return
 
-        from fuzzer_tool.adapters.filesystem import hash_data
-
+        # seed_key: memoized per corpus seed, same key as hash_data.
         seen: set[str] = set()
         unique: list[bytes] = []
         for seed in f.corpus:
-            h = hash_data(seed)
+            h = self.seed_key(seed)
             if h not in seen:
                 seen.add(h)
                 unique.append(seed)
@@ -2098,14 +2099,13 @@ class CorpusManager:
     def _set_aside(self, unique: list[bytes]) -> tuple[list[bytes], list[bytes]]:
         """Remove never-pruned seeds from *unique*: (irreplaceable, fresh)."""
         f = self.f
-        from fuzzer_tool.adapters.filesystem import hash_data
 
         # Irreplaceable seeds (loaded from corpus/seeds/irreplaceable/) are never pruned.
         # Separate them from the unique pool before minimization; re-add after.
         irreplaceable_seeds: list[bytes] = []
         if f.irreplaceable_hashes:
             for seed in unique[:]:  # iterate copy, mutate original
-                if hash_data(seed) in f.irreplaceable_hashes:
+                if self.seed_key(seed) in f.irreplaceable_hashes:
                     irreplaceable_seeds.append(seed)
                     unique.remove(seed)
 
@@ -2541,9 +2541,8 @@ class CorpusManager:
     def _commit_minimize(self, unique: list[bytes], removed: int, stale_ratio: float) -> None:
         """Move pruned files to pruned/ and swap f.corpus/f.seed_meta to *unique*."""
         f = self.f
-        from fuzzer_tool.adapters.filesystem import hash_data as _hash
 
-        kept_set = {_hash(s) for s in unique}
+        kept_set = {self.seed_key(s) for s in unique}
         self._prune_files(kept_set)
         del kept_set  # free kept hashes after file pruning
 
