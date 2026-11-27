@@ -363,7 +363,16 @@ class LiteralAccumulator:
     that grows with both factors.
     """
 
-    __slots__ = ("int_lits", "str_lits", "seen_int", "seen_str", "scanned")
+    __slots__ = (
+        "int_lits",
+        "str_lits",
+        "seen_int",
+        "seen_str",
+        "scanned",
+        "_refs",
+        "_base",
+        "_last",
+    )
 
     def __init__(self) -> None:
         self.int_lits: list[bytes] = []
@@ -373,9 +382,53 @@ class LiteralAccumulator:
         #: Number of corpus entries already folded in, for callers that
         #: append to a list and want to feed only the tail.
         self.scanned: int = 0
+        # id -> seed for every scanned seed still in the corpus; holding the
+        # object keeps its id from being reused by a new seed.
+        self._refs: dict[int, object] = {}
+        self._base = 0  # literal count after the last full rebuild
+        self._last: object = None  # corpus[scanned - 1] at the last sync
 
     def result(self) -> tuple[list[bytes], list[bytes]]:
         return self.int_lits, self.str_lits
+
+    def sync(self, corpus: list) -> None:
+        """Fold in every seed of *corpus* not yet scanned, tracked by identity.
+
+        Growth scans the tail. A prune or rebind (minimization keeps the
+        same seed objects) scans only unseen seeds instead of the whole
+        corpus: GStreamer prunes ~1/s on 5,000 x 8 KB seeds. Literals of
+        pruned seeds linger until the set doubles past its last rebuild,
+        then one full rescan drops them, so memory stays bounded.
+        """
+        n, k = len(corpus), self.scanned
+        if k <= n and (k == 0 or corpus[k - 1] is self._last):
+            self._fold(corpus[k:])
+            if k == 0:  # first scan is a full one
+                self._base = len(self.int_lits) + len(self.str_lits)
+        else:
+            fresh = [s for s in corpus if id(s) not in self._refs]
+            self._refs = {id(s): s for s in corpus}
+            self._fold(fresh)
+            self.scanned = n
+            if len(self.int_lits) + len(self.str_lits) > 2 * self._base:
+                self._rebuild(corpus)
+        self._last = corpus[-1] if corpus else None
+
+    def _fold(self, seeds: list) -> None:
+        """Scan *seeds* and remember them; advances ``scanned`` by their count."""
+        for raw in seeds:
+            _scan_literals(bytes(raw), self)
+            self._refs[id(raw)] = raw
+        self.scanned += len(seeds)
+
+    def _rebuild(self, corpus: list) -> None:
+        """Drop every literal and rescan *corpus* from scratch."""
+        for coll in (self.int_lits, self.str_lits, self.seen_int, self.seen_str):
+            coll.clear()
+        self._refs = {}
+        self.scanned = 0
+        self._fold(corpus)
+        self._base = len(self.int_lits) + len(self.str_lits)
 
 
 def _build_run_specs() -> tuple:
