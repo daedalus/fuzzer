@@ -40,8 +40,11 @@ variable index when no check is feasible.  Stdlib only (Hard Rule 51).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import IntEnum
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 #: Bound on n and m: the dense RREF encoder costs rank * n bits.
 MAX_N = 8192
@@ -214,9 +217,9 @@ def _chunks(body: list[int], weights: list[int], width: int) -> list[list[int]]:
     return out
 
 
-def _lists(body: list[int], weights: list[int], limit: int, what: str) -> list[list[int]]:
+def _lists(body: list[list[int]], weights: list[int], limit: int, what: str) -> list[list[int]]:
     """0-based index lists; ValueError on padding, range, weight or duplicates."""
-    out = []
+    out: list[list[int]] = []
     for i, (lst, w) in enumerate(zip(body, weights, strict=True)):
         vals = lst[:w]
         if any(lst[w:]):
@@ -288,7 +291,7 @@ def _encode(code: LdpcCode, word: int) -> int:
     return out
 
 
-def _pick(rng, n: int, count: int) -> list[int]:
+def _pick(rng: RandPool, n: int, count: int) -> list[int]:
     """*count* distinct indices in range(n), sparse Fisher-Yates (O(count))."""
     swap: dict[int, int] = {}
     out = []
@@ -299,12 +302,12 @@ def _pick(rng, n: int, count: int) -> list[int]:
     return out
 
 
-def _bits_mask(n: int, positions) -> int:
+def _bits_mask(n: int, positions: Iterable[int]) -> int:
     """Mask with variable j at bit n-1-j for each j in *positions*."""
     return sum(1 << (n - 1 - j) for j in positions)
 
 
-def _error(code: LdpcCode, mode: Mode, rng) -> int:
+def _error(code: LdpcCode, mode: Mode, rng: RandPool) -> int:
     """Error pattern XORed onto the re-encoded word for injection modes."""
     n = code.n
     if mode is Mode.CORRECTABLE:
@@ -312,7 +315,7 @@ def _error(code: LdpcCode, mode: Mode, rng) -> int:
         return _bits_mask(n, _pick(rng, n, count))
 
     if mode is Mode.UNCORRECTABLE:
-        return code.rows[code.live[rng.randint(0, len(code.live) - 1)]]
+        return int(code.rows[code.live[rng.randint(0, len(code.live) - 1)]])
 
     # SYNDROME: H.e = u_r via the RREF pivots whose transform uses check r.
     if not code.feasible:
@@ -322,7 +325,7 @@ def _error(code: LdpcCode, mode: Mode, rng) -> int:
     return _bits_mask(n, piv)
 
 
-def _mutate_word(code: LdpcCode, word: int, rng) -> int:
+def _mutate_word(code: LdpcCode, word: int, rng: RandPool) -> int:
     """One Mode edit on an n-bit word; never returns *word* itself."""
     mode = Mode(rng.randint(Mode.REPAIR, Mode.SYNDROME))
     if mode is Mode.REPAIR:
@@ -335,7 +338,7 @@ def _mutate_word(code: LdpcCode, word: int, rng) -> int:
     return base if out == word else out
 
 
-def ldpc_fix(data: bytes, rng, code: LdpcCode) -> bytes | None:
+def ldpc_fix(data: bytes, rng: RandPool, code: LdpcCode) -> bytes | None:
     """Mutate one LDPC codeword of *data*; None if no full codeword fits.
 
     Args:

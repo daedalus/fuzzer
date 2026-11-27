@@ -32,6 +32,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import TypeVar, cast
 
 from fuzzer_tool.core.rand_pool import RandPool
 
@@ -122,6 +123,15 @@ INDX_FIELDS = (
 )
 
 
+_T = TypeVar("_T")
+_Field = tuple[int, int, tuple[int, ...]]
+
+
+def _choose(rng: RandPool, seq: tuple[_T, ...]) -> _T:
+    """``rng.choice`` narrowed to the element type (same single draw)."""
+    return cast(_T, rng.choice(seq))
+
+
 class RunPos(IntEnum):
     """Mapping-pair byte to overwrite in the first run."""
 
@@ -206,7 +216,7 @@ def _has_boot(data: bytes) -> bool:
     )
 
 
-def _defix(data: bytes, rec: _Record) -> bytearray:
+def _defix(data: bytes | bytearray, rec: _Record) -> bytearray:
     """Logical record: each sector tail restored from its USA slot."""
     out = bytearray(data[rec.off : rec.off + rec.size])
     for k in range(rec.count - 1):
@@ -228,7 +238,7 @@ def _refix(logical: bytearray, rec: _Record) -> bytearray:
     return out
 
 
-def _attrs(logical: bytes, rec: _Record) -> list[_Attr]:
+def _attrs(logical: bytes | bytearray, rec: _Record) -> list[_Attr]:
     """Attribute headers from the first-attribute offset to the end marker."""
     if rec.magic != FILE_MAGIC:
         return []
@@ -244,7 +254,7 @@ def _attrs(logical: bytes, rec: _Record) -> list[_Attr]:
     return out
 
 
-def _mapping(logical: bytes, attr: _Attr) -> int | None:
+def _mapping(logical: bytes | bytearray, attr: _Attr) -> int | None:
     """Record-relative offset of the mapping pairs, if inside the attribute."""
     if not attr.nonres or attr.length < NONRES_MIN:
         return None
@@ -320,9 +330,9 @@ class _Editor:
     def _idx(self, n: int) -> int:
         return self.rng.randint(0, n - 1)
 
-    def _field(self, logical: bytearray, base: int, fields: tuple) -> None:
+    def _field(self, logical: bytearray, base: int, fields: tuple[_Field, ...]) -> None:
         off, width, edges = fields[self._idx(len(fields))]
-        _put(logical, base + off, width, self.rng.choice(edges))
+        _put(logical, base + off, width, _choose(self.rng, edges))
 
     def _commit(self, rec: _Record, logical: bytearray) -> None:
         self.buf[rec.off : rec.off + rec.size] = _refix(logical, rec)
@@ -362,7 +372,7 @@ class _Editor:
             RunPos.TERM: 1 + len_size + off_size,
         }[where]
         pos = min(mp + rel, attr.pos + attr.length - 1)
-        _put(logical, pos, 1, self.rng.choice(RUN_EDGES[where]))
+        _put(logical, pos, 1, _choose(self.rng, RUN_EDGES[where]))
         self._commit(attr.rec, logical)
 
     def fixup(self) -> None:
@@ -381,7 +391,7 @@ class _Editor:
             off += INDX_HDR + struct.unpack_from("<I", logical, INDX_HDR)[0]
         if off + width > rec.size:
             off, width, edges = INDX_FIELDS[1][1:]  # entry out of range: hit its offset
-        _put(logical, off, width, self.rng.choice(edges))
+        _put(logical, off, width, _choose(self.rng, edges))
         self._commit(rec, logical)
 
 
@@ -403,7 +413,7 @@ def mutate_ntfs(data: bytes, max_len: int = 65536, *, rng: RandPool) -> bytes | 
         return None
 
     buf = bytearray(data)
-    _HANDLERS[rng.choice(ops)](_Editor(buf, scan, rng))
+    _HANDLERS[_choose(rng, ops)](_Editor(buf, scan, rng))
 
     # A hostile USA overlapping the edited field can make the re-fix undo it.
     if buf == data and scan.records:
