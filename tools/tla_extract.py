@@ -47,6 +47,7 @@ BUILTIN_INVARIANTS = ("NoOrphan", "NoHang", "NoUncaught", "RecursionBound", "NoD
 _SYSCALLS = Path(__file__).resolve().parent / "tla" / "Syscalls.tla"
 _JAR_NAME = "tla2tools.jar"
 _MAX_INLINE = 3  # nested activations of one method before "Overflow"
+_RECURSION_LIMIT = 20_000
 _TLC_TIMEOUT = 600
 _UNCATCHABLE = ('"Hang"', '"Overflow"')
 _NO_DEADLINE = "NO_DEADLINE"
@@ -1099,9 +1100,17 @@ class Emitter:
 
 
 def extract(cls: type) -> Model:
-    """Compile *cls* into a TLA+ model."""
-    comp = Compiler(cls)
-    return Emitter(comp).emit()
+    """Compile *cls* into a TLA+ model.
+
+    CPS recurses once per statement along every inlined call chain, so the
+    default limit (1000) is exhausted by a few nested methods.
+    """
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, _RECURSION_LIMIT))
+    try:
+        return Emitter(Compiler(cls)).emit()
+    finally:
+        sys.setrecursionlimit(limit)
 
 
 # ── TLC ────────────────────────────────────────────────────────────

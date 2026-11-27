@@ -30,7 +30,7 @@ import time
 
 from fuzzer_tool.adapters.memfd_input import MemfdInput
 from fuzzer_tool.adapters.persistent_subprocess import _close_streams
-from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
+from fuzzer_tool.adapters.pipe_reader import PipeReader
 from fuzzer_tool.adapters.process import _clean_env
 from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
 from fuzzer_tool.core import tla
@@ -84,6 +84,12 @@ STDERR_LINES_MAX = 100  # max stderr lines retained from child processes
 # timeout, because the work it covers is process teardown, whose cost does
 # not shrink just because the target got a tighter deadline.
 _LOADER_GRACE = 1.0
+
+# Seconds start() waits for READY. The loader answers only after dlopen or
+# the target's forkserver handshake, which takes seconds on large ASAN
+# targets; past this it is presumed wedged (a target constructor that never
+# returns) and killed, instead of blocking the fuzzer forever on a restart.
+_START_DEADLINE = 120.0
 
 
 # Env each opted-in mode needs: read by afl_shim.c in the forkserver child,
@@ -306,31 +312,63 @@ class ForkserverRunner:
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
             log.warning("Forkserver: failed to send INIT")
+            self._abandon()
             return False
 
-        resp = self._reader.readline(NO_DEADLINE)
-        parts = resp.decode(errors="replace").strip().split()
-        if parts and parts[0] == "READY":
-            self._ready = True
-            # "forkserver" | "exec" | "dlopen"; "" from a loader built before
-            # the suffix existed. Only ever informational -- the protocol is
-            # identical in every mode, so nothing branches on it.
-            self.exec_mode = parts[1] if len(parts) > 1 else ""
-            self.capabilities = frozenset(parts[2:])
-            if self._argv is not None and "argv" not in self.capabilities:
-                log.warning("Forkserver: loader ignores ARG lines, cannot pass argv")
-                return False
-            self._backoff.started()
-            log.info(
-                "Forkserver started: %s (mode=%s, caps=%s)",
-                self.target,
-                self.exec_mode or "?",
-                ",".join(sorted(self.capabilities)) or "-",
-            )
+        if self._handshake():
             return True
 
-        log.warning("Forkserver failed to start: %r", resp)
+        self._abandon()
         return False
+
+    def _handshake(self) -> bool:
+        """Read READY within _START_DEADLINE; False leaves the loader to the caller."""
+        resp = self._reader.readline(time.monotonic() + _START_DEADLINE)
+        if resp is None:
+            log.warning("Forkserver: no READY within %.0fs", _START_DEADLINE)
+            return False
+
+        parts = resp.decode(errors="replace").strip().split()
+        if not parts or parts[0] != "READY":
+            log.warning("Forkserver failed to start: %r", resp)
+            return False
+
+        self._ready = True
+        # "forkserver" | "exec" | "dlopen"; "" from a loader built before
+        # the suffix existed. Only ever informational -- the protocol is
+        # identical in every mode, so nothing branches on it.
+        self.exec_mode = parts[1] if len(parts) > 1 else ""
+        self.capabilities = frozenset(parts[2:])
+        if self._argv is not None and "argv" not in self.capabilities:
+            log.warning("Forkserver: loader ignores ARG lines, cannot pass argv")
+            return False
+
+        self._backoff.started()
+        log.info(
+            "Forkserver started: %s (mode=%s, caps=%s)",
+            self.target,
+            self.exec_mode or "?",
+            ",".join(sorted(self.capabilities)) or "-",
+        )
+        return True
+
+    def _abandon(self) -> None:
+        """Kill and reap the loader, dropping any reply it still owes.
+
+        A failed handshake or an unanswered command leaves the loader in an
+        unknown protocol state: keeping it either leaks a live process or
+        lets a late reply answer the next request.
+        """
+        proc = self._proc
+        self._proc = None
+        self._ready = False
+        if proc is None:
+            return
+
+        with contextlib.suppress(OSError):
+            proc.kill()
+            proc.wait()
+        _close_streams(proc)
 
     def attach_backoff(self, backoff) -> None:
         """Pace this loader's restarts (--respawn-backoff)."""
@@ -372,7 +410,7 @@ class ForkserverRunner:
             self._proc.stdin.write(data)
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
-            self._ready = False
+            self._abandon()
             return self._restart_retry(data, -2)
 
         # Wait past the loader's own timeout before declaring the
@@ -465,7 +503,8 @@ class ForkserverRunner:
             self._proc.stdin.write(f"TIMEOUT {seconds:.6f}\n".encode())
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
-            self._ready = False
+            self._abandon()
+            self.start()
             return False
 
         # Bounded wait on the ack. The loader answers immediately -- it is
@@ -474,7 +513,11 @@ class ForkserverRunner:
         # fuzz loop with it.
         reply = self._reader.readline(time.monotonic() + self.timeout + _LOADER_GRACE)
         if reply is None:
-            log.warning("Forkserver: no reply to TIMEOUT; leaving deadline at %.3fs", self.timeout)
+            # The loader may still answer later, and that reply would be read
+            # as the next RC header: replace it, keeping the old deadline.
+            log.warning("Forkserver: no reply to TIMEOUT; respawning at %.3fs", self.timeout)
+            self._abandon()
+            self.start()
             return False
 
         parts = (reply or b"").decode(errors="replace").split()
