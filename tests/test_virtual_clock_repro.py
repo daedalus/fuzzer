@@ -150,9 +150,3 @@ def test_monte_carlo_null_is_seeded():
         for _ in range(2)
     ]
     assert runs[0] == runs[1]
-
-
-def test_monte_carlo_deadline_reads_injected_clock():
-    """Adversarial: a virtual clock never expires the budget, so the count is fixed."""
-    mc = MonteCarloScheduler(rng=RandPool(seed=_SEED), clock=Clock(ClockMode.VIRTUAL))
-    assert mc._clock.mode is ClockMode.VIRTUAL

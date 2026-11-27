@@ -3669,7 +3669,6 @@ class Fuzzer:
                     _CEM_ALPHA_FALLBACK if dirichlet_alpha is AlphaMode.LEARNED else 0.0
                 ),
                 rng=self._rng,
-                clock=self._clock,
             )
             if (mc_bandit or mc_cem or mopt)
             else None
