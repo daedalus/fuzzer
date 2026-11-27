@@ -38,9 +38,7 @@ class PairCoverScheduler(ArmCounts):
     #: Pair posteriors start from the op's marginal; no per-arm prior override.
     supports_priors = False
 
-    def __init__(
-        self, rng: RandPool | None, cover_target: int = 1, prior_strength: float = 2.0
-    ) -> None:
+    def __init__(self, rng: RandPool, cover_target: int = 1, prior_strength: float = 2.0) -> None:
         if rng is None:
             raise ValueError("PairCoverScheduler requires a RandPool (Hard Rule 16)")
         if cover_target < 1:
