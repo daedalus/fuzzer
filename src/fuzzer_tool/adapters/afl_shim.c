@@ -5887,6 +5887,13 @@ __AFL_NO_COV int strncmp(const char *a, const char *b, size_t n) {
 __AFL_NO_COV int afl_cmp_strncmp(const char *a, const char *b, size_t n)
     __attribute__((weak, alias("strncmp")));
 
+/* glibc's C23 const-generic macros (string.h, __glibc_const_generic) turn
+ * these names into _Generic(...) expressions; a definition would expand into
+ * one and fail to parse. The interposers below are plain functions. */
+#undef memchr
+#undef strstr
+#undef strpbrk
+
 __AFL_NO_COV void *memchr(const void *s, int c, size_t n) {
     __AFL_RESOLVE(real_memchr, afl_chr_fn, "memchr", __afl_fb_memchr);
     void *result = real_memchr(s, c, n);
