@@ -5428,6 +5428,13 @@ class OperatorEngine:
         out = transplant_atom(bytes(buf), donor, max_len=self._max_len(), rng=rng)
         return self._or_declined("mp4_atom_transplant", out, buf)
 
+    def _op_mp4_box_grow(self, buf, _byte_idx, _data):
+        """Add a missing required MP4 box (moov..stbl) with its required children."""
+        from fuzzer_tool.core.mutations.mp4_grow import grow_mp4  # noqa: PLC0415
+
+        out = grow_mp4(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("mp4_box_grow", out, buf)
+
     def _op_avi_field_mutate(self, buf, _byte_idx, _data):
         """One avih/strh/strf/indx/idx1 field inside the AVI LIST tree."""
         from fuzzer_tool.core.mutations.riff_fields import mutate_avi  # noqa: PLC0415

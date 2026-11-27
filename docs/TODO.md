@@ -14,6 +14,7 @@
 > Every A/B result goes in `docs/AB_LEDGER.md` (Hard Rule 59).
 
 ## Coverage & Instrumentation
+- [ ] **`mp4_box_grow`** (2026-11-27) — shipped (DEEP_DIVE §Grammar-aware). Open: (a) A/B owed (`AB_PENDING.md`); (b) one video template (`mp4v`, `vide`, `vmhd`): add audio (`soun`/`smhd`/`mp4a`) and `avc1`+`avcC`; (c) fragmented MP4 (`mvex`/`moof`/`traf`) not grown; (d) ~~MP4 seed generator~~ shipped (`tools/corpus_mp4.py`).
 - [ ] **Minimize re-hash** (2026-11-27) — fixed: corpus loops use the memoized `seed_key`. Open: `_bulk` (pure-Python XXH64) still runs once per admitted seed; vectorize if admission-time hashing shows in a profile.
 - [ ] **Resume on a rebuilt target** (2026-11-27) — fixed: edge tracker not restored on hash mismatch. Open: other edge-keyed state (`sensitivity`, `crash_mi`, Katz masks, per-seed `coverage_edges`) still restores across builds; audit each.
 - [ ] **Shim vs glibc C23 macros** (2026-11-27) — fixed: `#undef memchr/strstr/strpbrk` before the interposers (CI runner glibc; 127 tests red on master). Open: recheck when the shim interposes another const-generic name (`strchr`, `strrchr`, `bsearch`, `wcs*`).
