@@ -63,7 +63,7 @@ Not in the post: harness, engine, coverage measurement.
 | Static templates (A3 limitation) | `mp4_atom_transplant` grafts donor atoms between corpus files | none |
 | Single atom (A3 limitation) | `mp4_atom_mutate`: ~25 atom types (`stts`, `stsc`, `stsz`, `trun`, `elst`, …) | none |
 | Video/audio only (A3 limitation) | `mp4_stsd.Kind.OTHER` is opaque: `tx3g`, `wvtt`, `stpp`, `c608` fields untouched | **yes** |
-| `decodebin` after demux (A3) | harness stops at the demuxer | **yes**: codec bugs (Vorbis/Opus/JPEG in B) unreachable |
+| `decodebin` after demux (A3) | shipped 2026-11-27: demux pads feed parsers + subtitle decoders (h264parse, aacparse, ssaparse, …) | **partial**: real decoders (Vorbis/Opus/JPEG in B) need external libs |
 | Random box trees (B) | `core/prufer.py` + `tlv_reshape` exist, but `parse_tlv` is tag-first with a header-exclusive length; ISOBMFF is size-first, header-inclusive, so it never applies. `isobmff.py` has swap/delete/duplicate, no reparent/nest | **yes** |
 | Obscure fourccs (B) | `dictionaries/isomp4.dict`: 718 `qtdemux` fourccs; structural mutators don't use them as labels | **partial** |
 | Known-bug seeds | `tools/gen_ffmpeg_gst_seeds.py` has no `qtdemux` `stsd` seeds (its div-by-zero seed is AVI `vprp`) | **yes** |
@@ -81,6 +81,6 @@ Not in the post: harness, engine, coverage measurement.
    - Seeds: `tools/gen_isobmff_tree_seeds.py` (`prufer` shapes, labels from `isomp4.dict`), output under `~/fuzzing/`.
 3. **Field-aware text/subtitle sample entries** in `mp4_stsd` (`tx3g`, `wvtt`, `stpp`, `c608`).
 4. **`qtdemux` CVE seeds** in `gen_ffmpeg_gst_seeds.py` (`gs_` prefix), built from the 1.28.2 / 1.24.10 fix diffs.
-5. **Decode path.** Optional `decodebin` after the demuxer in `gstreamer_read.c`, so codec parsers are reachable.
+5. ~~**Decode path.**~~ Parsers and subtitle decoders shipped 2026-11-27 (DEEP_DIVE §Vendored GStreamer). Open: decoders needing external libs.
 
 Each item needs the TDD, falsification and adversarial tests, and `docs/DEEP_DIVE.md` updates the repo rules require.

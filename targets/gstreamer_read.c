@@ -5,8 +5,10 @@
  * 0 % 5 over the first five when typefind finds nothing) and pushes the data
  * into it from the calling thread (no pipeline threads):
  *   src pad -> demuxer sink -> demuxer src pad -> [parser] -> drop sink
- * A parser (h264parse, aacparse, ssaparse, ...) is inserted when one accepts
- * the pad's caps, so codec configs (avcC/hvcC/esds) are parsed, not dropped.
+ * A parser or subtitle decoder (h264parse, aacparse, ssaparse, ...) is
+ * inserted when one accepts the pad's caps, so codec configs (avcC/hvcC/esds,
+ * SSA headers) are parsed, not dropped. Static "src" pads (wavparse, auparse,
+ * subparse) are drained too: pad-added never reports them.
  * Build: tools/build_targets.sh (vendored libs are instrumented there)
  */
 #include <gst/gst.h>
@@ -56,7 +58,7 @@ static const char *kFallback[] = { "qtdemux", "matroskademux", "wavparse",
 #define FUZZ_GST_MAX_SINKS 64u
 
 static int g_inited;
-static GList *g_parsers;    /* parser factories, best rank first; built once */
+static GList *g_parsers;    /* parser + decoder factories, best rank first; built once */
 
 /* Objects one exec creates; released after the demuxer, see release_owned(). */
 static GstElement *g_parser_els[FUZZ_GST_MAX_PARSERS];
@@ -207,8 +209,10 @@ static void fuzz_gst_init(void) {
     GST_PLUGIN_STATIC_REGISTER(audioparsers);
     GST_PLUGIN_STATIC_REGISTER(videoparsersbad);
 
-    g_parsers = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_PARSER,
-                                                      GST_RANK_NONE);
+    /* Decoders too: ssaparse/subparse register as Codec/Decoder/Subtitle. The
+     * build has no other decoders (they need external libs). */
+    g_parsers = gst_element_factory_list_get_elements(
+        GST_ELEMENT_FACTORY_TYPE_PARSER | GST_ELEMENT_FACTORY_TYPE_DECODER, GST_RANK_NONE);
     g_parsers = g_list_sort(g_parsers, gst_plugin_feature_rank_compare_func);
     prewarm_factories();
 }
@@ -220,6 +224,15 @@ int fuzz_gstreamer(const unsigned char *buf, size_t size) {
     __afl_map_edge(0x3000);
     if (size < 8) { __afl_map_edge(0x3001); return 0; }
     fuzz_gst_init();
+
+    /* Leftovers mean the timeout guard abandoned the last exec mid-stream.
+     * Its objects may sit under locks the interrupted stack held, so they
+     * leak with its demuxer instead of being touched; only the slots return. */
+    if (g_n_parsers || g_n_sinks) {
+        __afl_map_edge(0x3007);
+        g_n_parsers = 0;
+        g_n_sinks = 0;
+    }
 
     const char *elem = NULL;
     GstTypeFindProbability prob = GST_TYPE_FIND_NONE;
@@ -241,7 +254,11 @@ int fuzz_gstreamer(const unsigned char *buf, size_t size) {
     }
 
     GstElement *demux = gst_element_factory_make(elem, NULL);
-    if (!demux) { __afl_map_edge(0x3003); return 0; }
+    if (!demux) {
+        __afl_map_edge(0x3003);
+        if (caps) gst_caps_unref(caps);
+        return 0;
+    }
     g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), NULL);
 
     GstPad *src = gst_pad_new("src", GST_PAD_SRC);
@@ -251,7 +268,16 @@ int fuzz_gstreamer(const unsigned char *buf, size_t size) {
         __afl_map_edge(0x3004);
         if (dsink) gst_object_unref(dsink);
         gst_object_unref(src); gst_object_unref(demux);
+        if (caps) gst_caps_unref(caps);
         return 0;
+    }
+
+    /* Static src pad: link it now, or the first push returns NOT_LINKED. */
+    GstPad *ssrc = gst_element_get_static_pad(demux, "src");
+    if (ssrc) {
+        __afl_map_edge(0x3008);
+        on_pad_added(demux, ssrc, NULL);
+        gst_object_unref(ssrc);
     }
     if (gst_element_set_state(demux, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
         __afl_map_edge(0x3005);
