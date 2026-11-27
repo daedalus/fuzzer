@@ -135,12 +135,12 @@ def _eliminate(rows: list[int]) -> tuple[list[int], list[int], int]:
     return basis, trans, deps
 
 
-def _t_guess(n: int, rows: list[int]) -> int:
+def _t_guess(n: int, lists: list[list[int]]) -> int:
     """Half the Tanner bound dmin >= wc_min + 1, in 1.._MAX_CORRECTABLE."""
     weights = [0] * n
-    for row in rows:
-        for j in range(n):
-            weights[j] += (row >> (n - 1 - j)) & 1
+    for lst in lists:
+        for j in lst:
+            weights[j] += 1
     wc = min((w for w in weights if w), default=1)
     return max(1, min(_MAX_CORRECTABLE, (wc + 1) // 2))
 
@@ -162,7 +162,7 @@ def _build(n: int, lists: list[list[int]]) -> LdpcCode:
         free=tuple(j for j in range(n) if j not in pivot_set),
         feasible=tuple(r for r in range(m) if not (deps >> r) & 1),
         live=tuple(r for r in range(m) if rows[r]),
-        t_guess=_t_guess(n, rows),
+        t_guess=_t_guess(n, lists),
         _basis=tuple(basis),
         _trans=tuple(trans),
         _pivot_mask=sum(1 << (n - 1 - p) for p in pivots),

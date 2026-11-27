@@ -155,9 +155,7 @@ class TestAlist:
         rows = gallager_rows()
         assert _rank(rows, GALLAGER_N) < len(rows)
 
-    @pytest.mark.parametrize(
-        ("n", "rows"), [(HAMMING_N, HAMMING_ROWS), (HAMMING_N, RANK_DEF_ROWS)]
-    )
+    @pytest.mark.parametrize(("n", "rows"), [(HAMMING_N, HAMMING_ROWS), (HAMMING_N, RANK_DEF_ROWS)])
     def test_free_positions_are_an_information_set(self, n, rows):
         code = parse_alist(alist_text(n, rows))
         words = _codewords(rows, n)

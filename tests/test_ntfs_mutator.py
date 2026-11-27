@@ -153,7 +153,9 @@ class TestRecHeader:
     def test_bytes_used_beyond_allocated(self):
         field = next(i for i, f in enumerate(REC_FIELDS) if f[0] == 0x18)
         edges = REC_FIELDS[field][2]
-        out = mutate_ntfs(IMAGE, rng=_rng(Op.REC_HEADER, IMAGE, [0, field], [edges.index(0xFFFFFFFF)]))
+        out = mutate_ntfs(
+            IMAGE, rng=_rng(Op.REC_HEADER, IMAGE, [0, field], [edges.index(0xFFFFFFFF)])
+        )
         used, alloc = struct.unpack_from("<II", out, MFT_OFF + 0x18)
         assert used == 0xFFFFFFFF and used > alloc
 
@@ -213,7 +215,9 @@ class TestRunlist:
 
     def test_negative_offset_delta(self):
         edges = RUN_EDGES[RunPos.OFFSET]
-        out = mutate_ntfs(IMAGE, rng=_rng(Op.RUNLIST, IMAGE, [0, RunPos.OFFSET], [edges.index(0xFF)]))
+        out = mutate_ntfs(
+            IMAGE, rng=_rng(Op.RUNLIST, IMAGE, [0, RunPos.OFFSET], [edges.index(0xFF)])
+        )
         # header 0x11: 1 length byte, 1 offset byte -> offset at +2, now signed -1.
         assert struct.unpack_from("<b", out, MFT_OFF + MAPPING + 2)[0] == -1
 

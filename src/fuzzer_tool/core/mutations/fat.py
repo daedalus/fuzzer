@@ -75,6 +75,7 @@ FSI_SIG_OFFS = (0, 484, 508)  # 0x41615252, 0x61417272, 0xAA550000
 SIG_FLIP = 0x01
 
 MAX_FAT_SCAN = 1 << 16  # FAT entries examined per mutation
+SCALAR_SCAN_MAX = 48  # below this many entries a Python walk beats numpy
 MAX_ENTRIES = 512  # directory entries collected
 MAX_DIR_CLUSTERS = 8  # FAT32 root chain length followed
 MAX_SUBDIRS = 8
@@ -394,8 +395,15 @@ def _fat_candidates(buf: bytearray, geo: Geometry) -> list[int]:
     last = _fat_last(buf, geo)
     if last < 2:
         return []
-    used = np.flatnonzero(_fat_values(buf, geo, last)[2:]) + 2
-    return used.tolist() if used.size else list(range(2, last + 1))
+
+    # Tiny FATs: numpy setup costs more than the walk (crossover ~48 entries).
+    if last < SCALAR_SCAN_MAX:
+        mask = CLUS_MASK[geo.kind]
+        used = [c for c in range(2, last + 1) if (_fat_get(buf, geo, 0, c) or 0) & mask]
+        return used or list(range(2, last + 1))
+
+    nz = np.flatnonzero(_fat_values(buf, geo, last)[2:]) + 2
+    return nz.tolist() if nz.size else list(range(2, last + 1))
 
 
 def _fat_value(op: Op, geo: Geometry, c: int, rng: RandPool) -> int:

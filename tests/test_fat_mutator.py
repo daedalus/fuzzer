@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import struct
 
 import pytest
 
+from fuzzer_tool.core.mutations import fat as fat_mod
 from fuzzer_tool.core.mutations.fat import (
     ATTR_EDGES,
     BPB_FIELDS,
@@ -244,6 +246,29 @@ class TestFatTable:
         one = bytearray(F12)
         one[16] = 1
         assert _mut(bytes(one), [Op.FAT_DESYNC, 0, 5], [0]) is None
+
+
+class TestScanPaths:
+    """Numpy and scalar candidate scans must agree (both sides of SCALAR_SCAN_MAX)."""
+
+    @pytest.mark.parametrize("kind", [FatType.FAT12, FatType.FAT16, FatType.FAT32])
+    def test_vector_matches_scalar(self, kind, monkeypatch):
+        pool = RandPool(seed=kind)
+        buf = bytearray(build_fat(Kind.FAT16)[:8192])
+        for i in range(512, 4096):  # random FAT bytes, many zero entries
+            buf[i] = pool.randint(0, 255) if pool.randint(0, 2) else 0
+        geo = dataclasses.replace(parse_fat(F12), kind=kind, clusters=300, fat_bytes=4096)
+
+        # Independent oracle for the decode itself (FAT12 nibble packing).
+        if kind is FatType.FAT12:
+            vals = fat_mod._fat_values(buf, geo, 301).tolist()
+            assert vals == [_fat12(bytes(buf), 512, c) for c in range(302)]
+
+        vec = fat_mod._fat_candidates(buf, geo)
+        monkeypatch.setattr(fat_mod, "SCALAR_SCAN_MAX", 1 << 20)
+        assert fat_mod._fat_candidates(buf, geo) == vec
+        # Control (Hard Rule 46): scalar against itself.
+        assert fat_mod._fat_candidates(buf, geo) == fat_mod._fat_candidates(buf, geo)
 
 
 class TestDirEntries:
