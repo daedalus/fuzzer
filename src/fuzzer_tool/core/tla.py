@@ -13,8 +13,12 @@ AST and emits a TLA+ module whose I/O outcomes come from tools/tla/Syscalls.tla.
         def run_one(self, data): ...
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TypeVar
+
+T = TypeVar("T")
 
 MACHINE_ATTR = "__tla_machine__"
 ENTRY_ATTR = "__tla_entry__"
@@ -71,7 +75,7 @@ def machine(
     model: dict[str, Op] | None = None,
     ignore: tuple[str, ...] = (),
     replies: dict[str, str] | None = None,
-):
+) -> Callable[[type[T]], type[T]]:
     """Mark a class as a state machine.
 
     Args:
@@ -86,28 +90,28 @@ def machine(
         dict(state), dict(invariants or {}), dict(model or {}), ignore, dict(replies or {})
     )
 
-    def mark(cls):
+    def mark(cls: type[T]) -> type[T]:
         setattr(cls, MACHINE_ATTR, spec)
         return cls
 
     return mark
 
 
-def entry(phase: Phase = Phase.CALL, requires: str | None = None):
+def entry(phase: Phase = Phase.CALL, requires: str | None = None) -> Callable[[T], T]:
     """Mark a method the caller invokes; *requires* is its caller-side guard."""
     spec = EntrySpec(phase, requires)
 
-    def mark(fn):
+    def mark(fn: T) -> T:
         setattr(fn, ENTRY_ATTR, spec)
         return fn
 
     return mark
 
 
-def opaque(*returns: object):
+def opaque(*returns: object) -> Callable[[T], T]:
     """Model a method as a black box returning one of *returns*, without effects."""
 
-    def mark(fn):
+    def mark(fn: T) -> T:
         setattr(fn, OPAQUE_ATTR, tuple(returns))
         return fn
 
