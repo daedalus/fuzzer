@@ -2080,6 +2080,20 @@ in `$FUZZ_BUILD_ROOT` like the other targets; meson build trees stay in
 `$FUZZ_BUILD_ROOT/gstreamer-<ver>-{noasan,asan}`. Tests:
 `tests/test_regression_gstreamer_{build,caps}.py`.
 
+*Reachability (2026-11-27).* Each demuxer src pad feeds the best-ranked parser whose sink
+caps intersect the pad's (`GST_ELEMENT_FACTORY_TYPE_PARSER`, list built once at init):
+`demux pad -> h264parse|h265parse|aacparse|flacparse|mpegaudioparse|ssaparse|... -> drop sink`.
+Codec configs (avcC/hvcC/esds, SSA headers) were dropped before; `mp4_codec_cfg_mutate` now
+reaches a real parser. ANY caps get no parser. Typefind also routes subtitles (`subparse`),
+ID3 (`id3demux`), APE tags (`apedemux`) and AU (`auparse`); the byte-0 fallback is unchanged,
+so existing corpora replay the same demuxer. New meson plugins: base `subparse`, good
+`id3demux`/`apetag`/`auparse`/`audioparsers`, bad `videoparsers`. Parsers and sinks are owned
+per exec (caps 16/64) and released after the demuxer; sink pads used to leak one per pad per
+exec. Parser and kMap factories are instantiated once at init (lazy GType registration).
+Measured on 8 ffmpeg-made seeds, 1.28.9 no-ASAN: 9,358 -> 15,744 edges; MP4 +67-69%,
+MKV +42-63%, MP3/ID3 +40%. Tests: `tests/test_regression_gstreamer_parsers.py`.
+Not done: decoders (need external libs), pull-mode scheduling (qtdemux `moov`-at-end seeks).
+
 **Dual vendored FFmpeg builds**: FFmpeg fuzz targets require coverage-instrumented
 vendored static libraries. Since the vendored FFmpeg `.a` files are compiled with
 `-fsanitize-coverage=trace-pc-guard,trace-cmp`, they embed undefined references to

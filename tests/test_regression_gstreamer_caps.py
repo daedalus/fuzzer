@@ -37,14 +37,26 @@ typedef void (*GLogFunc)(const gchar *, int, const gchar *, gpointer);
 #define G_LOG_LEVEL_INFO 8
 #define G_LOG_LEVEL_DEBUG 16
 typedef int GLogLevelFlags;
-typedef struct { int dummy; } GstObject;
-typedef struct { int dummy; } GstElement;
+/* One object type for elements and pads, so stubs can model refcounts and links. */
+typedef struct StubObj {
+    int refs, floating, kind, state, parser;
+    void *caps;
+    struct StubObj *peer, *parent, *sinkpad, *srcpad;
+} StubObj;
+typedef StubObj GstObject;
+typedef StubObj GstElement;
+typedef StubObj GstPad;
 typedef struct { int dummy; } GstSegment;
 typedef struct { int type; size_t offset; } GstBuffer;
 typedef struct { int type; } GstEvent;
-typedef struct { int refs; } GstCaps;
+typedef struct { int refs; int any; const char *name; int tracked; } GstCaps;
 typedef struct { int dummy; } GstStructure;
-typedef struct { int dummy; } GstPad;
+typedef struct GList { void *data; struct GList *next; } GList;
+typedef struct { const char *name; } GstElementFactory;
+typedef int (*GCompareFunc)(const void *, const void *);
+typedef enum { GST_RANK_NONE = 0 } GstRank;
+typedef unsigned long long GstElementFactoryListType;
+#define GST_ELEMENT_FACTORY_TYPE_PARSER (1ULL << 6)
 typedef enum { GST_TYPE_FIND_NONE = 0 } GstTypeFindProbability;
 typedef enum { GST_FLOW_OK = 0, GST_FLOW_NOT_NEGOTIATED = -4 } GstFlowReturn;
 typedef enum { GST_STATE_NULL = 1, GST_STATE_PLAYING = 4 } GstState;
@@ -93,6 +105,15 @@ GstBuffer *gst_buffer_new_memdup(gconstpointer, gsize);
 void gst_buffer_unref(GstBuffer *);
 void g_object_unref(gpointer);
 #define gst_object_unref(obj) g_object_unref(obj)
+gpointer gst_object_ref_sink(gpointer);
+GList *gst_element_factory_list_get_elements(GstElementFactoryListType, GstRank);
+GList *gst_element_factory_list_filter(GList *, const GstCaps *, GstPadDirection, gboolean);
+void gst_plugin_feature_list_free(GList *);
+GList *g_list_sort(GList *, GCompareFunc);
+int gst_plugin_feature_rank_compare_func(const void *, const void *);
+GstElement *gst_element_factory_create(GstElementFactory *, const gchar *);
+GstCaps *gst_pad_get_current_caps(GstPad *);
+gboolean gst_caps_is_any(const GstCaps *);
 #endif
 """
 
@@ -162,6 +183,18 @@ void gst_event_unref(GstEvent *e) { free(e); }
 GstBuffer *gst_buffer_new_memdup(gconstpointer d, gsize n) { (void)d; (void)n; GstBuffer *b = malloc(sizeof *b); b->type = 0; b->offset = 0; return b; }
 void gst_buffer_unref(GstBuffer *b) { free(b); }
 void g_object_unref(gpointer p) { (void)p; }
+gpointer gst_object_ref_sink(gpointer p) { return p; }
+GList *gst_element_factory_list_get_elements(GstElementFactoryListType t, GstRank r)
+{ (void)t; (void)r; return NULL; }
+GList *gst_element_factory_list_filter(GList *l, const GstCaps *c, GstPadDirection d, gboolean s)
+{ (void)l; (void)c; (void)d; (void)s; return NULL; }
+void gst_plugin_feature_list_free(GList *l) { (void)l; }
+GList *g_list_sort(GList *l, GCompareFunc f) { (void)f; return l; }
+int gst_plugin_feature_rank_compare_func(const void *a, const void *b) { (void)a; (void)b; return 0; }
+GstElement *gst_element_factory_create(GstElementFactory *f, const gchar *n)
+{ (void)f; (void)n; return NULL; }
+GstCaps *gst_pad_get_current_caps(GstPad *p) { (void)p; return NULL; }
+gboolean gst_caps_is_any(const GstCaps *c) { (void)c; return FALSE; }
 
 /* No CAPS event means no negotiation: model the demuxer's chain function. */
 GstFlowReturn gst_pad_push(GstPad *p, GstBuffer *b)
