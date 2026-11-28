@@ -53,7 +53,9 @@ from pathlib import Path
 
 # Runnable from a checkout without `pip install -e`: src/ for fuzzer_tool, root for module:Class.
 _ROOT = Path(__file__).resolve().parent.parent
-sys.path[:0] = [str(_ROOT / "src"), str(_ROOT)]
+sys.path[:0] = [str(_ROOT / "src"), str(_ROOT), str(Path(__file__).resolve().parent)]
+
+import tla_lean  # noqa: E402  (tools/, next to this file)
 
 from fuzzer_tool.core import tla  # noqa: E402
 
@@ -1775,6 +1777,31 @@ def check(model: Model, out: Path, jar: Path, bounds: Bounds) -> CheckResult:
     return CheckResult(completed, violations, states)
 
 
+class Backend(Enum):
+    """Model checker: TLC on the .tla, the Lean translation, or both (verdicts must agree)."""
+
+    TLC = "tlc"
+    LEAN = "lean"
+    BOTH = "both"
+
+
+def check_lean(model: Model, out: Path, lean_bin: Path, bounds: Bounds) -> CheckResult:
+    """Translate the module (with Syscalls.tla) to Lean, build it, run its BFS checker."""
+    consts = {"MaxProcs": bounds.max_procs, "MaxCalls": bounds.max_calls}
+    src = tla_lean.translate([_SYSCALLS.read_text(), model.tla], consts, model.invariants)
+    res = tla_lean.check(model.name, src, out / "lean", lean_bin)
+    return CheckResult(res.completed, res.violations, res.states)
+
+
+def _disagree(tlc: CheckResult, lean: CheckResult) -> str | None:
+    """Cross-check: same violated invariants and, when both explored fully, the same state count."""
+    if set(tlc.violations) != set(lean.violations):
+        return f"verdicts differ: TLC {sorted(tlc.violations)} vs Lean {sorted(lean.violations)}"
+    if tlc.completed and lean.completed and tlc.states != lean.states:
+        return f"state counts differ: TLC {tlc.states} vs Lean {lean.states}"
+    return None
+
+
 def _summarize(trace: str) -> str:
     """One line per state: the step taken and what it changed."""
     lines = []
@@ -1819,7 +1846,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("machine", help=f"{sorted(MACHINES)} or module:Class")
     ap.add_argument("--out", type=Path, help="output dir (default ~/fuzzing/tla/<machine>/)")
-    ap.add_argument("--check", action="store_true", help="run TLC on every invariant")
+    ap.add_argument("--check", action="store_true", help="run the model checker on every invariant")
+    ap.add_argument("--backend", choices=[b.value for b in Backend], default=Backend.TLC.value)
     ap.add_argument("--max-procs", type=int, default=Bounds.max_procs)
     ap.add_argument("--max-calls", type=int, default=Bounds.max_calls)
     ap.add_argument("--jar", type=Path, default=None)
@@ -1838,20 +1866,46 @@ def main(argv: list[str] | None = None) -> int:
         write(model, out, bounds)
         print(f"[*] wrote {out}/{model.name}.tla")
         return 0
+    return _run_checks(model, out, bounds, Backend(args.backend), args.jar)
 
-    jar = args.jar or find_jar()
-    if jar is None:
-        print("[!] tla2tools.jar or java missing: run tools/vendor_tla.sh", file=sys.stderr)
+
+def _run_checks(model: Model, out: Path, bounds: Bounds, backend: Backend, jar: Path | None) -> int:
+    """Run the chosen checker(s); with BOTH a disagreement is an error (exit 2)."""
+    results: dict[str, CheckResult] = {}
+    if backend is not Backend.LEAN:
+        jar = jar or find_jar()
+        if jar is None:
+            print("[!] tla2tools.jar or java missing: run tools/vendor_tla.sh", file=sys.stderr)
+            return 2
+        results["TLC"] = check(model, out, jar, bounds)
+    if backend is not Backend.TLC:
+        lean_bin = tla_lean.find_lean()
+        if lean_bin is None:
+            print("[!] Lean missing: run tools/vendor_lean.sh", file=sys.stderr)
+            return 2
+        try:
+            results["Lean"] = check_lean(model, out, lean_bin, bounds)
+        except tla_lean.TranslateError as e:
+            print(f"[!] Lean translation: {e}", file=sys.stderr)
+            return 2
+    for label, res in results.items():
+        _report(model, label, res, bounds)
+    diff = _disagree(results["TLC"], results["Lean"]) if len(results) > 1 else None
+    if diff:
+        print(f"[!] TLC and Lean disagree: {diff}", file=sys.stderr)
         return 2
-    res = check(model, out, jar, bounds)
+    return 1 if any(r.violations for r in results.values()) else 0
+
+
+def _report(model: Model, label: str, res: CheckResult, bounds: Bounds) -> None:
     print(
-        f"[*] {model.name}: {res.states} states, bounds procs={bounds.max_procs} calls={bounds.max_calls}"
+        f"[*] {model.name} ({label}): {res.states} states, "
+        f"bounds procs={bounds.max_procs} calls={bounds.max_calls}"
     )
     for inv in model.invariants:
         print(f"  {'FAIL' if inv in res.violations else 'ok  '} {inv}")
     for inv, trace in res.violations.items():
         print(f"\n[{inv}] counterexample:\n{_summarize(trace) or trace}")
-    return 1 if res.violations else 0
 
 
 if __name__ == "__main__":
