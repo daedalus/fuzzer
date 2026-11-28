@@ -3095,9 +3095,10 @@ At startup scans rodata/data/relro (same filter as the data-word dictionary, `el
     - `NoUncaught`: `os.fork()` failing (EAGAIN) escaped `restart()` and leaked the stdin pipe fds. It is now a failed start.
   - `StackSampler`:
     - `NoUncaught`: a previous SIGPROF handler installed from C reads back as `None`; `stop()` passed it to `signal.signal`, which raises `TypeError`. It is now left in place.
+    - Found by CI, not TLC (the model never interrupts a running handler): Python does not block a signal while its handler runs, so a handler slower than the 1 ms interval (under `pytest --cov`) re-entered itself until `RecursionError`, and the pytest process died of SIGPROF. `_on_tick` now drops a tick that lands inside it.
   - `PushNotifier`:
     - `NoOrphan`: a sender that died before reading its message was never tracked, leaving a zombie and an fd. It is now held before the write.
-- **Not modeled**: wedge-type liveness ("`run_one` eventually works again", e.g. `PersistentLoader` after a failed restart) needs temporal properties; `PROCSET` iteration (`_reap`, `close`) is skipped as an inert loop.
+- **Not modeled**: wedge-type liveness ("`run_one` eventually works again", e.g. `PersistentLoader` after a failed restart) needs temporal properties; `PROCSET` iteration (`_reap`, `close`) is skipped as an inert loop. A signal handler is never interrupted by its own signal, so re-entrant handlers are not checked.
 - Tests: `tests/test_tla_extract.py`, with fixtures in `tests/support/tla_fixtures.py`. Each bug fixture has a fixed twin that must pass first.
 
 ## Troubleshooting

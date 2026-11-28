@@ -136,3 +136,48 @@ def test_sampler_control(clean_sigprof):
     sampler.start()
     sampler.stop()
     assert signal.getsignal(signal.SIGPROF) is before
+
+
+def test_regression_sampler_reentrant_tick(clean_sigprof):
+    """A tick that lands inside the handler (slow handler, e.g. under coverage) is dropped.
+
+    Python does not block a signal while its handler runs, so a handler slower than
+    the interval re-entered itself until RecursionError (CI, 2026-11-28).
+    """
+    sampler = ss.StackSampler(interval_s=1.0)
+    nested = []
+    record = sampler._record
+
+    def reentering(frames):
+        nested.append(1)
+        if len(nested) < 50:
+            sampler._on_tick(signal.SIGPROF, None)  # the next tick arrives mid-handler
+        record(frames)
+
+    sampler._record = reentering
+    sampler._on_tick(signal.SIGPROF, None)
+    assert len(nested) == 1
+
+
+def test_regression_sampler_slow_handler(clean_sigprof):
+    """Real SIGPROF at 1 ms with a handler burning ~5 ms of CPU: no RecursionError."""
+    import time
+
+    sampler = ss.StackSampler(interval_s=0.001)
+    record = sampler._record
+
+    def slow(frames):
+        end = time.process_time() + 0.005
+        while time.process_time() < end:
+            pass
+        record(frames)
+
+    sampler._record = slow
+    try:
+        sampler.start()
+        end = time.process_time() + 0.1
+        while time.process_time() < end:
+            pass
+    finally:
+        sampler.stop()
+    assert sampler.samples > 0

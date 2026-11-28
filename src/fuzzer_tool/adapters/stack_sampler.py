@@ -75,6 +75,9 @@ class StackSampler:
         self._prev_handler: object = None
         self._prev_timer: tuple[float, float] = (0.0, 0.0)
         self._running = False
+        # Python runs a handler between bytecodes without blocking its signal: a
+        # handler slower than the interval (e.g. under coverage) re-enters itself.
+        self._in_tick = False
 
     @property
     def samples(self) -> int:
@@ -110,6 +113,16 @@ class StackSampler:
         self._running = False
 
     def _on_tick(self, _signum: int, frame: FrameType | None) -> None:
+        if self._in_tick:
+            return  # a tick that landed inside this handler: drop it
+
+        self._in_tick = True
+        try:
+            self._tick(frame)
+        finally:
+            self._in_tick = False
+
+    def _tick(self, frame: FrameType | None) -> None:
         frames = sys._current_frames()
 
         # The main thread's snapshot is this handler; *frame* is what it interrupted.
