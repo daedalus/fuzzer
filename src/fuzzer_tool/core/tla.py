@@ -58,6 +58,7 @@ class Op(Enum):
     SHM_DT = "ShmDt"  # libc_shm.shmdt(addr) -> bool
     SHM_RMID = "ShmRmid"  # libc_shm.shmctl_rmid(seg) -> bool
     PTRACE = "Ptrace"  # libc.ptrace(req, pid, ...): PTRACE_CONT/DETACH resume a stopped tracee
+    BOUNDED_WAIT = "WaitBounded"  # job.wait() bounded by its own deadline: always reaps
 
 
 class Init(Enum):

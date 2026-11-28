@@ -252,3 +252,22 @@ def test_regression_publish_error_does_not_stop_close(tmp_path, monkeypatch):
 
     assert published == ["good_2", "good_4"]
     assert q.pending == 0
+
+
+def test_regression_publish_failure_contained(tmp_path, release, monkeypatch):
+    """A non-OSError from publishing escaped tick()/close() and stopped the drain (TLA+ NoUncaught)."""
+    import fuzzer_tool.services.crash_gdb as crash_gdb
+
+    def boom(*_a):
+        raise ValueError("bad meta")
+
+    monkeypatch.setattr(crash_gdb, "refresh_crash_report", boom)
+    f, q = _wired(tmp_path)
+    q.enqueue(CrashMetadata(), b"a", -11, "crash_a")
+    q.enqueue(CrashMetadata(), b"b", -11, "crash_b")
+    release.touch()
+
+    q.close()
+
+    assert q.pending == 0
+    assert _runs(release) == 2

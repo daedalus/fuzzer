@@ -158,6 +158,48 @@ class LoopRunner:
         return True
 
 
+_COUNTDOWN = {f: tla.Kind.BOOL for f in ("_w", "_x", "_y", "_z")}
+
+
+@tla.machine(state=_COUNTDOWN, init=tla.Init.ASSUMED)
+class ThreeStepLoop:
+    """Exactly _LOOP_UNROLL iterations, then the condition fails: no LoopBound."""
+
+    @tla.entry()
+    def drain(self):
+        self._x = True
+        self._y = True
+        self._z = True
+        while self._x:
+            if self._z:
+                self._z = False
+            elif self._y:
+                self._y = False
+            else:
+                self._x = False
+
+
+@tla.machine(state=_COUNTDOWN, init=tla.Init.ASSUMED)
+class FourStepLoop:
+    """One iteration past the unroll bound: LoopBound."""
+
+    @tla.entry()
+    def drain(self):
+        self._w = True
+        self._x = True
+        self._y = True
+        self._z = True
+        while self._w:
+            if self._z:
+                self._z = False
+            elif self._y:
+                self._y = False
+            elif self._x:
+                self._x = False
+            else:
+                self._w = False
+
+
 @tla.machine(state={"_ready": tla.Kind.BOOL})
 class UnmodeledRunner:
     """The shell call is neither modeled nor ignored."""
@@ -1161,6 +1203,182 @@ class HavocReturnRunner(_TickBase):
             return False
         self._ready = False
         return True
+
+
+@tla.machine(state={"_proc": tla.Kind.PROC}, model=_SPAWN, init=tla.Init.ASSUMED)
+class CallerLocalRunner:
+    """A local read after an inlined call and an `if` keeps its value (not havoc)."""
+
+    @tla.entry()
+    def start(self):
+        if self._proc is not None:
+            return
+        proc = self._spawn()
+        if proc is not None:
+            self._proc = proc
+
+    @tla.entry()
+    def stop(self):
+        if self._proc is not None:
+            self._proc.kill()
+            self._proc.wait()
+        self._proc = None
+
+    def _spawn(self):
+        with contextlib.suppress(OSError):
+            return subprocess.Popen(["true"])
+        return None
+
+
+@tla.machine(state={"_proc": tla.Kind.PROC}, model=_SPAWN, init=tla.Init.ASSUMED)
+class CallerLeakRunner:
+    """CallerLocalRunner with the test inverted: the started proc is dropped."""
+
+    @tla.entry()
+    def start(self):
+        if self._proc is not None:
+            return
+        proc = self._spawn()
+        if proc is None:
+            self._proc = proc
+
+    def _spawn(self):
+        with contextlib.suppress(OSError):
+            return subprocess.Popen(["true"])
+        return None
+
+
+# CrashGdbQueue's shape: one live job (tuple of job and item), a deque behind it.
+# `job.wait` is GdbJob.wait, bounded by the job's own deadline.
+_GDBQ_SPEC = {
+    "state": {"_live": tla.Kind.PROC, "_queue": tla.Kind.QUEUE},
+    "model": {
+        "subprocess.Popen": tla.Op.SPAWN,
+        "job.wait": tla.Op.BOUNDED_WAIT,
+        "_refresh": tla.Op.MAY_FAIL,
+    },
+    "init": tla.Init.ASSUMED,
+}
+
+
+def _refresh(item):
+    """Stand-in report refresh; may raise a non-OSError (Op.MAY_FAIL)."""
+
+
+@tla.machine(**_GDBQ_SPEC)
+class CleanGdbQueue:
+    """Publish failures of any class are contained; close() drains every job."""
+
+    @tla.entry()
+    def enqueue(self, item):
+        self._queue.append(item)
+        if self._live is None:
+            self._start_next()
+
+    @tla.entry()
+    def tick(self):
+        if self._live is None:
+            return
+        job, item = self._live
+        if job.poll() is None:
+            return
+        self._publish(item)
+        self._start_next()
+
+    @tla.entry()
+    def close(self):
+        while self._live is not None:
+            job, item = self._live
+            job.wait()
+            self._publish(item)
+            self._start_next()
+
+    def _start_next(self):
+        self._live = None
+        while self._queue:
+            item = self._queue.popleft()
+            with contextlib.suppress(OSError):
+                job = subprocess.Popen(["gdb"])
+                self._live = (job, item)
+                return
+
+    def _publish(self, item):
+        with contextlib.suppress(Exception):
+            _refresh(item)
+
+
+@tla.machine(**_GDBQ_SPEC)
+class OsErrorOnlyGdbQueue:
+    """CrashGdbQueue._publish before the fix: only OSError is caught, so a failed
+    refresh escapes tick() and stops close() draining."""
+
+    @tla.entry()
+    def enqueue(self, item):
+        self._queue.append(item)
+        if self._live is None:
+            self._start_next()
+
+    @tla.entry()
+    def tick(self):
+        if self._live is None:
+            return
+        job, item = self._live
+        if job.poll() is None:
+            return
+        self._publish(item)
+        self._start_next()
+
+    @tla.entry()
+    def close(self):
+        while self._live is not None:
+            job, item = self._live
+            job.wait()
+            self._publish(item)
+            self._start_next()
+
+    def _start_next(self):
+        self._live = None
+        while self._queue:
+            item = self._queue.popleft()
+            with contextlib.suppress(OSError):
+                job = subprocess.Popen(["gdb"])
+                self._live = (job, item)
+                return
+
+    def _publish(self, item):
+        with contextlib.suppress(OSError):
+            _refresh(item)
+
+
+@tla.machine(**_GDBQ_SPEC)
+class NoWaitGdbQueue:
+    """close() publishes and moves on without waiting: the live gdb is dropped."""
+
+    @tla.entry()
+    def enqueue(self, item):
+        self._queue.append(item)
+        if self._live is None:
+            self._start_next()
+
+    @tla.entry()
+    def close(self):
+        while self._live is not None:
+            _job, item = self._live
+            self._publish(item)
+            self._start_next()
+
+    def _start_next(self):
+        self._live = None
+        while self._queue:
+            item = self._queue.popleft()
+            with contextlib.suppress(OSError):
+                job = subprocess.Popen(["gdb"])
+                self._live = (job, item)
+                return
+
+    def _publish(self, item):
+        with contextlib.suppress(Exception):
+            _refresh(item)
 
 
 class _Sender:
