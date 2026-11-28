@@ -66,6 +66,8 @@ MACHINES = {
     "push": "fuzzer_tool.services.push:PushNotifier",
     "persistent_signal": "fuzzer_tool.adapters.persistent_signal:PersistentRunner",
     "stack_sampler": "fuzzer_tool.adapters.stack_sampler:StackSampler",
+    "inprocess": "fuzzer_tool.adapters.inprocess:InProcessRunner",
+    "frontier": "fuzzer_tool.adapters.frontier_cov:FrontierOracle",
 }
 BUILTIN_INVARIANTS = (
     "NoOrphan",
@@ -113,6 +115,7 @@ _PARENT: dict[str, str | None] = {
     "ProcessLookupError": "OSError",
     "ChildProcessError": "OSError",
     "TypeError": "Exception",
+    "IndexError": "Exception",
     "RuntimeError": "Exception",
     "FileNotFoundError": "OSError",
     "OSError": "Exception",
@@ -149,6 +152,10 @@ class HType(Enum):
     SET = "set"  # a PROCSET field: a TLA set of proc ids
     PID = "pid"  # raw pid (os.fork, proc.pid)
     HANDLER = "handler"  # signal disposition / handler id
+    LOCK = "lock"  # a LOCK field (its name)
+    COND = "cond"  # a COND field (its name)
+    QUEUE = "queue"  # a QUEUE field (its length)
+    THREAD = "thread"  # a THREAD field (thread id)
     WAIT = "wait"  # os.waitpid result: status tag, pid half in Val.pair
 
 
@@ -158,8 +165,21 @@ _FIELD_HTYPE = {
     tla.Kind.FILE: HType.FILE,
     tla.Kind.PROCSET: HType.SET,
     tla.Kind.PID: HType.PID,
+    tla.Kind.LOCK: HType.LOCK,
+    tla.Kind.COND: HType.COND,
+    tla.Kind.QUEUE: HType.QUEUE,
+    tla.Kind.THREAD: HType.THREAD,
 }
-_HANDLE_KINDS = (tla.Kind.PROC, tla.Kind.READER, tla.Kind.FILE, tla.Kind.PID)
+_HANDLE_KINDS = (
+    tla.Kind.PROC,
+    tla.Kind.READER,
+    tla.Kind.FILE,
+    tla.Kind.PID,
+    tla.Kind.QUEUE,
+    tla.Kind.THREAD,
+)
+# Kinds that turn a class into a thread model (tools/tla_threads.py).
+_THREAD_KINDS = (tla.Kind.LOCK, tla.Kind.COND, tla.Kind.THREAD)
 # Context managers whose body runs once and whose exit has no modeled effect.
 _PASSTHROUGH_CTX = ("contextlib.ExitStack",)
 _SUPPRESS_CTX = ("contextlib.suppress", "suppress")
@@ -238,6 +258,7 @@ _MODEL_RESULT = {
     tla.Op.MAYBE: (VKind.STR, None),
     tla.Op.OPEN_FILE: (VKind.HANDLE, HType.FILE),
     tla.Op.KILLPG: (VKind.STR, None),
+    tla.Op.MAY_FAIL: (VKind.STR, None),
 }
 _MODEL_ARGS = {
     tla.Op.SPAWN: 0,
@@ -246,6 +267,7 @@ _MODEL_ARGS = {
     tla.Op.MAYBE: 0,
     tla.Op.OPEN_FILE: 0,
     tla.Op.KILLPG: 1,
+    tla.Op.MAY_FAIL: 0,
 }
 
 
@@ -263,6 +285,7 @@ class Model:
         return (
             "INIT Init\nNEXT Next\n"
             f"CONSTANTS MaxProcs = {bounds.max_procs}\n          MaxCalls = {bounds.max_calls}\n"
+            f"          MaxQueue = {bounds.max_queue}\n"
             f"INVARIANT {invariant}\n"
         )
 
@@ -273,6 +296,7 @@ class Bounds:
 
     max_procs: int = 3
     max_calls: int = 4
+    max_queue: int = 2
 
 
 @dataclass
@@ -922,7 +946,7 @@ class Compiler:
         fld = self._modeled_field(node)
         if fld is not None:
             return kv(w, self._field_val(fld, w))
-        const = self._signal_const(node)
+        const = self._signal_const(node) or self._enum_const(node)
         if const is not None:
             return kv(w, const)
         is_self = isinstance(node.value, ast.Name) and node.value.id == "self"
@@ -959,6 +983,25 @@ class Compiler:
             name = node.attr
         return Val(f'"{name}"', VKind.STR) if name else None
 
+    def _enum_const(self, node: ast.AST) -> Val | None:
+        """``OracleMode.THREAD`` (a module-level Enum) -> "OracleMode.THREAD"."""
+        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)):
+            return None
+        owner = self._globals.get(node.value.id)
+        if not (
+            isinstance(owner, type) and issubclass(owner, Enum) and node.attr in owner.__members__
+        ):
+            return None
+        return Val(f'"{owner.__name__}.{node.attr}"', VKind.STR)
+
+    def arg_val(self, value: object) -> Val:
+        """A pinned __init__ argument (tla.machine init_args) as a compile-time value."""
+        if isinstance(value, Enum):
+            return Val(f'"{type(value).__name__}.{value.name}"', VKind.STR)
+        if isinstance(value, bool | str) or value is None:
+            return self._const(value)
+        raise ExtractError(f"init_args value {value!r}: use an enum member, bool, str or None")
+
     def _field_val(self, fld: str, w: str) -> Val:
         kind = self.spec.state[fld]
         ref = f"{w}.s.{self._fields[fld]}"
@@ -969,6 +1012,8 @@ class Compiler:
             return Val(ref, VKind.STR, HType.HANDLER)
         if kind is tla.Kind.PROCSET:
             return Val(ref, VKind.HAVOC, HType.SET)
+        if kind in (tla.Kind.LOCK, tla.Kind.COND):
+            return Val(f'"{fld}"', VKind.STR, _FIELD_HTYPE[kind])  # named in w.lock / w.waiters
         return Val(ref, VKind.HANDLE, _FIELD_HTYPE[kind])
 
     def _compare(self, node: ast.Compare, w: str, env: Env, kv: ValK, kx: RaiseK) -> str:
@@ -1331,6 +1376,31 @@ class Compiler:
 
         return self._args(list(node.args), w, env, then, kx)
 
+    # deque / Condition methods -> Syscalls thread ops (lock owner is the step's thread t).
+    _SYNC_OPS = {
+        (HType.QUEUE, "append"): "QPush",
+        (HType.QUEUE, "popleft"): "QPop",
+        (HType.COND, "notify"): "CNotify",
+        (HType.COND, "notify_all"): "CNotifyAll",
+    }
+    cond_lock: dict[str, str] = {}  # COND field -> its LOCK field (set by the thread model)
+
+    def _sync_op(self, node: ast.Call, r: Val, path: str, w: str, env: Env, kv: ValK, kx) -> str:
+        op = self._SYNC_OPS.get((r.htype, path))
+        if op is None:
+            raise self.fail(node, f"no thread model for {r.htype.value} .{path}()")
+        if r.htype is HType.QUEUE:
+            field = r.tla.split(".s.", 1)[1]
+            args = [f'"{field}"']
+        else:
+            cond = r.tla.strip('"')
+            args = [r.tla, f'"{self.cond_lock.get(cond, cond)}"', "t"]
+
+        def then(w2: str, _vals: list[Val]) -> str:
+            return self._apply(op, w2, args, VKind.STR, None, kv, kx)
+
+        return self._args(list(node.args), w, env, then, kx)
+
     def _typed_call(self, node: ast.Call, w: str, env: Env, kv: ValK, kx) -> str:
         root, attrs = self._chain(node.func)
         recv = (
@@ -1341,6 +1411,8 @@ class Compiler:
         def with_recv(w2: str, r: Val) -> str:
             if r.htype is HType.SET:
                 return self._hold(node, r, w2, env, kv, kx)
+            if r.htype in (HType.QUEUE, HType.COND):
+                return self._sync_op(node, r, path, w2, env, kv, kx)
             entry = _TYPED_OPS.get((r.htype, path))
             if entry is None:
                 raise self.fail(node, f"no Syscalls.tla model for {r.htype} .{path}()")
@@ -1492,13 +1564,14 @@ class Emitter:
                 out.append((name, es))
         return out
 
-    _DEFAULT = {tla.Kind.BOOL: "FALSE", tla.Kind.PROCSET: "{}", tla.Kind.HANDLER: '"unset"'}
+    _DEFAULT = {
+        tla.Kind.BOOL: "FALSE",
+        tla.Kind.PROCSET: "{}",
+        tla.Kind.HANDLER: '"unset"',
+    }  # others: 0
 
     def _initial(self) -> str:
-        fields = ", ".join(
-            f"{n} |-> {self._DEFAULT.get(self.spec.state[f], _NONE_HANDLE)}"
-            for f, n in self.comp._fields.items()
-        )
+        fields = ", ".join(f"{n} |-> {self._start_value(f)}" for f, n in self.comp._fields.items())
         return (
             f"W0 == [s |-> [{fields}],\n"
             '        procs |-> [p \\in 1..MaxProcs |-> "free"], pend |-> [p \\in 1..MaxProcs |-> 0],\n'
@@ -1510,6 +1583,20 @@ class Emitter:
             "        periodic |-> [s \\in SigNames |-> FALSE],\n"
             '        killed |-> FALSE, stalekill |-> FALSE, loopbound |-> FALSE, setup |-> ""]'
         )
+
+    def _start_value(self, fld: str) -> str:
+        """A field's value in W0: Init.ASSUMED's declared value, else the kind default."""
+        kind = self.spec.state[fld]
+        if fld not in self.spec.assume:
+            return self._DEFAULT.get(kind, _NONE_HANDLE)
+        value = self.spec.assume[fld]
+        if kind is tla.Kind.BOOL and isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if kind is tla.Kind.HANDLER and isinstance(value, str):
+            return f'"{value}"'
+        if value is None:
+            return _NONE_STR if kind is tla.Kind.HANDLER else _NONE_HANDLE
+        raise ExtractError(f"assume[{fld!r}]={value!r} does not fit a {kind.value} field")
 
     @staticmethod
     def _render(v: Val) -> str:
@@ -1548,6 +1635,8 @@ class Emitter:
         a failed setup (w.setup), which the caller drops: SetupCleanup checks it
         left nothing running or open."""
         init_fn = self.comp._methods.get("__init__")
+        if self.spec.init is tla.Init.ASSUMED:
+            init_fn = None  # the post-__init__ state is declared (assume=)
 
         def failed(w: str, e: str, _env: Env | None = None) -> str:
             flags = (
@@ -1569,7 +1658,11 @@ class Emitter:
 
         if init_fn is None:
             return run_start(w0, NONE_VAL)
-        return self.comp.body(init_fn, w0, self._havoc_params(init_fn), run_start, failed)
+        params = self._havoc_params(init_fn)
+        params.update(
+            {k: self.comp.arg_val(v) for k, v in self.spec.init_args.items() if k in params}
+        )
+        return self.comp.body(init_fn, w0, params, run_start, failed)
 
     def _init(self, setup: str | None) -> str:
         """With signals, every initial disposition is explored (Syscalls Dispositions)."""
@@ -1670,6 +1763,10 @@ class Emitter:
         return out
 
     def emit(self) -> Model:
+        if any(k in _THREAD_KINDS for k in self.spec.state.values()):
+            import tla_threads  # noqa: PLC0415  (tools/ sibling; only thread models need it)
+
+            return tla_threads.ThreadModel(self).emit()
         entries = self._entries()
         setups = [n for n, es in entries if es.phase is tla.Phase.SETUP]
         if len(setups) > 1:
@@ -1772,8 +1869,9 @@ def check(model: Model, out: Path, jar: Path, bounds: Bounds) -> CheckResult:
             violations[inv] = re.split(r"\n\d+ states generated", trace, maxsplit=1)[0]
             continue
         if "Model checking completed. No error has been found." not in log:
+            # A parse or runtime error is no verdict: never report the invariant as ok.
             completed = False
-            violations.setdefault("TLC_ERROR", (log + err)[-4000:])
+            violations[inv] = "TLC error (no verdict):\n" + (log + err)[-4000:]
     return CheckResult(completed, violations, states)
 
 

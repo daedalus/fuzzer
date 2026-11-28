@@ -35,6 +35,10 @@ class Kind(Enum):
     PROCSET = "procset"  # list of procs this object will reap (appended to)
     PID = "pid"  # raw pid from os.fork(), or None; signaled with os.kill
     HANDLER = "handler"  # signal disposition or handler callable; "unset" until assigned
+    LOCK = "lock"  # threading.Lock: makes the class a thread model (tools/tla_threads.py)
+    COND = "cond"  # threading.Condition over a LOCK field (or its own lock)
+    QUEUE = "queue"  # deque used as a work queue: modeled as its length (<= MaxQueue)
+    THREAD = "thread"  # threading.Thread(target=self.<method>), or None
 
 
 class Op(Enum):
@@ -47,6 +51,14 @@ class Op(Enum):
     OPEN_FILE = "FileOpen"  # tempfile.TemporaryFile() -> fresh open file
     KILLPG = "KillPg"  # os.killpg(proc.pid, sig)
     WRAP = "Wrap"  # record constructor holding a proc, e.g. _Sender(proc, ...) -> proc
+    MAY_FAIL = "MayFail"  # work that returns or raises RuntimeError (e.g. a measurement)
+
+
+class Init(Enum):
+    """Where the model's initial state comes from."""
+
+    RUN = "run"  # compile __init__
+    ASSUMED = "assumed"  # skip __init__; fields start at kind defaults plus `assume`
 
 
 class Phase(Enum):
@@ -65,6 +77,9 @@ class MachineSpec:
     model: dict[str, Op] = field(default_factory=dict)
     ignore: tuple[str, ...] = ()
     replies: dict[str, str] = field(default_factory=dict)
+    init: Init = Init.RUN
+    assume: dict[str, object] = field(default_factory=dict)
+    init_args: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -83,6 +98,9 @@ def machine(
     model: dict[str, Op] | None = None,
     ignore: tuple[str, ...] = (),
     replies: dict[str, str] | None = None,
+    init: Init = Init.RUN,
+    assume: dict[str, object] | None = None,
+    init_args: dict[str, object] | None = None,
 ) -> Callable[[type[T]], type[T]]:
     """Mark a class as a state machine.
 
@@ -93,9 +111,21 @@ def machine(
         ignore: dotted call-text prefixes with no modeled effect (logging, timers).
         replies: request word -> reply word, e.g. ``{"RUN": "RC"}``; requests
             in this map are queued until a readline consumes their reply.
+        init: Init.ASSUMED skips an __init__ too heavy to model; the state after it
+            is declared in *assume* (field -> bool/str/None), the rest at defaults.
+        assume: initial field values for Init.ASSUMED.
+        init_args: __init__ arguments to pin (enum member, bool, str or None), e.g. the
+            production mode; unpinned arguments stay unmodeled.
     """
     spec = MachineSpec(
-        dict(state), dict(invariants or {}), dict(model or {}), ignore, dict(replies or {})
+        dict(state),
+        dict(invariants or {}),
+        dict(model or {}),
+        ignore,
+        dict(replies or {}),
+        init,
+        dict(assume or {}),
+        dict(init_args or {}),
     )
 
     def mark(cls: type[T]) -> type[T]:
