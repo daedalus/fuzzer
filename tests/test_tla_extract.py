@@ -247,3 +247,121 @@ def test_join_keeps_none(tmp_path):
     assert exact.completed and not exact.violations
     leak = _check(fx.EarlyNoneLeakRunner, tmp_path / "leak")
     assert "NoOrphan" in leak.violations
+
+
+# ── One TLC run for every invariant ─────────────────────────────────
+
+# x counts 0..3; Small fails at x = 2 and Tiny at x = 1; Bounded always holds.
+_MULTI = """---- MODULE Multi ----
+EXTENDS Naturals
+CONSTANTS MaxProcs, MaxCalls, MaxQueue
+VARIABLE w
+Init == w = [x |-> 0]
+Next == w.x < 3 /\\ w' = [w EXCEPT !.x = @ + 1]
+Small == w.x < 2
+Tiny == w.x < 1
+Bounded == w.x <= 3
+Broken == w.nope = 1
+====
+"""
+
+
+def _count_tlc(monkeypatch) -> list[int]:
+    calls = [0]
+    real = tla_extract._run_tlc
+
+    def counted(*args, **kwargs):
+        calls[0] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tla_extract, "_run_tlc", counted)
+    return calls
+
+
+@needs_tlc
+def test_one_tlc_run_all_invariants(tmp_path, monkeypatch):
+    """Every invariant's verdict comes from a single TLC run, shortest trace first."""
+    calls = _count_tlc(monkeypatch)
+    model = tla_extract.Model("Multi", _MULTI, ["Small", "Tiny", "Bounded"])
+    res = tla_extract.check(model, tmp_path, _JAR, tla_extract.Bounds())
+
+    assert calls[0] == 1
+    assert res.completed and res.states == 4  # x = 0..3: -continue explores past violations
+    assert set(res.violations) == {"Small", "Tiny"}
+    assert "x |-> 1" in res.violations["Tiny"] and "x |-> 2" not in res.violations["Tiny"]
+
+
+@needs_tlc
+def test_tlc_error_leaves_no_ok(tmp_path):
+    """Adversarial: an evaluation error is no verdict for any invariant, not a pass."""
+    model = tla_extract.Model("Multi", _MULTI, ["Bounded", "Broken"])
+    res = tla_extract.check(model, tmp_path, _JAR, tla_extract.Bounds())
+
+    assert not res.completed
+    assert set(res.violations) == {"Bounded", "Broken"}
+
+
+def test_violations_keep_first_trace():
+    log = (
+        "Error: Invariant A is violated.\nError: The behavior up to this point is:\nfirst\n"
+        "Error: Invariant A is violated.\nError: The behavior up to this point is:\nsecond\n"
+        "Error: Invariant B is violated.\nError: The behavior up to this point is:\nthird\n"
+        "Model checking completed. No error has been found.\n"
+        "9 states generated, 4 distinct states found, 0 states left on queue.\n"
+    )
+    found = tla_extract._violations(log)
+    assert set(found) == {"A", "B"}
+    assert "first" in found["A"] and "second" not in found["A"]
+    assert "third" in found["B"] and "Model checking" not in found["B"]
+
+
+# ── Inert havoc branches collapse to one path ───────────────────────
+
+
+def _havoc_in(cls, needle: str) -> bool:
+    return any(needle in h for h in tla_extract.extract(cls).havoc)
+
+
+def test_inert_havoc_if_skipped():
+    """No branch over `_times` / `_eps` / `avg`: none of them reach modeled state."""
+    model = tla_extract.extract(fx.InertHavocRunner)
+    assert not any(n in h for h in model.havoc for n in ("_times", "_eps", "avg"))
+
+
+@pytest.mark.parametrize(
+    "cls", [fx.HavocWriteRunner, fx.HavocLocalRunner, fx.HavocReturnRunner],
+    ids=lambda c: c.__name__,
+)  # fmt: skip
+def test_effectful_havoc_if_kept(cls):
+    """Adversarial: a modeled write, a modeled local, or an early return keeps both branches."""
+    assert _havoc_in(cls, "len(self._times) > 4")
+
+
+@needs_tlc
+def test_inert_havoc_same_states(tmp_path):
+    """Skipping inert branches changes no reachable state; the bare twin agrees with itself."""
+    bounds = tla_extract.Bounds()
+    bare = [
+        tla_extract.check(tla_extract.extract(fx.BareTickRunner), tmp_path / f"b{i}", _JAR, bounds)
+        for i in (0, 1)
+    ]
+    inert = tla_extract.check(
+        tla_extract.extract(fx.InertHavocRunner), tmp_path / "i", _JAR, bounds
+    )
+
+    assert (bare[0].states, bare[0].violations) == (bare[1].states, bare[1].violations)
+    assert inert.completed and (inert.states, inert.violations) == (bare[0].states, {})
+
+
+def test_regression_initial_state_violation_parsed():
+    """TLC words an Init violation differently; it was dropped, hiding SetupCleanup."""
+    log = (
+        "Error: Invariant SetupCleanup is violated by the initial state:\n"
+        'w = [setup |-> "OSError"]\n'
+        "\n"
+        "Finished computing initial states: 2 distinct states generated at x.\n"
+        "Model checking completed. No error has been found.\n"
+    )
+    found = tla_extract._violations(log)
+    assert set(found) == {"SetupCleanup"}
+    assert "OSError" in found["SetupCleanup"] and "Finished" not in found["SetupCleanup"]
