@@ -1076,6 +1076,93 @@ class DanglingResize:
         self.seg = new_seg
 
 
+class _TickBase:
+    """Shared start/stop for the havoc-dedup fixtures; tick() differs."""
+
+    def __init__(self):
+        self._proc = None
+        self._ready = False
+        self._times = []
+        self._eps = 0.0
+
+    @tla.entry(tla.Phase.SETUP)
+    def start(self):
+        self._proc = subprocess.Popen(["true"])
+        self._ready = True
+        return True
+
+    @tla.entry()
+    def stop(self):
+        proc = self._proc
+        self._proc = None
+        self._ready = False
+        if proc is None:
+            return
+        proc.kill()
+        proc.wait()
+
+
+@tla.machine(state=_PROC_STATE, model=_SPAWN, ignore=("self._times.pop",))
+class InertHavocRunner(_TickBase):
+    """tick()'s havoc branches touch only unmodeled state: one path, not four."""
+
+    @tla.entry()
+    def tick(self):
+        if len(self._times) > 4:
+            self._times.pop(0)
+        if self._eps == 0.0:
+            avg = sum(self._times)
+            if avg > 0:
+                self._eps = 1.0 / avg
+        return self._ready
+
+
+@tla.machine(state=_PROC_STATE, model=_SPAWN)
+class BareTickRunner(_TickBase):
+    """InertHavocRunner without the inert branches: the same reachable states."""
+
+    @tla.entry()
+    def tick(self):
+        return self._ready
+
+
+@tla.machine(state=_PROC_STATE, model=_SPAWN)
+class HavocWriteRunner(_TickBase):
+    """The havoc branch writes a modeled field: both branches stay."""
+
+    @tla.entry()
+    def tick(self):
+        if len(self._times) > 4:
+            self._ready = False
+        return self._ready
+
+
+@tla.machine(state=_PROC_STATE, model=_SPAWN)
+class HavocLocalRunner(_TickBase):
+    """The havoc branch sets a modeled local read later: both branches stay."""
+
+    @tla.entry()
+    def tick(self):
+        ok = True
+        if len(self._times) > 4:
+            ok = False
+        if not ok:
+            self._ready = False
+        return ok
+
+
+@tla.machine(state=_PROC_STATE, model=_SPAWN)
+class HavocReturnRunner(_TickBase):
+    """The havoc branch returns early: both branches stay."""
+
+    @tla.entry()
+    def tick(self):
+        if len(self._times) > 4:
+            return False
+        self._ready = False
+        return True
+
+
 class _Sender:
     """Stand-in record; the model treats it as its proc (Op.WRAP)."""
 

@@ -9,7 +9,7 @@ Pipeline:
     @tla.machine spec ──┐
     (state, model,      │
      ignore, replies)   ▼
-    class source ─ast─> Compiler (CPS) ─> Emitter ─> <Class>.tla + one .cfg per invariant ─> TLC
+    class source ─ast─> Compiler (CPS) ─> Emitter ─> <Class>.tla + <Class>.cfg (every invariant) ─> TLC
                          │                  │                    │
                          │ entries,         │ Init (__init__ +   │ EXTENDS tools/tla/Syscalls.tla
                          │ inlined self     │ SETUP), Call_<m>,  │ (hand-written outcomes:
@@ -310,13 +310,13 @@ class Model:
     invariants: list[str]
     havoc: list[str] = field(default_factory=list)
 
-    def cfg(self, invariant: str, bounds: "Bounds") -> str:
-        """TLC config checking one invariant."""
+    def cfg(self, bounds: "Bounds") -> str:
+        """TLC config checking every invariant in one run."""
         return (
             "INIT Init\nNEXT Next\n"
             f"CONSTANTS MaxProcs = {bounds.max_procs}\n          MaxCalls = {bounds.max_calls}\n"
             f"          MaxQueue = {bounds.max_queue}\n"
-            f"INVARIANT {invariant}\n"
+            f"INVARIANT {' '.join(self.invariants)}\n"
         )
 
 
@@ -721,6 +721,12 @@ class Compiler:
         return k.exc(w, f'"{text}"', env)
 
     def _s_if(self, node: ast.If, w: str, env: Env, k: Cont) -> str:
+        if self._inert_if(node, env):
+            # Both branches reach the same modeled state: one path instead of two.
+            assigned = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+                        and isinstance(n.ctx, ast.Store)}  # fmt: skip
+            return k.nxt(w, {**env, **dict.fromkeys(assigned, HAVOC)})
+
         join = _Join(self, k.nxt)
         inner = _replace(k, nxt=join.stub)
         then = _Join(self, lambda w2, e2: self.stmts(node.body, w2, e2, inner))
@@ -819,6 +825,78 @@ class Compiler:
         for j in steps:
             text = j.wrap(text)
         return done.wrap(text)
+
+    def _inert_if(self, node: ast.If, env: Env) -> bool:
+        """A havoc `if` whose branches leave modeled state as they found it.
+
+        Inert: no early exit, no loop or nested scope, no modeled write, only pure
+        (or, without signals, ignored) calls, and every local it assigns is havoc
+        either way, which is what the join would merge it to.
+        Example: `if len(self._times) > n: self._times.pop(0)`.
+        """
+        if not self._is_havoc(node.test, env):
+            return False
+
+        stored = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+                  and isinstance(n.ctx, ast.Store)}  # fmt: skip
+        env2 = {**env, **dict.fromkeys(stored, HAVOC)}
+        try:
+            return all(self._inert_node(sub, env2) for sub in ast.walk(node))
+        except ExtractError:
+            return False  # the regular path reports it with its location
+
+    _NOT_INERT = (
+        ast.Return, ast.Raise, ast.Break, ast.Continue, ast.Yield, ast.While, ast.For,
+        ast.With, ast.Try, ast.FunctionDef, ast.Lambda, ast.Delete, ast.Global, ast.Nonlocal,
+    )  # fmt: skip
+    _INERT_CALLS = (CallKind.PURE, CallKind.IGNORE)
+
+    def _inert_node(self, sub: ast.AST, env: Env) -> bool:
+        if isinstance(sub, self._NOT_INERT):
+            return False
+        if isinstance(sub, ast.Assign | ast.AugAssign | ast.AnnAssign):
+            return self._inert_assign(sub, env)
+        if not isinstance(sub, ast.Call):
+            return True
+
+        kind = self.classify(sub, env)
+        # With signals an ignored call is a yield point (Fire): not inert.
+        allowed = (CallKind.PURE,) if self.signals else self._INERT_CALLS
+        return kind in allowed
+
+    def _inert_assign(self, sub: ast.Assign | ast.AugAssign | ast.AnnAssign, env: Env) -> bool:
+        targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+        if any(self._modeled_field(n) for t in targets for n in ast.walk(t)):
+            return False
+        if sub.value is None:
+            return True
+
+        return self._is_havoc(sub.value, env) and self._havoc_source(sub.value, env)
+
+    def _havoc_source(self, value: ast.expr, env: Env) -> bool:
+        """The value derives from a havoc input, never a modeled constant.
+
+        Sources: a havoc local, an unmodeled `self.<field>`, an ignored call.
+        Rejected: `ok = False`, `sig = signal.SIGPROF`, `m = Mode.THREAD`, and
+        `a or b` / `a if c else b`, which may evaluate to a constant.
+        """
+        funcs = {id(n.func) for n in ast.walk(value) if isinstance(n, ast.Call)}
+        found = False
+        for n in ast.walk(value):
+            if isinstance(n, ast.BoolOp | ast.IfExp):
+                return False
+            if isinstance(n, ast.Attribute) and id(n) not in funcs:
+                if not (isinstance(n.value, ast.Name) and n.value.id == "self"):
+                    return False
+                found = True
+            elif self._source_leaf(n, env):
+                found = True
+        return found
+
+    def _source_leaf(self, n: ast.AST, env: Env) -> bool:
+        if isinstance(n, ast.Name):
+            return n.id in env
+        return isinstance(n, ast.Call) and self.classify(n, env) is CallKind.IGNORE
 
     def _is_havoc(self, test: ast.expr, env: Env) -> bool:
         """True when *test* reads no modeled field or modeled local."""
@@ -2007,23 +2085,44 @@ def find_jar() -> Path | None:
 
 
 def write(model: Model, out: Path, bounds: Bounds) -> None:
-    """Write the module, Syscalls.tla and one cfg per invariant into *out*."""
+    """Write the module, Syscalls.tla and its cfg (every invariant) into *out*."""
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{model.name}.tla").write_text(model.tla)
     shutil.copy(_SYSCALLS, out / _SYSCALLS.name)
-    for inv in model.invariants:
-        (out / f"{model.name}_{inv}.cfg").write_text(model.cfg(inv, bounds))
+    (out / f"{model.name}.cfg").write_text(model.cfg(bounds))
 
 
 _STATES_RE = re.compile(r"(\d+) distinct states found")
+_DONE = "Model checking completed. No error has been found."
+# One report per violating state under -continue; the trace runs to the next "Error:"
+# line or the closing summary.
+_VIOLATION_RE = re.compile(
+    r"Invariant (\w+) is violated\.\n.*?The behavior up to this point is:\n"
+    r"(.*?)(?=^Error:|^Model checking|^\d+ states generated|\Z)",
+    re.S | re.M,
+)
+# An Init state that violates is printed alone, ended by a blank line.
+_INIT_VIOLATION_RE = re.compile(
+    r"Invariant (\w+) is violated by the initial state:\n(.*?)(?=^\s*$|^Error:|\Z)",
+    re.S | re.M,
+)
 
 
-def _run_tlc(model: Model, out: Path, jar: Path, inv: str) -> tuple[str, str]:
+def _violations(log: str) -> dict[str, str]:
+    """First (shortest, BFS order) trace per violated invariant."""
+    found: dict[str, str] = {}
+    for inv, trace in _INIT_VIOLATION_RE.findall(log) + _VIOLATION_RE.findall(log):
+        found.setdefault(inv, trace.rstrip())
+    return found
+
+
+def _run_tlc(model: Model, out: Path, jar: Path) -> tuple[str, str]:
+    # -continue: a violation does not stop the run, so every invariant gets its verdict.
     cmd = [
         "java", "-XX:+UseParallelGC", "-cp", str(jar), "tlc2.TLC",
-        "-deadlock", "-workers", "1", "-cleanup",
+        "-deadlock", "-continue", "-workers", "1", "-cleanup",
         "-metadir", str(out / "states"),
-        "-config", f"{model.name}_{inv}.cfg", model.name,
+        "-config", f"{model.name}.cfg", model.name,
     ]  # fmt: skip
     proc = subprocess.run(
         cmd, cwd=out, capture_output=True, text=True, timeout=_TLC_TIMEOUT, check=False
@@ -2032,22 +2131,20 @@ def _run_tlc(model: Model, out: Path, jar: Path, inv: str) -> tuple[str, str]:
 
 
 def check(model: Model, out: Path, jar: Path, bounds: Bounds) -> CheckResult:
-    """Run TLC once per invariant; collect each violated one's trace."""
+    """Run TLC once over every invariant; collect each violated one's trace."""
     write(model, out, bounds)
-    violations, states, completed = {}, 0, True
+    log, err = _run_tlc(model, out, jar)
+    found = _STATES_RE.findall(log)
+    states = int(found[-1]) if found else 0
+    violations = _violations(log)
+    if _DONE in log:
+        return CheckResult(True, violations, states)
+
+    # A parse or runtime error is no verdict: never report an unviolated invariant as ok.
+    error = "TLC error (no verdict):\n" + (log + err)[-4000:]
     for inv in model.invariants:
-        log, err = _run_tlc(model, out, jar, inv)
-        found = _STATES_RE.findall(log)
-        states = max(states, int(found[-1])) if found else states
-        if f"Invariant {inv} is violated" in log:
-            trace = log.split("The behavior up to this point is:", 1)[-1]
-            violations[inv] = re.split(r"\n\d+ states generated", trace, maxsplit=1)[0]
-            continue
-        if "Model checking completed. No error has been found." not in log:
-            # A parse or runtime error is no verdict: never report the invariant as ok.
-            completed = False
-            violations[inv] = "TLC error (no verdict):\n" + (log + err)[-4000:]
-    return CheckResult(completed, violations, states)
+        violations.setdefault(inv, error)
+    return CheckResult(False, violations, states)
 
 
 class Backend(Enum):
@@ -2071,12 +2168,30 @@ def check_lean(model: Model, out: Path, lean_bin: Path, bounds: Bounds) -> Check
 
 
 def _disagree(tlc: CheckResult, lean: CheckResult) -> str | None:
-    """Cross-check: same violated invariants and, when both explored fully, the same state count."""
+    """Cross-check: same violated invariants, state count (both complete) and trace lengths."""
     if set(tlc.violations) != set(lean.violations):
         return f"verdicts differ: TLC {sorted(tlc.violations)} vs Lean {sorted(lean.violations)}"
     if tlc.completed and lean.completed and tlc.states != lean.states:
         return f"state counts differ: TLC {tlc.states} vs Lean {lean.states}"
+
+    # Both explore breadth-first: each invariant's shortest trace has one length.
+    for inv in sorted(tlc.violations):
+        a, b = _trace_len(tlc.violations[inv]), _trace_len(lean.violations[inv])
+        if a is None or a != b:
+            return f"trace lengths differ for {inv}: TLC {a or '?'} vs Lean {b or '?'}"
     return None
+
+
+_STATE_LINE_RE = re.compile(r"^State \d+:", re.M)
+
+
+def _trace_len(trace: str) -> int | None:
+    """States in a counterexample: `State n:` headers, or 1 for a bare Init state
+    (TLC prints those without a header). None when the text is no trace at all."""
+    n = len(_STATE_LINE_RE.findall(trace))
+    if n:
+        return n
+    return 1 if re.search(r"^w = ", trace, re.M) else None
 
 
 def _summarize(trace: str) -> str:
