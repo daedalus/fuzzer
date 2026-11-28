@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from fuzzer_tool.core import tla
+
 log = logging.getLogger(__name__)
 
 # llvm-cov export branch record: [line, col, end_line, end_col, true, false, ...]
@@ -188,6 +190,29 @@ class Coverage:
         return out
 
 
+# TLA+ model boundary (thread model): python tools/tla_extract.py frontier --check
+@tla.machine(
+    state={
+        "_lock": tla.Kind.LOCK,
+        "_wake": tla.Kind.COND,
+        "_queue": tla.Kind.QUEUE,
+        "_busy": tla.Kind.BOOL,
+        "_closing": tla.Kind.BOOL,
+        "_worker_done": tla.Kind.BOOL,
+        "_thread": tla.Kind.THREAD,
+    },
+    model={"self._cov.measure": tla.Op.MAY_FAIL},
+    init_args={"mode": OracleMode.THREAD},  # production; INLINE is for tests
+    ignore=(
+        "log.",
+        "Path",
+        "Coverage",
+        "OrderedDict",
+        "weakref.",
+        "self._queued.",
+        "self._cleanup",
+    ),
+)
 class FrontierOracle:
     """Per-seed reach of open frontier conditions, measured as seeds arrive.
 
@@ -238,6 +263,7 @@ class FrontierOracle:
 
     # -- producer ---------------------------------------------------------------
 
+    @tla.entry()
     def submit(self, key, data: bytes) -> None:
         """Queue a seed for measurement; dropped (counted) when the queue is full.
 
@@ -253,6 +279,7 @@ class FrontierOracle:
             self._queued.add(key)
             self._wake.notify()
 
+    @tla.entry()
     def drain(self) -> None:
         """Measure everything queued: inline, or wait for the worker."""
         if self._thread is None:
@@ -265,6 +292,7 @@ class FrontierOracle:
             while (self._queue or self._busy) and not self._worker_done:
                 self._wake.wait()
 
+    @tla.entry()
     def close(self) -> None:
         """Stop the worker and remove the work directory."""
         with self._lock:
@@ -366,6 +394,7 @@ class FrontierOracle:
                     self._wake.notify_all()
         return True
 
+    @tla.opaque(None)  # pure bookkeeping under the caller's lock
     def _fold(self, key, counts: Counts) -> None:
         """Add one seed's counts (caller holds the lock)."""
         executed = frozenset(b for b, (t, f) in counts.items() if t or f)

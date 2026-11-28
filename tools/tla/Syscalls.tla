@@ -220,6 +220,29 @@ SigGet(w, s, Ok(_, _), Raise(_, _)) == Ok(w, Shown(w.disp[s]))
 SetItimer(w, s, arm, per, Ok(_, _), Raise(_, _)) ==
     Ok([w EXCEPT !.timer[s] = arm, !.periodic[s] = arm /\ per], w.timer[s])
 
+\* ── threads (tools/tla_threads.py) ──────────────────────────────────────
+
+CONSTANT MaxQueue
+
+\* Work that may fail (e.g. a coverage measurement).
+MayFail(w, Ok(_, _), Raise(_, _)) == Ok(w, "None") \/ Raise(w, "RuntimeError")
+
+\* deque.append / popleft on a QUEUE field f (its length). Past MaxQueue the
+\* path raises "Bound": the thread model freezes it (w.bound) rather than
+\* pruning it, which would read as a deadlock.
+QPush(w, f, Ok(_, _), Raise(_, _)) ==
+    IF w.s[f] = MaxQueue THEN Raise(w, "Bound") ELSE Ok([w EXCEPT !.s[f] = @ + 1], "None")
+QPop(w, f, Ok(_, _), Raise(_, _)) ==
+    IF w.s[f] = 0 THEN Raise(w, "IndexError") ELSE Ok([w EXCEPT !.s[f] = @ - 1], "item")
+
+\* Condition.notify / notify_all by thread t; the lock l must be held.
+CNotify(w, c, l, t, Ok(_, _), Raise(_, _)) ==
+    CASE w.lock[l] # t       -> Raise(w, "RuntimeError")
+      [] w.waiters[c] = {}   -> Ok(w, "None")
+      [] OTHER               -> \E u \in w.waiters[c] : Ok([w EXCEPT !.waiters[c] = @ \ {u}], "None")
+CNotifyAll(w, c, l, t, Ok(_, _), Raise(_, _)) ==
+    IF w.lock[l] # t THEN Raise(w, "RuntimeError") ELSE Ok([w EXCEPT !.waiters[c] = {}], "None")
+
 \* Environment: a live loader may die between calls.
 Died(w) ==
     {[w EXCEPT !.procs[p] = "dead"] : p \in {q \in 1..MaxProcs : w.procs[q] = "live"}}

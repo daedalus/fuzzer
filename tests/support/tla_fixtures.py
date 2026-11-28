@@ -4,6 +4,7 @@ Each pair is a buggy class and its fixed twin: the fix is the control that
 must pass before the bug's counterexample means anything (Hard Rule 46).
 """
 
+import collections
 import contextlib
 import os
 import signal
@@ -627,6 +628,272 @@ class NonlocalHandlerRunner:
 
         signal.signal(signal.SIGALRM, _alarm)
         signal.setitimer(signal.ITIMER_REAL, 1.0)
+
+
+_GATED_STATE = {
+    "_is_c": tla.Kind.BOOL,
+    "_alarm_handler": tla.Kind.HANDLER,
+    "_old_alarm_handler": tla.Kind.HANDLER,
+    "_timed_out": tla.Kind.BOOL,
+}
+_GATED = {"init": tla.Init.ASSUMED, "assume": {"_is_c": True}, "ignore": ("os.getpid",)}
+
+
+@tla.machine(state=_GATED_STATE, **_GATED)
+class GatedOnceRunner:
+    """InProcessRunner's shape: install-once handler, gated by _is_c, no way back after stop()."""
+
+    def __init__(self):
+        os.system("heavy setup the model never compiles")
+
+    @tla.entry(requires="self._is_c")  # run_one dispatches here only while _is_c
+    def run(self):
+        if not hasattr(self, "_alarm_handler"):
+
+            def _alarm(signum, frame):
+                self._timed_out = True
+
+            self._alarm_handler = _alarm
+            self._old_alarm_handler = signal.signal(signal.SIGALRM, self._alarm_handler)
+        signal.setitimer(signal.ITIMER_REAL, 1.0)
+        try:
+            os.getpid()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    @tla.entry()
+    def stop(self):
+        if getattr(self, "_alarm_handler", None) is not None:
+            ours = signal.getsignal(signal.SIGALRM) is self._alarm_handler
+            if ours and self._old_alarm_handler is not None:
+                signal.signal(signal.SIGALRM, self._old_alarm_handler)
+            self._alarm_handler = None
+            self._old_alarm_handler = None
+        self._is_c = False
+
+
+@tla.machine(state=_GATED_STATE, **_GATED)
+class ReusedOnceRunner:
+    """GatedOnceRunner plus a reload(): reuse after stop() reaches the stale guard."""
+
+    def __init__(self):
+        os.system("heavy setup the model never compiles")
+
+    @tla.entry(requires="self._is_c")  # run_one dispatches here only while _is_c
+    def run(self):
+        if not hasattr(self, "_alarm_handler"):
+
+            def _alarm(signum, frame):
+                self._timed_out = True
+
+            self._alarm_handler = _alarm
+            self._old_alarm_handler = signal.signal(signal.SIGALRM, self._alarm_handler)
+        signal.setitimer(signal.ITIMER_REAL, 1.0)
+        try:
+            os.getpid()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    @tla.entry()
+    def stop(self):
+        if getattr(self, "_alarm_handler", None) is not None:
+            ours = signal.getsignal(signal.SIGALRM) is self._alarm_handler
+            if ours and self._old_alarm_handler is not None:
+                signal.signal(signal.SIGALRM, self._old_alarm_handler)
+            self._alarm_handler = None
+            self._old_alarm_handler = None
+        self._is_c = False
+
+    @tla.entry()
+    def reload(self):
+        self._is_c = True
+
+
+_ORACLE_STATE = {
+    "_lock": tla.Kind.LOCK,
+    "_wake": tla.Kind.COND,
+    "_queue": tla.Kind.QUEUE,
+    "_busy": tla.Kind.BOOL,
+    "_closing": tla.Kind.BOOL,
+    "_done": tla.Kind.BOOL,
+    "_thread": tla.Kind.THREAD,
+}
+_ORACLE_MODEL = {"self._cov.measure": tla.Op.MAY_FAIL}
+
+
+@tla.machine(state=_ORACLE_STATE, model=_ORACLE_MODEL)
+class LostWakeupOracle:
+    """drain() waits on the queue even after the worker exited: it never returns."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._wake = threading.Condition(self._lock)
+        self._queue = collections.deque()
+        self._busy = False
+        self._closing = False
+        self._done = False
+        self._fails = 0
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    @tla.entry()
+    def submit(self):
+        with self._lock:
+            self._queue.append(1)
+            self._wake.notify()
+
+    @tla.entry()
+    def close(self):
+        with self._lock:
+            self._closing = True
+            self._wake.notify_all()
+        self._thread.join()
+
+    @tla.entry()
+    def drain(self):
+        with self._lock:
+            while self._queue or self._busy:
+                self._wake.wait()
+
+    def _loop(self):
+        try:
+            while True:
+                with self._lock:
+                    while not self._queue and not self._closing:
+                        self._wake.wait()
+                    if self._closing:
+                        return
+                    self._queue.popleft()
+                    self._busy = True
+                try:
+                    self._cov.measure()
+                except RuntimeError:
+                    self._fails += 1
+                with self._lock:
+                    self._busy = False
+                    self._wake.notify_all()
+        finally:
+            with self._lock:
+                self._done = True
+                self._wake.notify_all()
+
+
+@tla.machine(state=_ORACLE_STATE, model=_ORACLE_MODEL)
+class FixedOracle:
+    """LostWakeupOracle whose drain() also stops once the worker is done."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._wake = threading.Condition(self._lock)
+        self._queue = collections.deque()
+        self._busy = False
+        self._closing = False
+        self._done = False
+        self._fails = 0
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    @tla.entry()
+    def submit(self):
+        with self._lock:
+            self._queue.append(1)
+            self._wake.notify()
+
+    @tla.entry()
+    def close(self):
+        with self._lock:
+            self._closing = True
+            self._wake.notify_all()
+        self._thread.join()
+
+    @tla.entry()
+    def drain(self):
+        with self._lock:
+            while (self._queue or self._busy) and not self._done:
+                self._wake.wait()
+
+    def _loop(self):
+        try:
+            while True:
+                with self._lock:
+                    while not self._queue and not self._closing:
+                        self._wake.wait()
+                    if self._closing:
+                        return
+                    self._queue.popleft()
+                    self._busy = True
+                try:
+                    self._cov.measure()
+                except RuntimeError:
+                    self._fails += 1
+                with self._lock:
+                    self._busy = False
+                    self._wake.notify_all()
+        finally:
+            with self._lock:
+                self._done = True
+                self._wake.notify_all()
+
+
+@tla.machine(state=_ORACLE_STATE, model=_ORACLE_MODEL)
+class NestedBlockingOracle:
+    """A blocking method called inside a larger expression is outside the subset."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._wake = threading.Condition(self._lock)
+        self._queue = collections.deque()
+        self._busy = False
+        self._closing = False
+        self._done = False
+        self._fails = 0
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    @tla.entry()
+    def submit(self):
+        with self._lock:
+            self._queue.append(1)
+            self._wake.notify()
+
+    @tla.entry()
+    def close(self):
+        with self._lock:
+            self._closing = True
+            self._wake.notify_all()
+        self._thread.join()
+
+    @tla.entry()
+    def drain(self):
+        return 1 + self._wait_empty()
+
+    def _wait_empty(self):
+        with self._lock:
+            while self._queue:
+                self._wake.wait()
+        return 0
+
+    def _loop(self):
+        try:
+            while True:
+                with self._lock:
+                    while not self._queue and not self._closing:
+                        self._wake.wait()
+                    if self._closing:
+                        return
+                    self._queue.popleft()
+                    self._busy = True
+                try:
+                    self._cov.measure()
+                except RuntimeError:
+                    self._fails += 1
+                with self._lock:
+                    self._busy = False
+                    self._wake.notify_all()
+        finally:
+            with self._lock:
+                self._done = True
+                self._wake.notify_all()
 
 
 class _Sender:
