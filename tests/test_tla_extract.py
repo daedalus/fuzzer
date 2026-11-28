@@ -145,6 +145,50 @@ def test_status_zero_false_exit(tmp_path):
     assert "NoOrphan" in false_exit.violations
 
 
+@needs_tlc
+def test_caller_locals_survive_inline(tmp_path):
+    """Joins after an inlined call see the caller's locals, not the callee's frame."""
+    kept = _check(fx.CallerLocalRunner, tmp_path / "kept")
+    assert kept.completed and not kept.violations
+
+    leak = _check(fx.CallerLeakRunner, tmp_path / "leak")
+    assert "NoOrphan" in leak.violations
+
+
+@needs_tlc
+def test_gdb_queue_publish_contained(tmp_path):
+    """CrashGdbQueue._publish catching only OSError: a failed refresh escapes tick/close."""
+    clean = _check(fx.CleanGdbQueue, tmp_path / "clean")
+    assert clean.completed and not clean.violations
+
+    buggy = _check(fx.OsErrorOnlyGdbQueue, tmp_path / "buggy")
+    assert "NoUncaught" in buggy.violations
+
+
+@needs_tlc
+def test_adversarial_gdb_queue_drop_live(tmp_path):
+    """close() without waiting drops a running gdb."""
+    res = _check(fx.NoWaitGdbQueue, tmp_path)
+    assert "NoOrphan" in res.violations
+
+
+@needs_tlc
+def test_loop_bound_only_past_unroll(tmp_path):
+    """A loop done in exactly 3 iterations is clean; one needing a 4th is LoopBound."""
+    three = _check(fx.ThreeStepLoop, tmp_path / "three")
+    assert three.completed and not three.violations
+
+    four = _check(fx.FourStepLoop, tmp_path / "four")
+    assert "LoopBound" in four.violations
+
+
+def test_bounded_wait_always_reaps():
+    """`job.wait` maps to WaitBounded (no Hang outcome), not Popen's Wait."""
+    model = tla_extract.extract(fx.CleanGdbQueue)
+    assert "WaitBounded(" in model.tla
+    assert "Wait(" not in model.tla.replace("WaitBounded(", "")
+
+
 # ── Adversarial: outside the subset fails loudly ────────────────────
 
 

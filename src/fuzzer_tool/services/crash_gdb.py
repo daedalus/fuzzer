@@ -24,6 +24,7 @@ from enum import Enum
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import crash_exists, refresh_crash_report
+from fuzzer_tool.core import tla
 from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer, GdbJob, TraceReport
 from fuzzer_tool.core.crash_metadata import CrashMetadata
 
@@ -50,6 +51,23 @@ class _Job:
     target: str
 
 
+# TLA+ model boundary: python tools/tla_extract.py crash_gdb --check
+@tla.machine(
+    state={"_live": tla.Kind.PROC, "_queue": tla.Kind.QUEUE},
+    model={
+        # GdbJob as a proc: start may raise OSError (gdb_start returning None is the
+        # same path), poll() is None until done, wait() always returns (its deadline
+        # kill is checked by the gdbjob machine).
+        "self._tracer(job.target).gdb_start": tla.Op.SPAWN,
+        "proc.wait": tla.Op.BOUNDED_WAIT,
+        # Every publish step may raise a non-OSError.
+        "refresh_crash_report": tla.Op.MAY_FAIL,
+        "tracer.finish_trace": tla.Op.MAY_FAIL,
+        "tracer.save_report": tla.Op.MAY_FAIL,
+    },
+    ignore=("log.", "_Job", "crash_exists"),
+    init=tla.Init.ASSUMED,  # __init__ only builds an empty deque: both fields start empty
+)
 class CrashGdbQueue:
     """Background GDB replays for novel crashes.
 
@@ -72,19 +90,22 @@ class CrashGdbQueue:
     def pending(self) -> int:
         return len(self._queue) + (self._live is not None)
 
+    @tla.entry()
     def enqueue(self, meta: CrashMetadata, data: bytes, returncode: int, base: str) -> None:
         """Hold one saved crash for its report's GDB section."""
         target = meta.target or self._target
         self._add(_Job(meta, data, returncode, base, TraceMode.SIDECAR, target))
 
+    @tla.entry()
     def want_trace(self, data: bytes, returncode: int, base: str) -> None:
         """Also write ``<base>.trace``: upgrades the held job, else adds one."""
-        for job in self._held():
-            if job.base == base:
-                job.mode = TraceMode.FULL
-                return
+        held = next((job for job in self._held() if job.base == base), None)
+        if held is not None:
+            held.mode = TraceMode.FULL
+            return
         self._add(_Job(None, data, returncode, base, TraceMode.FULL, self._target))
 
+    @tla.entry()
     def tick(self) -> None:
         """Publish a finished replay and start the next; never blocks on gdb."""
         if self._live is None:
@@ -96,6 +117,7 @@ class CrashGdbQueue:
         self._publish(job, report)
         self._start_next()
 
+    @tla.entry()
     def close(self) -> None:
         """Finish every held replay (end of run), each bounded by its timeout."""
         while self._live is not None:
@@ -103,6 +125,7 @@ class CrashGdbQueue:
             self._publish(job, proc.wait())
             self._start_next()
 
+    @tla.opaque("jobs")
     def _held(self):
         if self._live is not None:
             yield self._live[1]
@@ -124,6 +147,7 @@ class CrashGdbQueue:
                 self._live = (proc, job)
                 return
 
+    @tla.opaque("tracer")
     def _tracer(self, target: str) -> CrashTracer:
         tracer = self._tracers.get(target)
         if tracer is None:
@@ -143,7 +167,7 @@ class CrashGdbQueue:
             if job.mode is TraceMode.FULL and crash_exists(self._dir, job.base):
                 tracer = self._tracer(job.target)
                 tracer.save_report(tracer.finish_trace(job.data, report), str(self._dir), job.base)
-        except OSError:
+        except Exception:  # any failure: tick() and close() must keep draining
             log.warning("GDB replay publish failed for %s", job.base, exc_info=True)
 
     def _publish_sidecar(self, job: _Job, block: str) -> None:

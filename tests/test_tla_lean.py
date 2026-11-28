@@ -125,7 +125,7 @@ def _verdicts(res) -> tuple[bool, frozenset[str], int]:
     "cls",
     [fx.CleanRunner, fx.LeakyRunner, fx.StaleReplyRunner, fx.FreshReplyRunner, fx.LeakyJob,
      fx.CleanJob, fx.ShortReadRunner, fx.StaleKillRunner, fx.TimerFirstSampler,
-     fx.HandlerFirstSampler, fx.InstallOnceRunner],
+     fx.HandlerFirstSampler, fx.InstallOnceRunner, fx.CleanGdbQueue, fx.OsErrorOnlyGdbQueue],
     ids=lambda c: c.__name__,
 )  # fmt: skip
 def test_lean_matches_tlc(cls, tmp_path):
