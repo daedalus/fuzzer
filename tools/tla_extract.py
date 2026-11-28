@@ -14,24 +14,30 @@ Pipeline:
                          │ entries,         │ Init (__init__ +   │ EXTENDS tools/tla/Syscalls.tla
                          │ inlined self     │ SETUP), Call_<m>,  │ (hand-written outcomes:
                          │ calls, handlers  │ Die, Fire, H_<h>   │  Popen, pipes, files, fork,
-                         ▼                  ▼                    │  waitpid, kill, signals)
+                         ▼                  ▼                    │  waitpid, kill, signals,
+                                                                 │  ptrace, SysV shm)
 
 Compiler: each statement receives its continuations (fall through, return,
 raise, break, continue) and emits a TLA+ expression. A call with several
 outcomes becomes a Syscalls.tla operator applied to LAMBDA continuations;
 a continuation reached from more than one place is emitted once as a LET.
 
-    calls      self methods inline (<= 3 nested); @tla.opaque ones return a choice;
+    calls      self methods and same-module functions inline (<= 3 nested);
+               @tla.opaque ones return a choice;
                model= / stdlib (os.fork, waitpid, kill, signal.*) map to Syscalls ops;
                ignore= drops a call; anything else is ExtractError(file:line)
-    loops      while: unrolled 3x (clock-only condition -> expired, else LoopBound);
+    loops      while: unrolled 3x (clock-only condition -> expired, `while True` ->
+               deeper paths pruned, else LoopBound);
                for: only with no modeled effect (skipped)
     signals    a class touching signal.signal/setitimer gets Fire at every modeled
                or ignored call: an armed timer runs its handler, is ignored, or kills
-    values     unmodeled -> havoc: conditions over it take both branches ([havoc])
+    values     int and short str constants are TLA strings; Python's (0, 0) from
+               waitpid(WNOHANG) reads WIFEXITED; unmodeled -> havoc: conditions over
+               it take both branches ([havoc]); a join keeps whether a havoc is None
 
 Invariants: NoOrphan, NoHang, NoUncaught, RecursionBound, NoDesync, SetupCleanup,
-NoStaleKill, NoFatalSignal, LoopBound, plus each class's own (skipped while hung).
+NoStaleKill, NoFatalSignal, LoopBound, NoShmLeak (+ NoDanglingSeg with SEGMENT fields),
+plus each class's own (skipped while hung).
 """
 
 import argparse
@@ -42,6 +48,7 @@ import inspect
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import textwrap
@@ -68,6 +75,8 @@ MACHINES = {
     "stack_sampler": "fuzzer_tool.adapters.stack_sampler:StackSampler",
     "inprocess": "fuzzer_tool.adapters.inprocess:InProcessRunner",
     "frontier": "fuzzer_tool.adapters.frontier_cov:FrontierOracle",
+    "ptrace": "fuzzer_tool.services.runner:TargetRunner",
+    "shm": "fuzzer_tool.adapters.shm:ShmCoverage",
 }
 BUILTIN_INVARIANTS = (
     "NoOrphan",
@@ -93,18 +102,26 @@ _UNREAPED = '{"live", "dead", "stopped"}'
 _ITIMER_SIG = {"ITIMER_REAL": "SIGALRM", "ITIMER_PROF": "SIGPROF", "ITIMER_VIRTUAL": "SIGVTALRM"}
 _SIG_CONST = {"SIG_DFL": "default", "SIG_IGN": "ignore"}
 # os.W* status predicates over a waitpid status tag.
-_STOPPED = '{"stopped:SIGSTOP", "stopped:other"}'
+_STOPPED = '{"stopped:SIGSTOP", "stopped:SIGTRAP", "stopped:SIGSEGV", "stopped:other"}'
+_SEG_LIVE = '{"det", "att", "rmatt"}'  # segment exists or is still mapped
+_STOP_SIGS = ("SIGSTOP", "SIGTRAP", "SIGSEGV")
+_WSTOPSIG = (
+    "(CASE "
+    + " [] ".join(f'{{s}} = "stopped:{g}" -> "{g}"' for g in _STOP_SIGS)
+    + ' [] OTHER -> "SIGOTHER")'
+)
+# Python's os.waitpid returns status 0 for "no event" (WNOHANG), and WIFEXITED(0) is true.
+_EXITED = '{"exited", "none", "0"}'
 _WSTATUS = {
-    "os.WIFEXITED": lambda s: Val(f'({s} = "exited")', VKind.BOOL),
+    "os.WIFEXITED": lambda s: Val(f"({s} \\in {_EXITED})", VKind.BOOL),
     "os.WIFSIGNALED": lambda s: Val(f'({s} = "signaled")', VKind.BOOL),
     "os.WIFSTOPPED": lambda s: Val(f"({s} \\in {_STOPPED})", VKind.BOOL),
-    "os.WSTOPSIG": lambda s: Val(
-        f'(IF {s} = "stopped:SIGSTOP" THEN "SIGSTOP" ELSE "SIGOTHER")', VKind.STR
-    ),
+    "os.WSTOPSIG": lambda s: Val(_WSTOPSIG.format(s=s), VKind.STR),
     "os.WEXITSTATUS": lambda s: HAVOC,
     "os.WTERMSIG": lambda s: HAVOC,
 }
 _SIGNAL_CALLS = ("signal.signal", "signal.setitimer")
+_SHORT_STR = re.compile(r"[\w .:/+-]{0,40}")  # string constants kept as TLA strings
 _NO_DEADLINE = "NO_DEADLINE"
 _NONE_HANDLE = "0"
 _NONE_STR = '"None"'
@@ -157,6 +174,7 @@ class HType(Enum):
     QUEUE = "queue"  # a QUEUE field (its length)
     THREAD = "thread"  # a THREAD field (thread id)
     WAIT = "wait"  # os.waitpid result: status tag, pid half in Val.pair
+    SEG = "seg"  # SysV shm segment: id and attach address both name it
 
 
 _FIELD_HTYPE = {
@@ -169,6 +187,7 @@ _FIELD_HTYPE = {
     tla.Kind.COND: HType.COND,
     tla.Kind.QUEUE: HType.QUEUE,
     tla.Kind.THREAD: HType.THREAD,
+    tla.Kind.SEGMENT: HType.SEG,
 }
 _HANDLE_KINDS = (
     tla.Kind.PROC,
@@ -177,6 +196,7 @@ _HANDLE_KINDS = (
     tla.Kind.PID,
     tla.Kind.QUEUE,
     tla.Kind.THREAD,
+    tla.Kind.SEGMENT,
 )
 # Kinds that turn a class into a thread model (tools/tla_threads.py).
 _THREAD_KINDS = (tla.Kind.LOCK, tla.Kind.COND, tla.Kind.THREAD)
@@ -195,6 +215,7 @@ class Val:
     htype: HType | None = None
     tags: frozenset[str] = frozenset()  # leading words of literal payloads, e.g. {"RUN"}
     pair: str | None = None  # HType.WAIT: the pid half of (pid, status)
+    isnone: str | None = None  # HAVOC: TLA predicate "the value is None", when known
 
 
 HAVOC = Val(None, VKind.HAVOC)
@@ -225,6 +246,7 @@ class CallKind(Enum):
 
     IGNORE = "ignore"
     INLINE = "inline"
+    FUNC = "func"  # module-level function of the machine's module: inlined
     OPAQUE = "opaque"
     MODEL = "model"
     TYPED = "typed"
@@ -259,6 +281,10 @@ _MODEL_RESULT = {
     tla.Op.OPEN_FILE: (VKind.HANDLE, HType.FILE),
     tla.Op.KILLPG: (VKind.STR, None),
     tla.Op.MAY_FAIL: (VKind.STR, None),
+    tla.Op.SHM_GET: (VKind.HANDLE, HType.SEG),
+    tla.Op.SHM_AT: (VKind.HANDLE, HType.SEG),
+    tla.Op.SHM_DT: (VKind.STR, None),
+    tla.Op.SHM_RMID: (VKind.STR, None),
 }
 _MODEL_ARGS = {
     tla.Op.SPAWN: 0,
@@ -268,6 +294,10 @@ _MODEL_ARGS = {
     tla.Op.OPEN_FILE: 0,
     tla.Op.KILLPG: 1,
     tla.Op.MAY_FAIL: 0,
+    tla.Op.SHM_GET: 0,
+    tla.Op.SHM_AT: 1,
+    tla.Op.SHM_DT: 1,
+    tla.Op.SHM_RMID: 1,
 }
 
 
@@ -355,45 +385,80 @@ class _Join:
         self.name = comp.fresh("K")
 
     def stub(self, w: str, env: Env, *extra: Val) -> str:
+        """A call site. Arguments are placeholders until wrap() knows every site's kind."""
+        call = len(self._calls)
         self._calls.append((env, extra))
-        args = (
-            [w]
-            + [self._arg(env.get(n, HAVOC)) for n in self._names]
-            + [self._arg(v) for v in extra]
-        )
-        return f"{self.name}({', '.join(args)})"
+        n = len(self._names) + len(extra)
+        return f"{self.name}({', '.join([w, *(self._hole(call, i) for i in range(n))])})"
 
-    @staticmethod
-    def _arg(v: Val) -> str:
-        return v.tla if v.tla is not None else _NONE_HANDLE
+    def _hole(self, call: int, i: int) -> str:
+        return f"\x00{self.name}:{call}:{i}\x00"
+
+    # None at a call site is coerced to the merged kind's None.
+    _NONE_AS = {VKind.STR: _NONE_STR, VKind.BOOL: "FALSE"}
+
+    def _arg(self, v: Val, kind: VKind) -> str:
+        if kind in (VKind.HAVOC, VKind.NONE) or v.tla is None:
+            return self._NONE_AS.get(kind, _NONE_HANDLE) if v.kind is VKind.NONE else _NONE_HANDLE
+        return v.tla
 
     def _merge(self, vals: list[Val]) -> tuple[VKind, HType | None, frozenset[str]]:
         tags = frozenset().union(*(v.tags for v in vals))
-        first = vals[0]
-        if all(v.kind == first.kind and v.htype == first.htype for v in vals):
-            return first.kind, first.htype, tags
+        kinds = {(v.kind, v.htype) for v in vals if v.kind is not VKind.NONE}
+        if not kinds:
+            return VKind.NONE, None, tags
+        if len(kinds) == 1:
+            kind, htype = kinds.pop()
+            return kind, htype, tags
+        if {k for k, _ in kinds} == {VKind.STR}:
+            return VKind.STR, None, tags  # e.g. `status = 0` joined with a waitpid status
         return VKind.HAVOC, None, tags
 
     def _param(self, vals: list[Val], base: str) -> tuple[str, Val]:
         kind, htype, tags = self._merge(vals)
         p = self._comp.fresh(base)
         modeled = kind not in (VKind.HAVOC, VKind.NONE)
-        return p, Val(p if modeled else None, kind, htype, tags)
+        isnone = None
+        if kind is VKind.HAVOC and self._none_preds(vals) is not None:
+            isnone = p + "_none"  # extra BOOL parameter, see _none_column
+        return p, Val(p if modeled else None, kind, htype, tags, isnone=isnone)
+
+    @staticmethod
+    def _none_preds(vals: list[Val]) -> list[str] | None:
+        """Per-site "is None" predicates, if every site knows; else None."""
+        preds = [Compiler._is_none(v) for v in vals]
+        if any(p is None for p in preds) or all(p == "FALSE" for p in preds):
+            return None
+        return preds
 
     def wrap(self, text: str) -> str:
         if not self._calls:
             return text
         wp = self._comp.fresh("w")
-        params, env = [wp], {}
-        for n in self._names:
-            p, v = self._param([c[0].get(n, HAVOC) for c in self._calls], "l_" + n.lstrip("_"))
+        params, env, extras, columns = [wp], {}, [], []
+        # A name unbound at a site is never read on that path: it joins like None.
+        named = [
+            ([c[0].get(n, NONE_VAL) for c in self._calls], "l_" + n.lstrip("_"))
+            for n in self._names
+        ]
+        extra = [([c[1][i] for c in self._calls], b) for i, b in enumerate(self._extra)]
+        for j, (vals, base) in enumerate(named + extra):
+            p, v = self._param(vals, base)
             params.append(p)
-            env[n] = v
-        extras = []
-        for i, base in enumerate(self._extra):
-            p, v = self._param([c[1][i] for c in self._calls], base)
-            params.append(p)
-            extras.append(v)
+            if v.isnone:
+                params.append(v.isnone)  # BOOL twin: this HAVOC value is None
+            if j < len(named):
+                env[self._names[j]] = v
+            else:
+                extras.append(v)
+            columns.append((vals, v))
+        for i, (vals, merged) in enumerate(columns):
+            preds = self._none_preds(vals) if merged.isnone else None
+            for call, v in enumerate(vals):
+                arg = self._arg(v, merged.kind)
+                if preds is not None:
+                    arg = f"{arg}, {preds[call]}"
+                text = text.replace(self._hole(call, i), arg)
         body = self._body(wp, env, *extras)
         return f"LET {self.name}({', '.join(params)}) ==\n{body}\nIN {text}"
 
@@ -412,6 +477,7 @@ class Compiler:
         tree = ast.parse(textwrap.dedent("".join(lines)))
         self._methods = {n.name: n for n in tree.body[0].body if isinstance(n, ast.FunctionDef)}
         self._globals = vars(sys.modules[cls.__module__])
+        self._funcs: dict[str, ast.FunctionDef | None] = {}
         self._fields = {f: f.lstrip("_") for f in spec.state}
         self._counter = 0
         self._frames: list[set[str]] = []
@@ -435,10 +501,19 @@ class Compiler:
             ast.Continue: self._s_continue,
             ast.FunctionDef: self._s_funcdef,
             ast.Assert: lambda n, w, env, k: k.nxt(w, env),  # stripped under -O
+            ast.Delete: self._s_delete,
         }
         # Classes that touch signal dispositions get async handler interleaving.
+        # @tla.opaque bodies are never compiled (e.g. a forked child's setup).
+        compiled = [
+            fn
+            for name, fn in self._methods.items()
+            if not hasattr(getattr(cls, name, None), tla.OPAQUE_ATTR)
+        ]
         self.signals = any(
-            isinstance(n, ast.Call) and ast.unparse(n.func) in _SIGNAL_CALLS for n in ast.walk(tree)
+            isinstance(n, ast.Call) and ast.unparse(n.func) in _SIGNAL_CALLS
+            for fn in compiled
+            for n in ast.walk(fn)
         )
         self.handlers: dict[str, ast.FunctionDef] = {}  # handler id -> def
         self._in_handler = False
@@ -561,6 +636,8 @@ class Compiler:
             if any(self._modeled_field(n) for n in ast.walk(target)):
                 raise self.fail(target, "indirect store into a modeled field")
             return k.nxt(w, env)
+        if isinstance(target, ast.Tuple) and v.htype is HType.SEG:
+            return self._bind_seg(target, v, w, env, k)
         if isinstance(target, ast.Tuple) and v.htype is HType.WAIT:
             return k.nxt(w, {**env, **self._bind_wait(target, v)})
         if isinstance(target, ast.Tuple) and not any(self._modeled_field(e) for e in target.elts):
@@ -568,6 +645,15 @@ class Compiler:
             names = {e.id: HAVOC for e in target.elts if isinstance(e, ast.Name)}
             return k.nxt(w, {**env, **names})
         raise self.fail(target, "unsupported assignment target")
+
+    def _bind_seg(self, target: ast.Tuple, v: Val, w: str, env: Env, k: Cont) -> str:
+        """``shm_id, addr = _alloc_segment(...)``: both name the same segment."""
+        if not target.elts:
+            return k.nxt(w, env)
+        head, rest = target.elts[0], ast.Tuple(elts=target.elts[1:], ctx=ast.Store())
+        return self._bind(
+            head, v, w, env, _replace(k, nxt=lambda w2, e2: self._bind_seg(rest, v, w2, e2, k))
+        )
 
     def _bind_wait(self, target: ast.Tuple, v: Val) -> Env:
         """``waited, status = os.waitpid(...)``."""
@@ -586,11 +672,13 @@ class Compiler:
             return self._let(f"[{w} EXCEPT !.s.{name} = {self._handler_val(v)}]", then)
         if kind is tla.Kind.BOOL and v.kind is VKind.BOOL:
             return self._let(f"[{w} EXCEPT !.s.{name} = {v.tla}]", then)
-        if kind is tla.Kind.BOOL and v.kind is VKind.HAVOC:
+        # A str (e.g. a tuple literal) carries no truth the field means: unknown.
+        if kind is tla.Kind.BOOL and v.kind in (VKind.HAVOC, VKind.STR):
             self._note_havoc(node)
             b = self.fresh("b")
             return f"\\E {b} \\in BOOLEAN :\n" + self._let(f"[{w} EXCEPT !.s.{name} = {b}]", then)
-        if kind in _HANDLE_KINDS and v.kind is VKind.NONE:
+        if kind in _HANDLE_KINDS and (v.kind is VKind.NONE or v.tla == '"-1"'):
+            # None, or the -1 "no segment/fd" sentinel
             return self._let(f"[{w} EXCEPT !.s.{name} = {_NONE_HANDLE}]", then)
         if kind in _HANDLE_KINDS and v.kind is VKind.HANDLE:
             return self._let(f"[{w} EXCEPT !.s.{name} = {v.tla}]", then)
@@ -611,6 +699,12 @@ class Compiler:
             for extra in value.elts[1:]:
                 self._assert_pure(extra, env)
             value = value.elts[0]
+
+            # The first element stands in for the tuple, which is never None.
+            def ret(w2: str, v: Val) -> str:
+                return k.ret(w2, _replace(v, isnone="FALSE") if v.kind is VKind.HAVOC else v)
+
+            return self.expr(value, w, env, ret, self._raise_to(k, env))
         return self.expr(value, w, env, k.ret, self._raise_to(k, env))
 
     def _s_raise(self, node: ast.Raise, w: str, env: Env, k: Cont) -> str:
@@ -700,11 +794,16 @@ class Compiler:
         if node.orelse:
             raise self.fail(node, "while/else is unsupported")
         timed = self._is_havoc(node.test, env)
+        forever = isinstance(node.test, ast.Constant) and node.test.value is True
         done = _Join(self, k.nxt)
         steps: list[_Join] = []
 
         def iterate(i: int, w2: str, e2: Env) -> str:
             if i == _LOOP_UNROLL:
+                if forever:
+                    # `while True`: paths needing more iterations are not explored.
+                    # A guard over an action, not a bare FALSE, so it stays an action.
+                    return f"(FALSE /\\ {done.stub(w2, e2)})"
                 return done.stub(w2, e2) if timed else k.exc(w2, '"LoopBound"', e2)
             again = steps[i]  # entry of iteration i + 1
             inner = _replace(k, nxt=again.stub, cnt=again.stub, brk=done.stub)
@@ -729,6 +828,11 @@ class Compiler:
             if isinstance(n, ast.Name) and env.get(n.id, HAVOC).kind is not VKind.HAVOC:
                 return False
         return True
+
+    def _s_delete(self, node: ast.Delete, w: str, env: Env, k: Cont) -> str:
+        if any(self._modeled_field(n) for t in node.targets for n in ast.walk(t)):
+            raise self.fail(node, "del of a modeled field")
+        return k.nxt(w, env)
 
     def _s_break(self, node: ast.Break, w: str, env: Env, k: Cont) -> str:
         if k.brk is None:
@@ -908,6 +1012,8 @@ class Compiler:
         if self._negative_int(node):
             return kv(w, self._const(-node.operand.value))
         self._assert_pure(node, env)
+        if isinstance(node, ast.Tuple) and node.elts:
+            return kv(w, Val('"tuple"', VKind.STR, tags=self._tags(node, env)))  # never None
         return kv(w, Val(None, VKind.HAVOC, tags=self._tags(node, env)))
 
     @staticmethod
@@ -927,6 +1033,8 @@ class Compiler:
             return Val("TRUE" if value else "FALSE", VKind.BOOL)
         if isinstance(value, int):
             return Val(f'"{value}"', VKind.STR)
+        if isinstance(value, str) and _SHORT_STR.fullmatch(value):
+            return Val(f'"{value}"', VKind.STR, tags=_first_word(value))
         if isinstance(value, str | bytes):
             return Val(None, VKind.HAVOC, tags=_first_word(value))
         return HAVOC
@@ -1042,7 +1150,14 @@ class Compiler:
         return self.expr(node.left, w, env, right, kx)
 
     def _const_set(self, node: ast.AST) -> list[str] | None:
-        """TLA strings for a tuple/list/set literal of constants, else None."""
+        """TLA strings for a tuple/list/set literal of constants (or a module-level
+        tuple of signal numbers), else None."""
+        if isinstance(node, ast.Name):
+            value = self._globals.get(node.id)
+            ok = isinstance(value, tuple | list | set | frozenset) and value
+            if ok and all(isinstance(x, int) and x in signal.valid_signals() for x in value):
+                return sorted(f'"{signal.Signals(x).name}"' for x in value)
+            return None
         if not isinstance(node, ast.Tuple | ast.List | ast.Set):
             return None
         out = []
@@ -1061,6 +1176,10 @@ class Compiler:
             if res is None:
                 return HAVOC
             return Val(res if isinstance(op, ast.Is) else f"~{res}", VKind.BOOL)
+        sentinel = isinstance(op, ast.GtE | ast.Lt) and a.kind is VKind.HANDLE and b.tla == '"0"'
+        if sentinel:  # `seg_id >= 0`: the -1 sentinel is stored as the None handle
+            sym = "#" if isinstance(op, ast.GtE) else "="
+            return Val(f"({a.tla} {sym} {_NONE_HANDLE})", VKind.BOOL)
         a, b = self._zero_handle(a, b)
         same = a.kind is b.kind and a.kind in (VKind.STR, VKind.BOOL, VKind.HANDLE)
         if isinstance(op, ast.Eq | ast.NotEq | ast.Is | ast.IsNot) and same:
@@ -1086,7 +1205,7 @@ class Compiler:
             VKind.NONE: "TRUE",
             VKind.BOOL: "FALSE",
         }
-        return table.get(a.kind)
+        return table.get(a.kind, a.isnone)
 
     def _tags(self, node: ast.AST, env: Env) -> frozenset[str]:
         """Literal request words a payload expression carries."""
@@ -1147,6 +1266,8 @@ class Compiler:
         local = env.get(root.id)
         if local is not None:
             return CallKind.TYPED if local.kind is VKind.HANDLE and attrs else CallKind.PURE
+        if not attrs and self._module_func(root.id) is not None:
+            return CallKind.FUNC
         if root.id in self._globals and root.id not in vars(builtins):
             raise self.fail(node, "unmodeled call (add it to model= or ignore=)")
         return CallKind.PURE
@@ -1170,6 +1291,7 @@ class Compiler:
             return kv(w, Val(None, VKind.HAVOC, tags=self._tags(node, env)))
         handler = {
             CallKind.INLINE: self._inline,
+            CallKind.FUNC: self._inline,
             CallKind.OPAQUE: self._opaque,
             CallKind.MODEL: self._model_call,
             CallKind.TYPED: self._typed_call,
@@ -1346,6 +1468,8 @@ class Compiler:
             return self._args(
                 list(node.args), w, env, lambda w2, vals: kv(w2, self._wrapped(node, vals)), kx
             )
+        if op is tla.Op.PTRACE:
+            return self._ptrace(node, w, env, kv, kx)
         kind, htype = _MODEL_RESULT[op]
         n_args = _MODEL_ARGS[op]
 
@@ -1354,6 +1478,21 @@ class Compiler:
             return self._apply(op.value, w2, handles, kind, htype, kv, kx)
 
         return self._args(list(node.args) + [kw.value for kw in node.keywords], w, env, then, kx)
+
+    _RESUME = ("PTRACE_CONT", "PTRACE_DETACH")
+
+    def _ptrace(self, node: ast.Call, w: str, env: Env, kv: ValK, kx) -> str:
+        """``libc.ptrace(req, pid, addr, data)``: only a resume changes the proc."""
+        if len(node.args) < 2:
+            raise self.fail(node, "ptrace needs (request, pid, ...)")
+        resume = ast.unparse(node.args[0]).rsplit(".", 1)[-1] in self._RESUME
+        op = "PtraceCont" if resume else "Ptrace"
+
+        def then(w2: str, vals: list[Val]) -> str:
+            h = self._handle_arg(node, vals[1])
+            return self._apply(op, w2, [h], VKind.STR, None, kv, kx)
+
+        return self._args(list(node.args), w, env, then, kx)
 
     def _wrapped(self, node: ast.Call, vals: list[Val]) -> Val:
         """Op.WRAP: the record stands for the first proc among its arguments."""
@@ -1460,11 +1599,31 @@ class Compiler:
 
         return self._args(list(node.args), w, env, then, kx)
 
+    def _module_func(self, name: str) -> ast.FunctionDef | None:
+        """AST of a plain function defined in the machine's module (cached).
+
+        A synthetic leading parameter stands in for ``self`` so binding and
+        frames treat it like a method; line numbers are shifted so errors
+        point at the real source line."""
+        if name in self._funcs:
+            return self._funcs[name]
+        obj = self._globals.get(name)
+        ok = inspect.isfunction(obj) and obj.__module__ == self.cls.__module__
+        fn = None
+        if ok:
+            lines, line0 = inspect.getsourcelines(obj)
+            fn = ast.parse(textwrap.dedent("".join(lines))).body[0]
+            ast.increment_lineno(fn, line0 - self._line0)
+            fn.args.args.insert(0, ast.arg("self"))
+        self._funcs[name] = fn
+        return fn
+
     def _inline(self, node: ast.Call, w: str, env: Env, kv: ValK, kx) -> str:
-        name = self._chain(node.func)[1][0]
+        root, attrs = self._chain(node.func)
+        name = attrs[0] if attrs else root.id
         if self._stack.count(name) >= _MAX_INLINE:
             return kx(w, '"Overflow"')
-        fn = self._methods[name]
+        fn = self._methods[name] if attrs else self._module_func(name)
 
         def then(w2: str, vals: list[Val]) -> str:
             callee_env = self._bind_params(fn, node, vals)
@@ -1572,11 +1731,13 @@ class Emitter:
 
     def _initial(self) -> str:
         fields = ", ".join(f"{n} |-> {self._start_value(f)}" for f, n in self.comp._fields.items())
+        state = f"[{fields or 'none |-> 0'}]"  # TLA+ has no empty record
         return (
-            f"W0 == [s |-> [{fields}],\n"
+            f"W0 == [s |-> {state},\n"
             '        procs |-> [p \\in 1..MaxProcs |-> "free"], pend |-> [p \\in 1..MaxProcs |-> 0],\n'
             "        stale |-> [p \\in 1..MaxProcs |-> FALSE],\n"
             '        files |-> [f \\in 1..MaxProcs |-> "free"], nfile |-> 0,\n'
+            '        segs |-> [g \\in 1..MaxProcs |-> "free"], nseg |-> 0,\n'
             '        closed |-> {}, nproc |-> 0, ret |-> "", calls |-> 0, last |-> "",\n'
             '        hung |-> FALSE, overflow |-> FALSE, uncaught |-> "", desync |-> FALSE,\n'
             '        disp |-> [s \\in SigNames |-> "default"], timer |-> [s \\in SigNames |-> FALSE],\n'
@@ -1737,6 +1898,13 @@ class Emitter:
         sets = [f"w.s.{n}" for f, n in self.comp._fields.items() if kinds[f] is tla.Kind.PROCSET]
         return " \\cup ".join(["{" + ", ".join(procs) + "}", *sets])
 
+    def _seg_fields(self) -> list[str]:
+        kinds = self.spec.state
+        return [n for f, n in self.comp._fields.items() if kinds[f] is tla.Kind.SEGMENT]
+
+    def _segs(self) -> str:
+        return "{" + ", ".join(f"w.s.{n}" for n in self._seg_fields()) + "}"
+
     def _invariants(self) -> list[str]:
         unreaped = _UNREAPED
         out = [
@@ -1755,7 +1923,14 @@ class Emitter:
             # A timer fired while its signal still had the default (fatal) action.
             "NoFatalSignal == ~w.killed",
             "LoopBound == ~w.loopbound",
+            # A segment that exists or is mapped but no field names it is never freed.
+            f"NoShmLeak == \\A g \\in 1..MaxProcs : w.segs[g] \\in {_SEG_LIVE} => g \\in {self._segs()}",
         ]
+        segs = self._seg_fields()
+        if segs:
+            # A held segment is mapped and not removed: a view into it is valid memory.
+            held = " /\\ ".join(f'(w.s.{n} # NONE => w.segs[w.s.{n}] = "att")' for n in segs)
+            out.append(f"NoDanglingSeg == ~w.hung => ({held})")
         # A hung call is blocked mid-method; NoHang reports it, field invariants skip it.
         out += [
             f"{n} == ~w.hung => {self.comp.pure(src)}" for n, src in self.spec.invariants.items()

@@ -19,6 +19,9 @@
 (* stale[r]: a short read_exact left payload bytes in r; the next readline *)
 (* reads them as a header: w.desync.                                       *)
 (* files[f]: "free" | "open" | "closed" (TemporaryFile handles).           *)
+(* segs[g]: SysV shm segment. "det" exists, unmapped; "att" mapped;        *)
+(*   "rmatt" removed (IPC_RMID) but still mapped; "gone" freed.            *)
+(*   A segment's id and attach address are both the handle g.              *)
 (*                                                                         *)
 (* Abstractions (each is a modeling choice, not a fact about the OS):      *)
 (*   - wait() after kill always reaps (no D-state stalls).                 *)
@@ -172,6 +175,9 @@ Maybe(w, Ok(_, _), Raise(_, _)) == Ok(w, "path") \/ Ok(w, "None")
 \* os.fork(), parent side: the child's pid (bounded like Spawn), or OSError.
 Fork(w, Ok(_, _), Raise(_, _)) == Spawn(w, Ok, Raise)
 
+\* Stop reports: job control, a ptrace breakpoint (SIGTRAP), a fault (SIGSEGV).
+StopTags == {"stopped:SIGSTOP", "stopped:SIGTRAP", "stopped:SIGSEGV", "stopped:other"}
+
 Reap(w, p) == [w EXCEPT !.procs[p] = "reaped"]
 
 \* os.waitpid(pid, flags): (pid, status) as a status tag; the pid half is
@@ -183,8 +189,7 @@ WaitPid(w, p, nohang, untraced, Ok(_, _), Raise(_, _)) ==
       [] w.procs[p] = "live"             ->
             \/ Ok(Reap(w, p), "exited")
             \/ Ok(Reap(w, p), "signaled")
-            \/ (untraced /\ Ok([w EXCEPT !.procs[p] = "stopped"], "stopped:SIGSTOP"))
-            \/ (untraced /\ Ok([w EXCEPT !.procs[p] = "stopped"], "stopped:other"))
+            \/ (untraced /\ \E g \in StopTags : Ok([w EXCEPT !.procs[p] = "stopped"], g))
             \/ (nohang /\ Ok(w, "none"))
             \/ (~nohang /\ Raise(w, "Hang"))
       [] OTHER                           ->   \* stopped: already reported
@@ -225,6 +230,36 @@ SetItimer(w, s, arm, per, Ok(_, _), Raise(_, _)) ==
 CONSTANT MaxQueue
 
 \* Work that may fail (e.g. a coverage measurement).
+\* libc_shm wrappers: failures return None / False, never raise.
+ShmGet(w, Ok(_, _), Raise(_, _)) ==
+    \/ Ok(w, NONE)
+    \/ IF w.nseg = MaxProcs THEN FALSE
+       ELSE LET g == w.nseg + 1 IN Ok([w EXCEPT !.nseg = g, !.segs[g] = "det"], g)
+ShmAt(w, g, Ok(_, _), Raise(_, _)) ==
+    CASE g = NONE              -> Ok(w, NONE)
+      [] w.segs[g] = "det"     -> Ok([w EXCEPT !.segs[g] = "att"], g) \/ Ok(w, NONE)
+      [] w.segs[g] = "att"     -> Ok(w, g)
+      [] OTHER                 -> Ok(w, NONE)
+ShmDt(w, g, Ok(_, _), Raise(_, _)) ==
+    CASE g = NONE              -> Ok(w, "False")
+      [] w.segs[g] = "att"     -> Ok([w EXCEPT !.segs[g] = "det"], "True")
+      [] w.segs[g] = "rmatt"   -> Ok([w EXCEPT !.segs[g] = "gone"], "True")
+      [] OTHER                 -> Ok(w, "False")
+ShmRmid(w, g, Ok(_, _), Raise(_, _)) ==
+    CASE g = NONE              -> Ok(w, "False")
+      [] w.segs[g] = "att"     -> Ok([w EXCEPT !.segs[g] = "rmatt"], "True")
+      [] w.segs[g] = "det"     -> Ok([w EXCEPT !.segs[g] = "gone"], "True")
+      [] OTHER                 -> Ok(w, "False")
+
+\* libc.ptrace(req, pid, ...): errors come back as -1 (errno), never raised.
+\* PTRACE_CONT/DETACH resume a stopped tracee; other requests leave it as is.
+PtraceCont(w, p, Ok(_, _), Raise(_, _)) ==
+    CASE p = NONE                 -> Raise(w, "ArgumentError")
+      [] w.procs[p] = "stopped"   -> Ok([w EXCEPT !.procs[p] = "live"], "0")
+      [] OTHER                    -> Ok(w, "-1")
+Ptrace(w, p, Ok(_, _), Raise(_, _)) ==
+    IF p = NONE THEN Raise(w, "ArgumentError") ELSE Ok(w, "rc")  \* 0 or -1: no state change
+
 MayFail(w, Ok(_, _), Raise(_, _)) == Ok(w, "None") \/ Raise(w, "RuntimeError")
 
 \* deque.append / popleft on a QUEUE field f (its length). Past MaxQueue the

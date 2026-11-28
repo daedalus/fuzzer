@@ -136,6 +136,15 @@ def test_lost_wakeup_deadlocks(tmp_path):
     assert "NoDeadlock" in lost.violations
 
 
+@needs_tlc
+def test_status_zero_false_exit(tmp_path):
+    reaped = _check(fx.ReapRunningRunner, tmp_path / "reaped")
+    assert reaped.completed and not reaped.violations
+
+    false_exit = _check(fx.FalseExitRunner, tmp_path / "false")
+    assert "NoOrphan" in false_exit.violations
+
+
 # ── Adversarial: outside the subset fails loudly ────────────────────
 
 
@@ -219,3 +228,22 @@ def test_machine_extracts(name):
     """Every registered machine stays inside the subset (no TLC needed)."""
     model = tla_extract.extract(tla_extract._resolve(name))
     assert "Init ==" in model.tla
+
+
+@needs_tlc
+def test_shm_leak_and_dangling(tmp_path):
+    clean = _check(fx.CleanResize, tmp_path / "clean")
+    assert clean.completed and not clean.violations
+    leaky = _check(fx.LeakyResize, tmp_path / "leaky")
+    assert "NoShmLeak" in leaky.violations
+    dangling = _check(fx.DanglingResize, tmp_path / "dangling")
+    assert "NoDanglingSeg" in dangling.violations
+
+
+@needs_tlc
+def test_join_keeps_none(tmp_path):
+    """A tuple-or-None result stays exact through the return join."""
+    exact = _check(fx.EarlyTupleRunner, tmp_path / "exact")
+    assert exact.completed and not exact.violations
+    leak = _check(fx.EarlyNoneLeakRunner, tmp_path / "leak")
+    assert "NoOrphan" in leak.violations
