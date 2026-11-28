@@ -138,6 +138,39 @@ def test_lean_matches_tlc(cls, tmp_path):
     assert _verdicts(tlc[0]) == _verdicts(tlc[1])
     assert _verdicts(lean[0]) == _verdicts(lean[1])
     assert _verdicts(lean[0]) == _verdicts(tlc[0])
+    # Trace lengths too: both explore breadth-first, so each shortest trace has one length.
+    assert tla_extract._disagree(tlc[0], tlc[1]) is None
+    assert tla_extract._disagree(lean[0], lean[1]) is None
+    assert tla_extract._disagree(tlc[0], lean[0]) is None
+
+
+# TLC prints "State n: <action ...>" per step; an Init violation is one bare state.
+_TLC_3 = "State 1: <Initial predicate>\nw = 0\n\nState 2: <Next>\nw = 1\n\nState 3: <Next>\nw = 2"
+_LEAN_3 = "State 1: <step>\nw = 0\n\nState 2: <step>\nw = 1\n\nState 3: <step>\nw = 2"
+_TLC_INIT = 'w = [setup |-> "OSError"]'
+_LEAN_INIT = 'State 1: <step>\nw = [setup |-> "OSError"]'
+
+
+def _res(**violations: str) -> tla_extract.CheckResult:
+    return tla_extract.CheckResult(True, violations, 7)
+
+
+def test_trace_len_formats():
+    assert tla_extract._trace_len(_TLC_3) == tla_extract._trace_len(_LEAN_3) == 3
+    assert tla_extract._trace_len(_TLC_INIT) == tla_extract._trace_len(_LEAN_INIT) == 1
+
+
+def test_trace_length_mismatch_flagged():
+    """Falsification: same verdict, different shortest-trace length is a disagreement."""
+    assert tla_extract._disagree(_res(A=_TLC_3), _res(A=_LEAN_3)) is None
+    diff = tla_extract._disagree(_res(A=_TLC_3), _res(A=_LEAN_INIT))
+    assert diff is not None and "A" in diff and "3" in diff and "1" in diff
+
+
+def test_trace_without_states_flagged():
+    """Adversarial: a trace that cannot be measured (error text) is never silently equal."""
+    diff = tla_extract._disagree(_res(A="TLC error (no verdict):\nboom"), _res(A=_LEAN_3))
+    assert diff is not None
 
 
 @needs_lean

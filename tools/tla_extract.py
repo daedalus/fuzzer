@@ -2168,12 +2168,30 @@ def check_lean(model: Model, out: Path, lean_bin: Path, bounds: Bounds) -> Check
 
 
 def _disagree(tlc: CheckResult, lean: CheckResult) -> str | None:
-    """Cross-check: same violated invariants and, when both explored fully, the same state count."""
+    """Cross-check: same violated invariants, state count (both complete) and trace lengths."""
     if set(tlc.violations) != set(lean.violations):
         return f"verdicts differ: TLC {sorted(tlc.violations)} vs Lean {sorted(lean.violations)}"
     if tlc.completed and lean.completed and tlc.states != lean.states:
         return f"state counts differ: TLC {tlc.states} vs Lean {lean.states}"
+
+    # Both explore breadth-first: each invariant's shortest trace has one length.
+    for inv in sorted(tlc.violations):
+        a, b = _trace_len(tlc.violations[inv]), _trace_len(lean.violations[inv])
+        if a is None or a != b:
+            return f"trace lengths differ for {inv}: TLC {a or '?'} vs Lean {b or '?'}"
     return None
+
+
+_STATE_LINE_RE = re.compile(r"^State \d+:", re.M)
+
+
+def _trace_len(trace: str) -> int | None:
+    """States in a counterexample: `State n:` headers, or 1 for a bare Init state
+    (TLC prints those without a header). None when the text is no trace at all."""
+    n = len(_STATE_LINE_RE.findall(trace))
+    if n:
+        return n
+    return 1 if re.search(r"^w = ", trace, re.M) else None
 
 
 def _summarize(trace: str) -> str:
