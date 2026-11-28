@@ -77,6 +77,7 @@ MACHINES = {
     "frontier": "fuzzer_tool.adapters.frontier_cov:FrontierOracle",
     "ptrace": "fuzzer_tool.services.runner:TargetRunner",
     "shm": "fuzzer_tool.adapters.shm:ShmCoverage",
+    "crash_gdb": "fuzzer_tool.services.crash_gdb:CrashGdbQueue",
 }
 BUILTIN_INVARIANTS = (
     "NoOrphan",
@@ -285,6 +286,7 @@ _MODEL_RESULT = {
     tla.Op.SHM_AT: (VKind.HANDLE, HType.SEG),
     tla.Op.SHM_DT: (VKind.STR, None),
     tla.Op.SHM_RMID: (VKind.STR, None),
+    tla.Op.BOUNDED_WAIT: (VKind.STR, None),
 }
 _MODEL_ARGS = {
     tla.Op.SPAWN: 0,
@@ -298,7 +300,10 @@ _MODEL_ARGS = {
     tla.Op.SHM_AT: 1,
     tla.Op.SHM_DT: 1,
     tla.Op.SHM_RMID: 1,
+    tla.Op.BOUNDED_WAIT: 1,
 }
+# Ops modeling a method call: the receiver is their first argument (`job.wait()`).
+_RECEIVER_OPS = (tla.Op.BOUNDED_WAIT,)
 
 
 @dataclass
@@ -636,11 +641,18 @@ class Compiler:
             if any(self._modeled_field(n) for n in ast.walk(target)):
                 raise self.fail(target, "indirect store into a modeled field")
             return k.nxt(w, env)
-        if isinstance(target, ast.Tuple) and v.htype is HType.SEG:
+        if isinstance(target, ast.Tuple):
+            return self._bind_tuple(target, v, w, env, k)
+        raise self.fail(target, "unsupported assignment target")
+
+    def _bind_tuple(self, target: ast.Tuple, v: Val, w: str, env: Env, k: Cont) -> str:
+        if v.htype is HType.SEG:
             return self._bind_seg(target, v, w, env, k)
-        if isinstance(target, ast.Tuple) and v.htype is HType.WAIT:
+        if v.htype is HType.WAIT:
             return k.nxt(w, {**env, **self._bind_wait(target, v)})
-        if isinstance(target, ast.Tuple) and not any(self._modeled_field(e) for e in target.elts):
+        if v.htype is HType.PROC:
+            return k.nxt(w, {**env, **self._bind_lead(target, v)})
+        if not any(self._modeled_field(e) for e in target.elts):
             # Unpacking an unmodeled value: locals go havoc, unmodeled fields are dropped.
             names = {e.id: HAVOC for e in target.elts if isinstance(e, ast.Name)}
             return k.nxt(w, {**env, **names})
@@ -664,6 +676,13 @@ class Compiler:
             names[0].id: Val(v.pair, VKind.HANDLE, HType.PID),
             names[1].id: Val(v.tla, VKind.STR),
         }
+
+    def _bind_lead(self, target: ast.Tuple, v: Val) -> Env:
+        """``job, item = self._live``: the proc a tuple stands for is its first element."""
+        names = target.elts
+        if not all(isinstance(n, ast.Name) for n in names):
+            raise self.fail(target, "unpack a proc tuple into names")
+        return {names[0].id: v} | {n.id: HAVOC for n in names[1:]}
 
     def _store(self, node: ast.AST, fld: str, v: Val, w: str, then: WorldK) -> str:
         kind = self.spec.state[fld]
@@ -795,8 +814,8 @@ class Compiler:
 
     def _s_while(self, node: ast.While, w: str, env: Env, k: Cont) -> str:
         """Unroll _LOOP_UNROLL iterations. Past the bound, a condition over unmodeled
-        values only (a clock deadline) is taken as expired; a modeled one raises
-        the uncatchable "LoopBound"."""
+        values only (a clock deadline) is taken as expired; a modeled one that still
+        holds raises the uncatchable "LoopBound"."""
         if node.orelse:
             raise self.fail(node, "while/else is unsupported")
         timed = self._is_havoc(node.test, env)
@@ -810,7 +829,13 @@ class Compiler:
                     # `while True`: paths needing more iterations are not explored.
                     # A guard over an action, not a bare FALSE, so it stays an action.
                     return f"(FALSE /\\ {done.stub(w2, e2)})"
-                return done.stub(w2, e2) if timed else k.exc(w2, '"LoopBound"', e2)
+                if timed:
+                    return done.stub(w2, e2)
+                # Only a path that still meets the condition needs a 4th iteration.
+                return self.cond(
+                    node.test, w2, e2,
+                    lambda w3: k.exc(w3, '"LoopBound"', e2), lambda w3: done.stub(w3, e2), k,
+                )  # fmt: skip
             again = steps[i]  # entry of iteration i + 1
             inner = _replace(k, nxt=again.stub, cnt=again.stub, brk=done.stub)
             body = _Join(self, lambda w3, e3: self.stmts(node.body, w3, e3, inner))
@@ -1091,8 +1116,18 @@ class Compiler:
             return kv(w, self._const(-node.operand.value))
         self._assert_pure(node, env)
         if isinstance(node, ast.Tuple) and node.elts:
-            return kv(w, Val('"tuple"', VKind.STR, tags=self._tags(node, env)))  # never None
+            return self._tuple(node, w, env, kv, kx)
         return kv(w, Val(None, VKind.HAVOC, tags=self._tags(node, env)))
+
+    def _tuple(self, node: ast.Tuple, w: str, env: Env, kv: ValK, kx: RaiseK) -> str:
+        """A tuple is never None. Led by a proc it stands for that proc, like Op.WRAP:
+        ``self._live = (job, item)``."""
+        tagged = Val('"tuple"', VKind.STR, tags=self._tags(node, env))
+
+        def lead(w2: str, v: Val) -> str:
+            return kv(w2, v if v.htype is HType.PROC else tagged)
+
+        return self.expr(node.elts[0], w, env, lead, kx)
 
     @staticmethod
     def _negative_int(node: ast.expr) -> bool:
@@ -1550,12 +1585,14 @@ class Compiler:
             return self._ptrace(node, w, env, kv, kx)
         kind, htype = _MODEL_RESULT[op]
         n_args = _MODEL_ARGS[op]
+        recv = [node.func.value] if op in _RECEIVER_OPS else []
 
         def then(w2: str, vals: list[Val]) -> str:
             handles = [self._handle_arg(node, v) for v in vals[:n_args]]
             return self._apply(op.value, w2, handles, kind, htype, kv, kx)
 
-        return self._args(list(node.args) + [kw.value for kw in node.keywords], w, env, then, kx)
+        nodes = recv + list(node.args) + [kw.value for kw in node.keywords]
+        return self._args(nodes, w, env, then, kx)
 
     _RESUME = ("PTRACE_CONT", "PTRACE_DETACH")
 
@@ -1735,11 +1772,12 @@ class Compiler:
             text = self.stmts(fn.body, w, env, k)
             for j in reversed(self._pending_wraps):
                 text = j.wrap(text)
-            return ret.wrap(text)
         finally:
             self._pending_wraps = saved
             self._frames.pop()
             self._stack.pop()
+        # The caller's continuation compiles in the caller's frame: its joins keep its locals.
+        return ret.wrap(text)
 
     # ── invariants (pure) ──────────────────────────────────────────
 
@@ -1859,9 +1897,14 @@ class Emitter:
             [*_UNCATCHABLE, *(f'"{c}"' for c in sorted(_handlers_match(list(es.raises))))]
         )
 
+        # A QUEUE past MaxQueue raises "Bound": prune the path, like Spawn past MaxProcs.
+        queued = tla.Kind.QUEUE in self.spec.state.values()
+        prune = 'IF {e} = "Bound" THEN FALSE ELSE\n' if queued else ""
+
         def crash(w: str, e: str, _env: Env) -> str:
             return (
-                f'w\' = [{w} EXCEPT !.ret = {e}, !.calls = @ + 1, !.last = "{name}",\n'
+                prune.format(e=e)
+                + f'w\' = [{w} EXCEPT !.ret = {e}, !.calls = @ + 1, !.last = "{name}",\n'
                 f'   !.hung = @ \\/ {e} = "Hang", !.overflow = @ \\/ {e} = "Overflow",\n'
                 f'   !.killed = @ \\/ {e} = "Killed", !.loopbound = @ \\/ {e} = "LoopBound",\n'
                 f"   !.uncaught = IF {e} \\in {{{quiet}}} THEN @ ELSE {e}]"

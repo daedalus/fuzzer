@@ -32,13 +32,21 @@ class StderrCapture:
         self._saved: int | None = None
 
     def _open(self) -> None:
-        self._r, self._w = os.pipe()
-        os.set_blocking(self._r, False)
+        # All or nothing: a half-set state (pipe, no saved fd) would make begin()
+        # skip _open and finish() fail to restore fd 2.
+        r, w = os.pipe()
         try:
-            fcntl.fcntl(self._w, fcntl.F_SETPIPE_SZ, _PIPE_BYTES)
-        except OSError:
-            log.debug("F_SETPIPE_SZ refused; keeping default pipe size", exc_info=True)
-        self._saved = os.dup(_STDERR_FD)
+            os.set_blocking(r, False)
+            try:
+                fcntl.fcntl(w, fcntl.F_SETPIPE_SZ, _PIPE_BYTES)
+            except OSError:
+                log.debug("F_SETPIPE_SZ refused; keeping default pipe size", exc_info=True)
+            saved = os.dup(_STDERR_FD)
+        except BaseException:
+            os.close(r)
+            os.close(w)
+            raise
+        self._r, self._w, self._saved = r, w, saved
 
     def begin(self) -> None:
         if self._r is None:

@@ -172,7 +172,15 @@ class TcpSeedInbox:
         )
         with self._lock:
             self._conns[reader] = conn
-        reader.start()
+        try:
+            reader.start()
+        except RuntimeError as e:
+            # "can't start new thread": undo what _serve would have, keep accepting.
+            with self._lock:
+                self._conns.pop(reader, None)
+            conn.close()
+            self._slots.release()
+            log.warning("tcp seed from %s dropped: reader did not start: %s", _peer(addr), e)
 
     def _serve(self, conn: socket.socket, addr: tuple) -> None:
         """Read one message and queue it; always frees the slot and the socket."""

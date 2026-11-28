@@ -76,6 +76,12 @@ Wait(w, p, Ok(_, _), Raise(_, _)) ==
                                   \/ Raise(w, "Hang")
       [] OTHER                 -> Ok([w EXCEPT !.procs[p] = "reaped"], "rc")
 
+\* job.wait() on a handle that kills itself at its own deadline (GdbJob):
+\* always returns and reaps; the deadline is checked in the job's own model.
+WaitBounded(w, p, Ok(_, _), Raise(_, _)) ==
+    IF p = NONE THEN Raise(w, "AttributeError")
+    ELSE Ok([w EXCEPT !.procs[p] = "reaped"], "rc")
+
 \* proc.wait(timeout=t)
 WaitT(w, p, Ok(_, _), Raise(_, _)) ==
     CASE p = NONE              -> Raise(w, "AttributeError")

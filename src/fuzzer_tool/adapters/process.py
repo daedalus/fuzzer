@@ -1083,8 +1083,13 @@ def run_target_fast(
         e = _clean_env(env)
         # Redirect stdin from the temp file so targets that read(0, ...) get the data.
         stdin_fd = os.open(fname, os.O_RDONLY)
-        # Capture stderr via pipe for ASAN/sanitizer output.
-        stderr_r, stderr_w = os.pipe()
+        # Capture stderr via pipe for ASAN/sanitizer output. An EMFILE here
+        # must not leak stdin_fd: no cleanup below owns it yet.
+        try:
+            stderr_r, stderr_w = os.pipe()
+        except OSError:
+            os.close(stdin_fd)
+            raise
         file_actions = (
             (os.POSIX_SPAWN_DUP2, stdin_fd, 0),
             (os.POSIX_SPAWN_DUP2, stderr_w, 2),

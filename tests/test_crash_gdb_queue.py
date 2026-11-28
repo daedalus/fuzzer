@@ -192,3 +192,82 @@ def test_round_hands_trace_to_the_queue():
 
     src = inspect.getsource(FuzzRound._on_crash)
     assert "_crash_gdb" in src and "want_trace" in src
+
+
+class _FakeReport:
+    def __init__(self, base: str):
+        self._base = base
+
+    def sidecar_block(self) -> str:
+        if self._base.startswith("bad"):
+            raise ValueError("unparseable gdb output")
+        return f"block {self._base}"
+
+
+class _FakeJob:
+    """A finished gdb run: poll() and wait() return its report at once."""
+
+    def __init__(self, base: str):
+        self._report = _FakeReport(base)
+
+    def poll(self):
+        return self._report
+
+    def wait(self):
+        return self._report
+
+
+def _fake_queue(tmp_path, monkeypatch) -> tuple[CrashGdbQueue, list[str]]:
+    q = CrashGdbQueue("t", tmp_path, timeout=5)
+    published: list[str] = []
+    monkeypatch.setattr(q, "_start", lambda job: _FakeJob(job.base))
+    monkeypatch.setattr(q, "_publish_sidecar", lambda job, block: published.append(job.base))
+    return q, published
+
+
+def _meta() -> CrashMetadata:
+    return CrashMetadata(target="t")
+
+
+def test_regression_publish_error_does_not_escape_tick(tmp_path, monkeypatch):
+    """A non-OSError from publishing escaped tick() into the fuzz loop and aborted the run."""
+    q, published = _fake_queue(tmp_path, monkeypatch)
+    q.enqueue(_meta(), b"a", -11, "bad_1")
+    q.enqueue(_meta(), b"b", -11, "good_2")
+
+    q.tick()  # publishes bad_1 (fails, logged), starts good_2
+    q.tick()
+
+    assert published == ["good_2"]
+    assert q.pending == 0
+
+
+def test_regression_publish_error_does_not_stop_close(tmp_path, monkeypatch):
+    """Adversarial: close() must still finish every held job after one publish fails."""
+    q, published = _fake_queue(tmp_path, monkeypatch)
+    for base in ("bad_1", "good_2", "bad_3", "good_4"):
+        q.enqueue(_meta(), b"x", -11, base)
+
+    q.close()
+
+    assert published == ["good_2", "good_4"]
+    assert q.pending == 0
+
+
+def test_regression_publish_failure_contained(tmp_path, release, monkeypatch):
+    """A non-OSError from publishing escaped tick()/close() and stopped the drain (TLA+ NoUncaught)."""
+    import fuzzer_tool.services.crash_gdb as crash_gdb
+
+    def boom(*_a):
+        raise ValueError("bad meta")
+
+    monkeypatch.setattr(crash_gdb, "refresh_crash_report", boom)
+    f, q = _wired(tmp_path)
+    q.enqueue(CrashMetadata(), b"a", -11, "crash_a")
+    q.enqueue(CrashMetadata(), b"b", -11, "crash_b")
+    release.touch()
+
+    q.close()
+
+    assert q.pending == 0
+    assert _runs(release) == 2
