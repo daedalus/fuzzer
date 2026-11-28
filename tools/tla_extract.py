@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
 """Extract a TLA+ model from a ``@tla.machine`` class and check it with TLC.
 
-    python tools/tla_extract.py forkserver --check
+    python tools/tla_extract.py <machine> --check      # MACHINES: forkserver, persistent, ...
     python tools/tla_extract.py pkg.module:Class --out DIR
 
 Pipeline:
 
-    class source ─ast─> Compiler (CPS) ─> <Class>.tla/.cfg ─> TLC, one run per invariant
-         │                                     │
-    @tla.machine spec                  EXTENDS Syscalls.tla
-    (state, model, ignore, replies)    (hand-written I/O outcomes)
+    @tla.machine spec ──┐
+    (state, model,      │
+     ignore, replies)   ▼
+    class source ─ast─> Compiler (CPS) ─> Emitter ─> <Class>.tla + one .cfg per invariant ─> TLC
+                         │                  │                    │
+                         │ entries,         │ Init (__init__ +   │ EXTENDS tools/tla/Syscalls.tla
+                         │ inlined self     │ SETUP), Call_<m>,  │ (hand-written outcomes:
+                         │ calls, handlers  │ Die, Fire, H_<h>   │  Popen, pipes, files, fork,
+                         ▼                  ▼                    │  waitpid, kill, signals)
 
-The compiler walks each entry method in continuation-passing style: every
-statement receives "what happens next" (fall through, return, raise) and
-emits a TLA+ expression. A call with several outcomes becomes a
-Syscalls.tla operator applied to LAMBDA continuations; a continuation that
-is reached from more than one place is emitted once as a LET operator.
-Anything outside the subset raises ExtractError naming file:line.
+Compiler: each statement receives its continuations (fall through, return,
+raise, break, continue) and emits a TLA+ expression. A call with several
+outcomes becomes a Syscalls.tla operator applied to LAMBDA continuations;
+a continuation reached from more than one place is emitted once as a LET.
+
+    calls      self methods inline (<= 3 nested); @tla.opaque ones return a choice;
+               model= / stdlib (os.fork, waitpid, kill, signal.*) map to Syscalls ops;
+               ignore= drops a call; anything else is ExtractError(file:line)
+    loops      while: unrolled 3x (clock-only condition -> expired, else LoopBound);
+               for: only with no modeled effect (skipped)
+    signals    a class touching signal.signal/setitimer gets Fire at every modeled
+               or ignored call: an armed timer runs its handler, is ignored, or kills
+    values     unmodeled -> havoc: conditions over it take both branches ([havoc])
+
+Invariants: NoOrphan, NoHang, NoUncaught, RecursionBound, NoDesync, SetupCleanup,
+NoStaleKill, NoFatalSignal, LoopBound, plus each class's own (skipped while hung).
 """
 
 import argparse
