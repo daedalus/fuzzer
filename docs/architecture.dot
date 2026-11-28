@@ -132,7 +132,7 @@ digraph fuzzer_tool {
         color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
         mkill [label="core/ir_mutants → adapters/mutant_build · mutant_replay.c\lservices/mutant_kill (mutants-build · mutants-score)\ltools/lib/bench_paired --kill-set (metric: kills)\l",
                fillcolor="#e3e7ec", fontcolor="#242a31"];
-        tlamodel [label="core/tla.py markers → tools/tla_extract.py\lAST → TLA+ (CPS) · tools/tla/Syscalls.tla\l   processes · fork/waitpid · signals (Fire)\ltools/tla_threads.py: locks · conditions · threads\lTLC: orphan · hang · desync · deadlock · class invariants\l",
+        tlamodel [label="core/tla.py markers → tools/tla_extract.py\lAST → TLA+ (CPS) · tools/tla/Syscalls.tla\l   processes · fork/waitpid · signals (Fire)\ltools/tla_threads.py: locks · conditions · threads\lTLC / Lean 4 (tools/tla_lean.py, TlaRt.lean BFS)\lorphan · hang · desync · deadlock · class invariants\l",
                fillcolor="#e3e7ec", fontcolor="#242a31"];
     }
 
