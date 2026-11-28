@@ -143,7 +143,9 @@ class CrashGdbQueue:
             if job.mode is TraceMode.FULL and crash_exists(self._dir, job.base):
                 tracer = self._tracer(job.target)
                 tracer.save_report(tracer.finish_trace(job.data, report), str(self._dir), job.base)
-        except OSError:
+        except Exception:
+            # Any failure (I/O, a gdb report that does not parse) loses this replay only:
+            # it must not escape tick() into the fuzz loop or stop close() draining.
             log.warning("GDB replay publish failed for %s", job.base, exc_info=True)
 
     def _publish_sidecar(self, job: _Job, block: str) -> None:

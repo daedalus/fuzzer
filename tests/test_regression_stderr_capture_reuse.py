@@ -114,3 +114,44 @@ def test_close_releases_fds():
     for fd in fds:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+def _fd2_identity() -> tuple[int, int]:
+    st = os.fstat(2)
+    return st.st_dev, st.st_ino
+
+
+def _open_fds() -> set[int]:
+    return {int(n) for n in os.listdir("/proc/self/fd")}
+
+
+def test_regression_failed_open_leaves_no_half_state(monkeypatch):
+    """dup(2) failing after pipe() left _r set and _saved None: the next begin() skipped
+    _open, sent fd 2 into the pipe, and finish() raised TypeError, leaving it there."""
+    cap = StderrCapture()
+    real_dup = os.dup
+    calls = [0]
+
+    def flaky_dup(fd):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise OSError(24, "Too many open files")
+        return real_dup(fd)
+
+    monkeypatch.setattr(stderr_capture.os, "dup", flaky_dup)
+    before_fd2, before_fds = _fd2_identity(), _open_fds()
+
+    with pytest.raises(OSError):
+        cap.begin()
+    assert _fd2_identity() == before_fd2  # never redirected
+    assert _open_fds() == before_fds  # the pipe was closed again
+
+    # Retry once dup works: a full capture, then fd 2 back where it was.
+    try:
+        cap.begin()
+        os.write(2, b"after\n")
+        assert cap.finish() == "after\n"
+        assert _fd2_identity() == before_fd2
+    finally:
+        cap.close()
+    assert _open_fds() == before_fds

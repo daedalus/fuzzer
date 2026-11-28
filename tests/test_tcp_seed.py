@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import sys
 import threading
@@ -435,3 +436,37 @@ class TestOutputAtomic:
         line = [w for w in writes if "Received seed" in w]
         assert len(line) == 1 and line[0].endswith("\n")
         assert "\n" not in [w for w in writes]  # no lone newline write
+
+
+class TestReaderStartFailure:
+    def test_regression_reader_start_failure_keeps_inbox_alive(self, monkeypatch):
+        """A reader that cannot start ("can't start new thread") used to leak its slot and
+        socket, kill the accept loop, and make close() join an unstarted thread (raise)."""
+        from fuzzer_tool.adapters import tcp_seed
+
+        box = TcpSeedInbox(0, max_bytes=64, max_connections=1)  # one slot: a leak deafens it
+        real = threading.Thread
+        fails = [1]
+
+        class FlakyThread(real):
+            def start(self):
+                if self.name == "tcp-seed-conn" and fails[0]:
+                    fails[0] -= 1
+                    raise RuntimeError("can't start new thread")
+                super().start()
+
+        monkeypatch.setattr(tcp_seed.threading, "Thread", FlakyThread)
+        try:
+            # The failed connection is closed by the server: EOF or, with unread bytes, a
+            # reset. Never a timeout.
+            with socket.create_connection((DEFAULT_HOST, box.port), timeout=WAIT_S) as s:
+                s.sendall(b"lost")
+                with contextlib.suppress(ConnectionResetError):
+                    assert s.recv(1) == b""
+
+            _send(box.port, b"kept")
+            _wait_received(box, 1)
+            assert box.pop() == b"kept"
+        finally:
+            box.close()  # must not raise on the never-started reader
+        assert not box._conns
