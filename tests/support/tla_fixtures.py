@@ -10,6 +10,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 
 from fuzzer_tool.core import tla
 
@@ -142,15 +143,16 @@ class RecursiveRunner:
 
 @tla.machine(state={"_ready": tla.Kind.BOOL})
 class LoopRunner:
-    """Loops are outside the subset."""
+    """`match` is outside the subset."""
 
     def __init__(self):
         self._ready = False
 
     @tla.entry(tla.Phase.SETUP)
     def start(self):
-        while not self._ready:
-            self._ready = True
+        match self._ready:
+            case _:
+                self._ready = True
         return True
 
 
@@ -348,6 +350,283 @@ class EffectLoopRunner:
         for _ in range(2):
             self._proc = subprocess.Popen(["true"])
         return True
+
+
+_PID_STATE = {"pid": tla.Kind.PID, "_started": tla.Kind.BOOL}
+_CHILD_ONLY = ("os.execve", "os._exit")
+
+
+@tla.machine(state=_PID_STATE, ignore=_CHILD_ONLY)
+class StaleKillRunner:
+    """stop() reaps the child, then signals its (possibly reused) pid again."""
+
+    def __init__(self):
+        self.pid = None
+        self._started = False
+
+    @tla.entry(tla.Phase.SETUP)
+    def start(self):
+        pid = os.fork()
+        if pid == 0:
+            os.execve("/bin/true", ["true"], {})
+            os._exit(127)
+        self.pid = pid
+        self._started = True
+        return True
+
+    @tla.entry()
+    def stop(self):
+        if self.pid is not None:
+            with contextlib.suppress(ProcessLookupError, ChildProcessError):
+                os.kill(self.pid, signal.SIGKILL)
+                os.waitpid(self.pid, 0)
+        if self.pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(self.pid, signal.SIGKILL)
+        self.pid = None
+
+
+@tla.machine(state=_PID_STATE, ignore=_CHILD_ONLY)
+class ReapForgetRunner:
+    """StaleKillRunner that forgets the pid once it is reaped."""
+
+    def __init__(self):
+        self.pid = None
+        self._started = False
+
+    @tla.entry(tla.Phase.SETUP)
+    def start(self):
+        pid = os.fork()
+        if pid == 0:
+            os.execve("/bin/true", ["true"], {})
+            os._exit(127)
+        self.pid = pid
+        self._started = True
+        return True
+
+    @tla.entry()
+    def stop(self):
+        if self.pid is not None:
+            with contextlib.suppress(ProcessLookupError, ChildProcessError):
+                os.kill(self.pid, signal.SIGKILL)
+                os.waitpid(self.pid, 0)
+            self.pid = None
+        if self.pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(self.pid, signal.SIGKILL)
+        self.pid = None
+
+
+_POLL_IGNORE = (*_CHILD_ONLY, "time.")
+
+
+@tla.machine(state=_PID_STATE, ignore=_POLL_IGNORE)
+class ForgetStoppedRunner:
+    """A child stopped by a foreign signal is forgotten while still alive."""
+
+    def __init__(self):
+        self.pid = None
+        self._started = False
+
+    @tla.entry(tla.Phase.SETUP)
+    def start(self):
+        pid = os.fork()
+        if pid == 0:
+            os._exit(127)
+        self.pid = pid
+        return True
+
+    @tla.entry(requires="self.pid is not None")
+    def poll(self):
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            waited, status = os.waitpid(self.pid, os.WNOHANG | os.WUNTRACED)
+            if waited == 0:
+                continue
+            if os.WIFSTOPPED(status):
+                if os.WSTOPSIG(status) in (signal.SIGSTOP, signal.SIGTRAP):
+                    os.kill(self.pid, signal.SIGCONT)
+                    return True
+                self.pid = None
+                return False
+            self.pid = None
+            return False
+        return False
+
+
+@tla.machine(state=_PID_STATE, ignore=_POLL_IGNORE)
+class ReapStoppedRunner:
+    """ForgetStoppedRunner that kills and reaps a foreign-stopped child first."""
+
+    def __init__(self):
+        self.pid = None
+        self._started = False
+
+    @tla.entry(tla.Phase.SETUP)
+    def start(self):
+        pid = os.fork()
+        if pid == 0:
+            os._exit(127)
+        self.pid = pid
+        return True
+
+    @tla.entry(requires="self.pid is not None")
+    def poll(self):
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            waited, status = os.waitpid(self.pid, os.WNOHANG | os.WUNTRACED)
+            if waited == 0:
+                continue
+            if os.WIFSTOPPED(status):
+                if os.WSTOPSIG(status) in (signal.SIGSTOP, signal.SIGTRAP):
+                    os.kill(self.pid, signal.SIGCONT)
+                    return True
+                os.kill(self.pid, signal.SIGKILL)
+                os.waitpid(self.pid, 0)
+                self.pid = None
+                return False
+            self.pid = None
+            return False
+        return False
+
+
+_TICK_STATE = {"_running": tla.Kind.BOOL, "_prev": tla.Kind.HANDLER, "_ticked": tla.Kind.BOOL}
+
+
+@tla.machine(state=_TICK_STATE)
+class TimerFirstSampler:
+    """Arms the timer before installing the handler: a tick hits the default action."""
+
+    def __init__(self):
+        self._running = False
+        self._prev = None
+        self._ticked = False
+
+    @tla.entry(requires="not self._running")
+    def start(self):
+        signal.setitimer(signal.ITIMER_PROF, 0.01, 0.01)
+        self._prev = signal.signal(signal.SIGPROF, self._on_tick)
+        self._running = True
+
+    @tla.entry(requires="self._running")
+    def stop(self):
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        if self._prev is not None:
+            signal.signal(signal.SIGPROF, self._prev)
+        self._running = False
+
+    def _on_tick(self, signum, frame):
+        self._ticked = True
+
+
+@tla.machine(state=_TICK_STATE)
+class HandlerFirstSampler:
+    """TimerFirstSampler with handler first and timer disarmed before restoring."""
+
+    def __init__(self):
+        self._running = False
+        self._prev = None
+        self._ticked = False
+
+    @tla.entry(requires="not self._running")
+    def start(self):
+        self._prev = signal.signal(signal.SIGPROF, self._on_tick)
+        signal.setitimer(signal.ITIMER_PROF, 0.01, 0.01)
+        self._running = True
+
+    @tla.entry(requires="self._running")
+    def stop(self):
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        if self._prev is not None:
+            signal.signal(signal.SIGPROF, self._prev)
+        self._running = False
+
+    def _on_tick(self, signum, frame):
+        self._ticked = True
+
+
+_ALARM_STATE = {"_handler": tla.Kind.HANDLER, "_old": tla.Kind.HANDLER, "_timed_out": tla.Kind.BOOL}
+
+
+@tla.machine(state=_ALARM_STATE, ignore=("os.getpid",))  # stands in for the target call
+class InstallOnceRunner:
+    """hasattr() install-once guard: after stop() sets the field to None it never reinstalls."""
+
+    def __init__(self):
+        self._timed_out = False
+
+    @tla.entry()
+    def run(self):
+        if not hasattr(self, "_handler"):
+
+            def _alarm(signum, frame):
+                self._timed_out = True
+
+            self._handler = _alarm
+            self._old = signal.signal(signal.SIGALRM, self._handler)
+        signal.setitimer(signal.ITIMER_REAL, 1.0)
+        try:
+            os.getpid()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    @tla.entry()
+    def stop(self):
+        if getattr(self, "_handler", None) is not None:
+            if signal.getsignal(signal.SIGALRM) is self._handler and self._old is not None:
+                signal.signal(signal.SIGALRM, self._old)
+            self._handler = None
+            self._old = None
+
+
+@tla.machine(state=_ALARM_STATE, ignore=("os.getpid",))  # stands in for the target call
+class InstallCheckRunner:
+    """InstallOnceRunner whose guard also reinstalls after stop()."""
+
+    def __init__(self):
+        self._timed_out = False
+
+    @tla.entry()
+    def run(self):
+        if getattr(self, "_handler", None) is None:
+
+            def _alarm(signum, frame):
+                self._timed_out = True
+
+            self._handler = _alarm
+            self._old = signal.signal(signal.SIGALRM, self._handler)
+        signal.setitimer(signal.ITIMER_REAL, 1.0)
+        try:
+            os.getpid()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    @tla.entry()
+    def stop(self):
+        if getattr(self, "_handler", None) is not None:
+            if signal.getsignal(signal.SIGALRM) is self._handler and self._old is not None:
+                signal.signal(signal.SIGALRM, self._old)
+            self._handler = None
+            self._old = None
+
+
+@tla.machine(state={"_timed_out": tla.Kind.BOOL})
+class NonlocalHandlerRunner:
+    """A handler that rebinds an enclosing local is outside the subset."""
+
+    def __init__(self):
+        self._timed_out = False
+
+    @tla.entry()
+    def run(self):
+        hit = False
+
+        def _alarm(signum, frame):
+            nonlocal hit
+            hit = True
+
+        signal.signal(signal.SIGALRM, _alarm)
+        signal.setitimer(signal.ITIMER_REAL, 1.0)
 
 
 class _Sender:

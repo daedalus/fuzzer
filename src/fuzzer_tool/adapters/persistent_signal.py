@@ -35,6 +35,7 @@ import time
 from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.adapters.process import signal_rc
 from fuzzer_tool.adapters.respawn_backoff import NO_BACKOFF, Failure
+from fuzzer_tool.core import tla
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,32 @@ IPC_PRIVATE = libc_shm.IPC_PRIVATE
 _STDERR_TAIL = 64 * 1024
 
 
+# TLA+ model boundary: python tools/tla_extract.py persistent_signal --check
+@tla.machine(
+    state={"pid": tla.Kind.PID, "_started": tla.Kind.BOOL},
+    ignore=(
+        "log.",
+        "time.",
+        "ctypes.",
+        "struct.",
+        "libc_shm.",
+        "tempfile.TemporaryFile",
+        "signal_rc",
+        "self._backoff.",
+        "self._perf_counters.",
+        "self._err.",
+        "os.fstat",
+        # child side of fork: never runs in the parent
+        "os.pipe",
+        "os.environ",
+        "os.close",
+        "os.setsid",
+        "os.dup2",
+        "os.open",
+        "os.execve",
+        "os._exit",
+    ),
+)
 class PersistentRunner:
     """Run a custom SIGUSR1-handling target in persistent mode.
 
@@ -80,6 +107,7 @@ class PersistentRunner:
         self._backoff = backoff
         backoff.started()
 
+    @tla.opaque("")
     def _read_stderr(self) -> str:
         """Stderr the target wrote since the current iteration began."""
         if self._err is None:
@@ -93,6 +121,7 @@ class PersistentRunner:
         except OSError:
             return ""
 
+    @tla.entry(tla.Phase.SETUP)
     def start(self) -> bool:
         if self._started:
             return True
@@ -120,7 +149,15 @@ class PersistentRunner:
         self._err = tempfile.TemporaryFile()  # noqa: SIM115 - closed in _cleanup_shm
         self._err_off = 0
         err_fd = self._err.fileno()
-        pid = os.fork()
+        try:
+            pid = os.fork()
+        except OSError as exc:
+            # EAGAIN/ENOMEM: a failed start, not an exception out of restart().
+            log.warning("Persistent target fork failed: %s", exc)
+            os.close(stdin_r)
+            os.close(stdin_w)
+            self._cleanup()
+            return False
         if pid == 0:
             # Everything here runs in the forked child, which shares the
             # parent's entire Python stack (pytest included). If execve
@@ -179,6 +216,7 @@ class PersistentRunner:
             self._cleanup()
             return False
 
+    @tla.entry()
     def run_one(self, data: bytes) -> tuple[int, str]:
         if not self._started or self.pid is None:
             return -2, "persistent runner not started"
@@ -246,6 +284,7 @@ class PersistentRunner:
         self._started = False
         self.pid = None
 
+    @tla.entry()
     def restart(self) -> bool:
         """Replace a dead target (crash, exit, timeout) with a fresh one.
 
@@ -262,6 +301,7 @@ class PersistentRunner:
         """Whether a target is parked and ready for the next input."""
         return self._started
 
+    @tla.entry()
     def stop(self):
         """Stop the target. SIGUSR2 is dead code for __AFL_LOOP targets — just SIGKILL."""
         if self.pid is not None and self._started:
@@ -270,6 +310,8 @@ class PersistentRunner:
                 os.waitpid(self.pid, 0)
             except (ProcessLookupError, ChildProcessError):
                 pass
+            # Reaped: forget the pid, or _cleanup() SIGKILLs it again (maybe reused).
+            self._reaped()
         self._cleanup()
 
     def _cleanup(self):

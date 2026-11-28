@@ -31,6 +31,8 @@ import threading
 import time
 from types import CodeType, FrameType
 
+from fuzzer_tool.core import tla
+
 DEFAULT_INTERVAL_S = 0.005  # 200 Hz of CPU time
 MAX_DEPTH = 64
 MAX_STACKS = 50_000  # distinct stacks kept; Hard Rule 54
@@ -38,6 +40,22 @@ OVERFLOW = ("<overflow>",)
 _ROOT = "thread:"
 
 
+# TLA+ model boundary: python tools/tla_extract.py stack_sampler --check
+@tla.machine(
+    state={
+        "_running": tla.Kind.BOOL,
+        "_prev_handler": tla.Kind.HANDLER,
+        "_prev_timer": tla.Kind.BOOL,
+    },
+    ignore=(
+        "collections.",
+        "sys.",
+        "threading.",
+        "signal.siginterrupt",
+        "self._record",
+        "self._ran",
+    ),
+)
 class StackSampler:
     """Count sampled Python stacks per thread, bounded in depth and table size."""
 
@@ -65,6 +83,7 @@ class StackSampler:
 
     # ── Timer ──────────────────────────────────────────────────────────
 
+    @tla.entry(raises=("RuntimeError",))
     def start(self) -> None:
         """Install the SIGPROF handler and arm the CPU-time timer."""
         if self._running:
@@ -75,6 +94,7 @@ class StackSampler:
         self._prev_timer = signal.setitimer(signal.ITIMER_PROF, self._interval, self._interval)
         self._running = True
 
+    @tla.entry()
     def stop(self) -> None:
         """Restore the previous handler and timer. Idempotent."""
         if not self._running:
@@ -82,7 +102,10 @@ class StackSampler:
 
         # Handler before timer: a re-armed caller timer must never tick into ours.
         signal.setitimer(signal.ITIMER_PROF, 0)
-        signal.signal(signal.SIGPROF, self._prev_handler)
+        # None: the previous handler was installed from C and cannot be restored
+        # from Python (signal.signal rejects None); ours stays, timer-less.
+        if self._prev_handler is not None:
+            signal.signal(signal.SIGPROF, self._prev_handler)
         signal.setitimer(signal.ITIMER_PROF, *self._prev_timer)
         self._running = False
 

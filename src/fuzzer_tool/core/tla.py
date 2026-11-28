@@ -33,6 +33,8 @@ class Kind(Enum):
     READER = "reader"  # PipeReader over a proc's stdout, or None
     FILE = "file"  # open file object (TemporaryFile), or None
     PROCSET = "procset"  # list of procs this object will reap (appended to)
+    PID = "pid"  # raw pid from os.fork(), or None; signaled with os.kill
+    HANDLER = "handler"  # signal disposition or handler callable; "unset" until assigned
 
 
 class Op(Enum):
