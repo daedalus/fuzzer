@@ -1206,7 +1206,8 @@ class InProcessRunner:
         The caller (Fuzzer._handle_stall) has already updated os.environ with the
         new __AFL_SHM_ID and AFL_MAP_SIZE before calling this method.
         """
-        # Invalidate cached SHM pointer so read_bitmap() re-attaches
+        # Detach and drop the cached old mapping so read_bitmap() re-attaches
+        libc_shm.shmdt(self._shm_ptr)
         self._shm_ptr = None
         self.shm_size = new_size
         # Update coverage_env_id to the new SHM so read_bitmap() attaches
@@ -1222,6 +1223,10 @@ class InProcessRunner:
             self._persistent.stop()
             self._persistent.start()
             return
+
+        # .so loader fallback: its env holds the old segment id.
+        if self._forkserver:
+            self._forkserver.update_shm_after_resize(self.coverage_env_id, new_size)
 
         # Direct mode: re-run __afl_map_shm() to update __afl_area,
         # and __afl_map_size to the new SHM.

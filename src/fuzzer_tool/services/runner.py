@@ -35,6 +35,7 @@ from fuzzer_tool.adapters.process import (
     stderr_crash_marker,
 )
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE
+from fuzzer_tool.core import tla
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.services.ptrace_coverage import (
     PTRACE_CONT,
@@ -184,6 +185,30 @@ def ptrace_available() -> bool:
             os.waitpid(pid, 0)
 
 
+@tla.machine(
+    state={},
+    # __init__ only stores the Fuzzer; the model starts after it.
+    init=tla.Init.ASSUMED,
+    model={"libc.ptrace": tla.Op.PTRACE},
+    ignore=(
+        "ctypes.",
+        "os.pipe",
+        "os.close",
+        "threading.",
+        "writer.",
+        "time.",
+        "log.",
+        "_capture_crash_state",
+        "signal_rc",
+        "struct.",
+        "cov.",
+        "f.",
+        "min",
+        "str",
+        "bytes",
+        "bytearray",
+    ),
+)
 class TargetRunner:
     """Manages target execution across multiple backends.
 
@@ -527,6 +552,7 @@ class TargetRunner:
             stderr = err.read().decode(errors="replace")
         return rc, stderr + msg
 
+    @tla.entry()
     def _ptrace_run(self, data: bytes, err_fd: int) -> tuple[int, str]:
         f = self.f
         cov = f.ptrace_cov
@@ -546,7 +572,12 @@ class TargetRunner:
 
         stdin_r, stdin_w = os.pipe()
         writer = None
-        pid = os.fork()
+        try:
+            pid = os.fork()
+        except OSError as e:  # EAGAIN/ENOMEM: a failed run, not a fuzzer crash
+            os.close(stdin_r)
+            os.close(stdin_w)
+            return _NOT_RUN, str(e)
         f._last_child_pid = pid
         if pid == 0:
             self._ptrace_child(stdin_r, stdin_w, libc, f.target, err_fd)
@@ -584,6 +615,7 @@ class TargetRunner:
                 writer.join(timeout=f.timeout)
 
     @staticmethod
+    @tla.opaque("None")  # child side of the fork: never returns
     def _ptrace_child(stdin_r: int, stdin_w: int, libc, target: str, err_fd: int) -> None:
         """Forked child: wire stdin, stderr to *err_fd*, silence stdout, PTRACE_TRACEME, exec.
 
@@ -744,11 +776,17 @@ class TargetRunner:
     ) -> tuple[int, str]:
         """Reap or kill the tracee after the loop and derive the final return code."""
         f = self.f
+        killed = False
         if child_reaped:
             pass
         elif last_action == "cont" and last_sig == signal.SIGTRAP:
             waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-            if waited != 0 and os.WIFSTOPPED(status):
+            # Still running: (0, 0) would read as WIFEXITED below. Kill and reap.
+            if waited == 0:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                return _NOT_RUN, ""
+            if os.WIFSTOPPED(status):
                 libc.ptrace(PTRACE_CONT, pid, None, None)
                 # Bounded, not blocking. The tracee was just resumed with
                 # a blind PTRACE_CONT after its breakpoint handler failed;
@@ -759,7 +797,7 @@ class TargetRunner:
                 status = _ptrace_wait_until(pid, deadline)
                 if status is None:
                     return _ptrace_report_timeout(pid)
-            elif waited != 0:
+            else:
                 if os.WIFSIGNALED(status):
                     returncode = signal_rc(os.WTERMSIG(status))
                 elif os.WIFEXITED(status):
@@ -767,6 +805,7 @@ class TargetRunner:
         else:
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
+            killed = True
 
         if returncode == 0 and not child_reaped:
             if os.WIFSIGNALED(status):
@@ -775,10 +814,12 @@ class TargetRunner:
                 returncode = os.WEXITSTATUS(status)
             elif os.WIFSTOPPED(status):
                 returncode = -os.WSTOPSIG(status)
-                _capture_crash_state(pid, libc, f)
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
-                    os.waitpid(pid, 0)
+                # Already reaped above: a second SIGKILL could hit a reused pid.
+                if not killed:
+                    _capture_crash_state(pid, libc, f)
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, signal.SIGKILL)
+                        os.waitpid(pid, 0)
         return returncode, ""
 
     def _run_triage_ptrace(self, data: bytes) -> tuple[int, str]:

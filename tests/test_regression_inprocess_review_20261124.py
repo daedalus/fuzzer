@@ -173,6 +173,7 @@ class TestResizeFallbackPointsAtTable:
         so = _build(tmp_path, _SRC_NO_MAP_SHM, "nomapshm")
         runner = InProcessRunner.__new__(InProcessRunner)
         runner._persistent = None
+        runner._forkserver = None
         runner._lib = ctypes.CDLL(so)
         runner._shim_handle = ctypes.CDLL(so)
         runner._shm_ptr = None

@@ -24,6 +24,7 @@ from collections.abc import Callable
 import numpy as np
 
 from fuzzer_tool.adapters import libc_shm, native_scan
+from fuzzer_tool.core import tla
 from fuzzer_tool.core.count_class import bucket_bits
 
 log = logging.getLogger(__name__)
@@ -320,6 +321,34 @@ def _entry_struct(size: int) -> type[ctypes.Structure]:
     return _AflEntry * size
 
 
+@tla.machine(
+    state={"shm_id": tla.Kind.SEGMENT, "_ptr": tla.Kind.SEGMENT},
+    model={
+        "libc_shm.shmget": tla.Op.SHM_GET,
+        "libc_shm.shmat": tla.Op.SHM_AT,
+        "libc_shm.shmdt": tla.Op.SHM_DT,
+        "libc_shm.shmctl_rmid": tla.Op.SHM_RMID,
+    },
+    ignore=(
+        "ctypes.",
+        "np.",
+        "os.strerror",
+        "bool",
+        "str",
+        "set",
+        "touched_region_bytes",
+        "frozenset",
+        "_live_scan",
+        "self._register_atexit",
+        "self._forget_paths",
+        "self._known_paths",
+        "_entry_struct",
+        "EntryArr.",
+        "self._fold_displacement",
+        "self.on_table_loss",
+        "self.entry_tags",
+    ),
+)
 class ShmCoverage:
     """Sparse-entry SHM for edge coverage tracking.
 
@@ -1761,6 +1790,7 @@ class ShmCoverage:
 
     # ── Resize ───────────────────────────────────────────────────────────
 
+    @tla.entry(raises=("OSError",))  # allocation failure: the caller keeps the old table
     def resize(self, new_num_entries: int) -> None:
         """Resize the hash table (allocates new SHM, copies entries).
 
@@ -1845,6 +1875,7 @@ class ShmCoverage:
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
+    @tla.entry()
     def cleanup(self):
         """Detach and remove the segment, and drop every view into it.
 

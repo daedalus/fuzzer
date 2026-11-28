@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 
+from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.core import tla
 
 _PROC_STATE = {"_proc": tla.Kind.PROC, "_ready": tla.Kind.BOOL}
@@ -894,6 +895,185 @@ class NestedBlockingOracle:
             with self._lock:
                 self._done = True
                 self._wake.notify_all()
+
+
+def _reap_child(pid):
+    """Module-level helper: the extractor inlines it."""
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(pid, 0)
+
+
+@tla.machine(state={}, ignore=_CHILD_ONLY)
+class FalseExitRunner:
+    """_ptrace_settle's shape: (0, 0) from WNOHANG reads as a clean exit; the child leaks."""
+
+    @tla.entry(raises=("OSError",))  # fork failure is the caller's
+    def run(self):
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        last = None
+        status = 0
+        while True:
+            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+            if waited == 0:
+                continue
+            if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                return 0
+            last = "cont"
+            os.kill(pid, signal.SIGCONT)
+            break
+        if last == "cont":
+            waited, status = os.waitpid(pid, os.WNOHANG)
+            if waited == 0:
+                last = None  # nothing to do: status 0 reads as exit 0
+        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+            return 0  # reaped
+        _reap_child(pid)
+        return -1
+
+
+@tla.machine(state={}, ignore=_CHILD_ONLY)
+class ReapRunningRunner:
+    """FalseExitRunner that kills and reaps a child still running after the resume."""
+
+    @tla.entry(raises=("OSError",))  # fork failure is the caller's
+    def run(self):
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        last = None
+        status = 0
+        while True:
+            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+            if waited == 0:
+                continue
+            if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                return 0
+            last = "cont"
+            os.kill(pid, signal.SIGCONT)
+            break
+        if last == "cont":
+            waited, status = os.waitpid(pid, os.WNOHANG)
+            if waited == 0:
+                _reap_child(pid)
+                return -2
+        if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+            return 0  # reaped
+        _reap_child(pid)
+        return -1
+
+
+@tla.machine(state={}, ignore=_CHILD_ONLY)
+class EarlyTupleRunner:
+    """_ptrace_first_stop's shape: a (rc, msg) tuple once reaped, None while running."""
+
+    def _first(self, pid):
+        waited, _status = os.waitpid(pid, os.WNOHANG)
+        if waited == 0:
+            return None
+        return -1, ""
+
+    @tla.entry(raises=("OSError",))
+    def run(self):
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        early = self._first(pid)
+        if early is not None:
+            return early
+        _reap_child(pid)
+        return 0
+
+
+@tla.machine(state={}, ignore=_CHILD_ONLY)
+class EarlyNoneLeakRunner:
+    """EarlyTupleRunner that returns on None: the running child leaks."""
+
+    def _first(self, pid):
+        waited, _status = os.waitpid(pid, os.WNOHANG)
+        if waited == 0:
+            return None
+        return -1, ""
+
+    @tla.entry(raises=("OSError",))
+    def run(self):
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        early = self._first(pid)
+        if early is None:
+            return 0
+        return early
+
+
+_SHM_STATE = {"seg": tla.Kind.SEGMENT, "addr": tla.Kind.SEGMENT}
+_SHM_OPS = {
+    "libc_shm.shmget": tla.Op.SHM_GET,
+    "libc_shm.shmat": tla.Op.SHM_AT,
+    "libc_shm.shmdt": tla.Op.SHM_DT,
+    "libc_shm.shmctl_rmid": tla.Op.SHM_RMID,
+}
+
+
+def _alloc(size):
+    """_alloc_segment's shape: a failed attach removes the fresh segment."""
+    seg = libc_shm.shmget(size)
+    if seg is None:
+        raise OSError("shmget")
+    addr = libc_shm.shmat(seg)
+    if addr is None:
+        libc_shm.shmctl_rmid(seg)
+        raise OSError("shmat")
+    return seg, addr
+
+
+@tla.machine(state=_SHM_STATE, model=_SHM_OPS)
+class CleanResize:
+    """ShmCoverage.resize's order: allocate new, detach + remove old, rebind."""
+
+    def __init__(self):
+        self.seg, self.addr = _alloc(1)
+
+    @tla.entry(raises=("OSError",))
+    def resize(self):
+        new_seg, new_addr = _alloc(2)
+        libc_shm.shmdt(self.addr)
+        libc_shm.shmctl_rmid(self.seg)
+        self.seg = new_seg
+        self.addr = new_addr
+
+
+@tla.machine(state=_SHM_STATE, model=_SHM_OPS)
+class LeakyResize:
+    """Detaches the old segment but never removes it: it outlives the process."""
+
+    def __init__(self):
+        self.seg, self.addr = _alloc(1)
+
+    @tla.entry(raises=("OSError",))
+    def resize(self):
+        new_seg, new_addr = _alloc(2)
+        libc_shm.shmdt(self.addr)
+        self.seg = new_seg
+        self.addr = new_addr
+
+
+@tla.machine(state=_SHM_STATE, model=_SHM_OPS)
+class DanglingResize:
+    """Frees the old segment but keeps its address: later views read freed memory."""
+
+    def __init__(self):
+        self.seg, self.addr = _alloc(1)
+
+    @tla.entry(raises=("OSError",))
+    def resize(self):
+        new_seg, _new_addr = _alloc(2)
+        libc_shm.shmdt(self.addr)
+        libc_shm.shmctl_rmid(self.seg)
+        self.seg = new_seg
 
 
 class _Sender:

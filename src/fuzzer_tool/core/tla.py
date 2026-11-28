@@ -39,6 +39,7 @@ class Kind(Enum):
     COND = "cond"  # threading.Condition over a LOCK field (or its own lock)
     QUEUE = "queue"  # deque used as a work queue: modeled as its length (<= MaxQueue)
     THREAD = "thread"  # threading.Thread(target=self.<method>), or None
+    SEGMENT = "segment"  # SysV shm segment (its id or attach address), or None / -1
 
 
 class Op(Enum):
@@ -52,6 +53,11 @@ class Op(Enum):
     KILLPG = "KillPg"  # os.killpg(proc.pid, sig)
     WRAP = "Wrap"  # record constructor holding a proc, e.g. _Sender(proc, ...) -> proc
     MAY_FAIL = "MayFail"  # work that returns or raises RuntimeError (e.g. a measurement)
+    SHM_GET = "ShmGet"  # libc_shm.shmget(size) -> fresh segment, or None
+    SHM_AT = "ShmAt"  # libc_shm.shmat(seg) -> attached address, or None
+    SHM_DT = "ShmDt"  # libc_shm.shmdt(addr) -> bool
+    SHM_RMID = "ShmRmid"  # libc_shm.shmctl_rmid(seg) -> bool
+    PTRACE = "Ptrace"  # libc.ptrace(req, pid, ...): PTRACE_CONT/DETACH resume a stopped tracee
 
 
 class Init(Enum):
