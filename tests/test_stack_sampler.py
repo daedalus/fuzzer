@@ -105,10 +105,12 @@ class TestTimer:
         s = StackSampler(interval_s=0.001)
 
         s.start()
-        end = time.process_time() + 0.2
-        while time.process_time() < end:
-            pass
-        s.stop()
+        try:
+            end = time.process_time() + 0.2
+            while time.process_time() < end:
+                pass
+        finally:
+            s.stop()  # a failure here must not leave SIGPROF armed for later tests
 
         assert s.samples > 0
         assert signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0)
