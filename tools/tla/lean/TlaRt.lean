@@ -118,6 +118,29 @@ partial def exc (r : Val) (path : List Val) (f : Val → Val) : Val :=
 
 def mem (x s : Val) : Val := .bool ((elems s).contains x)
 def cup (a c : Val) : Val := setOf (elems a ++ elems c)
+def diff (a c : Val) : Val := .set ((elems a).filter fun x => !(elems c).contains x)
+
+def domain : Val → Val
+  | .fn kv => .set (kv.map (·.1))
+  | _ => panic! "DOMAIN of a non-function"
+
+/-- TLC `k :> v`: the one-point function. -/
+def single (k v : Val) : Val := .fn #[(k, v)]
+
+/-- TLC `f @@ g`: f's value wins on a shared key. Both are sorted: merge them. -/
+partial def merge (f g : Val) : Val :=
+  match f, g with
+  | .fn a, .fn c => .fn (go a c 0 0 #[])
+  | _, _ => panic! "@@ of a non-function"
+where
+  go (a c : Array (Val × Val)) (i j : Nat) (acc : Array (Val × Val)) : Array (Val × Val) :=
+    if i ≥ a.size then acc ++ c.extract j c.size
+    else if j ≥ c.size then acc ++ a.extract i a.size
+    else match a[i]!.1.cmp c[j]!.1 with
+      | .lt => go a c (i + 1) j (acc.push a[i]!)
+      | .gt => go a c i (j + 1) (acc.push c[j]!)
+      | .eq => go a c (i + 1) (j + 1) (acc.push a[i]!)
+
 def setMap (s : Val) (f : Val → Val) : Val := setOf ((elems s).map f)
 def setFilter (s : Val) (p : Val → Bool) : Val := .set ((elems s).filter p)
 def all (s : Val) (p : Val → Bool) : Val := .bool ((elems s).all p)

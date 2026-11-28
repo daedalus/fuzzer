@@ -1885,7 +1885,11 @@ class Backend(Enum):
 
 def check_lean(model: Model, out: Path, lean_bin: Path, bounds: Bounds) -> CheckResult:
     """Translate the module (with Syscalls.tla) to Lean, build it, run its BFS checker."""
-    consts = {"MaxProcs": bounds.max_procs, "MaxCalls": bounds.max_calls}
+    consts = {
+        "MaxProcs": bounds.max_procs,
+        "MaxCalls": bounds.max_calls,
+        "MaxQueue": bounds.max_queue,
+    }
     src = tla_lean.translate([_SYSCALLS.read_text(), model.tla], consts, model.invariants)
     res = tla_lean.check(model.name, src, out / "lean", lean_bin)
     return CheckResult(res.completed, res.violations, res.states)

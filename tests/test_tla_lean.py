@@ -92,6 +92,30 @@ def test_counter_fails_only_past_bound(tmp_path):
     assert bad.violations["Bad"].count("State ") == 4
 
 
+# Operators the thread models use: \\ (difference), :> / @@ (TLC), DOMAIN, ENABLED.
+_THREAD_OPS = """---- MODULE Counter ----
+VARIABLE w
+Init == w = ("a" :> 1) @@ [a |-> 9, b |-> 2]
+Next == w' = w
+Merge == w = [a |-> 1, b |-> 2]
+Dom == DOMAIN w = {"a", "b"}
+Diff == {1, 2, 3} \\ {2} = {1, 3}
+En == ENABLED (w.a = 1 /\\ w' = w)
+NotEn == ~ENABLED (w.a = 2 /\\ w' = w)
+Wrong == ENABLED (w.a = 2 /\\ w' = w)
+====
+"""
+
+
+@needs_lean
+def test_thread_model_operators(tmp_path):
+    """@@ keeps the left value; ENABLED is true exactly when the action has a successor."""
+    invs = ["Merge", "Dom", "Diff", "En", "NotEn", "Wrong"]
+    res = _lean_check(_THREAD_OPS, {}, invs, tmp_path)
+    assert res.completed and res.states == 1
+    assert set(res.violations) == {"Wrong"}
+
+
 def _verdicts(res) -> tuple[bool, frozenset[str], int]:
     return res.completed, frozenset(res.violations), res.states
 

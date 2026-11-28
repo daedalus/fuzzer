@@ -35,7 +35,7 @@ _EXIT_PANIC = 3
 
 _KEYWORDS = {"IF", "THEN", "ELSE", "CASE", "OTHER", "LET", "IN", "LAMBDA", "EXCEPT"}
 _UNSUPPORTED = {
-    "CHOOSE", "SUBSET", "UNION", "DOMAIN", "ENABLED", "UNCHANGED", "RECURSIVE",
+    "CHOOSE", "SUBSET", "UNION", "UNCHANGED", "RECURSIVE",
     "INSTANCE", "ASSUME", "THEOREM", "LOCAL",
 }  # fmt: skip
 _BUILTINS = {"ToString": "Tla.toStr"}
@@ -54,7 +54,10 @@ _INFIX = {
     ">=": (5, "ge"),
     "\\in": (5, "in"),
     "\\notin": (5, "notin"),
+    "@@": (6, "merge"),
+    ":>": (7, "single"),
     "\\cup": (8, "cup"),
+    "\\": (8, "diff"),
     "..": (9, "range"),
     "+": (10, "add"),
     "-": (10, "sub"),
@@ -67,7 +70,7 @@ _TOKEN_RE = re.compile(
     r"""(?P<ws>[ \t\r]+)|(?P<nl>\n)|(?P<lcom>\\\*[^\n]*)|(?P<bcom>\(\*.*?\*\))
     |(?P<rule>-{4,}[^\n]*|={4,}[^\n]*)
     |(?P<str>"(?:\\.|[^"\\])*")|(?P<num>\d+)
-    |(?P<op>==|\|->|->|=>|<=|>=|/\\|\\/|\\(?:notin|in|cup|E|A)\b|\.\.|\[\]|[=\#<>+\-@!.,:()\[\]{}~'])
+    |(?P<op>==|\|->|->|=>|<=|>=|/\\|\\/|\\(?:notin|in|cup|E|A)\b|\\|:>|@@|\.\.|\[\]|[=\#<>+\-@!.,:()\[\]{}~'])
     |(?P<id>[A-Za-z_][A-Za-z0-9_]*)""",
     re.VERBOSE | re.DOTALL,
 )
@@ -326,6 +329,11 @@ class Parser:
             self.fence = saved
         return items[0] if len(items) == 1 else Node(kind, items, first.line)
 
+    def p_unary(self) -> Node:
+        """DOMAIN f / ENABLED A: the operand binds tighter than any infix."""
+        tok = self.next()
+        return Node(tok.text.lower(), [self.prefix()], tok.line)
+
     def p_paren(self) -> Node:
         tok = self.next()
         saved, self.fence = self.fence, -2  # parens bracket their own layout
@@ -480,6 +488,8 @@ _PREFIX = {
     "\\A": Parser.p_quant,
     "{": Parser.p_set,
     "[": Parser.p_bracket,
+    "DOMAIN": Parser.p_unary,
+    "ENABLED": Parser.p_unary,
 }
 
 
@@ -824,6 +834,13 @@ class Emitter:
         pred = self.boolean(body, inner)
         return f"(Tla.b (Tla.{fn} {self.val(dom, scope)} (fun {_q(var)} => {pred})))"
 
+    def b_enabled(self, n: Node, scope) -> str:
+        # ENABLED A: A has a successor from the current state.
+        return f"(!{self.acts(n.args[0], scope)}.isEmpty)"
+
+    def v_domain(self, n: Node, scope) -> str:
+        return f"(Tla.domain {self.val(n.args[0], scope)})"
+
     def b_paren(self, n: Node, scope) -> str:
         return self.boolean(n.args[0], scope)
 
@@ -890,10 +907,13 @@ class Emitter:
         return bool(refs)
 
 
-_BOOLISH = {"and", "or", "implies", "not", "eq", "ne", "in", "notin", "exists", "forall"}
+_BOOLISH = {
+    "and", "or", "implies", "not", "eq", "ne", "in", "notin", "exists", "forall", "enabled",
+}  # fmt: skip
 _VAL_BIN = {
     "lt": "lt", "gt": "gt", "le": "le", "ge": "ge", "add": "add", "sub": "sub",
-    "cup": "cup", "range": "range", "funset": "funSet",
+    "cup": "cup", "range": "range", "funset": "funSet", "diff": "diff", "single": "single",
+    "merge": "merge",
 }  # fmt: skip
 _VAL = {
     "num": Emitter.v_num, "str": Emitter.v_str, "at": Emitter.v_at, "ident": Emitter.v_ident,
@@ -901,13 +921,15 @@ _VAL = {
     "case": Emitter.v_case, "let": Emitter.v_let, "dot": Emitter.v_dot, "app": Emitter.v_app,
     "setlit": Emitter.v_setlit, "setmap": Emitter.v_setmap, "setfilter": Emitter.v_setfilter,
     "fnof": Emitter.v_fnof, "record": Emitter.v_record, "except": Emitter.v_except,
-    "prime": Emitter.v_prime, **{k: Emitter.v_bin for k in _VAL_BIN},
+    "prime": Emitter.v_prime, "domain": Emitter.v_domain,
+    **{k: Emitter.v_bin for k in _VAL_BIN},
 }  # fmt: skip
 _BOOL = {
     "and": Emitter.b_and, "or": Emitter.b_or, "implies": Emitter.b_implies,
     "not": Emitter.b_not, "eq": Emitter.b_eq, "ne": Emitter.b_eq, "in": Emitter.b_in,
     "notin": Emitter.b_in, "exists": Emitter.b_quant, "forall": Emitter.b_quant,
     "paren": Emitter.b_paren,
+    "enabled": Emitter.b_enabled,
 }  # fmt: skip
 _ACTS = {
     "eq": Emitter.a_eq, "or": Emitter.a_or, "and": Emitter.a_and, "if": Emitter.a_if,
