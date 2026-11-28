@@ -11,6 +11,7 @@
 (*                                                                         *)
 (* Process status:                                                         *)
 (*   "live"   running; may answer, stall or die                            *)
+(*   "stopped" SIGSTOP'd (itself or by a signal); alive, not running       *)
 (*   "dead"   exited or killed, not reaped (zombie)                        *)
 (*   "reaped" waited for                                                   *)
 (* pend[p]: replies p owes, oldest first. Consuming one while another is   *)
@@ -24,7 +25,10 @@
 (*   - a write to a live proc may still raise BrokenPipeError: the        *)
 (*     loader closing its pipes on exit before it is reapable.             *)
 (*   - Popen may raise OSError (EAGAIN/ENOMEM, missing binary).            *)
-(*   - "Hang" / "Overflow" are uncatchable pseudo-exceptions.              *)
+(*   - os.kill on a reaped pid sets w.stalekill: the number may already    *)
+(*     name another process.                                               *)
+(*   - A fatal signal (default action) raises the uncatchable "Killed".    *)
+(*   - "Hang" / "Overflow" / "LoopBound" are uncatchable pseudo-exceptions.*)
 EXTENDS Naturals
 
 CONSTANT MaxProcs
@@ -162,6 +166,59 @@ CloseStreams(w, p, Ok(_, _), Raise(_, _)) ==
 
 \* A lookup that may come back empty (e.g. the loader binary).
 Maybe(w, Ok(_, _), Raise(_, _)) == Ok(w, "path") \/ Ok(w, "None")
+
+\* ── fork / waitpid / kill ───────────────────────────────────────────────
+
+\* os.fork(), parent side: the child's pid (bounded like Spawn), or OSError.
+Fork(w, Ok(_, _), Raise(_, _)) == Spawn(w, Ok, Raise)
+
+Reap(w, p) == [w EXCEPT !.procs[p] = "reaped"]
+
+\* os.waitpid(pid, flags): (pid, status) as a status tag; the pid half is
+\* derived by the caller: 0 for "none", else pid.
+WaitPid(w, p, nohang, untraced, Ok(_, _), Raise(_, _)) ==
+    CASE p = NONE                        -> Raise(w, "TypeError")
+      [] w.procs[p] \in {"reaped", "free"} -> Raise(w, "ChildProcessError")
+      [] w.procs[p] = "dead"             -> Ok(Reap(w, p), "signaled") \/ Ok(Reap(w, p), "exited")
+      [] w.procs[p] = "live"             ->
+            \/ Ok(Reap(w, p), "exited")
+            \/ Ok(Reap(w, p), "signaled")
+            \/ (untraced /\ Ok([w EXCEPT !.procs[p] = "stopped"], "stopped:SIGSTOP"))
+            \/ (untraced /\ Ok([w EXCEPT !.procs[p] = "stopped"], "stopped:other"))
+            \/ (nohang /\ Ok(w, "none"))
+            \/ (~nohang /\ Raise(w, "Hang"))
+      [] OTHER                           ->   \* stopped: already reported
+            IF nohang THEN Ok(w, "none") ELSE Raise(w, "Hang")
+
+\* os.kill(pid, sig).
+KillSig(w, p, sig, Ok(_, _), Raise(_, _)) ==
+    CASE p = NONE                    -> Raise(w, "TypeError")
+      [] w.procs[p] = "reaped"       -> Raise([w EXCEPT !.stalekill = TRUE], "ProcessLookupError")
+      [] w.procs[p] = "dead"         -> Ok(w, "None")
+      [] sig = "SIGKILL"             -> Ok([w EXCEPT !.procs[p] = "dead"], "None")
+      [] sig = "SIGSTOP"             -> Ok([w EXCEPT !.procs[p] = "stopped"], "None")
+      [] sig = "SIGCONT"             -> Ok([w EXCEPT !.procs[p] = "live"], "None")
+      [] OTHER                       -> Ok(w, "None")
+
+\* ── signal dispositions and interval timers ─────────────────────────────
+
+SigNames == {"SIGALRM", "SIGPROF", "SIGVTALRM"}
+\* Initial dispositions; "cforeign" is a handler installed outside Python,
+\* which signal.signal / getsignal report as None.
+Dispositions == {"default", "ignore", "other", "cforeign"}
+Shown(d) == IF d = "cforeign" THEN "None" ELSE d
+
+\* signal.signal(sig, handler): returns the previous disposition.
+SigSet(w, s, h, Ok(_, _), Raise(_, _)) ==
+    IF h \in {"None", "unset"} THEN Raise(w, "TypeError")
+    ELSE Ok([w EXCEPT !.disp[s] = h], Shown(w.disp[s]))
+
+SigGet(w, s, Ok(_, _), Raise(_, _)) == Ok(w, Shown(w.disp[s]))
+
+\* signal.setitimer(which, seconds[, interval]); which is named by its signal.
+\* Returns whether the timer was armed before (the saved value a caller restores).
+SetItimer(w, s, arm, per, Ok(_, _), Raise(_, _)) ==
+    Ok([w EXCEPT !.timer[s] = arm, !.periodic[s] = arm /\ per], w.timer[s])
 
 \* Environment: a live loader may die between calls.
 Died(w) ==

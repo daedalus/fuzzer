@@ -82,6 +82,42 @@ def test_short_read_desyncs(tmp_path):
     assert "NoDesync" in short.violations
 
 
+@needs_tlc
+def test_stale_kill_only_unforgotten(tmp_path):
+    fixed = _check(fx.ReapForgetRunner, tmp_path / "fixed")
+    assert fixed.completed and not fixed.violations
+
+    stale = _check(fx.StaleKillRunner, tmp_path / "stale")
+    assert "NoStaleKill" in stale.violations
+
+
+@needs_tlc
+def test_foreign_stop_orphans(tmp_path):
+    reaped = _check(fx.ReapStoppedRunner, tmp_path / "reaped")
+    assert reaped.completed and not reaped.violations
+
+    forgot = _check(fx.ForgetStoppedRunner, tmp_path / "forgot")
+    assert "NoOrphan" in forgot.violations
+
+
+@needs_tlc
+def test_timer_before_handler_kills(tmp_path):
+    ordered = _check(fx.HandlerFirstSampler, tmp_path / "ordered")
+    assert ordered.completed and not ordered.violations
+
+    racy = _check(fx.TimerFirstSampler, tmp_path / "racy")
+    assert "NoFatalSignal" in racy.violations
+
+
+@needs_tlc
+def test_install_once_after_stop(tmp_path):
+    checked = _check(fx.InstallCheckRunner, tmp_path / "checked")
+    assert checked.completed and not checked.violations
+
+    once = _check(fx.InstallOnceRunner, tmp_path / "once")
+    assert "NoFatalSignal" in once.violations
+
+
 # ── Adversarial: outside the subset fails loudly ────────────────────
 
 
@@ -94,7 +130,7 @@ def _line_of(cls, needle: str) -> int:
 def test_loop_rejected():
     with pytest.raises(tla_extract.ExtractError) as err:
         tla_extract.extract(fx.LoopRunner)
-    assert f"tla_fixtures.py:{_line_of(fx.LoopRunner, 'while not')}" in str(err.value)
+    assert f"tla_fixtures.py:{_line_of(fx.LoopRunner, 'match self')}" in str(err.value)
 
 
 def test_unmodeled_call_rejected():
@@ -108,6 +144,12 @@ def test_effectful_loop_rejected():
     with pytest.raises(tla_extract.ExtractError) as err:
         tla_extract.extract(fx.EffectLoopRunner)
     assert f"tla_fixtures.py:{_line_of(fx.EffectLoopRunner, 'for _ in')}" in str(err.value)
+
+
+def test_nonlocal_handler_rejected():
+    with pytest.raises(tla_extract.ExtractError) as err:
+        tla_extract.extract(fx.NonlocalHandlerRunner)
+    assert f"tla_fixtures.py:{_line_of(fx.NonlocalHandlerRunner, 'nonlocal hit')}" in str(err.value)
 
 
 def test_cli_writes_nothing(tmp_path):

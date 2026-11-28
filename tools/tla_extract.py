@@ -32,6 +32,7 @@ import sys
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from dataclasses import replace as _replace
 from enum import Enum
 from pathlib import Path
 
@@ -46,6 +47,8 @@ MACHINES = {
     "persistent": "fuzzer_tool.adapters.persistent_subprocess:PersistentLoader",
     "gdbjob": "fuzzer_tool.core.analyzers.analyzer_trace:GdbJob",
     "push": "fuzzer_tool.services.push:PushNotifier",
+    "persistent_signal": "fuzzer_tool.adapters.persistent_signal:PersistentRunner",
+    "stack_sampler": "fuzzer_tool.adapters.stack_sampler:StackSampler",
 }
 BUILTIN_INVARIANTS = (
     "NoOrphan",
@@ -54,6 +57,9 @@ BUILTIN_INVARIANTS = (
     "RecursionBound",
     "NoDesync",
     "SetupCleanup",
+    "NoStaleKill",
+    "NoFatalSignal",
+    "LoopBound",
 )
 
 _SYSCALLS = Path(__file__).resolve().parent / "tla" / "Syscalls.tla"
@@ -61,15 +67,36 @@ _JAR_NAME = "tla2tools.jar"
 _MAX_INLINE = 3  # nested activations of one method before "Overflow"
 _RECURSION_LIMIT = 20_000
 _TLC_TIMEOUT = 600
-_UNCATCHABLE = ('"Hang"', '"Overflow"')
+_UNCATCHABLE = ('"Hang"', '"Overflow"', '"Killed"', '"LoopBound"')
+_LOOP_UNROLL = 3  # while-loop iterations explored before the bound
+_UNREAPED = '{"live", "dead", "stopped"}'
+# signal.ITIMER_* -> the signal it delivers.
+_ITIMER_SIG = {"ITIMER_REAL": "SIGALRM", "ITIMER_PROF": "SIGPROF", "ITIMER_VIRTUAL": "SIGVTALRM"}
+_SIG_CONST = {"SIG_DFL": "default", "SIG_IGN": "ignore"}
+# os.W* status predicates over a waitpid status tag.
+_STOPPED = '{"stopped:SIGSTOP", "stopped:other"}'
+_WSTATUS = {
+    "os.WIFEXITED": lambda s: Val(f'({s} = "exited")', VKind.BOOL),
+    "os.WIFSIGNALED": lambda s: Val(f'({s} = "signaled")', VKind.BOOL),
+    "os.WIFSTOPPED": lambda s: Val(f"({s} \\in {_STOPPED})", VKind.BOOL),
+    "os.WSTOPSIG": lambda s: Val(
+        f'(IF {s} = "stopped:SIGSTOP" THEN "SIGSTOP" ELSE "SIGOTHER")', VKind.STR
+    ),
+    "os.WEXITSTATUS": lambda s: HAVOC,
+    "os.WTERMSIG": lambda s: HAVOC,
+}
+_SIGNAL_CALLS = ("signal.signal", "signal.setitimer")
 _NO_DEADLINE = "NO_DEADLINE"
 _NONE_HANDLE = "0"
 _NONE_STR = '"None"'
 
 # Exception classes the model can raise, child -> parent.
-_PARENT = {
+_PARENT: dict[str, str | None] = {
     "BrokenPipeError": "OSError",
     "ProcessLookupError": "OSError",
+    "ChildProcessError": "OSError",
+    "TypeError": "Exception",
+    "RuntimeError": "Exception",
     "FileNotFoundError": "OSError",
     "OSError": "Exception",
     "ValueError": "Exception",
@@ -77,6 +104,7 @@ _PARENT = {
     "TimeoutExpired": "SubprocessError",
     "SubprocessError": "Exception",
     "Exception": "BaseException",
+    "BaseException": None,
 }
 
 
@@ -102,6 +130,9 @@ class HType(Enum):
     FD = "fd"
     FILE = "file"
     SET = "set"  # a PROCSET field: a TLA set of proc ids
+    PID = "pid"  # raw pid (os.fork, proc.pid)
+    HANDLER = "handler"  # signal disposition / handler id
+    WAIT = "wait"  # os.waitpid result: status tag, pid half in Val.pair
 
 
 _FIELD_HTYPE = {
@@ -109,8 +140,9 @@ _FIELD_HTYPE = {
     tla.Kind.READER: HType.READER,
     tla.Kind.FILE: HType.FILE,
     tla.Kind.PROCSET: HType.SET,
+    tla.Kind.PID: HType.PID,
 }
-_HANDLE_KINDS = (tla.Kind.PROC, tla.Kind.READER, tla.Kind.FILE)
+_HANDLE_KINDS = (tla.Kind.PROC, tla.Kind.READER, tla.Kind.FILE, tla.Kind.PID)
 # Context managers whose body runs once and whose exit has no modeled effect.
 _PASSTHROUGH_CTX = ("contextlib.ExitStack",)
 _SUPPRESS_CTX = ("contextlib.suppress", "suppress")
@@ -125,6 +157,7 @@ class Val:
     kind: VKind
     htype: HType | None = None
     tags: frozenset[str] = frozenset()  # leading words of literal payloads, e.g. {"RUN"}
+    pair: str | None = None  # HType.WAIT: the pid half of (pid, status)
 
 
 HAVOC = Val(None, VKind.HAVOC)
@@ -146,6 +179,8 @@ class Cont:
     nxt: NextK
     ret: RetK
     exc: ExcK
+    brk: NextK | None = None  # `break` target inside a while loop
+    cnt: NextK | None = None  # `continue` target
 
 
 class CallKind(Enum):
@@ -157,6 +192,8 @@ class CallKind(Enum):
     MODEL = "model"
     TYPED = "typed"
     PURE = "pure"
+    STDLIB = "stdlib"  # os.fork/waitpid/kill, signal.* (fixed semantics)
+    WSTATUS = "wstatus"  # os.W* predicates: pure over a status tag
 
 
 # (receiver type, attribute path) -> (operator, result kind, result htype)
@@ -352,8 +389,18 @@ class Compiler:
             ast.Try: self._s_try,
             ast.With: self._s_with,
             ast.For: self._s_for,
+            ast.While: self._s_while,
+            ast.Break: self._s_break,
+            ast.Continue: self._s_continue,
+            ast.FunctionDef: self._s_funcdef,
             ast.Assert: lambda n, w, env, k: k.nxt(w, env),  # stripped under -O
         }
+        # Classes that touch signal dispositions get async handler interleaving.
+        self.signals = any(
+            isinstance(n, ast.Call) and ast.unparse(n.func) in _SIGNAL_CALLS for n in ast.walk(tree)
+        )
+        self.handlers: dict[str, ast.FunctionDef] = {}  # handler id -> def
+        self._in_handler = False
 
     # ── helpers ────────────────────────────────────────────────────
 
@@ -399,7 +446,7 @@ class Compiler:
         head, rest = body[0], body[1:]
         if not rest:
             return self.stmt(head, w, env, k)
-        k2 = Cont(lambda w2, e2: self.stmts(rest, w2, e2, k), k.ret, k.exc)
+        k2 = _replace(k, nxt=lambda w2, e2: self.stmts(rest, w2, e2, k))
         return self.stmt(head, w, env, k2)
 
     def stmt(self, node: ast.stmt, w: str, env: Env, k: Cont) -> str:
@@ -473,15 +520,29 @@ class Compiler:
             if any(self._modeled_field(n) for n in ast.walk(target)):
                 raise self.fail(target, "indirect store into a modeled field")
             return k.nxt(w, env)
+        if isinstance(target, ast.Tuple) and v.htype is HType.WAIT:
+            return k.nxt(w, {**env, **self._bind_wait(target, v)})
         if isinstance(target, ast.Tuple) and not any(self._modeled_field(e) for e in target.elts):
             # Unpacking an unmodeled value: locals go havoc, unmodeled fields are dropped.
             names = {e.id: HAVOC for e in target.elts if isinstance(e, ast.Name)}
             return k.nxt(w, {**env, **names})
         raise self.fail(target, "unsupported assignment target")
 
+    def _bind_wait(self, target: ast.Tuple, v: Val) -> Env:
+        """``waited, status = os.waitpid(...)``."""
+        names = target.elts
+        if len(names) != 2 or not all(isinstance(n, ast.Name) for n in names):
+            raise self.fail(target, "unpack os.waitpid into two names")
+        return {
+            names[0].id: Val(v.pair, VKind.HANDLE, HType.PID),
+            names[1].id: Val(v.tla, VKind.STR),
+        }
+
     def _store(self, node: ast.AST, fld: str, v: Val, w: str, then: WorldK) -> str:
         kind = self.spec.state[fld]
         name = self._fields[fld]
+        if kind is tla.Kind.HANDLER:
+            return self._let(f"[{w} EXCEPT !.s.{name} = {self._handler_val(v)}]", then)
         if kind is tla.Kind.BOOL and v.kind is VKind.BOOL:
             return self._let(f"[{w} EXCEPT !.s.{name} = {v.tla}]", then)
         if kind is tla.Kind.BOOL and v.kind is VKind.HAVOC:
@@ -493,6 +554,13 @@ class Compiler:
         if kind in _HANDLE_KINDS and v.kind is VKind.HANDLE:
             return self._let(f"[{w} EXCEPT !.s.{name} = {v.tla}]", then)
         raise self.fail(node, f"cannot store {v.kind.value} into {kind.value} field")
+
+    @staticmethod
+    def _handler_val(v: Val) -> str:
+        """A HANDLER value: a disposition/handler string, "None", or "other" if unknown."""
+        if v.kind is VKind.STR:
+            return v.tla or '"other"'
+        return _NONE_STR if v.kind is VKind.NONE else '"other"'
 
     def _s_return(self, node: ast.Return, w: str, env: Env, k: Cont) -> str:
         value = node.value
@@ -519,7 +587,7 @@ class Compiler:
 
     def _s_if(self, node: ast.If, w: str, env: Env, k: Cont) -> str:
         join = _Join(self, k.nxt)
-        inner = Cont(join.stub, k.ret, k.exc)
+        inner = _replace(k, nxt=join.stub)
         then = _Join(self, lambda w2, e2: self.stmts(node.body, w2, e2, inner))
         other = _Join(self, lambda w2, e2: self.stmts(node.orelse, w2, e2, inner))
         text = self.cond(
@@ -549,7 +617,9 @@ class Compiler:
             )
 
         body = self._with_pending(
-            lambda: self.stmts(node.body, w, env, Cont(join.stub, k.ret, self._share_exc(on_exc)))
+            lambda: self.stmts(
+                node.body, w, env, _replace(k, nxt=join.stub, exc=self._share_exc(on_exc))
+            )
         )
         return join.wrap(body)
 
@@ -582,6 +652,61 @@ class Compiler:
             self._check_inert(node, sub, loop_env)
         return k.nxt(w, loop_env)
 
+    def _s_while(self, node: ast.While, w: str, env: Env, k: Cont) -> str:
+        """Unroll _LOOP_UNROLL iterations. Past the bound, a condition over unmodeled
+        values only (a clock deadline) is taken as expired; a modeled one raises
+        the uncatchable "LoopBound"."""
+        if node.orelse:
+            raise self.fail(node, "while/else is unsupported")
+        timed = self._is_havoc(node.test, env)
+        done = _Join(self, k.nxt)
+        steps: list[_Join] = []
+
+        def iterate(i: int, w2: str, e2: Env) -> str:
+            if i == _LOOP_UNROLL:
+                return done.stub(w2, e2) if timed else k.exc(w2, '"LoopBound"', e2)
+            again = steps[i]  # entry of iteration i + 1
+            inner = _replace(k, nxt=again.stub, cnt=again.stub, brk=done.stub)
+            body = _Join(self, lambda w3, e3: self.stmts(node.body, w3, e3, inner))
+            text = self.cond(
+                node.test, w2, e2, lambda w3: body.stub(w3, e2), lambda w3: done.stub(w3, e2), k
+            )
+            return body.wrap(text)
+
+        for i in range(1, _LOOP_UNROLL + 1):
+            steps.append(_Join(self, lambda w2, e2, i=i: iterate(i, w2, e2)))
+        text = iterate(0, w, env)
+        for j in steps:
+            text = j.wrap(text)
+        return done.wrap(text)
+
+    def _is_havoc(self, test: ast.expr, env: Env) -> bool:
+        """True when *test* reads no modeled field or modeled local."""
+        for n in ast.walk(test):
+            if self._modeled_field(n):
+                return False
+            if isinstance(n, ast.Name) and env.get(n.id, HAVOC).kind is not VKind.HAVOC:
+                return False
+        return True
+
+    def _s_break(self, node: ast.Break, w: str, env: Env, k: Cont) -> str:
+        if k.brk is None:
+            raise self.fail(node, "break outside a while loop")
+        return k.brk(w, env)
+
+    def _s_continue(self, node: ast.Continue, w: str, env: Env, k: Cont) -> str:
+        if k.cnt is None:
+            raise self.fail(node, "continue outside a while loop")
+        return k.cnt(w, env)
+
+    def _s_funcdef(self, node: ast.FunctionDef, w: str, env: Env, k: Cont) -> str:
+        """A nested def is a candidate signal handler: bind its name to a handler id."""
+        if node.decorator_list:
+            raise self.fail(node, "decorated nested function is unsupported")
+        key = f"{self._stack[-1]}.{node.name}"
+        self.handlers[key] = node
+        return k.nxt(w, {**env, node.name: Val(f'"h:{key}"', VKind.STR, HType.HANDLER)})
+
     def _check_inert(self, loop: ast.For, sub: ast.AST, env: Env) -> None:
         if isinstance(sub, ast.Return | ast.Raise | ast.Yield):
             raise self.fail(loop, "loop that leaves the method is unsupported")
@@ -607,9 +732,7 @@ class Compiler:
         def build() -> str:
             body_k = self._handler_cont(node, kf)
             if node.orelse:
-                body_k = Cont(
-                    lambda w2, e2: self.stmts(node.orelse, w2, e2, kf), body_k.ret, body_k.exc
-                )
+                body_k = _replace(body_k, nxt=lambda w2, e2: self.stmts(node.orelse, w2, e2, kf))
             return self.stmts(node.body, w, env, body_k)
 
         text = self._with_pending(build)
@@ -639,7 +762,7 @@ class Compiler:
         def dispatch(w2: str, e: str, e2: Env) -> str:
             return self._dispatch(arms, w2, e, e2, kf)
 
-        return Cont(kf.nxt, kf.ret, self._share_exc(dispatch))
+        return _replace(kf, exc=self._share_exc(dispatch))
 
     def _handler_names(self, h: ast.ExceptHandler) -> list[str]:
         if h.type is None:
@@ -665,7 +788,7 @@ class Compiler:
         fin = node.finalbody
 
         def after(w2: str, e2: Env, then: NextK) -> str:
-            return self._with_pending(lambda: self.stmts(fin, w2, e2, Cont(then, k.ret, k.exc)))
+            return self._with_pending(lambda: self.stmts(fin, w2, e2, _replace(k, nxt=then)))
 
         nxt = _Join(self, lambda w2, e2: after(w2, e2, k.nxt))
         ret = _Join(self, lambda w2, e2, v: after(w2, e2, lambda w3, _e3: k.ret(w3, v)), ("v",))
@@ -682,6 +805,9 @@ class Compiler:
             nxt.stub,
             lambda w2, v: ret.stub(w2, env, v),
             lambda w2, e, e2: exc.stub(w2, e2, Val(e, VKind.STR)),
+            # break/continue through a finally run it first.
+            (lambda w2, e2: after(w2, e2, k.brk)) if k.brk else None,
+            (lambda w2, e2: after(w2, e2, k.cnt)) if k.cnt else None,
         )
         return kf, [exc, ret, nxt]
 
@@ -779,6 +905,14 @@ class Compiler:
         fld = self._modeled_field(node)
         if fld is not None:
             return kv(w, self._field_val(fld, w))
+        const = self._signal_const(node)
+        if const is not None:
+            return kv(w, const)
+        is_self = isinstance(node.value, ast.Name) and node.value.id == "self"
+        if is_self and node.attr in self._methods:
+            # A bound method used as a value: a signal handler.
+            self.handlers[node.attr] = self._methods[node.attr]
+            return kv(w, Val(f'"h:{node.attr}"', VKind.STR, HType.HANDLER))
         if node.attr == "closed":
             # f.closed on a modeled file.
             def closed(w2: str, b: Val) -> str:
@@ -796,11 +930,26 @@ class Compiler:
         self._assert_pure(node.value, env)
         return kv(w, HAVOC)
 
+    @staticmethod
+    def _signal_const(node: ast.AST) -> Val | None:
+        """``signal.SIGTERM`` -> "SIGTERM"; ITIMER_* -> its signal; SIG_DFL/SIG_IGN."""
+        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)):
+            return None
+        if node.value.id != "signal":
+            return None
+        name = _ITIMER_SIG.get(node.attr) or _SIG_CONST.get(node.attr)
+        if name is None and node.attr.startswith("SIG"):
+            name = node.attr
+        return Val(f'"{name}"', VKind.STR) if name else None
+
     def _field_val(self, fld: str, w: str) -> Val:
         kind = self.spec.state[fld]
         ref = f"{w}.s.{self._fields[fld]}"
         if kind is tla.Kind.BOOL:
             return Val(ref, VKind.BOOL)
+        if kind is tla.Kind.HANDLER:
+            # Reading an unassigned attribute raises AttributeError in Python.
+            return Val(ref, VKind.STR, HType.HANDLER)
         if kind is tla.Kind.PROCSET:
             return Val(ref, VKind.HAVOC, HType.SET)
         return Val(ref, VKind.HANDLE, _FIELD_HTYPE[kind])
@@ -810,6 +959,18 @@ class Compiler:
             self._assert_pure(node, env)
             return kv(w, HAVOC)
         op = node.ops[0]
+        consts = self._const_set(node.comparators[0])
+        if isinstance(op, ast.In | ast.NotIn) and consts is not None:
+            # x in (signal.SIGSTOP, signal.SIGTRAP)
+            sym = "\\in" if isinstance(op, ast.In) else "\\notin"
+
+            def member(w2: str, a: Val) -> str:
+                ok = a.kind is VKind.STR
+                return kv(
+                    w2, Val(f"({a.tla} {sym} {{{', '.join(consts)}}})", VKind.BOOL) if ok else HAVOC
+                )
+
+            return self.expr(node.left, w, env, member, kx)
 
         def right(w2: str, a: Val) -> str:
             return self.expr(
@@ -818,17 +979,42 @@ class Compiler:
 
         return self.expr(node.left, w, env, right, kx)
 
+    def _const_set(self, node: ast.AST) -> list[str] | None:
+        """TLA strings for a tuple/list/set literal of constants, else None."""
+        if not isinstance(node, ast.Tuple | ast.List | ast.Set):
+            return None
+        out = []
+        for e in node.elts:
+            v = self._signal_const(e) or (
+                self._const(e.value) if isinstance(e, ast.Constant) else None
+            )
+            if v is None or v.kind is not VKind.STR:
+                return None
+            out.append(v.tla)
+        return out
+
     def _cmp(self, op: ast.cmpop, a: Val, b: Val) -> Val:
         if isinstance(op, ast.Is | ast.IsNot) and b.kind is VKind.NONE:
             res = self._is_none(a)
             if res is None:
                 return HAVOC
             return Val(res if isinstance(op, ast.Is) else f"~{res}", VKind.BOOL)
+        a, b = self._zero_handle(a, b)
         same = a.kind is b.kind and a.kind in (VKind.STR, VKind.BOOL, VKind.HANDLE)
-        if isinstance(op, ast.Eq | ast.NotEq) and same:
-            sym = "=" if isinstance(op, ast.Eq) else "#"
+        if isinstance(op, ast.Eq | ast.NotEq | ast.Is | ast.IsNot) and same:
+            sym = "=" if isinstance(op, ast.Eq | ast.Is) else "#"
             return Val(f"({a.tla} {sym} {b.tla})", VKind.BOOL)
         return HAVOC
+
+    @staticmethod
+    def _zero_handle(a: Val, b: Val) -> tuple[Val, Val]:
+        """``pid == 0``: the int literal 0 against a handle is the None handle."""
+        zero = Val(_NONE_HANDLE, VKind.HANDLE)
+        if a.kind is VKind.HANDLE and b.tla == '"0"':
+            return a, zero
+        if b.kind is VKind.HANDLE and a.tla == '"0"':
+            return zero, b
+        return a, b
 
     @staticmethod
     def _is_none(a: Val) -> str | None:
@@ -874,6 +1060,10 @@ class Compiler:
             return CallKind.IGNORE
         if text in self.spec.model:
             return CallKind.MODEL
+        if text in self._STDLIB:
+            return CallKind.STDLIB
+        if text in _WSTATUS:
+            return CallKind.WSTATUS
         root, attrs = self._chain(node.func)
         if isinstance(root, ast.Name) and root.id == "self":
             return self._classify_self(node, attrs)
@@ -901,16 +1091,18 @@ class Compiler:
 
     def _assert_pure(self, node: ast.AST, env: Env) -> None:
         for sub in ast.walk(node):
-            if isinstance(sub, ast.Call) and self.classify(sub, env) not in (
-                CallKind.PURE,
-                CallKind.IGNORE,
-            ):
+            pure = (CallKind.PURE, CallKind.IGNORE, CallKind.OPAQUE, CallKind.WSTATUS)
+            if isinstance(sub, ast.Call) and self.classify(sub, env) not in pure:
                 raise self.fail(sub, "effectful call nested in an expression")
 
     def call(self, node: ast.Call, w: str, env: Env, kv: ValK, kx: RaiseK) -> str:
+        query = self._self_attr_query(node, w)
+        if query is not None:
+            return kv(w, query)
         kind = self.classify(node, env)
         if kind is CallKind.IGNORE:
-            return kv(w, HAVOC)
+            # An ignored call (often the long-running target call) is a yield point.
+            return self._yield(w, lambda wy: kv(wy, HAVOC), kx)
         if kind is CallKind.PURE:
             self._assert_pure(node, env)
             return kv(w, Val(None, VKind.HAVOC, tags=self._tags(node, env)))
@@ -919,8 +1111,130 @@ class Compiler:
             CallKind.OPAQUE: self._opaque,
             CallKind.MODEL: self._model_call,
             CallKind.TYPED: self._typed_call,
+            CallKind.STDLIB: self._stdlib_call,
+            CallKind.WSTATUS: self._wstatus_call,
         }[kind]
         return handler(node, w, env, kv, kx)
+
+    def _self_attr_query(self, node: ast.Call, w: str) -> Val | None:
+        """``hasattr(self, "f")`` / ``getattr(self, "f", d)`` on a HANDLER field."""
+        if not (isinstance(node.func, ast.Name) and node.func.id in ("hasattr", "getattr")):
+            return None
+        args = node.args
+        if len(args) < 2 or not (isinstance(args[0], ast.Name) and args[0].id == "self"):
+            return None
+        name = args[1].value if isinstance(args[1], ast.Constant) else None
+        if self.spec.state.get(name) is not tla.Kind.HANDLER:
+            return None
+        ref = f"{w}.s.{self._fields[name]}"
+        if node.func.id == "hasattr":
+            return Val(f'({ref} # "unset")', VKind.BOOL)
+        dflt = args[2] if len(args) > 2 else None
+        fallback = (
+            self._handler_val(self._const(dflt.value))
+            if isinstance(dflt, ast.Constant)
+            else '"other"'
+        )
+        return Val(f'(IF {ref} = "unset" THEN {fallback} ELSE {ref})', VKind.STR, HType.HANDLER)
+
+    # ── process control and signals (stdlib, fixed semantics) ──────
+
+    _STDLIB = (
+        "os.fork",
+        "os.waitpid",
+        "os.kill",
+        "signal.signal",
+        "signal.getsignal",
+        "signal.setitimer",
+    )
+
+    def _stdlib_call(self, node: ast.Call, w: str, env: Env, kv: ValK, kx) -> str:
+        text = ast.unparse(node.func)
+        build = {
+            "os.fork": self._c_fork,
+            "os.waitpid": self._c_waitpid,
+            "os.kill": self._c_kill,
+            "signal.signal": self._c_sigset,
+            "signal.getsignal": self._c_sigget,
+            "signal.setitimer": self._c_setitimer,
+        }[text]
+
+        def then(w2: str, vals: list[Val]) -> str:
+            return build(node, vals, w2, kv, kx)
+
+        return self._args(
+            [a.value if isinstance(a, ast.Starred) else a for a in node.args], w, env, then, kx
+        )
+
+    def _c_fork(self, node, vals, w, kv, kx) -> str:
+        return self._apply("Fork", w, [], VKind.HANDLE, HType.PID, kv, kx)
+
+    def _c_waitpid(self, node, vals, w, kv, kx) -> str:
+        pid = self._handle_arg(node, vals[0])
+        flags = ast.unparse(node.args[1]) if len(node.args) > 1 else ""
+        nohang = "TRUE" if "WNOHANG" in flags else "FALSE"
+        untraced = "TRUE" if "WUNTRACED" in flags else "FALSE"
+
+        def pair(v: Val) -> Val:
+            return Val(
+                v.tla, VKind.STR, HType.WAIT, pair=f'(IF {v.tla} = "none" THEN 0 ELSE {pid})'
+            )
+
+        return self._apply(
+            "WaitPid", w, [pid, nohang, untraced], VKind.STR, None, kv, kx, wrap=pair
+        )
+
+    def _c_kill(self, node, vals, w, kv, kx) -> str:
+        sig = vals[1].tla if vals[1].kind is VKind.STR else '"SIGOTHER"'
+        return self._apply(
+            "KillSig", w, [self._handle_arg(node, vals[0]), sig], VKind.STR, None, kv, kx
+        )
+
+    def _sig_arg(self, node: ast.Call, v: Val) -> str:
+        if v.kind is not VKind.STR:
+            raise self.fail(node, "signal number must be a signal.SIG*/ITIMER_* constant")
+        return v.tla
+
+    def _c_sigset(self, node, vals, w, kv, kx) -> str:
+        args = [self._sig_arg(node, vals[0]), self._handler_val(vals[1])]
+        return self._apply("SigSet", w, args, VKind.STR, HType.HANDLER, kv, kx)
+
+    def _c_sigget(self, node, vals, w, kv, kx) -> str:
+        return self._apply(
+            "SigGet", w, [self._sig_arg(node, vals[0])], VKind.STR, HType.HANDLER, kv, kx
+        )
+
+    def _c_setitimer(self, node, vals, w, kv, kx) -> str:
+        """``setitimer(which, 0)`` disarms. It returns the previous armed state (BOOL), so
+        ``setitimer(which, *saved)`` restores exactly when *saved* is a modeled BOOL."""
+        sig = self._sig_arg(node, vals[0])
+        if any(isinstance(a, ast.Starred) for a in node.args):
+            saved = vals[1]
+            per = self.fresh("per")
+            arm = saved.tla if saved.kind is VKind.BOOL else self.fresh("arm")
+            body = self._apply("SetItimer", w, [sig, arm, per], VKind.BOOL, None, kv, kx)
+            free = [per] if saved.kind is VKind.BOOL else [arm, per]
+            return f"\\E {', '.join(free)} \\in BOOLEAN :\n{body}"
+        arm = "FALSE" if vals[1].tla == '"0"' else "TRUE"
+        per = "TRUE" if len(vals) > 2 and vals[2].tla != '"0"' else "FALSE"
+        return self._apply("SetItimer", w, [sig, arm, per], VKind.BOOL, None, kv, kx)
+
+    def _wstatus_call(self, node: ast.Call, w: str, env: Env, kv: ValK, kx) -> str:
+        """os.WIFEXITED(status) and friends: pure over the status tag."""
+        pred = _WSTATUS[ast.unparse(node.func)]
+
+        def then(w2: str, vals: list[Val]) -> str:
+            v = vals[0] if vals else HAVOC
+            return kv(w2, pred(v.tla) if v.kind is VKind.STR else HAVOC)
+
+        return self._args(list(node.args), w, env, then, kx)
+
+    def _yield(self, w: str, op: WorldK, kx) -> str:
+        """A point where a pending timer signal may run its handler first (see Fire)."""
+        if not self.signals or self._in_handler:
+            return op(w)
+        ky, wy, wx, ex = self.fresh("Ky"), self.fresh("wy"), self.fresh("wx"), self.fresh("ex")
+        return f"LET {ky}({wy}) ==\n{op(wy)}\nIN Fire({w}, {ky}, LAMBDA {wx}, {ex}: {kx(wx, ex)})"
 
     def _args(
         self, nodes: list[ast.expr], w: str, env: Env, then: Callable[[str, list[Val]], str], kx
@@ -935,12 +1249,27 @@ class Compiler:
         return step(0, w, [])
 
     def _apply(
-        self, op: str, w: str, args: list[str], kind: VKind, htype: HType | None, kv: ValK, kx
+        self,
+        op: str,
+        w: str,
+        args: list[str],
+        kind: VKind,
+        htype: HType | None,
+        kv: ValK,
+        kx,
+        wrap: Callable[[Val], Val] | None = None,
     ) -> str:
+        """``Op(w, args, Ok, Raise)``; every modeled call is also a signal yield point."""
         w2, v2, w3, e3 = self.fresh("w"), self.fresh("v"), self.fresh("w"), self.fresh("e")
-        lead = ", ".join([w, *args])
-        ok = kv(w2, Val(v2, kind, htype))
-        return f"{op}({lead},\n LAMBDA {w2}, {v2}:\n{ok},\n LAMBDA {w3}, {e3}: {kx(w3, e3)})"
+        val = Val(v2, kind, htype)
+        ok = kv(w2, wrap(val) if wrap else val)
+        err = kx(w3, e3)
+
+        def at(wy: str) -> str:
+            lead = ", ".join([wy, *args])
+            return f"{op}({lead},\n LAMBDA {w2}, {v2}:\n{ok},\n LAMBDA {w3}, {e3}: {err})"
+
+        return self._yield(w, at, kx)
 
     def _handle_arg(self, node: ast.AST, v: Val) -> str:
         if v.kind is VKind.HANDLE:
@@ -1146,7 +1475,7 @@ class Emitter:
                 out.append((name, es))
         return out
 
-    _DEFAULT = {tla.Kind.BOOL: "FALSE", tla.Kind.PROCSET: "{}"}
+    _DEFAULT = {tla.Kind.BOOL: "FALSE", tla.Kind.PROCSET: "{}", tla.Kind.HANDLER: '"unset"'}
 
     def _initial(self) -> str:
         fields = ", ".join(
@@ -1160,7 +1489,9 @@ class Emitter:
             '        files |-> [f \\in 1..MaxProcs |-> "free"], nfile |-> 0,\n'
             '        closed |-> {}, nproc |-> 0, ret |-> "", calls |-> 0, last |-> "",\n'
             '        hung |-> FALSE, overflow |-> FALSE, uncaught |-> "", desync |-> FALSE,\n'
-            '        setup |-> ""]'
+            '        disp |-> [s \\in SigNames |-> "default"], timer |-> [s \\in SigNames |-> FALSE],\n'
+            "        periodic |-> [s \\in SigNames |-> FALSE],\n"
+            '        killed |-> FALSE, stalekill |-> FALSE, loopbound |-> FALSE, setup |-> ""]'
         )
 
     @staticmethod
@@ -1189,19 +1520,23 @@ class Emitter:
             return (
                 f'w\' = [{w} EXCEPT !.ret = {e}, !.calls = @ + 1, !.last = "{name}",\n'
                 f'   !.hung = @ \\/ {e} = "Hang", !.overflow = @ \\/ {e} = "Overflow",\n'
+                f'   !.killed = @ \\/ {e} = "Killed", !.loopbound = @ \\/ {e} = "LoopBound",\n'
                 f"   !.uncaught = IF {e} \\in {{{quiet}}} THEN @ ELSE {e}]"
             )
 
         return crash
 
-    def _setup(self, setup: str | None) -> str:
+    def _setup(self, setup: str | None, w0: str = "W0") -> str:
         """Init: __init__ then the SETUP entry. A raise or a falsy return is kept as
         a failed setup (w.setup), which the caller drops: SetupCleanup checks it
         left nothing running or open."""
         init_fn = self.comp._methods.get("__init__")
 
         def failed(w: str, e: str, _env: Env | None = None) -> str:
-            return f'w = [{w} EXCEPT !.setup = {e}, !.hung = {e} = "Hang"]'
+            flags = (
+                f'!.hung = {e} = "Hang", !.killed = {e} = "Killed", !.loopbound = {e} = "LoopBound"'
+            )
+            return f"w = [{w} EXCEPT !.setup = {e}, {flags}]"
 
         def keep(w: str, v: Val) -> str:
             truth = self.comp.truth(v)
@@ -1216,8 +1551,60 @@ class Emitter:
             return self.comp.body(fn, w, self._havoc_params(fn), keep, failed)
 
         if init_fn is None:
-            return run_start("W0", NONE_VAL)
-        return self.comp.body(init_fn, "W0", self._havoc_params(init_fn), run_start, failed)
+            return run_start(w0, NONE_VAL)
+        return self.comp.body(init_fn, w0, self._havoc_params(init_fn), run_start, failed)
+
+    def _init(self, setup: str | None) -> str:
+        """With signals, every initial disposition is explored (Syscalls Dispositions)."""
+        if not self.comp.signals:
+            return self._setup(setup)
+        body = self._setup(setup, "W00")
+        return f"\\E d0 \\in [SigNames -> Dispositions] :\n  LET W00 == [W0 EXCEPT !.disp = d0] IN\n{body}"
+
+    def _handler_ops(self) -> list[str]:
+        """One operator per signal handler: its body with K (resume) / X (raise)."""
+        out, done = [], set()
+        comp = self.comp
+        comp._in_handler = True
+        try:
+            while set(comp.handlers) - done:
+                key = sorted(set(comp.handlers) - done)[0]
+                done.add(key)
+                fn = comp.handlers[key]
+                body = comp.body(
+                    fn,
+                    "wh",
+                    self._havoc_params(fn),
+                    lambda w2, _v: f"Kh({w2})",
+                    lambda w2, e, _env: f"Xh({w2}, {e})",
+                )
+                out.append(f"{self._hname(key)}(wh, Kh(_), Xh(_, _)) ==\n{body}\n")
+        finally:
+            comp._in_handler = False
+        return out
+
+    @staticmethod
+    def _hname(key: str) -> str:
+        return "H_" + re.sub(r"\W", "_", key).strip("_")
+
+    def _fire(self) -> str:
+        """A pending timer signal runs at a yield point: its handler, the default
+        action (the uncatchable "Killed"), or nothing (ignored / foreign handler)."""
+        arms = [
+            f'[] wf1.disp[sf] = "h:{k}" -> {self._hname(k)}(wf1, Kf, Xf)'
+            for k in sorted(self.comp.handlers)
+        ]
+        cases = "\n            ".join(
+            ['CASE wf1.disp[sf] = "default" -> Xf(wf1, "Killed")', *arms, "[] OTHER -> Kf(wf1)"]
+        )
+        return (
+            "Fire(wf, Kf(_), Xf(_, _)) ==\n"
+            "    \\/ Kf(wf)\n"
+            "    \\/ \\E sf \\in SigNames :\n"
+            "         /\\ wf.timer[sf]\n"
+            "         /\\ LET wf1 == [wf EXCEPT !.timer[sf] = wf.periodic[sf]] IN\n"
+            f"            {cases}\n"
+        )
 
     @staticmethod
     def _havoc_params(fn: ast.FunctionDef) -> Env:
@@ -1233,14 +1620,15 @@ class Emitter:
         return f"Call_{name} ==\n  {live}{guard} /\\ (\n{body}\n)\n"
 
     def _held(self) -> str:
-        """Proc ids the object can still reach: PROC fields plus PROCSET members."""
+        """Proc ids the object can still reach: PROC/PID fields plus PROCSET members."""
         kinds = self.spec.state
-        procs = [f"w.s.{n}" for f, n in self.comp._fields.items() if kinds[f] is tla.Kind.PROC]
+        held_kinds = (tla.Kind.PROC, tla.Kind.PID)
+        procs = [f"w.s.{n}" for f, n in self.comp._fields.items() if kinds[f] in held_kinds]
         sets = [f"w.s.{n}" for f, n in self.comp._fields.items() if kinds[f] is tla.Kind.PROCSET]
         return " \\cup ".join(["{" + ", ".join(procs) + "}", *sets])
 
     def _invariants(self) -> list[str]:
-        unreaped = '{"live", "dead"}'
+        unreaped = _UNREAPED
         out = [
             # A running or zombie proc nobody holds is never reaped.
             f"NoOrphan == \\A p \\in 1..MaxProcs : w.procs[p] \\in {unreaped} => p \\in {self._held()}",
@@ -1252,6 +1640,11 @@ class Emitter:
             'SetupCleanup == w.setup # "" => '
             f"(\\A p \\in 1..MaxProcs : w.procs[p] \\notin {unreaped}) /\\ "
             '(\\A f \\in 1..MaxProcs : w.files[f] # "open")',
+            # os.kill on a reaped pid may hit whatever process now has that number.
+            "NoStaleKill == ~w.stalekill",
+            # A timer fired while its signal still had the default (fatal) action.
+            "NoFatalSignal == ~w.killed",
+            "LoopBound == ~w.loopbound",
         ]
         # A hung call is blocked mid-method; NoHang reports it, field invariants skip it.
         out += [
@@ -1268,8 +1661,9 @@ class Emitter:
             )
         calls = [(n, es) for n, es in entries if es.phase is tla.Phase.CALL]
         name = self.cls.__name__
-        init = self._setup(setups[0] if setups else None)
+        init = self._init(setups[0] if setups else None)
         actions = [self._call(n, es) for n, es in calls]
+        signal_ops = [*self._handler_ops(), self._fire()] if self.comp.signals else []
         invariants = self._invariants()
         nxt = " \\/ ".join([f"Call_{n}" for n, _ in calls] + ["Die"])
         havoc = "\n".join(f"\\*   {h}" for h in self.comp.havoc) or "\\*   none"
@@ -1283,6 +1677,7 @@ class Emitter:
                 "CONSTANT MaxCalls",
                 "VARIABLE w",
                 self._initial(),
+                *signal_ops,
                 f"Init == {init}",
                 *actions,
                 'Die == ~w.hung /\\ \\E w2 \\in Died(w) : w\' = [w2 EXCEPT !.last = "<loader died>"]',
