@@ -35,6 +35,7 @@ from fuzzer_tool.adapters.shim_factory import (
 )
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY
 from fuzzer_tool.adapters.stderr_capture import StderrCapture
+from fuzzer_tool.core import tla
 from fuzzer_tool.core.elf import is_so_path
 from fuzzer_tool.core.run_mode import InputPlacement, StateRestore
 from fuzzer_tool.core.token_bucket import ReportThrottle
@@ -298,6 +299,40 @@ def _crash_guard(r: "InProcessRunner", sig: int) -> None:
     r._last_fault_label = GUARD_OVERREAD if r._arena.owns(addr) else ""
 
 
+# TLA+ model boundary (direct_lite SIGALRM timer only):
+# python tools/tla_extract.py inprocess --check
+@tla.machine(
+    state={
+        "_is_c": tla.Kind.BOOL,
+        "_timed_out": tla.Kind.BOOL,
+        "_alarm_handler": tla.Kind.HANDLER,
+        "_old_alarm_handler": tla.Kind.HANDLER,
+    },
+    # __init__ loads the library and builds the shim; the model starts after it.
+    init=tla.Init.ASSUMED,
+    assume={"_is_c": True},
+    ignore=(
+        "log.",
+        "len",
+        "os.path.",
+        "os.unlink",
+        "cleanup_shim",
+        "self._pre",
+        "self._fill",
+        "self._guard_call",
+        "self._func_ptr",
+        "self._abandoned",
+        "self._on_crash",
+        "self._flush_distance_tail",
+        "self._unbind_guard",
+        "self._stderr.",
+        "self._image.",
+        "self._heap.",
+        "self._arena.",
+        "self._persistent.",
+        "self._forkserver.",
+    ),
+)
 class InProcessRunner:
     """Call target function with minimal overhead.
 
@@ -997,6 +1032,7 @@ class InProcessRunner:
             self._flush_distance_tail()
         return result or (-2, "runner not initialized")
 
+    @tla.entry(requires="self._is_c")  # run_one dispatches here only while _is_c
     def _run_c_direct_lite(self, data: bytes) -> tuple[int, str]:
         """Lightweight direct ctypes call — minimal overhead.
 
@@ -1218,6 +1254,7 @@ class InProcessRunner:
                 except (ValueError, OSError):
                     pass
 
+    @tla.entry()
     def stop(self):
         # Regression (2026-11-24 review): _run_c_direct_lite installs its
         # SIGALRM handler once (install-once is the design — per-call

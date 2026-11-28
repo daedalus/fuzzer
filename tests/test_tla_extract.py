@@ -118,6 +118,24 @@ def test_install_once_after_stop(tmp_path):
     assert "NoFatalSignal" in once.violations
 
 
+@needs_tlc
+def test_assumed_init_reuse(tmp_path):
+    gated = _check(fx.GatedOnceRunner, tmp_path / "gated")
+    assert gated.completed and not gated.violations
+
+    reused = _check(fx.ReusedOnceRunner, tmp_path / "reused")
+    assert "NoFatalSignal" in reused.violations
+
+
+@needs_tlc
+def test_lost_wakeup_deadlocks(tmp_path):
+    fixed = _check(fx.FixedOracle, tmp_path / "fixed")
+    assert fixed.completed and not fixed.violations
+
+    lost = _check(fx.LostWakeupOracle, tmp_path / "lost")
+    assert "NoDeadlock" in lost.violations
+
+
 # ── Adversarial: outside the subset fails loudly ────────────────────
 
 
@@ -150,6 +168,14 @@ def test_nonlocal_handler_rejected():
     with pytest.raises(tla_extract.ExtractError) as err:
         tla_extract.extract(fx.NonlocalHandlerRunner)
     assert f"tla_fixtures.py:{_line_of(fx.NonlocalHandlerRunner, 'nonlocal hit')}" in str(err.value)
+
+
+def test_nested_blocking_call_rejected():
+    with pytest.raises(tla_extract.ExtractError) as err:
+        tla_extract.extract(fx.NestedBlockingOracle)
+    assert f"tla_fixtures.py:{_line_of(fx.NestedBlockingOracle, 'return 1 + self')}" in str(
+        err.value
+    )
 
 
 def test_cli_writes_nothing(tmp_path):
